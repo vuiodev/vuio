@@ -251,10 +251,7 @@ The application provides comprehensive startup diagnostics including:
 
 Contributions are welcome! Please read our contributing guidelines and ensure:
 
-1. All tests pass (`cargo test`)
-2. Code is formatted (`cargo fmt`)
-3. No clippy warnings (`cargo clippy`)
-4. Cross-platform compatibility is maintained
+Cross-platform compatibility is maintained
 
 ## 📄 License
 
