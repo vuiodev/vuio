@@ -1,0 +1,96 @@
+!include "MUI2.nsh"
+!include "nsDialogs.nsh"
+!include "LogicLib.nsh"
+
+# --- Installer Attributes ---
+Name "vuio"
+OutFile "vuio_installer.exe"
+InstallDir "$PROGRAMFILES\vuio"
+RequestExecutionLevel admin
+
+# --- Global Variables ---
+Var MEDIA_FOLDER
+Var NETWORK_INTERFACE
+
+# --- Pages ---
+!insertmacro MUI_PAGE_WELCOME
+!insertmacro MUI_PAGE_DIRECTORY
+Page custom CustomPageCreate "" "Configuration"
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_PAGE_FINISH
+
+!insertmacro MUI_UNPAGE_CONFIRM
+!insertmacro MUI_UNPAGE_INSTFILES
+
+# --- Language ---
+!insertmacro MUI_LANGUAGE "English"
+
+# --- Custom Page ---
+Function CustomPageCreate
+    nsDialogs::Create 1018
+    Pop $0
+
+    ${NSD_CreateLabel} 0 0 100% 12u "Select Media Folder:"
+    ${NSD_CreateText} 0 13u 70% 12u ""
+    Pop $MEDIA_FOLDER_TEXT
+    ${NSD_CreateBrowseButton} 75% 12u 25% 12u "Browse..."
+    Pop $BROWSE_BUTTON
+    ${NSD_OnClick} $BROWSE_BUTTON OnBrowse
+
+    ${NSD_CreateLabel} 0 40u 100% 12u "Select Network Interface to Serve From:"
+    ${NSD_CreateDropList} 0 53u 100% 100u ""
+    Pop $NETWORK_INTERFACE_DROPDOWN
+
+    # --- Populate Network Interfaces ---
+    IpConfig::GetEnabledNetworkAdaptersIDs /NOUNLOAD
+    Pop $0 ; Number of adapters
+    ${For} $1 0 $0
+        IpConfig::GetEnabledNetworkAdaptersID $1 /NOUNLOAD
+        Pop $R0 ; Adapter ID
+        IpConfig::GetNetworkAdapterDescription $R0 /NOUNLOAD
+        Pop $R1 ; Adapter Description
+        Pop $R2
+        ${NSD_CB_AddString} $NETWORK_INTERFACE_DROPDOWN "$R1"
+    ${Next}
+    ${NSD_CB_SetCurSel} $NETWORK_INTERFACE_DROPDOWN 0
+
+    nsDialogs::Show
+FunctionEnd
+
+Function OnBrowse
+    nsDialogs::SelectFolderDialog "Select Media Folder" ""
+    Pop $MEDIA_FOLDER
+    ${NSD_SetText} $MEDIA_FOLDER_TEXT $MEDIA_FOLDER
+FunctionEnd
+
+# --- Installation Section ---
+Section "Install"
+    SetOutPath $INSTDIR
+
+    # --- TODO: Add your application files here ---
+    File "vuio.exe"
+
+    ${NSD_GetText} $MEDIA_FOLDER_TEXT $MEDIA_FOLDER
+    ${NSD_GetText} $NETWORK_INTERFACE_DROPDOWN $NETWORK_INTERFACE
+
+    # --- Create Service ---
+    SimpleSC::InstallService "vuio_service" "vuio Application Service" "16" "2" '"$INSTDIR\vuio.exe" --media-path "$MEDIA_FOLDER" --interface "$NETWORK_INTERFACE"'
+    Pop $0
+    ${If} $0 != "0"
+        MessageBox MB_OK|MB_ICONSTOP "Failed to create the vuio service. Error code: $0"
+    ${EndIf}
+
+    # --- Start Service ---
+    SimpleSC::StartService "vuio_service"
+SectionEnd
+
+# --- Uninstaller Section ---
+Section "Uninstall"
+    # --- Stop and Delete Service ---
+    SimpleSC::StopService "vuio_service"
+    SimpleSC::RemoveService "vuio_service"
+
+    # --- Remove Files and Directory ---
+    Delete "$INSTDIR\vuio.exe"
+    RMDir "$INSTDIR"
+SectionEnd

@@ -1,0 +1,105 @@
+# Cross-platform Cargo configuration for VuIO
+
+# Cross-compilation targets and linkers
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+rustflags = ["-C", "link-arg=-static-libgcc"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.x86_64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "link-arg=-undefined", "-C", "link-arg=dynamic_lookup"]
+
+[target.x86_64-unknown-linux-gnu]
+linker = "gcc"
+
+[target.aarch64-unknown-linux-gnu]
+linker = "aarch64-linux-gnu-gcc"
+
+[target.armv7-unknown-linux-gnueabihf]
+linker = "arm-linux-gnueabihf-gcc"
+
+# SQLite static linking for all platforms
+[target.'cfg(all())']
+rustflags = ["-C", "link-arg=-static-libgcc"]
+
+# Platform-specific build configurations
+[build]
+# Default target for the current platform
+target-dir = "target"
+
+# Test configuration
+[test]
+# Increase test timeout for integration tests
+timeout = 300
+
+# Profile configurations
+[profile.test]
+# Enable debug info for better test debugging
+debug = true
+opt-level = 0
+
+[profile.bench]
+# Optimize benchmarks
+debug = false
+opt-level = 3
+lto = true
+
+# Environment variables for cross-compilation
+[env]
+# Windows cross-compilation
+PKG_CONFIG_ALLOW_CROSS = "1"
+PKG_CONFIG_ALL_STATIC = "1"
+
+# SQLite configuration
+SQLITE_STATIC = "1"
+SQLITE_LIB_DIR = { value = "", relative = true }
+
+# Network interface detection
+RUST_LOG = "debug"
+
+# Platform-specific environment variables
+[target.x86_64-pc-windows-msvc.env]
+VCPKG_ROOT = "C:\\vcpkg"
+
+[target.x86_64-pc-windows-gnu.env]
+CC_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-gcc"
+CXX_x86_64_pc_windows_gnu = "x86_64-w64-mingw32-g++"
+
+[target.aarch64-unknown-linux-gnu.env]
+CC_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-gcc"
+CXX_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-g++"
+AR_aarch64_unknown_linux_gnu = "aarch64-linux-gnu-ar"
+
+# Alias configurations for common commands
+[alias]
+# Cross-platform build commands
+build-all = "build --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target x86_64-apple-darwin"
+test-all = "test --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target x86_64-apple-darwin"
+
+# Platform-specific test commands
+test-windows = "test --target x86_64-pc-windows-msvc"
+test-macos = "test --target x86_64-apple-darwin"
+test-linux = "test --target x86_64-unknown-linux-gnu"
+
+# Integration test commands
+test-platform = "test --test platform_tests"
+test-integration = "test --test integration_tests"
+test-database = "test database_tests"
+test-watcher = "test watcher_tests"
+
+# Release build commands
+build-release-all = "build --release --target x86_64-unknown-linux-gnu --target x86_64-pc-windows-msvc --target x86_64-apple-darwin"
+
+# Benchmark commands
+bench-all = "bench --all-features"
+bench-database = "bench database"
+bench-network = "bench network"
+bench-filesystem = "bench filesystem"

@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" 
+           Name="VuIO Server" 
+           Language="1033" 
+           Version="!(bind.FileVersion.VuIOExe)" 
+           Manufacturer="VuIO Project" 
+           UpgradeCode="12345678-1234-1234-1234-123456789012">
+    
+    <Package InstallerVersion="200" 
+             Compressed="yes" 
+             InstallScope="perMachine" 
+             Description="VuIO Media Server"
+             Comments="Cross-platform DLNA media server" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Features -->
+    <Feature Id="ProductFeature" Title="VuIO Server" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+      <ComponentRef Id="ApplicationShortcut" />
+      <ComponentRef Id="ConfigFile" />
+      <ComponentRef Id="FirewallRules" />
+    </Feature>
+
+    <!-- Directory Structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="VuIO">
+          <Directory Id="ConfigFolder" Name="config" />
+          <Directory Id="LogsFolder" Name="logs" />
+        </Directory>
+      </Directory>
+      
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="VuIO Server" />
+      </Directory>
+      
+      <Directory Id="DesktopFolder" Name="Desktop" />
+    </Directory>
+
+    <!-- Components -->
+    <ComponentGroup Id="ProductComponents" Directory="INSTALLFOLDER">
+      <!-- Main executable -->
+      <Component Id="VuIOExe" Guid="*">
+        <File Id="VuIOExe" 
+              Source="$(var.SourceDir)\vuio.exe" 
+              KeyPath="yes" 
+              Checksum="yes" />
+        
+        <!-- Windows Service registration -->
+        <ServiceInstall Id="VuIOService"
+                        Type="ownProcess"
+                        Vital="yes"
+                        Name="VuIO"
+                        DisplayName="VuIO Media Server"
+                        Description="DLNA media server for sharing media files"
+                        Start="auto"
+                        Account="LocalSystem"
+                        ErrorControl="ignore"
+                        Interactive="no">
+          <ServiceDependency Id="Tcpip" />
+        </ServiceInstall>
+        
+        <ServiceControl Id="StartService" 
+                        Start="install" 
+                        Stop="both" 
+                        Remove="uninstall" 
+                        Name="VuIO" 
+                        Wait="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Configuration file -->
+    <Component Id="ConfigFile" Directory="ConfigFolder" Guid="*">
+      <File Id="DefaultConfig" 
+            Source="$(var.SourceDir)\config\default.toml" 
+            KeyPath="yes" 
+            Name="vuio.toml" />
+    </Component>
+
+    <!-- Application shortcuts -->
+    <Component Id="ApplicationShortcut" Directory="ApplicationProgramsFolder" Guid="*">
+      <Shortcut Id="ApplicationStartMenuShortcut"
+                Name="VuIO Server"
+                Description="Start VuIO Media Server"
+                Target="[#VuIOExe]"
+                WorkingDirectory="INSTALLFOLDER" />
+      
+      <RemoveFolder Id="ApplicationProgramsFolder" On="uninstall" />
+      <RegistryValue Root="HKCU" 
+                     Key="Software\VuIO\Server" 
+                     Name="installed" 
+                     Type="integer" 
+                     Value="1" 
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Windows Firewall rules -->
+    <Component Id="FirewallRules" Directory="INSTALLFOLDER" Guid="*">
+      <fire:FirewallException Id="VuIOHTTP"
+                              Name="VuIO HTTP Server"
+                              Port="8080"
+                              Protocol="tcp"
+                              Scope="localSubnet"
+                              IgnoreFailure="yes"
+                              xmlns:fire="http://schemas.microsoft.com/wix/FirewallExtension" />
+      
+      <fire:FirewallException Id="VuIOSSDP"
+                              Name="VuIO SSDP Discovery"
+                              Port="1900"
+                              Protocol="udp"
+                              Scope="localSubnet"
+                              IgnoreFailure="yes"
+                              xmlns:fire="http://schemas.microsoft.com/wix/FirewallExtension" />
+      
+      <RegistryValue Root="HKLM" 
+                     Key="Software\VuIO\Server" 
+                     Name="firewall_configured" 
+                     Type="integer" 
+                     Value="1" 
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- UI Configuration -->
+    <UI>
+      <UIRef Id="WixUI_InstallDir" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2">1</Publish>
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2">1</Publish>
+    </UI>
+
+    <!-- License -->
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.SourceDir)\LICENSE.rtf" />
+    
+    <!-- Custom properties -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="ARPPRODUCTICON" Value="VuIOExe" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/vuio/vuio" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/vuio/vuio" />
+    <Property Id="ARPNOREPAIR" Value="1" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+  </Product>
+</Wix>

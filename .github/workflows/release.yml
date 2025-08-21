@@ -1,0 +1,155 @@
+name: Release
+
+# This workflow runs on pushes to main/develop branches and on pull requests
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*' # Also run on version tags (e.g., v1.0.0)
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ===================================================================
+  # Job 1: Run Tests and Checks on all Platforms (for PRs and pushes)
+  # ===================================================================
+  test-and-lint:
+    name: Test & Lint
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy lints
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build project (Debug mode)
+        run: cargo build --verbose
+
+      - name: Run all tests
+        run: cargo test --verbose --all-features
+
+  # ===================================================================
+  # Job 2: Security Audit (runs independently)
+  # ===================================================================
+  security-audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+      - name: Run security audit
+        run: cargo audit
+
+  # ===================================================================
+  # Job 3: Build & Release (runs ONLY on new version tags)
+  # ===================================================================
+  release:
+    name: Build & Release Artifacts
+    runs-on: ubuntu-latest
+    # This job only runs when a tag is pushed (e.g., git push origin v1.2.3)
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    # Needs the test job to pass before running
+    needs: test-and-lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # Install targets for cross-compilation
+          targets: x86_64-pc-windows-gnu, x86_64-apple-darwin
+
+      - name: Install cross-compilation dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 nsis zip
+          # For macOS cross-compilation
+          sudo apt-get install -y clang llvm libz-dev
+          
+      - name: Set up macOS SDK for cross-compilation
+        uses: ananich/setup-mac-os-sdk@v1
+        with:
+          sdk-version: "11.3" # Choose a macOS SDK version
+
+      # --- Build for Linux ---
+      - name: Build for Linux (x86_64)
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package for Linux
+        run: |
+          tar -czf vuio-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vuio
+
+      # --- Build for Windows ---
+      - name: Build for Windows (x86_64)
+        run: cargo build --release --target x86_64-pc-windows-gnu
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+
+      - name: Create NSIS Installer for Windows
+        run: |
+          # Extract version from tag (e.g., v1.2.3 -> 1.2.3)
+          VERSION=${GITHUB_REF_NAME#v}
+          makensis -V2 -DVERSION=$VERSION installer.nsi
+
+      # --- Build for macOS ---
+      - name: Build for macOS (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+        env:
+          # Point to the macOS SDK for the linker
+          SDKROOT: ${{ env.SDK_PATH }}
+          CC: clang
+      
+      - name: Package for macOS
+        run: |
+          tar -czf vuio-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release vuio
+
+      # --- Create GitHub Release ---
+      - name: Create GitHub Release and Upload Artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          # This will create a draft release. Remove `draft: true` to publish automatically.
+          draft: true 
+          files: |
+            vuio-linux-x86_64.tar.gz
+            VuIO-v*-installer.exe
+            vuio-macos-x86_64.tar.gz
