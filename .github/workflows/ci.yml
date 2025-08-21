@@ -13,38 +13,32 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   # The name of your binary. This is used for packaging.
-  BINARY_NAME: vuio 
+  BINARY_NAME: vuio
 
 jobs:
   # ===================================================================
   # Job 1: Run Tests and Checks on all Platforms (for PRs and pushes)
   # ===================================================================
   test_and_check:
-    name: Build on ${{ matrix.os-arch }}
-    runs-on: ${{ matrix.os }}
+    name: Test on ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           # x86_64 builds
-          - os: ubuntu-latest
-            os-arch: Linux-x86_64
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            os-arch: Windows-x86_64
-            target: x86_64-pc-windows-gnu
-          - os: macos-13 # x86 runner
-            os-arch: macOS-x86_64
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc # Use MSVC for consistency
+          - runner: macos-13 # x86 runner
             target: x86_64-apple-darwin
           # aarch64 (ARM) builds
-          - os: ubuntu-latest
-            os-arch: Linux-aarch64
+          - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
-          - os: windows-latest
-            os-arch: Windows-aarch64
-            target: aarch64-pc-windows-gnu
-          - os: macos-14 # ARM runner (M1/M2)
-            os-arch: macOS-aarch64
+          - runner: windows-latest
+            target: aarch64-pc-windows-msvc # CORRECTED TARGET
+          - runner: macos-14 # ARM runner (M1/M2)
             target: aarch64-apple-darwin
 
     steps:
@@ -67,60 +61,56 @@ jobs:
             target/
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install dependencies for ARM cross-compile (Linux)
+        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          # Install linker for ARM cross-compile on x86 runner
-          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu
-          fi
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Build project
         run: cargo build --target ${{ matrix.target }}
-        env:
-          # Set linker for ARM cross-compilation on Linux
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
 
   # ===================================================================
   # Job 2: Build Release Artifacts (runs ONLY on new version tags)
   # ===================================================================
   build_release_artifacts:
-    name: Build release for ${{ matrix.os-arch }}
+    name: Build release for ${{ matrix.target }}
     # This job only runs when a tag is pushed
     if: startsWith(github.ref, 'refs/tags/')
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     needs: test_and_check # Ensure tests pass before building release
     strategy:
       fail-fast: false
       matrix:
         include:
           # x86_64 targets
-          - os: ubuntu-latest
-            os-arch: linux-x86_64
+          - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            os-arch: linux-x86_64
             asset_ext: .tar.gz
-          - os: windows-latest
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
             os-arch: windows-x86_64
-            target: x86_64-pc-windows-gnu
             asset_ext: .exe
-          - os: macos-13 # x86 runner
-            os-arch: macos-x86_64
+          - runner: macos-13 # x86 runner
             target: x86_64-apple-darwin
+            os-arch: macos-x86_64
             asset_ext: .tar.gz
           # aarch64 (ARM) targets
-          - os: ubuntu-latest
-            os-arch: linux-arm64
+          - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            os-arch: linux-arm64
             asset_ext: .tar.gz
-          - os: windows-latest
+          - runner: windows-latest
+            target: aarch64-pc-windows-msvc # CORRECTED TARGET
             os-arch: windows-arm64
-            target: aarch64-pc-windows-gnu
             asset_ext: .exe
-          - os: macos-14 # ARM runner (M1/M2)
-            os-arch: macos-arm64
+          - runner: macos-14 # ARM runner (M1/M2)
             target: aarch64-apple-darwin
+            os-arch: macos-arm64
             asset_ext: .tar.gz
 
     steps:
@@ -131,45 +121,36 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      
-      # Install NSIS for Windows installer
-      - name: Install NSIS
+
+      - name: Install NSIS (Windows)
         if: runner.os == 'Windows'
         run: choco install nsis
 
-      # Install linker for Linux ARM cross-build
-      - name: Install build dependencies (Linux)
+      - name: Install dependencies for ARM cross-compile (Linux)
         if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
 
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
-        env:
-          # Set linker for ARM cross-compilation on Linux
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
       - name: Package artifacts
         shell: bash
         run: |
-          # Define source and output paths/names
           VERSION=${GITHUB_REF_NAME#v}
           BINARY_PATH_PREFIX="target/${{ matrix.target }}/release"
           ASSET_NAME="${{ env.BINARY_NAME }}-${{ matrix.os-arch }}${{ matrix.asset_ext }}"
 
           if [ "${{ runner.os }}" == "Windows" ]; then
-            # Windows: Create NSIS installer
-            # Note: NSIS needs to be on the PATH, choco does this
             BINARY_FILE="${{ env.BINARY_NAME }}.exe"
             cp "$BINARY_PATH_PREFIX/$BINARY_FILE" .
             makensis -V2 -DVERSION=$VERSION -DAPP_EXE=$BINARY_FILE -DOUTFILE=$ASSET_NAME installer.nsi
           else
-            # Linux/macOS: Create a compressed tarball
             tar -czf "$ASSET_NAME" -C "$BINARY_PATH_PREFIX" "${{ env.BINARY_NAME }}"
           fi
 
-      - name: Upload artifact
+      - name: Upload artifact for release
         uses: actions/upload-artifact@v4
         with:
           name: release-artifacts
@@ -182,9 +163,9 @@ jobs:
     name: Create GitHub Release
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
-    needs: build_release_artifacts # This job runs after all matrix builds are complete
+    needs: build_release_artifacts
     permissions:
-      contents: write # Required to create a release
+      contents: write
 
     steps:
       - name: Download all release artifacts
@@ -196,6 +177,5 @@ jobs:
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v1
         with:
-          # This will create a draft release. Remove `draft: true` to publish automatically.
           draft: true
           files: release-artifacts/*
