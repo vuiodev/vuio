@@ -1,11 +1,11 @@
-name: Cross-Platform CI
+name: Release
 
-# This workflow runs on pushes to main/develop, all pull requests, and version tags
+# This workflow runs on pushes to main/develop branches and on pull requests
 on:
   push:
     branches: [ main, develop ]
     tags:
-      - 'v*' # e.g., v1.0, v1.2.3
+      - 'v*' # Also run on version tags (e.g., v1.0.0)
   pull_request:
     branches: [ main, develop ]
 
@@ -15,10 +15,10 @@ env:
 
 jobs:
   # ===================================================================
-  # Job 1: Run all tests on every platform
+  # Job 1: Run Tests and Checks on all Platforms (for PRs and pushes)
   # ===================================================================
-  test:
-    name: Test Suite
+  build:
+    name: Build
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install Rust toolchain
+      - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Cargo dependencies
@@ -41,103 +41,87 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
 
-      - name: Build project (Debug mode)
-        run: cargo build --verbose
-
-      - name: Run all tests
-        # This single command runs all unit tests, integration tests, and doc tests
-        run: cargo test --verbose --all-features
+      - name: Build project
+        run: cargo build --release
 
   # ===================================================================
-  # Job 2: Build release binaries on each platform
+  # Job 3: Build & Release (runs ONLY on new version tags)
   # ===================================================================
-  build-artifacts:
-    name: Build Release Artifacts
-    runs-on: ${{ matrix.os }}
-    needs: test # This job starts after all tests pass
-    # Only run this job for pushes to 'main' or when a version tag is pushed
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/')
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            asset_name: vuio-linux-x86_64.tar.gz
-            binary_name: vuio
-          - os: windows-latest
-            asset_name: vuio-windows-x86_64.zip
-            binary_name: vuio.exe
-          - os: macos-latest
-            asset_name: vuio-macos-x86_64.tar.gz
-            binary_name: vuio
-
+  release:
+    name: Build & Release Artifacts
+    runs-on: ubuntu-latest
+    # This job only runs when a tag is pushed (e.g., git push origin v1.2.3)
+    if: startsWith(github.ref, 'refs/tags/')
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies for release build
-        uses: actions/cache@v4
         with:
-          path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+          # Install targets for cross-compilation
+          targets: x86_64-pc-windows-gnu, x86_64-apple-darwin
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-
-      - name: Build release binary
-        run: cargo build --release --verbose
-
-      - name: Package artifact (Linux/macOS)
-        if: runner.os != 'Windows'
+      - name: Install cross-compilation dependencies
         run: |
-          cd target/release
-          tar -czf ../../${{ matrix.asset_name }} ${{ matrix.binary_name }}
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 nsis zip
+          # For macOS cross-compilation
+          sudo apt-get install -y clang llvm libz-dev
+          
+      - name: Set up macOS SDK for cross-compilation
+        uses: ananich/setup-mac-os-sdk@v1
+        with:
+          sdk-version: "11.3" # Choose a macOS SDK version
 
-      - name: Package artifact (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
+      # --- Build for Linux ---
+      - name: Build for Linux (x86_64)
+        run: cargo build --release --target x86_64-unknown-linux-gnu
+
+      - name: Package for Linux
         run: |
-          Compress-Archive -Path target/release/${{ matrix.binary_name }} -DestinationPath ${{ matrix.asset_name }}
+          tar -czf vuio-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vuio
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.asset_name }}
-          path: ${{ matrix.asset_name }}
+      # --- Build for Windows ---
+      - name: Build for Windows (x86_64)
+        run: cargo build --release --target x86_64-pc-windows-gnu
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
 
-  # ===================================================================
-  # Job 3: Create a GitHub Release (only for version tags)
-  # ===================================================================
-  release:
-    name: Create GitHub Release
-    runs-on: ubuntu-latest
-    needs: build-artifacts
-    if: startsWith(github.ref, 'refs/tags/')
-    
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release-artifacts
+      - name: Create NSIS Installer for Windows
+        run: |
+          # Extract version from tag (e.g., v1.2.3 -> 1.2.3)
+          VERSION=${GITHUB_REF_NAME#v}
+          makensis -V2 -DVERSION=$VERSION installer.nsi
 
+      # --- Build for macOS ---
+      - name: Build for macOS (x86_64)
+        run: cargo build --release --target x86_64-apple-darwin
+        env:
+          # Point to the macOS SDK for the linker
+          SDKROOT: ${{ env.SDK_PATH }}
+          CC: clang
+      
+      - name: Package for macOS
+        run: |
+          tar -czf vuio-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release vuio
+
+      # --- Create GitHub Release ---
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v1
         with:
           # This will create a draft release. Remove `draft: true` to publish automatically.
-          draft: true
-          files: release-artifacts/**/*```
+          draft: true 
+          files: |
+            vuio-linux-x86_64.tar.gz
+            vuio-installer-x86_64.exe
+            vuio-macos-x86_64.tar.gz

@@ -1,0 +1,143 @@
+name: Cross-Platform CI
+
+# This workflow runs on pushes to main/develop, all pull requests, and version tags
+on:
+  push:
+    branches: [ main, develop ]
+    tags:
+      - 'v*' # e.g., v1.0, v1.2.3
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ===================================================================
+  # Job 1: Run all tests on every platform
+  # ===================================================================
+  test:
+    name: Test Suite
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build project (Debug mode)
+        run: cargo build --verbose
+
+      - name: Run all tests
+        # This single command runs all unit tests, integration tests, and doc tests
+        run: cargo test --verbose --all-features
+
+  # ===================================================================
+  # Job 2: Build release binaries on each platform
+  # ===================================================================
+  build-artifacts:
+    name: Build Release Artifacts
+    runs-on: ${{ matrix.os }}
+    needs: test # This job starts after all tests pass
+    # Only run this job for pushes to 'main' or when a version tag is pushed
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || startsWith(github.ref, 'refs/tags/')
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: vuio-linux-x86_64.tar.gz
+            binary_name: vuio
+          - os: windows-latest
+            asset_name: vuio-windows-x86_64.zip
+            binary_name: vuio.exe
+          - os: macos-latest
+            asset_name: vuio-macos-x86_64.tar.gz
+            binary_name: vuio
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies for release build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+
+      - name: Build release binary
+        run: cargo build --release --verbose
+
+      - name: Package artifact (Linux/macOS)
+        if: runner.os != 'Windows'
+        run: |
+          cd target/release
+          tar -czf ../../${{ matrix.asset_name }} ${{ matrix.binary_name }}
+
+      - name: Package artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path target/release/${{ matrix.binary_name }} -DestinationPath ${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ${{ matrix.asset_name }}
+
+  # ===================================================================
+  # Job 3: Create a GitHub Release (only for version tags)
+  # ===================================================================
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: build-artifacts
+    if: startsWith(github.ref, 'refs/tags/')
+    
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Create GitHub Release and Upload Artifacts
+        uses: softprops/action-gh-release@v1
+        with:
+          # This will create a draft release. Remove `draft: true` to publish automatically.
+          draft: true
+          files: release-artifacts/**/*```
