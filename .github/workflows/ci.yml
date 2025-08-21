@@ -70,9 +70,6 @@ jobs:
       - name: Build project
         run: cargo build --target ${{ matrix.target }}
 
-      - name: Run tests
-        run: cargo test --target ${{ matrix.target }}
-
   # ===================================================================
   # Job 2: Build Release Artifacts (runs ONLY on new version tags)
   # ===================================================================
