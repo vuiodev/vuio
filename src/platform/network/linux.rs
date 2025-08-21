@@ -223,7 +223,7 @@ impl LinuxNetworkManager {
         for line in output.lines() {
             let line = line.trim();
             
-            // Interface line: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000"
+            // Interface line: "2: eth0: <BROADCAST,MULTicast,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000"
             if let Some(colon_pos) = line.find(':') {
                 if let Some(second_colon) = line[colon_pos + 1..].find(':') {
                     let second_colon_pos = colon_pos + 1 + second_colon;
@@ -393,21 +393,22 @@ impl LinuxNetworkManager {
     
     /// Enable multicast on Linux socket with proper interface binding
     async fn enable_multicast_linux(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
-        let selected_interface = if let Some(iface) = interface {
-            iface
-        } else {
-            // Use the first suitable interface
-            socket.interfaces.iter()
-                .find(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
-                .ok_or_else(|| PlatformError::NetworkConfig("No suitable interface for multicast on Linux".to_string()))?
+        let (selected_interface_name, local_addr) = {
+            let selected_interface = if let Some(iface) = interface {
+                iface
+            } else {
+                // Use the first suitable interface
+                socket.interfaces.iter()
+                    .find(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
+                    .ok_or_else(|| PlatformError::NetworkConfig("No suitable interface for multicast on Linux".to_string()))?
+            };
+            (selected_interface.name.clone(), selected_interface.ip_address)
         };
-        
-        let local_addr = selected_interface.ip_address;
         
         match socket.enable_multicast(group, local_addr).await {
             Ok(()) => {
                 info!("Successfully enabled multicast on Linux for group {} via interface {} ({})", 
-                      group, selected_interface.name, local_addr);
+                      group, selected_interface_name, local_addr);
                 Ok(())
             }
             Err(e) => {
@@ -422,7 +423,7 @@ impl LinuxNetworkManager {
                 
                 error_msg.push_str("\nTip: Check firewall settings (iptables, ufw, firewalld).");
                 error_msg.push_str("\nTip: Ensure the network interface supports multicast.");
-                error_msg.push_str(&format!("\nTip: Try using interface {} explicitly.", selected_interface.name));
+                error_msg.push_str(&format!("\nTip: Try using interface {} explicitly.", selected_interface_name));
                 error_msg.push_str("\nTip: Check if running in a network namespace that restricts multicast.");
                 
                 Err(PlatformError::NetworkConfig(error_msg))
