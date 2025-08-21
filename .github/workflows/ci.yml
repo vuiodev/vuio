@@ -31,8 +31,6 @@ jobs:
   # Job 1: Run Tests and Checks
   # ===================================================================
   test_and_check:
-    # THIS JOB NOW ALWAYS RUNS, BUT ITS STEPS ARE CONDITIONAL.
-    # This prevents it from being "skipped" and breaking the dependency chain.
     name: Test on ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -56,13 +54,11 @@ jobs:
       - name: Checkout code
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.task_to_run == 'test'
         uses: actions/checkout@v4
-
       - name: Install Rust toolchain (stable)
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.task_to_run == 'test'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Cache Cargo dependencies
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.task_to_run == 'test'
         uses: actions/cache@v4
@@ -74,13 +70,11 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Install dependencies for ARM cross-compile (Linux)
         if: (github.event_name != 'workflow_dispatch' || github.event.inputs.task_to_run == 'test') && runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-
       - name: Build project
         if: github.event_name != 'workflow_dispatch' || github.event.inputs.task_to_run == 'test'
         run: cargo build --target ${{ matrix.target }}
@@ -90,9 +84,7 @@ jobs:
   # ===================================================================
   build_release_artifacts:
     name: Build release for ${{ matrix.target }}
-    # This job only runs on tags OR on a manual 'release' dispatch.
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release')
-    # This dependency is now SAFE because test_and_check will 'succeed' instead of 'skip'.
     needs: test_and_check
     runs-on: ${{ matrix.runner }}
     strategy:
@@ -124,6 +116,7 @@ jobs:
             os-arch: macos-arm64
             asset_ext: .tar.gz
     steps:
+      # ... other steps are the same ...
       - name: Checkout code
         uses: actions/checkout@v4
       - name: Install Rust toolchain
@@ -152,13 +145,10 @@ jobs:
           else
             VERSION_TAG="${{ github.ref_name }}"
           fi
-          
           VERSION=${VERSION_TAG#v}
           echo "Building artifacts for version: $VERSION_TAG"
-
           BINARY_PATH_PREFIX="target/${{ matrix.target }}/release"
           ASSET_NAME="${{ env.BINARY_NAME }}-${{ matrix.os-arch }}${{ matrix.asset_ext }}"
-
           if [ "${{ runner.os }}" == "Windows" ]; then
             BINARY_FILE="${{ env.BINARY_NAME }}.exe"
             cp "$BINARY_PATH_PREFIX/$BINARY_FILE" .
@@ -169,7 +159,7 @@ jobs:
       - name: Upload artifact for release
         uses: actions/upload-artifact@v4
         with:
-          name: release-artifacts
+          name: release-artifact-${{ matrix.os-arch }}
           path: ${{ env.BINARY_NAME }}-*
 
   # ===================================================================
@@ -182,15 +172,16 @@ jobs:
     needs: build_release_artifacts
     permissions:
       contents: write
+
     steps:
       - name: Download all release artifacts
         uses: actions/download-artifact@v4
         with:
-          name: release-artifacts
           path: release-artifacts
+
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
           draft: true
-          files: release-artifacts/*
+          files: release-artifacts/*/*
