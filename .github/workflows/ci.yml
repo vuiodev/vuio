@@ -20,7 +20,7 @@ jobs:
   # Job 1: Run Tests and Checks on all Platforms (for PRs and pushes)
   # ===================================================================
   test_and_check:
-    name: Test on ${{ matrix.os-arch }}
+    name: Build on ${{ matrix.os-arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
