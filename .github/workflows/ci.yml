@@ -12,18 +12,40 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  # The name of your binary. This is used for packaging.
+  BINARY_NAME: vuio 
 
 jobs:
   # ===================================================================
   # Job 1: Run Tests and Checks on all Platforms (for PRs and pushes)
   # ===================================================================
-  build:
-    name: Build
+  test_and_check:
+    name: Test on ${{ matrix.os-arch }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        include:
+          # x86_64 builds
+          - os: ubuntu-latest
+            os-arch: Linux-x86_64
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            os-arch: Windows-x86_64
+            target: x86_64-pc-windows-gnu
+          - os: macos-13 # x86 runner
+            os-arch: macOS-x86_64
+            target: x86_64-apple-darwin
+          # aarch64 (ARM) builds
+          - os: ubuntu-latest
+            os-arch: Linux-aarch64
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            os-arch: Windows-aarch64
+            target: aarch64-pc-windows-gnu
+          - os: macos-14 # ARM runner (M1/M2)
+            os-arch: macOS-aarch64
+            target: aarch64-apple-darwin
 
     steps:
       - name: Checkout code
@@ -31,6 +53,8 @@ jobs:
 
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
@@ -41,26 +65,64 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # Install linker for ARM cross-compile on x86 runner
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            sudo apt-get install -y gcc-aarch64-linux-gnu
+          fi
           sudo apt-get install -y libssl-dev pkg-config
 
       - name: Build project
-        run: cargo build
+        run: cargo build --target ${{ matrix.target }}
+        env:
+          # Set linker for ARM cross-compilation on Linux
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
   # ===================================================================
-  # Job 3: Build & Release (runs ONLY on new version tags)
+  # Job 2: Build Release Artifacts (runs ONLY on new version tags)
   # ===================================================================
-  release:
-    name: Build & Release Artifacts
-    runs-on: ubuntu-latest
-    # This job only runs when a tag is pushed (e.g., git push origin v1.2.3)
+  build_release_artifacts:
+    name: Build release for ${{ matrix.os-arch }}
+    # This job only runs when a tag is pushed
     if: startsWith(github.ref, 'refs/tags/')
-    
+    runs-on: ${{ matrix.os }}
+    needs: test_and_check # Ensure tests pass before building release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x86_64 targets
+          - os: ubuntu-latest
+            os-arch: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            asset_ext: .tar.gz
+          - os: windows-latest
+            os-arch: windows-x86_64
+            target: x86_64-pc-windows-gnu
+            asset_ext: .exe
+          - os: macos-13 # x86 runner
+            os-arch: macos-x86_64
+            target: x86_64-apple-darwin
+            asset_ext: .tar.gz
+          # aarch64 (ARM) targets
+          - os: ubuntu-latest
+            os-arch: linux-arm64
+            target: aarch64-unknown-linux-gnu
+            asset_ext: .tar.gz
+          - os: windows-latest
+            os-arch: windows-arm64
+            target: aarch64-pc-windows-gnu
+            asset_ext: .exe
+          - os: macos-14 # ARM runner (M1/M2)
+            os-arch: macos-arm64
+            target: aarch64-apple-darwin
+            asset_ext: .tar.gz
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -68,60 +130,72 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          # Install targets for cross-compilation
-          targets: x86_64-pc-windows-gnu, x86_64-apple-darwin
+          targets: ${{ matrix.target }}
+      
+      # Install NSIS for Windows installer
+      - name: Install NSIS
+        if: runner.os == 'Windows'
+        run: choco install nsis
 
-      - name: Install cross-compilation dependencies
+      # Install linker for Linux ARM cross-build
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 nsis zip
-          # For macOS cross-compilation
-          sudo apt-get install -y clang llvm libz-dev
-          
-      - name: Set up macOS SDK for cross-compilation
-        uses: ananich/setup-mac-os-sdk@v1
-        with:
-          sdk-version: "11.3" # Choose a macOS SDK version
+          sudo apt-get install -y gcc-aarch64-linux-gnu
 
-      # --- Build for Linux ---
-      - name: Build for Linux (x86_64)
-        run: cargo build --release --target x86_64-unknown-linux-gnu
-
-      - name: Package for Linux
-        run: |
-          tar -czf vuio-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release vuio
-
-      # --- Build for Windows ---
-      - name: Build for Windows (x86_64)
-        run: cargo build --release --target x86_64-pc-windows-gnu
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
         env:
-          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          # Set linker for ARM cross-compilation on Linux
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
 
-      - name: Create NSIS Installer for Windows
+      - name: Package artifacts
+        shell: bash
         run: |
-          # Extract version from tag (e.g., v1.2.3 -> 1.2.3)
+          # Define source and output paths/names
           VERSION=${GITHUB_REF_NAME#v}
-          makensis -V2 -DVERSION=$VERSION installer.nsi
+          BINARY_PATH_PREFIX="target/${{ matrix.target }}/release"
+          ASSET_NAME="${{ env.BINARY_NAME }}-${{ matrix.os-arch }}${{ matrix.asset_ext }}"
 
-      # --- Build for macOS ---
-      - name: Build for macOS (x86_64)
-        run: cargo build --release --target x86_64-apple-darwin
-        env:
-          # Point to the macOS SDK for the linker
-          SDKROOT: ${{ env.SDK_PATH }}
-          CC: clang
-      
-      - name: Package for macOS
-        run: |
-          tar -czf vuio-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release vuio
+          if [ "${{ runner.os }}" == "Windows" ]; then
+            # Windows: Create NSIS installer
+            # Note: NSIS needs to be on the PATH, choco does this
+            BINARY_FILE="${{ env.BINARY_NAME }}.exe"
+            cp "$BINARY_PATH_PREFIX/$BINARY_FILE" .
+            makensis -V2 -DVERSION=$VERSION -DAPP_EXE=$BINARY_FILE -DOUTFILE=$ASSET_NAME installer.nsi
+          else
+            # Linux/macOS: Create a compressed tarball
+            tar -czf "$ASSET_NAME" -C "$BINARY_PATH_PREFIX" "${{ env.BINARY_NAME }}"
+          fi
 
-      # --- Create GitHub Release ---
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifacts
+          path: ${{ env.BINARY_NAME }}-*
+
+  # ===================================================================
+  # Job 3: Create GitHub Release (runs ONLY on new version tags)
+  # ===================================================================
+  create_github_release:
+    name: Create GitHub Release
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    needs: build_release_artifacts # This job runs after all matrix builds are complete
+    permissions:
+      contents: write # Required to create a release
+
+    steps:
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: release-artifacts
+          path: release-artifacts
+
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v1
         with:
           # This will create a draft release. Remove `draft: true` to publish automatically.
-          draft: true 
-          files: |
-            vuio-linux-x86_64.tar.gz
-            vuio-installer-x86_64.exe
-            vuio-macos-x86_64.tar.gz
+          draft: true
+          files: release-artifacts/*
