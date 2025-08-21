@@ -1,55 +1,65 @@
 name: Release
 
-# This workflow runs on pushes to main/develop branches and on pull requests
+# This workflow runs on pushes/PRs to main/develop, on version tags, and can be manually triggered.
 on:
   push:
     branches: [ main, develop ]
     tags:
-      - 'v*' # Also run on version tags (e.g., v1.0.0)
+      - 'v*' # Run on version tags (e.g., v1.0.0)
   pull_request:
     branches: [ main, develop ]
+  workflow_dispatch:
+    inputs:
+      task_to_run:
+        description: 'Which part of the workflow to run'
+        type: choice
+        options:
+          - test         # To run only the test_and_check job
+          - release      # To run only the release jobs
+        required: true
+        default: 'test'
+      tag_name:
+        description: 'Required for "release" task: The tag for the release (e.g., v1.0.1)'
+        required: false # Not required for the 'test' task
 
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # The name of your binary. This is used for packaging.
   BINARY_NAME: vuio
 
 jobs:
   # ===================================================================
-  # Job 1: Run Tests and Checks on all Platforms (for PRs and pushes)
+  # Job 1: Run Tests and Checks
   # ===================================================================
   test_and_check:
+    # This job runs on push/PR events OR when manually triggered with the 'test' task.
+    if: github.event_name != 'workflow_dispatch' || github.event.inputs.task_to_run == 'test'
     name: Test on ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          # x86_64 builds
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
           - runner: windows-latest
-            target: x86_64-pc-windows-msvc # Use MSVC for consistency
-          - runner: macos-13 # x86 runner
+            target: x86_64-pc-windows-msvc
+          - runner: macos-13
             target: x86_64-apple-darwin
-          # aarch64 (ARM) builds
           - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
           - runner: windows-latest
-            target: aarch64-pc-windows-msvc # CORRECTED TARGET
-          - runner: macos-14 # ARM runner (M1/M2)
+            target: aarch64-pc-windows-msvc
+          - runner: macos-14
             target: aarch64-apple-darwin
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Install Rust toolchain (stable)
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Cache Cargo dependencies
         uses: actions/cache@v4
         with:
@@ -60,30 +70,28 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
       - name: Install dependencies for ARM cross-compile (Linux)
         if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-
       - name: Build project
         run: cargo build --target ${{ matrix.target }}
 
   # ===================================================================
-  # Job 2: Build Release Artifacts (runs ONLY on new version tags)
+  # Job 2: Build Release Artifacts
   # ===================================================================
   build_release_artifacts:
     name: Build release for ${{ matrix.target }}
-    # This job only runs when a tag is pushed
-    if: startsWith(github.ref, 'refs/tags/')
+    # This job runs on version tags OR when manually triggered with the 'release' task.
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release')
+    # It depends on tests for tag pushes, but has no dependency for a manual release.
+    needs: ${{ startsWith(github.ref, 'refs/tags/') && 'test_and_check' || '' }}
     runs-on: ${{ matrix.runner }}
-    needs: test_and_check # Ensure tests pass before building release
     strategy:
       fail-fast: false
       matrix:
         include:
-          # x86_64 targets
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             os-arch: linux-x86_64
@@ -92,20 +100,19 @@ jobs:
             target: x86_64-pc-windows-msvc
             os-arch: windows-x86_64
             asset_ext: .exe
-          - runner: macos-13 # x86 runner
+          - runner: macos-13
             target: x86_64-apple-darwin
             os-arch: macos-x86_64
             asset_ext: .tar.gz
-          # aarch64 (ARM) targets
           - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             os-arch: linux-arm64
             asset_ext: .tar.gz
           - runner: windows-latest
-            target: aarch64-pc-windows-msvc # CORRECTED TARGET
+            target: aarch64-pc-windows-msvc
             os-arch: windows-arm64
             asset_ext: .exe
-          - runner: macos-14 # ARM runner (M1/M2)
+          - runner: macos-14
             target: aarch64-apple-darwin
             os-arch: macos-arm64
             asset_ext: .tar.gz
@@ -113,29 +120,38 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-
       - name: Install NSIS (Windows)
         if: runner.os == 'Windows'
         run: choco install nsis
-
       - name: Install dependencies for ARM cross-compile (Linux)
         if: runner.os == 'Linux' && matrix.target == 'aarch64-unknown-linux-gnu'
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
-
       - name: Build binary
         run: cargo build --release --target ${{ matrix.target }}
-
       - name: Package artifacts
         shell: bash
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
+          # Determine version from the tag ref or the manual input
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            if [ -z "${{ github.event.inputs.tag_name }}" ]; then
+              echo "Error: The 'tag_name' input is required when running the 'release' task."
+              exit 1
+            fi
+            VERSION_TAG="${{ github.event.inputs.tag_name }}"
+          else
+            VERSION_TAG="${{ github.ref_name }}"
+          fi
+          
+          # Strip 'v' prefix for use in some tools (e.g., installer version)
+          VERSION=${VERSION_TAG#v}
+          echo "Building artifacts for version: $VERSION_TAG"
+
           BINARY_PATH_PREFIX="target/${{ matrix.target }}/release"
           ASSET_NAME="${{ env.BINARY_NAME }}-${{ matrix.os-arch }}${{ matrix.asset_ext }}"
 
@@ -146,7 +162,6 @@ jobs:
           else
             tar -czf "$ASSET_NAME" -C "$BINARY_PATH_PREFIX" "${{ env.BINARY_NAME }}"
           fi
-
       - name: Upload artifact for release
         uses: actions/upload-artifact@v4
         with:
@@ -154,11 +169,12 @@ jobs:
           path: ${{ env.BINARY_NAME }}-*
 
   # ===================================================================
-  # Job 3: Create GitHub Release (runs ONLY on new version tags)
+  # Job 3: Create GitHub Release
   # ===================================================================
   create_github_release:
     name: Create GitHub Release
-    if: startsWith(github.ref, 'refs/tags/')
+    # This job runs on version tags OR when manually triggered with the 'release' task.
+    if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release')
     runs-on: ubuntu-latest
     needs: build_release_artifacts
     permissions:
@@ -170,9 +186,10 @@ jobs:
         with:
           name: release-artifacts
           path: release-artifacts
-
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v1
         with:
+          # Use the tag from the git ref or the one provided manually
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
           draft: true
           files: release-artifacts/*
