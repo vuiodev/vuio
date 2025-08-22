@@ -138,6 +138,13 @@ You can monitor multiple directories by adding multiple `[[media.directories]]` 
 - `"All"` - Use all available interfaces  
 - `"eth0"` - Use a specific interface name (replace with actual interface name)
 
+**Media Configuration Options:**
+- `scan_on_startup` - Whether to scan all media directories on startup (default: true)
+- `watch_for_changes` - Enable real-time file system monitoring (default: true)
+- `cleanup_deleted_files` - Remove deleted files from database automatically (default: true)
+- `supported_extensions` - Global list of supported media file extensions
+- Individual directories can override `extensions` and `exclude_patterns`
+
 ### Example Configuration
 ```toml
 [server]
@@ -151,6 +158,12 @@ ssdp_port = 1900
 interface_selection = "Auto"
 multicast_ttl = 4
 announce_interval_seconds = 30
+
+[media]
+scan_on_startup = true
+watch_for_changes = true
+cleanup_deleted_files = true
+supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "jpg", "jpeg", "png"]
 
 [[media.directories]]
 path = "/home/user/Videos"
