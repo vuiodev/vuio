@@ -74,9 +74,103 @@ setup_directories() {
     log "Directory setup completed"
 }
 
+# Validate existing configuration
+validate_existing_config() {
+    local config_file="/config/config.toml"
+    
+    # Check if file exists and is readable
+    if [ ! -f "$config_file" ] || [ ! -r "$config_file" ]; then
+        return 1
+    fi
+    
+    # Check for required sections
+    if ! grep -q "\[server\]" "$config_file" || 
+       ! grep -q "\[network\]" "$config_file" || 
+       ! grep -q "\[media\]" "$config_file" || 
+       ! grep -q "\[database\]" "$config_file"; then
+        log "Configuration file missing required sections"
+        return 1
+    fi
+    
+    # Check for required fields
+    if ! grep -q "uuid =" "$config_file" || 
+       ! grep -q "port =" "$config_file" || 
+       ! grep -q "path =" "$config_file"; then
+        log "Configuration file missing required fields"
+        return 1
+    fi
+    
+    # Basic TOML syntax check - ensure no obvious syntax errors
+    if grep -q "^\[.*\]\[" "$config_file"; then
+        log "Configuration file has TOML syntax errors"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Check if environment variables require config updates
+should_update_config() {
+    local config_file="/config/config.toml"
+    
+    # Check if critical environment variables differ from config
+    local current_port=$(grep '^port' "$config_file" | sed 's/port = \([0-9]*\)/\1/' || echo "")
+    local current_name=$(grep '^name' "$config_file" | sed 's/name = "\(.*\)"/\1/' || echo "")
+    local current_interface=$(grep '^interface' "$config_file" | sed 's/interface = "\(.*\)"/\1/' || echo "")
+    
+    [ "${VUIO_PORT:-8080}" != "$current_port" ] || 
+    [ "${VUIO_SERVER_NAME:-VuIO}" != "$current_name" ] || 
+    [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$current_interface" ]
+}
+
+# Update existing configuration with environment variables
+update_existing_config() {
+    local config_file="/config/config.toml"
+    local temp_file="/tmp/config_update.toml"
+    
+    # Create backup
+    cp "$config_file" "${config_file}.backup" || error_exit "Failed to create config backup"
+    
+    # Update port if different
+    if [ "${VUIO_PORT:-8080}" != "$(grep '^port' "$config_file" | sed 's/port = \([0-9]*\)/\1/')" ]; then
+        sed "s/^port = .*/port = ${VUIO_PORT:-8080}/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+        log "Updated port to ${VUIO_PORT:-8080}"
+    fi
+    
+    # Update server name if different
+    if [ "${VUIO_SERVER_NAME:-VuIO}" != "$(grep '^name' "$config_file" | sed 's/name = "\(.*\)"/\1/')" ]; then
+        sed "s/^name = .*/name = \"${VUIO_SERVER_NAME:-VuIO}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+        log "Updated server name to ${VUIO_SERVER_NAME:-VuIO}"
+    fi
+    
+    # Update interface if different
+    if [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$(grep '^interface' "$config_file" | sed 's/interface = "\(.*\)"/\1/')" ]; then
+        sed "s/^interface = .*/interface = \"${VUIO_BIND_INTERFACE:-0.0.0.0}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+        log "Updated bind interface to ${VUIO_BIND_INTERFACE:-0.0.0.0}"
+    fi
+    
+    # Set proper ownership
+    chown vuio:vuio "$config_file"
+    chmod 644 "$config_file"
+}
+
 # Generate configuration file
 generate_config() {
     local config_file="/config/config.toml"
+    
+    # Check if valid config already exists
+    if [ -f "$config_file" ] && validate_existing_config; then
+        log "Valid configuration file already exists: $config_file"
+        
+        # Check if environment variables require config updates
+        if should_update_config; then
+            log "Updating configuration with new environment variables"
+            update_existing_config
+        else
+            log "Skipping regeneration to preserve user customizations"
+        fi
+        return 0
+    fi
     
     log "Generating configuration file: $config_file"
     
@@ -182,21 +276,8 @@ validate_config() {
     
     log "Validating configuration file"
     
-    if [ ! -f "$config_file" ]; then
-        error_exit "Configuration file does not exist: $config_file"
-    fi
-    
-    if [ ! -r "$config_file" ]; then
-        error_exit "Configuration file is not readable: $config_file"
-    fi
-    
-    # Basic TOML syntax check
-    if ! grep -q "\[server\]" "$config_file"; then
-        error_exit "Configuration file missing [server] section"
-    fi
-    
-    if ! grep -q "uuid =" "$config_file"; then
-        error_exit "Configuration file missing required uuid field"
+    if ! validate_existing_config; then
+        error_exit "Configuration validation failed"
     fi
     
     log "Configuration validation passed"
