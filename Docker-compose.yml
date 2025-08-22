@@ -22,7 +22,7 @@ services:
     environment:
       - VUIO_PORT=8080
       - VUIO_MEDIA_DIR=/media
-      - VUIO_SERVER_NAME="VuIO"
-      - VUIO_BIND_INTERFACE="0.0.0.0"
+      - VUIO_SERVER_NAME=VuIO
+      - VUIO_BIND_INTERFACE=0.0.0.0
       # Set to a specific interface like "eth0" if Auto discovery fails
-      - VUIO_SSDP_INTERFACE="Auto" 
+      - VUIO_SSDP_INTERFACE=Auto 
