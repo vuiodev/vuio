@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -275,7 +275,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                     continue;
                 }
 
-                match debouncer.watcher().watch(directory, RecursiveMode::Recursive) {
+                match debouncer.watch(directory, RecursiveMode::Recursive) {
                     Ok(()) => {
                         watched_paths.insert(directory.clone());
                         info!("Started watching directory: {:?}", directory);
@@ -346,7 +346,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 return Ok(());
             }
 
-            match debouncer.watcher().watch(path, RecursiveMode::Recursive) {
+            match debouncer.watch(path, RecursiveMode::Recursive) {
                 Ok(()) => {
                     watched_paths.insert(path.to_path_buf());
                     info!("Added watch path: {:?}", path);
@@ -373,7 +373,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 return Ok(());
             }
 
-            match debouncer.watcher().unwatch(path) {
+            match debouncer.unwatch(path) {
                 Ok(()) => {
                     watched_paths.remove(path);
                     info!("Removed watch path: {:?}", path);

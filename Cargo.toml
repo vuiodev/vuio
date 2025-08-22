@@ -11,7 +11,7 @@ path = "src/lib.rs"
 axum = "0.8"
 tokio = { version = "1.47", features = ["rt-multi-thread", "net", "fs", "time", "sync", "macros", "io-util", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
-uuid = { version = "1.17", features = ["v4"] }
+uuid = { version = "1.18", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
 thiserror = "2.0"
 anyhow = "1.0"
@@ -23,18 +23,18 @@ futures-util = "0.3"
 libc = "0.2"
 sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
-notify = "6.1"
-notify-debouncer-full = "0.3"
-toml = "0.8"
+notify = "8.2"
+notify-debouncer-full = "0.6"
+toml = "0.9"
 serde_json = "1.0"
-dirs = "5.0"
+dirs = "6.0"
 hostname = "0.4"
-num_cpus = "1.16"
+num_cpus = "1.17"
 reqwest = { version = "0.12", features = ["json"] }
 openssl = { version = "0.10", features = ["vendored"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.58", features = [
+windows = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
@@ -42,7 +42,7 @@ windows = { version = "0.58", features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3.8"
+tempfile = "3.21"
 
 [profile.release]
 opt-level = "z"
