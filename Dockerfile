@@ -3,7 +3,7 @@
 FROM rust:1-alpine AS builder
 
 # Install build dependencies for static linking.
-RUN apk add --no-cache musl-dev
+RUN apk add --no-cache musl-dev perl
 
 WORKDIR /app
 
