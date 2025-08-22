@@ -60,7 +60,8 @@ EXPOSE 1900/udp
 ENV VUIO_PORT=8080
 ENV VUIO_MEDIA_DIR=/media
 ENV VUIO_BIND_INTERFACE="0.0.0.0"
-ENV VUIO_SSDP_INTERFACE="Auto" # Can be "Auto", "All", or a specific interface name e.g., "eth0"
+# Can be "Auto", "All", or a specific interface name e.g., "eth0"
+ENV VUIO_SSDP_INTERFACE="Auto" 
 ENV VUIO_SERVER_NAME="VuIO"
 
 # The entrypoint script will generate the config from environment variables on start.
