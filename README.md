@@ -55,9 +55,23 @@ A comprehensive, cross-platform DLNA/UPnP media server written in Rust with adva
 
 ### Build from Source
 ```bash
-git clone https://github.com/vuio/vuio.git
+git clone https://github.com/vuiodev/vuio.git
 cd vuio
 cargo build --release
+```
+
+### Docker
+```bash
+docker-compose up -d
+```
+
+```bash
+docker run -d \
+  --name vuio-server \
+  --network host \
+  -v /path/on/your/computer/vuio-config:/config \
+  -v /path/on/your/computer/media-files:/media \
+  ghcr.io/vuiodev/vuio:latest
 ```
 
 ### Quick Start

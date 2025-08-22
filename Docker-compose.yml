@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  vuio:
+    image: ghcr.io/vuiodev/vuio:latest
+    container_name: vuio-server
+    restart: unless-stopped
+    # Use host networking for easiest SSDP/DLNA discovery.
+    # If you use host networking, you don't need the -p flags,
+    # but the container will use your host's IP directly.
+    # VUIO_PORT env var will determine the host port used.
+    network_mode: "host" 
+    #ports:
+    #  # Use this if you are NOT using network_mode: "host"
+    #  - "8080:8080/tcp"
+    #  - "1900:1900/udp"
+    volumes:
+      # Persist configuration and database to a local directory named 'config'
+      - ./vuio-config:/config
+      # Mount your media library (replace ./my-media with the actual path)
+      - ./my-media:/media
+    environment:
+      - VUIO_PORT=8080
+      - VUIO_MEDIA_DIR=/media
+      - VUIO_SERVER_NAME="VuIO"
+      - VUIO_BIND_INTERFACE="0.0.0.0"
+      # Set to a specific interface like "eth0" if Auto discovery fails
+      - VUIO_SSDP_INTERFACE="Auto" 
