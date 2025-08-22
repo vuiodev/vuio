@@ -206,7 +206,7 @@ impl ConfigValidator {
         let db_path = config.get_database_path();
         if let Some(parent) = db_path.parent() {
             // Only validate the parent directory, not the database file itself
-            platform_config.validate_path(&parent.to_path_buf())
+            platform_config.validate_path(parent)
                 .with_context(|| format!("Database directory failed platform validation: {}", parent.display()))?;
         }
         

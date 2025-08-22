@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 use super::{AppConfig, ConfigChangeEvent, ConfigManager};
@@ -199,7 +199,8 @@ impl Default for ConfigChangeRegistry {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
-    use tokio::time::{sleep, Duration};
+    use tokio::sync::RwLock;
+
 
     #[tokio::test]
     async fn test_config_watcher_service_creation() -> Result<()> {

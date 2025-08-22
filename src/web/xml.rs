@@ -126,14 +126,12 @@ pub fn generate_browse_response(
 ) -> String {
     let server_ip = get_server_ip(state);
     let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">"#);
-    let number_returned;
-
-    if object_id == "0" {
+    let number_returned = if object_id == "0" {
         // Root directory: show containers for media types
         didl.push_str(r#"<container id="video" parentID="0" restricted="1"><dc:title>Video</dc:title><upnp:class>object.container</upnp:class></container>"#);
         didl.push_str(r#"<container id="audio" parentID="0" restricted="1"><dc:title>Music</dc:title><upnp:class>object.container</upnp:class></container>"#);
         didl.push_str(r#"<container id="image" parentID="0" restricted="1"><dc:title>Pictures</dc:title><upnp:class>object.container</upnp:class></container>"#);
-        number_returned = 3;
+        3
     } else {
         let mut sub_containers = HashSet::new();
         let mut items = Vec::new();
@@ -239,8 +237,8 @@ pub fn generate_browse_response(
             ));
         }
         
-        number_returned = sorted_containers.len() + items.len();
-    }
+        sorted_containers.len() + items.len()
+    };
 
     didl.push_str("</DIDL-Lite>");
     let total_matches = number_returned;

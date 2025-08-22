@@ -474,6 +474,7 @@ async fn handle_configuration_changes(
 }
 
 /// Implement graceful degradation when platform features are unavailable
+#[allow(dead_code)]
 async fn handle_platform_feature_unavailable(feature: &str, error: &anyhow::Error) -> anyhow::Result<()> {
     match feature {
         "multicast" => {
@@ -1901,7 +1902,7 @@ async fn cleanup_old_backups(backup_dir: &std::path::Path) -> anyhow::Result<()>
     
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.is_file() && path.extension().map_or(false, |ext| ext == "db") {
+        if path.is_file() && path.extension().is_some_and(|ext| ext == "db") {
             if let Ok(metadata) = entry.metadata().await {
                 backup_files.push((path, metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH)));
             }

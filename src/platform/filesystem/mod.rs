@@ -579,7 +579,6 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     
     #[test]
     fn test_mime_type_detection() {

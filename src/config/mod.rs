@@ -642,9 +642,8 @@ impl AppConfig {
 
     /// Simple pattern matching for exclude patterns
     fn matches_pattern(filename: &str, pattern: &str) -> bool {
-        if pattern.starts_with("*.") {
+        if let Some(ext) = pattern.strip_prefix("*.") {
             // Extension pattern like "*.tmp"
-            let ext = &pattern[2..];
             filename.ends_with(&format!(".{}", ext))
         } else if pattern == ".*" {
             // Hidden file pattern - matches files starting with dot
@@ -829,13 +828,10 @@ impl AppConfig {
         }
         
         // Validate network interface configuration
-        match &self.network.interface_selection {
-            NetworkInterfaceConfig::Specific(interface_name) => {
-                if interface_name.is_empty() {
-                    return Err(anyhow::anyhow!("Specific network interface name cannot be empty"));
-                }
+        if let NetworkInterfaceConfig::Specific(interface_name) = &self.network.interface_selection {
+            if interface_name.is_empty() {
+                return Err(anyhow::anyhow!("Specific network interface name cannot be empty"));
             }
-            _ => {} // Auto and All are always valid
         }
         
         // Validate server interface address for platform compatibility
@@ -896,7 +892,7 @@ impl AppConfig {
         
         // Validate Windows-specific exclude patterns are present
         let has_windows_patterns = self.media.directories.iter().any(|dir| {
-            dir.exclude_patterns.as_ref().map_or(false, |patterns| {
+            dir.exclude_patterns.as_ref().is_some_and(|patterns| {
                 patterns.iter().any(|p| p == "Thumbs.db" || p == "desktop.ini")
             })
         });
@@ -935,7 +931,7 @@ impl AppConfig {
         
         // Validate macOS-specific exclude patterns are present
         let has_macos_patterns = self.media.directories.iter().any(|dir| {
-            dir.exclude_patterns.as_ref().map_or(false, |patterns| {
+            dir.exclude_patterns.as_ref().is_some_and(|patterns| {
                 patterns.iter().any(|p| p == ".DS_Store" || p == ".AppleDouble")
             })
         });
@@ -974,7 +970,7 @@ impl AppConfig {
         
         // Validate Linux-specific exclude patterns are present
         let has_linux_patterns = self.media.directories.iter().any(|dir| {
-            dir.exclude_patterns.as_ref().map_or(false, |patterns| {
+            dir.exclude_patterns.as_ref().is_some_and(|patterns| {
                 patterns.iter().any(|p| p == "lost+found" || p.starts_with(".Trash-"))
             })
         });

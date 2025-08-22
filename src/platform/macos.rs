@@ -96,7 +96,7 @@ fn parse_ifconfig_output(output: &str) -> PlatformResult<Vec<NetworkInterface>> 
         
         // Look for IPv4 address (skip IPv6)
         if line.trim().starts_with("inet ") && !line.contains("inet6") {
-            let parts: Vec<&str> = line.trim().split_whitespace().collect();
+            let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 2 {
                 if let Ok(ip) = parts[1].parse::<IpAddr>() {
                     current_ip = Some(ip);
@@ -198,10 +198,11 @@ pub fn gather_macos_metadata() -> PlatformResult<HashMap<String, String>> {
 }
 
 /// Check macOS firewall status
+#[allow(dead_code)]
 pub fn get_firewall_status() -> PlatformResult<bool> {
     // Check if the application firewall is enabled
     match std::process::Command::new("defaults")
-        .args(&["read", "/Library/Preferences/com.apple.alf", "globalstate"])
+        .args(["read", "/Library/Preferences/com.apple.alf", "globalstate"])
         .output()
     {
         Ok(output) if output.status.success() => {
@@ -218,6 +219,7 @@ pub fn get_firewall_status() -> PlatformResult<bool> {
 }
 
 /// Check if running with sudo privileges
+#[allow(dead_code)]
 pub fn is_elevated() -> bool {
     std::env::var("USER")
         .map(|user| user == "root")
@@ -226,6 +228,7 @@ pub fn is_elevated() -> bool {
 }
 
 /// Get the preferred network interface for multicast on macOS
+#[allow(dead_code)]
 pub fn get_preferred_multicast_interface() -> Option<String> {
     // On macOS, en0 is typically the primary Ethernet interface
     // and en1 is typically WiFi

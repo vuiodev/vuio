@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemError};
 use crate::platform::{OsType, PlatformError, PlatformResult};
@@ -428,7 +428,7 @@ impl PlatformConfig {
     }
 
     /// Validate that a path is appropriate for the current platform.
-    pub fn validate_path(&self, path: &PathBuf) -> PlatformResult<()> {
+    pub fn validate_path(&self, path: &Path) -> PlatformResult<()> {
         let fs_manager = create_platform_filesystem_manager();
         // The filesystem manager's validate_path only validates the format.
         // Existence is checked by callers like AppConfig::from_args.
@@ -442,7 +442,6 @@ impl PlatformConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn test_platform_config_creation() {

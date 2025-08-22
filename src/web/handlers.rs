@@ -139,11 +139,7 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
         let start = if start_str.is_empty() {
             // Suffix range like "-500" (last 500 bytes)
             let suffix_len: u64 = end_str.parse().map_err(|_| AppError::InvalidRange)?;
-            if suffix_len >= file_size {
-                0
-            } else {
-                file_size - suffix_len
-            }
+            file_size.saturating_sub(suffix_len)
         } else {
             start_str.parse().map_err(|_| AppError::InvalidRange)?
         };

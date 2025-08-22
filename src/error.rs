@@ -92,15 +92,7 @@ impl AppError {
             AppError::Internal(_) => false,
             AppError::Io(io_err) => {
                 // Some I/O errors are recoverable (temporary network issues, etc.)
-                match io_err.kind() {
-                    std::io::ErrorKind::TimedOut => true,
-                    std::io::ErrorKind::Interrupted => true,
-                    std::io::ErrorKind::WouldBlock => true,
-                    std::io::ErrorKind::ConnectionRefused => true,
-                    std::io::ErrorKind::ConnectionAborted => true,
-                    std::io::ErrorKind::NotConnected => true,
-                    _ => false,
-                }
+                matches!(io_err.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::NotConnected)
             }
             AppError::Http(_) => false,
             AppError::Watcher(_) => true, // File watcher can often be restarted
@@ -258,7 +250,7 @@ pub trait ErrorRecovery {
     type Error;
     
     /// Attempt to recover from an error and retry the operation
-    async fn recover_and_retry(&self, error: &Self::Error, max_attempts: u32) -> std::result::Result<Self::Output, Self::Error>;
+    fn recover_and_retry(&self, error: &Self::Error, max_attempts: u32) -> impl std::future::Future<Output = std::result::Result<Self::Output, Self::Error>> + Send;
 }
 
 /// Helper function to retry operations with exponential backoff

@@ -264,10 +264,7 @@ impl BaseNetworkManager {
     
     /// Internal method to check if a port is available
     async fn is_port_available_internal(&self, port: u16) -> bool {
-        match self.try_bind_port(port).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        (self.try_bind_port(port).await).is_ok()
     }
     
     /// Filter interfaces to find suitable ones for DLNA
@@ -469,7 +466,6 @@ impl Default for BaseNetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
     use crate::platform::InterfaceType;
     
     fn create_test_interface(name: &str, ip: &str, interface_type: InterfaceType) -> NetworkInterface {

@@ -1,8 +1,8 @@
 use std::collections::HashMap;
-use std::net::IpAddr;
-use std::path::PathBuf;
+
+use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
-use crate::platform::{PlatformInfo, PlatformError, OsType, NetworkInterface};
+use crate::platform::{PlatformInfo, PlatformError, OsType};
 
 /// Comprehensive diagnostic information for troubleshooting
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,10 +250,7 @@ impl DiagnosticInfo {
     async fn test_port_availability(port: u16) -> bool {
         use tokio::net::TcpListener;
         
-        match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        (TcpListener::bind(format!("127.0.0.1:{}", port)).await).is_ok()
     }
     
     /// Test basic network connectivity
@@ -261,10 +258,7 @@ impl DiagnosticInfo {
         use tokio::net::TcpStream;
         use tokio::time::{timeout, Duration};
         
-        match timeout(Duration::from_secs(5), TcpStream::connect(format!("{}:{}", host, port))).await {
-            Ok(Ok(_)) => true,
-            _ => false,
-        }
+        matches!(timeout(Duration::from_secs(5), TcpStream::connect(format!("{}:{}", host, port))).await, Ok(Ok(_)))
     }
     
     /// Detect firewall status for the current platform
@@ -391,7 +385,7 @@ impl DiagnosticInfo {
     }
     
     /// Get available free space for a path
-    async fn get_free_space(path: &PathBuf) -> Option<u64> {
+    async fn get_free_space(_path: &Path) -> Option<u64> {
         // TODO: Implement cross-platform free space detection
         None
     }

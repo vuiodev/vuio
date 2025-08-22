@@ -149,8 +149,7 @@ pub async fn demonstrate_config_hot_reload() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use tokio::sync::RwLock;
+
 
     #[tokio::test]
     async fn test_example_service() -> Result<()> {

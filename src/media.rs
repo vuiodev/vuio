@@ -440,7 +440,7 @@ pub struct ScanError {
 /// 
 /// This function is deprecated in favor of using MediaScanner directly
 #[deprecated(note = "Use MediaScanner::scan_directory instead")]
-pub async fn scan_media_files(dir: &PathBuf) -> Result<Vec<MediaFile>> {
+pub async fn scan_media_files(dir: &Path) -> Result<Vec<MediaFile>> {
     let filesystem_manager = create_platform_filesystem_manager();
     
     let fs_files = filesystem_manager

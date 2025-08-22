@@ -74,7 +74,7 @@ impl MacOSNetworkManager {
         
         // Check if the application firewall is enabled
         match Command::new("defaults")
-            .args(&["read", "/Library/Preferences/com.apple.alf", "globalstate"])
+            .args(["read", "/Library/Preferences/com.apple.alf", "globalstate"])
             .output()
         {
             Ok(output) if output.status.success() => {
@@ -140,7 +140,7 @@ impl MacOSNetworkManager {
             warn!("No interfaces found via ifconfig, attempting fallback detection");
             
             // Try to get the default route interface
-            if let Ok(route_output) = Command::new("route").args(&["get", "default"]).output() {
+            if let Ok(route_output) = Command::new("route").args(["get", "default"]).output() {
                 let route_str = String::from_utf8_lossy(&route_output.stdout);
                 if let Some(interface_line) = route_str.lines().find(|line| line.trim().starts_with("interface:")) {
                     if let Some(iface_name) = interface_line.split(':').nth(1) {
@@ -150,7 +150,7 @@ impl MacOSNetworkManager {
                         if let Ok(ip_output) = Command::new("ifconfig").arg(iface_name).output() {
                             let ip_str = String::from_utf8_lossy(&ip_output.stdout);
                             if let Some(inet_line) = ip_str.lines().find(|line| line.trim().starts_with("inet ") && !line.contains("inet6")) {
-                                if let Some(ip_part) = inet_line.trim().split_whitespace().nth(1) {
+                                if let Some(ip_part) = inet_line.split_whitespace().nth(1) {
                                     if let Ok(ip) = ip_part.parse::<IpAddr>() {
                                         info!("Found fallback interface {} with IP {}", iface_name, ip);
                                         interfaces.push(NetworkInterface {
@@ -186,7 +186,6 @@ impl MacOSNetworkManager {
         let mut current_ip: Option<IpAddr> = None;
         let mut is_up = false;
         let mut supports_multicast = false;
-        let mut status_active = false;
         
         for line in output.lines() {
             // Detect interface name (starts at beginning of line and ends with colon)
@@ -215,7 +214,6 @@ impl MacOSNetworkManager {
                 current_ip = None;
                 is_up = false;
                 supports_multicast = false;
-                status_active = false;
                 
                 // Check flags in the same line
                 if line.contains("UP") {
@@ -228,7 +226,7 @@ impl MacOSNetworkManager {
             
             // Look for IPv4 address (skip IPv6)
             if line.trim().starts_with("inet ") && !line.contains("inet6") {
-                let parts: Vec<&str> = line.trim().split_whitespace().collect();
+                let parts: Vec<&str> = line.split_whitespace().collect();
                 if parts.len() >= 2 {
                     if let Ok(ip) = parts[1].parse::<IpAddr>() {
                         current_ip = Some(ip);
@@ -236,10 +234,8 @@ impl MacOSNetworkManager {
                 }
             }
             
-            // Check for status flags
-            if line.trim().starts_with("status: active") {
-                status_active = true;
-            }
+            // Note: We used to check for "status: active" but this is too strict
+            // and causes many valid interfaces to be ignored. The UP flag is sufficient.
         }
         
         // Don't forget the last interface
@@ -510,10 +506,7 @@ impl NetworkManager for MacOSNetworkManager {
     }
     
     async fn is_port_available(&self, port: u16) -> bool {
-        match self.try_bind_port_macos(port).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        (self.try_bind_port_macos(port).await).is_ok()
     }
     
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {
