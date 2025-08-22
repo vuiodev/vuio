@@ -50,7 +50,7 @@ A comprehensive, cross-platform DLNA/UPnP media server written in Rust with adva
 ## 🛠️ Installation & Usage
 
 ### Prerequisites
-- Rust 1.70+ (for building from source)
+- Rust 1.75+ (for building from source)
 - SQLite 3.x (bundled with the application)
 
 ### Build from Source
@@ -61,18 +61,8 @@ cargo build --release
 ```
 
 ### Docker
-```bash
-docker-compose up -d
-```
 
-```bash
-docker run -d \
-  --name vuio-server \
-  --network host \
-  -v /path/on/your/computer/vuio-config:/config \
-  -v /path/on/your/computer/media-files:/media \
-  ghcr.io/vuiodev/vuio:latest
-```
+Check documentation for [Docker](DOCKER.md).
 
 ### Quick Start
 ```bash

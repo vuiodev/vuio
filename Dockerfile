@@ -29,31 +29,26 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 # ---- Final Stage ----
 FROM alpine:latest
 
-# Install runtime dependencies (ca-certificates is good practice).
-RUN apk add --no-cache ca-certificates
+# Install runtime dependencies including shadow for usermod/groupmod
+RUN apk add --no-cache ca-certificates shadow su-exec
 
-# Create a non-root user and group for security.
-RUN addgroup -S vuio && adduser -S vuio -G vuio
+# Create a non-root user and group for security with default IDs
+RUN addgroup -g 1000 vuio && adduser -u 1000 -G vuio -s /bin/sh -D vuio
 
-# Create directories for the application, config, and media.
-# These should be mounted as volumes in production.
-RUN mkdir -p /app /config /media && chown -R vuio:vuio /app /config /media
+# Create directories for the application, config, and media
+RUN mkdir -p /app /config /media
 
 # Copy the binary from the builder stage
-COPY --from=builder --chown=vuio:vuio /tmp/vuio /app/vuio
+COPY --from=builder /tmp/vuio /app/vuio
 
 # Make sure the binary is executable
 RUN chmod +x /app/vuio
 
-# Switch to the non-root user.
-USER vuio
-WORKDIR /app
+# Set default environment variables for user/group IDs
+ENV PUID=1000
+ENV PGID=1000
 
-# Expose ports for HTTP server (TCP) and SSDP (UDP). Default values can be overridden by environment variables.
-EXPOSE 8080/tcp
-EXPOSE 1900/udp
-
-# Set default environment variables for configuration.
+# Set default environment variables for configuration
 ENV VUIO_PORT=8080
 ENV VUIO_MEDIA_DIR=/media
 ENV VUIO_BIND_INTERFACE=0.0.0.0
@@ -61,10 +56,18 @@ ENV VUIO_BIND_INTERFACE=0.0.0.0
 ENV VUIO_SSDP_INTERFACE=Auto
 ENV VUIO_SERVER_NAME=VuIO
 
-# The entrypoint script will generate the config from environment variables on start.
-COPY --chown=vuio:vuio docker-entrypoint.sh /usr/local/bin/
+# Copy the enhanced entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
+# Expose ports for HTTP server (TCP) and SSDP (UDP)
+EXPOSE 8080/tcp
+EXPOSE 1900/udp
+
+# Use root for entrypoint to allow user switching
+USER root
+WORKDIR /app
+
 ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
-# Default command to run the application.
+# Default command to run the application
 CMD ["/app/vuio", "--config", "/config/config.toml"]

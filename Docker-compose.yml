@@ -5,24 +5,36 @@ services:
     image: ghcr.io/vuiodev/vuio:latest
     container_name: vuio-server
     restart: unless-stopped
-    # Use host networking for easiest SSDP/DLNA discovery.
-    # If you use host networking, you don't need the -p flags,
-    # but the container will use your host's IP directly.
-    # VUIO_PORT env var will determine the host port used.
-    network_mode: "host" 
+    
+    # IMPORTANT: Use host networking for proper SSDP/DLNA multicast support
+    # Without host networking, multicast packets will be blocked
+    network_mode: "host"
+    
+    # Alternative: If you can't use host networking, use these port mappings
+    # but note that SSDP discovery may not work properly
     #ports:
-    #  # Use this if you are NOT using network_mode: "host"
     #  - "8080:8080/tcp"
     #  - "1900:1900/udp"
+    
     volumes:
-      # Persist configuration and database to a local directory named 'config'
+      # Persist configuration and database
       - ./vuio-config:/config
-      # Mount your media library (replace ./my-media with the actual path)
+      # Mount your media library (adjust path as needed)
       - ./my-media:/media
+      
     environment:
+      # User/Group ID mapping - set these to match your host user
+      - PUID=1000  # Change to your user ID (run 'id -u' to find yours)
+      - PGID=1000  # Change to your group ID (run 'id -g' to find yours)
+      
+      # Application configuration
       - VUIO_PORT=8080
       - VUIO_MEDIA_DIR=/media
       - VUIO_SERVER_NAME=VuIO
       - VUIO_BIND_INTERFACE=0.0.0.0
-      # Set to a specific interface like "eth0" if Auto discovery fails
+      
+      # Network interface for SSDP multicast
+      # - "Auto": Automatically detect best interface
+      # - "All": Use all available interfaces  
+      # - "eth0": Use specific interface (useful for macvlan)
       - VUIO_SSDP_INTERFACE=Auto 

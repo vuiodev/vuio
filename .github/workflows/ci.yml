@@ -28,12 +28,12 @@ env:
 
 jobs:
   # ===================================================================
-  # Job 1: Run Tests and Checks (Only for Pull Requests or Manual 'test' run)
+  # Job 1: Run Tests and Checks (Push, Pull Requests, or Manual 'test' run)
   # ===================================================================
   test_and_check:
     name: Test on ${{ matrix.target }}
-    # This job now ONLY runs for pull requests or when manually triggered with 'test'.
-    if: github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    # This job runs for any push, pull requests, or when manually triggered with 'test'.
+    if: github.event_name == 'push' || github.event_name == 'pull_request' || (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
