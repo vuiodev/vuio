@@ -14,6 +14,7 @@ ARG TARGETARCH
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
+    echo "pub fn lib() {}" > src/lib.rs && \
     TARGETPLATFORM=$(if [ "$TARGETARCH" = "amd64" ]; then echo "x86_64-unknown-linux-musl"; elif [ "$TARGETARCH" = "arm64" ]; then echo "aarch64-unknown-linux-musl"; else exit 1; fi) && \
     rustup target add $TARGETPLATFORM && \
     cargo build --release --target $TARGETPLATFORM
