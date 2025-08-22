@@ -9,7 +9,7 @@ use vuio::{
     watcher::{CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher},
     web,
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::{net::SocketAddr, sync::Arc, path::PathBuf};
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
@@ -23,6 +23,10 @@ fn parse_early_args() -> (bool, Option<String>) {
     struct EarlyArgs {
         /// The directory containing media files to serve
         _media_dir: Option<String>,
+
+        /// Additional media directories to serve (can be used multiple times)
+        #[arg(long = "media-dir", action = clap::ArgAction::Append)]
+        _additional_media_dirs: Vec<String>,
 
         /// The network port to listen on
         #[arg(short, long)]
@@ -78,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load or create configuration with platform-specific defaults
-    let config = match initialize_configuration(&platform_info).await {
+    let config = match initialize_configuration(&platform_info, config_file_path).await {
         Ok(config) => Arc::new(config),
         Err(e) => {
             error!("Failed to initialize configuration: {}", e);
@@ -580,11 +584,22 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
 }
 
 /// Initialize configuration with platform-specific defaults and validation
-async fn initialize_configuration(_platform_info: &PlatformInfo) -> anyhow::Result<AppConfig> {
+async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_path: Option<String>) -> anyhow::Result<AppConfig> {
     info!("Initializing configuration...");
     
-    let config_path = AppConfig::get_platform_config_file_path();
-    info!("Configuration file path: {}", config_path.display());
+    // Use provided config file path if available, otherwise use platform default
+    let config_path = if let Some(path) = config_file_path {
+        let custom_path = PathBuf::from(path);
+        if !custom_path.exists() {
+            anyhow::bail!("Configuration file does not exist: {}", custom_path.display());
+        }
+        info!("Using custom configuration file: {}", custom_path.display());
+        custom_path
+    } else {
+        let default_path = AppConfig::get_platform_config_file_path();
+        info!("Using default configuration file path: {}", default_path.display());
+        default_path
+    };
     
     // First, try to load from command line arguments
     match AppConfig::from_args().await {

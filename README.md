@@ -94,10 +94,31 @@ Arguments:
   [MEDIA_DIR]  The directory containing media files to serve
 
 Options:
-  -p, --port <PORT>    The network port to listen on [default: 8080]
-  -n, --name <NAME>    The friendly name for the DLNA server [default: platform-specific]
-  -h, --help           Print help information
-  -V, --version        Print version information
+  -p, --port <PORT>        The network port to listen on [default: 8080]
+  -n, --name <NAME>        The friendly name for the DLNA server [default: platform-specific]
+  -c, --config <CONFIG>    Path to configuration file
+      --media-dir <DIR>    Additional media directories (can be used multiple times)
+      --debug              Enable debug logging
+  -h, --help               Print help information
+  -V, --version            Print version information
+```
+
+### Multiple Media Directories
+
+You can serve media from multiple directories using:
+
+```bash
+# Single directory
+./vuio /path/to/movies
+
+# Multiple directories
+./vuio /path/to/movies --media-dir /path/to/music --media-dir /path/to/photos
+
+# Only additional directories (no primary)
+./vuio --media-dir /raid1/movies --media-dir /raid2/music --media-dir /nas/photos
+
+# Mixed with other options
+./vuio -p 9090 -n "My Media Server" /primary/media --media-dir /secondary/media
 ```
 
 ## ⚙️ Configuration
@@ -108,6 +129,14 @@ VuIO uses a TOML configuration file with platform-specific defaults:
 - **Windows:** `%APPDATA%\VuIO\config.toml`
 - **macOS:** `~/Library/Application Support/VuIO/config.toml`
 - **Linux:** `~/.config/vuio/config.toml`
+
+**Multiple Media Directories:**
+You can monitor multiple directories by adding multiple `[[media.directories]]` sections to your configuration file. Each directory can have its own settings for recursion, file extensions, and exclude patterns.
+
+**Network Interface Selection:**
+- `"Auto"` - Automatically select the best interface
+- `"All"` - Use all available interfaces  
+- `"eth0"` - Use a specific interface name (replace with actual interface name)
 
 ### Example Configuration
 ```toml
@@ -127,6 +156,12 @@ announce_interval_seconds = 30
 path = "/home/user/Videos"
 recursive = true
 extensions = ["mp4", "mkv", "avi"]
+exclude_patterns = ["*.tmp", ".*"]
+
+[[media.directories]]
+path = "/home/user/Music"
+recursive = true
+extensions = ["mp3", "flac", "wav"]
 exclude_patterns = ["*.tmp", ".*"]
 
 [database]

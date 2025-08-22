@@ -50,11 +50,13 @@ pub struct NetworkConfig {
 
 /// Network interface selection configuration
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", content = "value")]
+#[serde(rename_all = "PascalCase")]
 pub enum NetworkInterfaceConfig {
     Auto,
-    Specific(String),
+    #[serde(rename = "All")]
     All,
+    #[serde(untagged)]
+    Specific(String),
 }
 
 /// Media configuration settings
@@ -96,6 +98,10 @@ impl AppConfig {
             /// The directory containing media files to serve
             media_dir: Option<String>,
 
+            /// Additional media directories to serve (can be used multiple times)
+            #[arg(long = "media-dir", action = clap::ArgAction::Append)]
+            additional_media_dirs: Vec<String>,
+
             /// The network port to listen on
             #[arg(short, long)]
             port: Option<u16>,
@@ -126,6 +132,9 @@ impl AppConfig {
             
             // Override config file settings with command line arguments
             if let Some(media_dir) = &args.media_dir {
+                let mut media_directories = vec![];
+                
+                // Add primary media directory
                 let media_dir = PathBuf::from(media_dir);
                 if !media_dir.exists() {
                     anyhow::bail!("Media directory does not exist: {}", media_dir.display());
@@ -134,14 +143,54 @@ impl AppConfig {
                     anyhow::bail!("Media path is not a directory: {}", media_dir.display());
                 }
                 
-                config.media.directories = vec![
-                    MonitoredDirectoryConfig {
-                        path: media_dir.to_string_lossy().to_string(),
+                media_directories.push(MonitoredDirectoryConfig {
+                    path: media_dir.to_string_lossy().to_string(),
+                    recursive: true,
+                    extensions: None,
+                    exclude_patterns: None,
+                });
+                
+                // Add additional media directories
+                for additional_dir in &args.additional_media_dirs {
+                    let add_dir = PathBuf::from(additional_dir);
+                    if !add_dir.exists() {
+                        anyhow::bail!("Additional media directory does not exist: {}", add_dir.display());
+                    }
+                    if !add_dir.is_dir() {
+                        anyhow::bail!("Additional media path is not a directory: {}", add_dir.display());
+                    }
+                    
+                    media_directories.push(MonitoredDirectoryConfig {
+                        path: add_dir.to_string_lossy().to_string(),
                         recursive: true,
                         extensions: None,
                         exclude_patterns: None,
+                    });
+                }
+                
+                config.media.directories = media_directories;
+            } else if !args.additional_media_dirs.is_empty() {
+                // If only additional directories are provided without primary
+                let mut media_directories = vec![];
+                
+                for additional_dir in &args.additional_media_dirs {
+                    let add_dir = PathBuf::from(additional_dir);
+                    if !add_dir.exists() {
+                        anyhow::bail!("Additional media directory does not exist: {}", add_dir.display());
                     }
-                ];
+                    if !add_dir.is_dir() {
+                        anyhow::bail!("Additional media path is not a directory: {}", add_dir.display());
+                    }
+                    
+                    media_directories.push(MonitoredDirectoryConfig {
+                        path: add_dir.to_string_lossy().to_string(),
+                        recursive: true,
+                        extensions: None,
+                        exclude_patterns: None,
+                    });
+                }
+                
+                config.media.directories = media_directories;
             }
             
             if let Some(port) = args.port {
@@ -155,28 +204,68 @@ impl AppConfig {
             return Ok((config, args.debug, args.config));
         }
         
-        // If no media directory provided, return error to indicate no args
-        let media_dir_str = args.media_dir.ok_or_else(|| {
-            anyhow::anyhow!("No media directory provided in command line arguments")
-        })?;
-        
-        let media_dir = PathBuf::from(&media_dir_str);
-        
-        tracing::info!("Processing command line arguments with media directory: {}", media_dir.display());
-        
-        // Validate that the directory exists before doing platform validation
-        if !media_dir.exists() {
-            anyhow::bail!("Media directory does not exist: {}", media_dir.display());
+        // If no media directory provided, check for additional directories
+        if args.media_dir.is_none() && args.additional_media_dirs.is_empty() {
+            return Err(anyhow::anyhow!("No media directory provided in command line arguments"));
         }
         
-        if !media_dir.is_dir() {
-            anyhow::bail!("Media path is not a directory: {}", media_dir.display());
-        }
-
-        // Now validate the path for platform compatibility
+        // Build list of media directories
+        let mut media_directories = vec![];
         let platform_config = PlatformConfig::for_current_platform();
-        platform_config.validate_path(&media_dir)
-            .with_context(|| format!("Invalid media directory for current platform: {}", media_dir.display()))?;
+        
+        // Add primary media directory if provided
+        if let Some(media_dir_str) = &args.media_dir {
+            let media_dir = PathBuf::from(media_dir_str);
+            
+            tracing::info!("Processing command line arguments with media directory: {}", media_dir.display());
+            
+            // Validate that the directory exists before doing platform validation
+            if !media_dir.exists() {
+                anyhow::bail!("Media directory does not exist: {}", media_dir.display());
+            }
+            
+            if !media_dir.is_dir() {
+                anyhow::bail!("Media path is not a directory: {}", media_dir.display());
+            }
+
+            // Now validate the path for platform compatibility
+            platform_config.validate_path(&media_dir)
+                .with_context(|| format!("Invalid media directory for current platform: {}", media_dir.display()))?;
+            
+            media_directories.push(MonitoredDirectoryConfig {
+                path: media_dir.to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
+            });
+        }
+        
+        // Add additional media directories
+        for additional_dir_str in &args.additional_media_dirs {
+            let additional_dir = PathBuf::from(additional_dir_str);
+            
+            tracing::info!("Processing additional media directory: {}", additional_dir.display());
+            
+            // Validate that the directory exists
+            if !additional_dir.exists() {
+                anyhow::bail!("Additional media directory does not exist: {}", additional_dir.display());
+            }
+            
+            if !additional_dir.is_dir() {
+                anyhow::bail!("Additional media path is not a directory: {}", additional_dir.display());
+            }
+
+            // Validate the path for platform compatibility
+            platform_config.validate_path(&additional_dir)
+                .with_context(|| format!("Invalid additional media directory for current platform: {}", additional_dir.display()))?;
+            
+            media_directories.push(MonitoredDirectoryConfig {
+                path: additional_dir.to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
+            });
+        }
 
         let mut config = Self::default_for_platform();
         
@@ -185,16 +274,12 @@ impl AppConfig {
             config.server.port = port;
         }
         config.server.name = args.name;
-        config.media.directories = vec![
-            MonitoredDirectoryConfig {
-                path: media_dir.to_string_lossy().to_string(),
-                recursive: true,
-                extensions: None,
-                exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
-            }
-        ];
+        config.media.directories = media_directories;
         
-        tracing::info!("Using command line media directory: {}", media_dir.display());
+        tracing::info!("Using {} media directories from command line", config.media.directories.len());
+        for (i, dir) in config.media.directories.iter().enumerate() {
+            tracing::info!("  {}: {}", i + 1, dir.path);
+        }
         
         Ok((config, args.debug, args.config))
     }
