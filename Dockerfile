@@ -37,7 +37,7 @@ RUN addgroup -S vuio && adduser -S vuio -G vuio
 
 # Create directories for the application, config, and media.
 # These should be mounted as volumes in production.
-RUN mkdir -p /app /config /media && chown -R appuser:appgroup /app /config /media
+RUN mkdir -p /app /config /media && chown -R vuio:vuio /app /config /media
 
 # Copy the binary from the builder stage based on target architecture.
 ARG TARGETARCH
