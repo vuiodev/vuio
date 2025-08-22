@@ -439,7 +439,7 @@ impl NetworkManager for LinuxNetworkManager {
     }
     
     async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket> {
-        let mut last_error = None;
+        let mut _last_error = None;
         
         // Try primary port first
         match self.try_bind_port_linux(config.primary_port).await {
@@ -462,7 +462,7 @@ impl NetworkManager for LinuxNetworkManager {
             }
             Err(e) => {
                 warn!("Primary port {} failed on Linux: {}", config.primary_port, e);
-                last_error = Some(e);
+                _last_error = Some(e);
             }
         }
         
@@ -485,13 +485,13 @@ impl NetworkManager for LinuxNetworkManager {
                 }
                 Err(e) => {
                     debug!("Fallback port {} failed on Linux: {}", port, e);
-                    last_error = Some(e);
+                    _last_error = Some(e);
                 }
             }
         }
         
         // If we get here, all ports failed
-        Err(last_error.unwrap_or_else(|| 
+        Err(_last_error.unwrap_or_else(|| 
             PlatformError::NetworkConfig("All ports failed on Linux".to_string())
         ))
     }

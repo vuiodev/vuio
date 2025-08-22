@@ -1,6 +1,6 @@
 use async_trait::async_trait;
-use notify::{RecommendedWatcher, RecursiveMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap};
+use notify::{RecommendedWatcher, RecursiveMode, Config};
+use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -167,7 +167,7 @@ impl CrossPlatformWatcher {
         let event_sender = self.event_sender.clone();
         let media_extensions = self.media_extensions.clone();
         
-        let debouncer = new_debouncer(
+        let debouncer = new_debouncer_opt(
             self.debounce_duration,
             None, // Use default tick rate
             move |result: DebounceEventResult| {
@@ -239,6 +239,8 @@ impl CrossPlatformWatcher {
                     }
                 }
             },
+            FileIdMap::new(),
+            Config::default(),
         )?;
 
         let mut debouncer_guard = self.debouncer.write().await;
