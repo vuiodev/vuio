@@ -1,7 +1,7 @@
 # ---- Chef Stage ----
 FROM rust:1-alpine AS chef
 RUN apk add --no-cache musl-dev perl build-base
-RUN cargo install cargo-chef
+RUN cargo install cargo-chef sccache
 WORKDIR /app
 
 # ---- Planner Stage ----
@@ -16,6 +16,11 @@ FROM chef AS builder
 # Declare TARGETARCH for this stage
 ARG TARGETARCH
 
+# Set up sccache
+ENV RUSTC_WRAPPER=sccache
+ENV SCCACHE_DIR=/sccache
+RUN mkdir -p /sccache
+
 # Set up target architecture and install target
 RUN if [ "$TARGETARCH" = "amd64" ]; then \
         export RUST_TARGET="x86_64-unknown-linux-musl"; \
@@ -29,13 +34,19 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
 
 # Copy recipe and build dependencies (this layer will be cached unless dependencies change)
 COPY --from=planner /app/recipe.json recipe.json
-RUN RUST_TARGET=$(cat /tmp/rust_target) && \
+RUN --mount=type=cache,target=/sccache \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    RUST_TARGET=$(cat /tmp/rust_target) && \
     cargo chef cook --release --target $RUST_TARGET --recipe-path recipe.json
 
 # Copy source code and build application (only this layer rebuilds when source changes)
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN RUST_TARGET=$(cat /tmp/rust_target) && \
+RUN --mount=type=cache,target=/sccache \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    RUST_TARGET=$(cat /tmp/rust_target) && \
     cargo build --release --target $RUST_TARGET && \
     cp target/$RUST_TARGET/release/vuio /tmp/vuio
 
