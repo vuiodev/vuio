@@ -1,7 +1,5 @@
 version: '3.8'
 
-# No custom networks needed with host networking
-
 services:
   vuio:
     build:
@@ -42,7 +40,7 @@ services:
       
       # Set server IP for DLNA announcements (Required for Linux Docker)
       # This is critical for proper DLNA discovery when using host networking
-      - VUIO_SERVER_IP=192.168.1.60  # Your Linux host IP address
+      - VUIO_SERVER_IP=192.168.1.126  # Your Linux host IP address
       
       # Set SSDP port to avoid conflicts (port 1900 is in use)
       - VUIO_SSDP_PORT=1902

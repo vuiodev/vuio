@@ -677,21 +677,20 @@ impl LinuxNetworkManager {
 }
 
 impl LinuxNetworkManager {
-    /// Create receive socket exactly like MiniDLNA: bind to INADDR_ANY:1900
+    ///  bind to INADDR_ANY:1900
     async fn create_receive_socket(&self, port: u16) -> PlatformResult<UdpSocket> {
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port)); // INADDR_ANY
         
         let socket = UdpSocket::bind(socket_addr).await
             .map_err(|e| PlatformError::NetworkConfig(format!("Failed to bind receive socket to {}: {}", socket_addr, e)))?;
         
-        // Apply MiniDLNA socket options
         self.apply_receive_socket_options(&socket)?;
         
-        info!("Created receive socket bound to {} (MiniDLNA pattern)", socket_addr);
+        info!("Created receive socket bound to {}", socket_addr);
         Ok(socket)
     }
     
-    /// Apply MiniDLNA receive socket options
+    /// Apply receive socket options
     fn apply_receive_socket_options(&self, socket: &UdpSocket) -> PlatformResult<()> {
         use std::os::unix::io::AsRawFd;
         
@@ -711,22 +710,40 @@ impl LinuxNetworkManager {
         if ret != 0 {
             warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
         }
+
+        // This is necessary to prevent the "Address in use" error when creating the announcement socket.
+        #[cfg(target_os = "linux")]
+        {
+            let ret_port = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEPORT,
+                    &optval as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&optval) as libc::socklen_t,
+                )
+            };
+            if ret_port != 0 {
+                // Log as a warning, as older kernels might not support this, but it's crucial for modern systems.
+                warn!("Failed to set SO_REUSEPORT: {}. This might cause issues in some environments.", std::io::Error::last_os_error());
+            }
+        }
         
-        debug!("Applied MiniDLNA receive socket options");
+        debug!("Applied receive socket options");
         Ok(())
     }
     
-    /// Join multicast membership on specific interface (exact MiniDLNA pattern)
+    /// Join multicast membership on specific interface
     async fn join_multicast_on_interface(&self, socket: &UdpSocket, interface: &NetworkInterface) -> PlatformResult<()> {
         use std::os::unix::io::AsRawFd;
         
         let fd = socket.as_raw_fd();
         
-        // MiniDLNA pattern: Use IP_ADD_MEMBERSHIP with specific interface address
+        // Use IP_ADD_MEMBERSHIP with specific interface address
         if let IpAddr::V4(interface_ip) = interface.ip_address {
             let multicast_addr = "239.255.255.250".parse::<std::net::Ipv4Addr>().unwrap();
             
-            // Create ip_mreq structure like MiniDLNA
+            // Create ip_mreq structure
             let mreq = libc::ip_mreq {
                 imr_multiaddr: libc::in_addr {
                     s_addr: u32::from(multicast_addr).to_be(),
@@ -772,9 +789,9 @@ impl NetworkManager for LinuxNetworkManager {
         self.create_ssdp_socket_with_config(&self.config).await
     }
     
-    /// Create SSDP socket with exact MiniDLNA pattern for Docker compatibility
+    /// Create SSDP socket with Docker compatibility
     async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket> {
-        // MiniDLNA pattern: Create receive socket bound to INADDR_ANY:1900
+        // Create receive socket bound to INADDR_ANY:1900
         let receive_socket = self.create_receive_socket(config.primary_port).await?;
         
         // Get all available network interfaces
@@ -795,7 +812,7 @@ impl NetworkManager for LinuxNetworkManager {
             multicast_enabled: false,
         };
         
-        // MiniDLNA pattern: Join multicast membership on each interface
+        // Join multicast membership on each interface
         for interface in &suitable_interfaces {
             if let Err(e) = self.join_multicast_on_interface(&ssdp_socket.socket, interface).await {
                 warn!("Failed to join multicast on interface {}: {}", interface.name, e);
@@ -838,11 +855,11 @@ impl NetworkManager for LinuxNetworkManager {
     }
     
     async fn join_multicast_group(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
-        // MiniDLNA pattern: multicast membership is already set up during socket creation
+        // multicast membership is already set up during socket creation
         // This method just verifies that multicast is enabled
         
         if socket.multicast_enabled {
-            info!("Multicast already enabled on socket (MiniDLNA pattern)");
+            info!("Multicast already enabled on socket");
             return Ok(());
         }
         
