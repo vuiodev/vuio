@@ -34,13 +34,9 @@ services:
       - VUIO_SERVER_NAME=VuIO
       - VUIO_BIND_INTERFACE=0.0.0.0
       
-      # Set the correct network interface for DLNA discovery  
-      # Force specific network interface for multicast
-      - VUIO_SSDP_INTERFACE=enp12s0
-      
-      # Set server IP for DLNA announcements (Required for Linux Docker)
-      # This is critical for proper DLNA discovery when using host networking
-      - VUIO_SERVER_IP=192.168.1.126  # Your Linux host IP address
+      # Set server IP for DLNA announcements (Required for Docker host networking)
+      # This ensures DLNA announcements use the correct IP address
+      - VUIO_SERVER_IP=192.168.1.126  # Your host IP address
       
       # Set SSDP port to avoid conflicts (port 1900 is in use)
       - VUIO_SSDP_PORT=1902

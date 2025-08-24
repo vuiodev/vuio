@@ -150,7 +150,7 @@ pub fn gather_linux_metadata() -> PlatformResult<HashMap<String, String>> {
 }
 
 /// Check if running as root
-pub fn is_elevated() -> bool {
+pub fn _is_elevated() -> bool {
     std::env::var("USER")
         .map(|user| user == "root")
         .unwrap_or(false) ||
@@ -158,7 +158,7 @@ pub fn is_elevated() -> bool {
 }
 
 /// Check Linux firewall status (simplified)
-pub fn get_firewall_status() -> PlatformResult<bool> {
+pub fn _get_firewall_status() -> PlatformResult<bool> {
     // Check for common firewall tools
     let has_iptables = std::process::Command::new("which")
         .arg("iptables")
@@ -183,13 +183,13 @@ pub fn get_firewall_status() -> PlatformResult<bool> {
 }
 
 /// Check if a port requires special privileges on Linux
-pub fn requires_elevation(port: u16) -> bool {
+pub fn _requires_elevation(port: u16) -> bool {
     // Ports below 1024 require root privileges or CAP_NET_BIND_SERVICE capability
     port < 1024
 }
 
 /// Get available network namespaces
-pub fn get_network_namespaces() -> PlatformResult<Vec<String>> {
+pub fn _get_network_namespaces() -> PlatformResult<Vec<String>> {
     let mut namespaces = Vec::new();
     
     // Read from /proc/net/netns if available
@@ -235,16 +235,16 @@ mod tests {
     
     #[test]
     fn test_elevation_check() {
-        let requires_root = requires_elevation(80);
+        let requires_root = _requires_elevation(80);
         assert!(requires_root);
         
-        let no_root_needed = requires_elevation(8080);
+        let no_root_needed = _requires_elevation(8080);
         assert!(!no_root_needed);
     }
     
     #[test]
     fn test_network_namespaces() {
-        let namespaces = get_network_namespaces();
+        let namespaces = _get_network_namespaces();
         assert!(namespaces.is_ok());
         // Namespaces list can be empty, that's fine
     }
