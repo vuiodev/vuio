@@ -60,7 +60,14 @@ async fn ssdp_search_responder(state: AppState, network_manager: Arc<PlatformNet
     // Create SSDP socket with retry logic
     let mut socket = None;
     for attempt in 1..=MAX_SOCKET_RETRIES {
-        let ssdp_config = SsdpConfig::default();
+        let ssdp_config = SsdpConfig {
+            primary_port: state.config.network.ssdp_port,
+            fallback_ports: vec![8080, 8081, 8082, 9090],
+            multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
+            announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
+            max_retries: 3,
+            interfaces: Vec::new(),
+        };
         match network_manager.create_ssdp_socket_with_config(&ssdp_config).await {
             Ok(s) => {
                 info!("Successfully created SSDP socket on port {} (attempt {})", s.port, attempt);
@@ -203,7 +210,14 @@ async fn ssdp_search_responder(state: AppState, network_manager: Arc<PlatformNet
                     error!("Too many consecutive errors ({}), attempting to recreate socket", MAX_CONSECUTIVE_ERRORS);
                     
                     // Try to recreate the socket
-                    let ssdp_config = SsdpConfig::default();
+                    let ssdp_config = SsdpConfig {
+                        primary_port: state.config.network.ssdp_port,
+                        fallback_ports: vec![8080, 8081, 8082, 9090],
+                        multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
+                        announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
+                        max_retries: 3,
+                        interfaces: Vec::new(),
+                    };
                     match network_manager.create_ssdp_socket_with_config(&ssdp_config).await {
                         Ok(new_socket) => {
                             info!("Successfully recreated SSDP socket on port {}", new_socket.port);
@@ -274,7 +288,14 @@ async fn send_ssdp_alive(state: &AppState, network_manager: &PlatformNetworkMana
     // Create a temporary socket for announcements with retry logic
     let mut socket = None;
     for attempt in 1..=MAX_SOCKET_CREATION_RETRIES {
-        let ssdp_config = SsdpConfig::default();
+        let ssdp_config = SsdpConfig {
+            primary_port: state.config.network.ssdp_port,
+            fallback_ports: vec![8080, 8081, 8082, 9090],
+            multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
+            announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
+            max_retries: 3,
+            interfaces: Vec::new(),
+        };
         match network_manager.create_ssdp_socket_with_config(&ssdp_config).await {
             Ok(s) => {
                 socket = Some(s);
@@ -311,7 +332,7 @@ async fn send_ssdp_alive(state: &AppState, network_manager: &PlatformNetworkMana
         "urn:schemas-upnp-org:service:ContentDirectory:1"
     ];
     
-    let multicast_addr = format!("{}:{}", SSDP_MULTICAST_ADDR, SSDP_PORT).parse::<SocketAddr>()?;
+    let multicast_addr = format!("{}:{}", SSDP_MULTICAST_ADDR, state.config.network.ssdp_port).parse::<SocketAddr>()?;
     
     for service_type in &service_types {
         let (nt, usn) = match *service_type {
@@ -339,7 +360,7 @@ async fn send_ssdp_alive(state: &AppState, network_manager: &PlatformNetworkMana
             NTS: ssdp:alive\r\n\
             SERVER: VuIO/1.0 UPnP/1.0\r\n\
             USN: {}\r\n\r\n",
-            SSDP_MULTICAST_ADDR, SSDP_PORT,
+            SSDP_MULTICAST_ADDR, state.config.network.ssdp_port,
             server_ip, config.server.port, nt, usn
         );
 
