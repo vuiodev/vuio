@@ -28,3 +28,7 @@ services:
       
       # Let Vuio auto-detect the best interface
       - VUIO_SSDP_INTERFACE=Auto
+      
+      # Set server IP for DLNA announcements (Docker/container environments)
+      # Uncomment and set to your host machine's IP address for proper DLNA discovery
+      # - VUIO_SERVER_IP=192.168.1.100

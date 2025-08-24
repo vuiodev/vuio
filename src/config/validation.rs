@@ -44,6 +44,14 @@ impl ConfigValidator {
             return Err(anyhow!("Invalid UUID format: {}", config.server.uuid));
         }
 
+        // Validate server IP if specified
+        if let Some(ip) = &config.server.ip {
+            if !ip.is_empty() && ip != "0.0.0.0" {
+                ip.parse::<IpAddr>()
+                    .with_context(|| format!("Invalid server IP address: {}", ip))?;
+            }
+        }
+
         Ok(())
     }
 

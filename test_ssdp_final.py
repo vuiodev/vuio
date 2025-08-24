@@ -8,16 +8,16 @@ def test_ssdp():
     
     msearch_msg = (
         "M-SEARCH * HTTP/1.1\r\n"
-        "HOST: 127.0.0.1:1902\r\n"
+        "HOST: 192.168.65.3:1902\r\n"
         "MAN: \"ssdp:discover\"\r\n"
         "ST: upnp:rootdevice\r\n"
         "MX: 3\r\n\r\n"
     )
     
     try:
-        # Send to localhost (Docker port forwarding)
-        sock.sendto(msearch_msg.encode(), ('127.0.0.1', 1902))
-        print("Sent M-SEARCH to localhost:1902 (Docker port forwarding)")
+        # Send to Docker Desktop container IP
+        sock.sendto(msearch_msg.encode(), ('192.168.65.3', 1902))
+        print("Sent M-SEARCH to Docker container at 192.168.65.3:1902")
         
         # Listen for response
         sock.settimeout(5)

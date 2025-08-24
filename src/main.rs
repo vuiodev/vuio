@@ -451,7 +451,8 @@ async fn handle_configuration_changes(
     
     // Check for server configuration changes
     if old_config.server.port != new_config.server.port ||
-       old_config.server.interface != new_config.server.interface {
+       old_config.server.interface != new_config.server.interface ||
+       old_config.server.ip != new_config.server.ip {
         info!("Server configuration changed");
         changes_detected = true;
         
@@ -461,6 +462,10 @@ async fn handle_configuration_changes(
         
         if old_config.server.interface != new_config.server.interface {
             info!("Server interface changed: {} -> {}", old_config.server.interface, new_config.server.interface);
+        }
+        
+        if old_config.server.ip != new_config.server.ip {
+            info!("Server IP changed: {:?} -> {:?}", old_config.server.ip, new_config.server.ip);
         }
         
         warn!("Server configuration changes require application restart to take effect");

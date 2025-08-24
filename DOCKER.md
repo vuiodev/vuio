@@ -138,6 +138,7 @@ Use `docker-compose.macvlan.yml` for this setup.
 | `VUIO_PORT` | 8080 | HTTP server port |
 | `VUIO_SERVER_NAME` | VuIO | DLNA server name |
 | `VUIO_BIND_INTERFACE` | 0.0.0.0 | Server bind interface |
+| `VUIO_SERVER_IP` | auto-detect | Specific IP for DLNA announcements |
 | `VUIO_SSDP_INTERFACE` | Auto | SSDP multicast interface |
 | `VUIO_MEDIA_DIR` | /media | Media directory path |
 
@@ -192,6 +193,12 @@ volumes:
    ```yaml
    - VUIO_SSDP_INTERFACE=eth0  # Use your actual interface
    ```
+5. Set specific server IP for Docker environments:
+   ```yaml
+   - VUIO_SERVER_IP=192.168.1.100  # Use your host machine's IP
+   ```
+
+**Note:** The `VUIO_SERVER_IP` variable is particularly useful in Docker environments where the container's internal IP differs from the host machine's IP that DLNA clients need to connect to. This removes the need for complex network interface detection and provides a reliable way to specify the correct IP for DLNA announcements.
 
 ### Configuration File Issues
 

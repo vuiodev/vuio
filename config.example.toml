@@ -1,0 +1,49 @@
+# VuIO Server Configuration Example
+# Copy this file to your platform's config directory and rename to config.toml
+#
+# Platform-specific config locations:
+# - Windows: %APPDATA%\VuIO\config.toml
+# - macOS: ~/Library/Application Support/VuIO/config.toml  
+# - Linux: ~/.config/vuio/config.toml
+# - Docker: /config/config.toml (mounted volume)
+
+[server]
+port = 8080
+interface = "0.0.0.0"
+name = "VuIO Server"
+uuid = "auto-generated-on-first-run"
+# ip = "192.168.1.100"  # Optional: Set specific IP for DLNA announcements (useful for Docker)
+
+[network]
+ssdp_port = 1900
+multicast_ttl = 4
+announce_interval_seconds = 300
+interface_selection = "Auto"  # Options: "Auto", "All", or specific interface name
+
+[media]
+scan_on_startup = true
+watch_for_changes = true
+cleanup_deleted_files = true
+supported_extensions = [
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ogv",
+    "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "ape",
+    "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "svg"
+]
+
+# Add one or more media directories to monitor
+[[media.directories]]
+path = "/path/to/your/media"  # Change this to your actual media directory
+recursive = true
+# extensions = ["mp4", "mkv", "avi"]  # Optional: Override global extensions for this directory
+# exclude_patterns = ["*.tmp", ".*"]  # Optional: Files/patterns to exclude
+
+# Example: Additional media directory
+# [[media.directories]]
+# path = "/path/to/your/music"
+# recursive = true
+# extensions = ["mp3", "flac", "wav"]
+
+[database]
+path = "/config/media.db"  # Will use platform-appropriate default if not specified
+vacuum_on_startup = false
+backup_enabled = true

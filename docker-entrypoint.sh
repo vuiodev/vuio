@@ -117,10 +117,12 @@ should_update_config() {
     local current_port=$(grep '^port' "$config_file" | sed 's/port = \([0-9]*\)/\1/' || echo "")
     local current_name=$(grep '^name' "$config_file" | sed 's/name = "\(.*\)"/\1/' || echo "")
     local current_interface=$(grep '^interface' "$config_file" | sed 's/interface = "\(.*\)"/\1/' || echo "")
+    local current_ip=$(grep '^ip' "$config_file" | sed 's/ip = "\(.*\)"/\1/' || echo "")
     
     [ "${VUIO_PORT:-8080}" != "$current_port" ] || 
     [ "${VUIO_SERVER_NAME:-VuIO}" != "$current_name" ] || 
-    [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$current_interface" ]
+    [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$current_interface" ] ||
+    [ "${VUIO_SERVER_IP:-}" != "$current_ip" ]
 }
 
 # Update existing configuration with environment variables
@@ -147,6 +149,19 @@ update_existing_config() {
     if [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$(grep '^interface' "$config_file" | sed 's/interface = "\(.*\)"/\1/')" ]; then
         sed "s/^interface = .*/interface = \"${VUIO_BIND_INTERFACE:-0.0.0.0}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
         log "Updated bind interface to ${VUIO_BIND_INTERFACE:-0.0.0.0}"
+    fi
+    
+    # Update server IP if specified
+    if [ -n "${VUIO_SERVER_IP:-}" ]; then
+        if ! grep -q '^ip = ' "$config_file"; then
+            # Add IP field if it doesn't exist
+            sed "/^uuid = /a ip = \"${VUIO_SERVER_IP}\"" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+            log "Added server IP: ${VUIO_SERVER_IP}"
+        elif [ "${VUIO_SERVER_IP}" != "$(grep '^ip' "$config_file" | sed 's/ip = "\(.*\)"/\1/')" ]; then
+            # Update existing IP field
+            sed "s/^ip = .*/ip = \"${VUIO_SERVER_IP}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+            log "Updated server IP to ${VUIO_SERVER_IP}"
+        fi
     fi
     
     # Set proper ownership
@@ -217,6 +232,14 @@ port = ${VUIO_PORT:-8080}
 interface = "${VUIO_BIND_INTERFACE:-0.0.0.0}"
 name = "${VUIO_SERVER_NAME:-VuIO}"
 uuid = "$uuid"
+EOF
+
+    # Add server IP if specified
+    if [ -n "${VUIO_SERVER_IP:-}" ]; then
+        echo "ip = \"${VUIO_SERVER_IP}\"" >> "$config_file"
+    fi
+    
+    cat >> "$config_file" <<EOF
 
 [network]
 ssdp_port = ${VUIO_SSDP_PORT:-1900}
@@ -266,6 +289,7 @@ EOF
     log "  Server port: ${VUIO_PORT:-8080}"
     log "  Server name: ${VUIO_SERVER_NAME:-VuIO}"
     log "  Bind interface: ${VUIO_BIND_INTERFACE:-0.0.0.0}"
+    log "  Server IP: ${VUIO_SERVER_IP:-auto-detect}"
     log "  SSDP interface: ${VUIO_SSDP_INTERFACE:-Auto}"
     log "  Media directory: ${VUIO_MEDIA_DIR:-/media}"
 }

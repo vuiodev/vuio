@@ -142,6 +142,7 @@ port = 8080
 interface = "0.0.0.0"
 name = "VuIO Server"
 uuid = "auto-generated"
+# ip = "192.168.1.100"  # Optional: Set specific IP for DLNA announcements
 
 [network]
 ssdp_port = 1900

@@ -37,6 +37,7 @@ pub struct ServerConfig {
     pub interface: String,
     pub name: String,
     pub uuid: String,
+    pub ip: Option<String>,
 }
 
 /// Network configuration settings
@@ -470,6 +471,7 @@ impl AppConfig {
                 interface: Self::get_platform_default_interface(&platform_config),
                 name: Self::get_platform_server_name(&platform_config),
                 uuid: Uuid::new_v4().to_string(),
+                ip: None,
             },
             network: NetworkConfig {
                 ssdp_port: Self::get_platform_default_ssdp_port(&platform_config),
