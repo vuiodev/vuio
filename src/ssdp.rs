@@ -6,7 +6,6 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 const SSDP_MULTICAST_ADDR: &str = "239.255.255.250";
-const SSDP_PORT: u16 = 1900;
 const ANNOUNCE_INTERVAL_SECS: u64 = 300; // Announce every 5 minutes
 
 pub fn run_ssdp_service(state: AppState) -> Result<()> {
