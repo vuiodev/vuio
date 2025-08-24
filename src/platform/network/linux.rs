@@ -1097,7 +1097,6 @@ impl LinuxNetworkManager {
             Err(_) => Ok(false),
         }
     }
-}
 
 impl Default for LinuxNetworkManager {
     fn default() -> Self {
