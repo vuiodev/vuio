@@ -250,7 +250,7 @@ mod tests {
     async fn test_macos_interface_detection() {
         let interfaces = detect_network_interfaces().await;
         assert!(interfaces.is_ok());
-        let ifaces = interfaces.unwrap();
+        let _ifaces = interfaces.unwrap();
         // In a test environment, ifconfig might not return much, but it shouldn't be an empty Vec if it works.
         // It's okay if it falls back.
         // The important part is that it doesn't fail catastrophically.

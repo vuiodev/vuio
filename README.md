@@ -9,8 +9,18 @@ A comprehensive, cross-platform DLNA/UPnP media server written in Rust with adva
 - **SSDP Discovery** - Automatic device discovery with platform-optimized networking
 - **HTTP Range Streaming** - Efficient streaming with seek support for large media files
 - **Dynamic XML Generation** - Standards-compliant device and service descriptions
-- **Multi-format Support** - Handles MKV, MP4, AVI, MP3, FLAC, JPEG, PNG, and many more formats
+- **Multi-format Support** - Handles MKV, MP4, AVI, MP3, FLAC, WAV, AAC, OGG, JPEG, PNG, and many more formats
 - **Read-Only Media Support** - Works seamlessly with read-only file systems and network storage
+
+### 🎵 Advanced Audio Features
+- **Rich Metadata Extraction** - Automatic extraction of title, artist, album, genre, track number, year, and album artist from audio files
+- **Music Categorization** - Browse music by Artists, Albums, Genres, Years, and Album Artists with track counts
+- **Playlist Management** - Create, edit, and manage playlists with support for M3U and PLS formats
+- **Audio Format Support** - MP3, FLAC, WAV, AAC, OGG, WMA, M4A, OPUS, AIFF with full metadata
+- **Smart Music Organization** - Automatic categorization and sorting of music collections
+- **DLNA Audio Browsing** - Professional-grade music browsing experience for DLNA clients
+- **Playlist Import/Export** - Import existing playlists and export to standard formats
+- **Track Management** - Add, remove, and reorder tracks in playlists with position management
 
 ### Cross-Platform Integration
 - **Windows Support** - UAC integration, Windows Firewall detection, Windows Defender awareness
@@ -328,24 +338,227 @@ announce_interval_seconds = 30
 scan_on_startup = true
 watch_for_changes = true
 cleanup_deleted_files = true
-supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "jpg", "jpeg", "png"]
+supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "aac", "ogg", "jpg", "jpeg", "png"]
 
+# Video directory
 [[media.directories]]
 path = "/home/user/Videos"
 recursive = true
-extensions = ["mp4", "mkv", "avi"]
+extensions = ["mp4", "mkv", "avi", "mov", "wmv"]
 exclude_patterns = ["*.tmp", ".*"]
 
+# Music directory with audio-specific extensions
 [[media.directories]]
 path = "/home/user/Music"
 recursive = true
-extensions = ["mp3", "flac", "wav"]
+extensions = ["mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus"]
+exclude_patterns = ["*.tmp", ".*", "*.m3u", "*.pls"]  
+# Exclude playlist files from scanning
+
+# Photos directory
+[[media.directories]]
+path = "/home/user/Pictures"
+recursive = true
+extensions = ["jpg", "jpeg", "png", "gif", "bmp"]
 exclude_patterns = ["*.tmp", ".*"]
 
 [database]
 path = "~/.local/share/vuio/media.db"
 vacuum_on_startup = false
 backup_enabled = true
+```
+
+## 🎵 Audio Features & Music Management
+
+VuIO provides professional-grade audio features that rival commercial media servers like Plex or Emby, with comprehensive music organization and playlist management.
+
+### Audio Metadata Support
+
+**Automatic Metadata Extraction:**
+- **Title, Artist, Album** - Extracted from ID3 tags and other metadata formats
+- **Genre, Year, Track Number** - Complete album and track information
+- **Album Artist** - Proper handling of compilation albums and various artists
+- **Duration** - Accurate playback time for seeking and display
+- **Fallback Parsing** - Intelligent filename parsing when metadata is missing
+
+**Supported Audio Formats:**
+- **Lossless:** FLAC, WAV, AIFF, APE
+- **Lossy:** MP3, AAC, OGG Vorbis, WMA, OPUS
+- **Apple:** M4A, M4P (iTunes), M4B (audiobooks)
+- **Platform-specific:** ASF, WM (Windows Media)
+
+### Music Categorization & Browsing
+
+VuIO organizes your music collection into intuitive categories accessible through any DLNA client:
+
+**Browse by Artists:**
+```
+Audio > Artists > [Artist Name] > [All Tracks by Artist]
+```
+- Lists all unique artists with track counts
+- Shows all tracks by selected artist, sorted by album and track number
+- Supports various artists and featured artist metadata
+
+**Browse by Albums:**
+```
+Audio > Albums > [Album Name] > [Album Tracks]
+```
+- Lists all albums with track counts
+- Can be filtered by specific artist
+- Proper track ordering by track number
+
+**Browse by Genres:**
+```
+Audio > Genres > [Genre] > [All Tracks in Genre]
+```
+- Automatic genre categorization from metadata
+- Supports multiple genres per track
+- Custom genre organization
+
+**Browse by Years:**
+```
+Audio > Years > [Year] > [All Tracks from Year]
+```
+- Organizes music by release year
+- Perfect for exploring music by era
+- Handles albums spanning multiple years
+
+**Browse by Album Artists:**
+```
+Audio > Album Artists > [Album Artist] > [All Albums]
+```
+- Proper handling of compilation albums
+- Separates album artists from track artists
+- Ideal for classical and soundtrack collections
+
+### Playlist Management
+
+**Playlist Creation & Management:**
+- Create custom playlists through the web API
+- Add and remove tracks dynamically
+- Reorder tracks with position management
+- Delete and modify existing playlists
+
+**Playlist Import & Export:**
+```bash
+# Supported formats
+- M3U/M3U8 playlists (most common)
+- PLS playlists (WinAmp/iTunes compatible)
+
+# Import existing playlists
+POST /api/playlists/import
+
+# Export playlists
+GET /api/playlists/{id}/export?format=m3u
+GET /api/playlists/{id}/export?format=pls
+```
+
+**Directory Playlist Scanning:**
+- Automatically discover existing playlist files
+- Import multiple playlists from directory
+- Maintain playlist metadata and descriptions
+
+### Web API for Audio Management
+
+**Playlist Operations:**
+```bash
+# List all playlists
+GET /api/playlists
+
+# Create a new playlist
+POST /api/playlists
+{
+  "name": "My Favorite Songs",
+  "description": "A collection of my favorite tracks"
+}
+
+# Add track to playlist
+POST /api/playlists/{id}/tracks
+{
+  "media_file_id": 123,
+  "position": 1
+}
+
+# Import playlist file
+POST /api/playlists/import
+# (multipart/form-data with playlist file)
+
+# Export playlist
+GET /api/playlists/{id}/export?format=m3u
+
+# Scan directory for playlists
+POST /api/playlists/scan
+{
+  "directory": "/path/to/playlists"
+}
+```
+
+### DLNA Client Compatibility
+
+**Tested DLNA Clients:**
+- **VLC Media Player** - Full audio browsing and playback
+- **Kodi/XBMC** - Complete music library integration
+- **Windows Media Player** - Native Windows DLNA support
+- **BubbleUPnP (Android)** - Advanced mobile music browsing
+- **Hi-Fi Cast (iOS)** - Premium iOS audio streaming
+- **Smart TVs** - Samsung, LG, Sony, and other DLNA-enabled TVs
+
+**Audio Streaming Features:**
+- **Gapless Playback** - Seamless album listening experience
+- **HTTP Range Requests** - Efficient seeking and resume
+- **Multiple Bitrates** - Automatic quality selection
+
+### Music Library Organization
+
+**Best Practices:**
+```bash
+# Recommended directory structure
+/music/
+├── Artist Name/
+│   ├── Album Name (Year)/
+│   │   ├── 01 - Track Name.flac
+│   │   ├── 02 - Track Name.flac
+│   │   └── folder.jpg
+│   └── Another Album/
+└── Various Artists/
+    └── Compilation Album/
+        ├── 01 - Artist - Track.mp3
+        └── 02 - Artist - Track.mp3
+
+# Playlist storage
+/music/playlists/
+├── favorites.m3u
+├── workout.pls
+└── jazz_collection.m3u8
+```
+
+**Metadata Tips:**
+- Use proper ID3v2.4 tags for MP3 files
+- Ensure consistent artist naming (avoid "Artist" vs "The Artist")
+- Use "Album Artist" tag for compilations
+- Include cover art as embedded metadata or folder.jpg
+- Set appropriate genre tags for better categorization
+
+**Configuration for Large Music Libraries:**
+```toml
+[media]
+# Enable for faster startup with large collections
+scan_on_startup = false
+watch_for_changes = true
+cleanup_deleted_files = true
+
+[database]
+# Enable database optimization for large libraries
+vacuum_on_startup = true
+backup_enabled = true
+
+[[media.directories]]
+path = "/music"
+recursive = true
+# Audio-specific extensions
+extensions = ["mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "aiff"]
+# Exclude temporary and playlist files
+exclude_patterns = ["*.tmp", ".*", "*.m3u", "*.pls", "*.log"]
 ```
 
 ## 🔧 Platform-Specific Notes
@@ -415,7 +628,7 @@ cargo test config::tests
 ```
 
 **Test Coverage:**
-- ✅ 81 tests passing
+- ✅ 91 tests passing (including audio features)
 - ✅ Platform detection and capabilities
 - ✅ Database operations and health checks
 - ✅ Configuration management and validation
@@ -423,6 +636,9 @@ cargo test config::tests
 - ✅ Network interface detection
 - ✅ SSDP socket creation and binding
 - ✅ Media file scanning and metadata
+- ✅ Audio metadata extraction and categorization
+- ✅ Playlist management (M3U/PLS import/export)
+- ✅ Music categorization and browsing
 - ✅ Error handling and recovery
 
 ## 🐛 Troubleshooting
@@ -475,6 +691,31 @@ sudo setcap 'cap_net_bind_service=+ep' ./target/release/vuio
 - Ensure SSDP port (1900) is not blocked
 - Try specifying network interface in configuration
 - For Docker: Use `network_mode: host` for full multicast support
+
+**Audio Files Not Showing Metadata**
+- Verify audio files have embedded ID3 tags or metadata
+- Check that file extensions are included in `supported_extensions`
+- Enable debug logging to see metadata extraction attempts: `RUST_LOG=debug`
+- Supported metadata formats: ID3v1/v2, Vorbis Comments, APE tags, MP4 metadata
+- For files without metadata, titles will be extracted from filenames
+
+**Music Categories Are Empty**
+- Ensure audio files have proper artist/album/genre metadata
+- Check that the media directory scanning completed successfully
+- Verify database contains audio files: look for `mime_type LIKE 'audio/%'` entries
+- Re-scan the media directory if metadata was added after initial scan
+
+**Playlists Not Importing**
+- Verify playlist files are in M3U or PLS format
+- Check that file paths in playlists point to actual media files
+- Ensure playlist files are not excluded by `exclude_patterns`
+- Use absolute paths in playlist files for best compatibility
+
+**Poor DLNA Audio Performance**
+- Enable database vacuuming for large music libraries: `vacuum_on_startup = true`
+- Use read-only media mounts to improve Docker performance
+- Consider disabling `scan_on_startup` for very large collections
+- Monitor database size and consider periodic cleanup
 
 ### Diagnostic Information
 

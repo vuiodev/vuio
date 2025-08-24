@@ -1584,7 +1584,7 @@ mod tests {
         assert!(recommendations.iter().any(|r| r.contains("port")));
         
         // Test best practices check
-        let issues = config.check_platform_best_practices();
+        let _issues = config.check_platform_best_practices();
         // Issues may or may not exist depending on the platform and configuration
         // But the function should not panic
         

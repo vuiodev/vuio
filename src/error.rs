@@ -44,6 +44,9 @@ pub enum AppError {
 
     #[error("File serving error: {0}")]
     FileServing(String),
+    
+    #[error("Invalid input: {0}")]
+    InvalidInput(String),
 }
 
 impl IntoResponse for AppError {
@@ -51,6 +54,7 @@ impl IntoResponse for AppError {
         let (status, message) = match &self {
             AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::InvalidRange => (StatusCode::RANGE_NOT_SATISFIABLE, self.to_string()),
+            AppError::InvalidInput(_) => (StatusCode::BAD_REQUEST, self.to_string()),
             AppError::Platform(platform_err) => {
                 // Use platform-specific error messages with troubleshooting info
                 (StatusCode::INTERNAL_SERVER_ERROR, platform_err.user_message())
@@ -89,6 +93,7 @@ impl AppError {
         match self {
             AppError::NotFound => false,
             AppError::InvalidRange => false,
+            AppError::InvalidInput(_) => false,
             AppError::Internal(_) => false,
             AppError::Io(io_err) => {
                 // Some I/O errors are recoverable (temporary network issues, etc.)

@@ -545,6 +545,10 @@ mod tests {
             title: None,
             artist: None,
             album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
         });
@@ -562,6 +566,10 @@ mod tests {
             title: None,
             artist: None,
             album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
         });

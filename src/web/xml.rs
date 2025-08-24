@@ -115,9 +115,9 @@ fn get_upnp_class(mime_type: &str) -> &str {
     if mime_type.starts_with("video/") {
         "object.item.videoItem"
     } else if mime_type.starts_with("audio/") {
-        "object.item.audioItem"
+        "object.item.audioItem.musicTrack"
     } else if mime_type.starts_with("image/") {
-        "object.item.imageItem"
+        "object.item.imageItem.photo"
     } else {
         "object.item" // Generic item
     }
@@ -258,17 +258,70 @@ pub fn generate_browse_response_with_totals(
             );
             let upnp_class = get_upnp_class(&file.mime_type);
             
+            // Enhanced metadata for audio items
+            let metadata_xml = if file.mime_type.starts_with("audio/") {
+                let mut metadata_parts = Vec::new();
+                
+                if let Some(ref artist) = file.artist {
+                    metadata_parts.push(format!(
+                        "<upnp:artist>{}</upnp:artist>",
+                        xml_escape(artist)
+                    ));
+                }
+                
+                if let Some(ref album) = file.album {
+                    metadata_parts.push(format!(
+                        "<upnp:album>{}</upnp:album>",
+                        xml_escape(album)
+                    ));
+                }
+                
+                if let Some(ref genre) = file.genre {
+                    metadata_parts.push(format!(
+                        "<upnp:genre>{}</upnp:genre>",
+                        xml_escape(genre)
+                    ));
+                }
+                
+                if let Some(track_num) = file.track_number {
+                    metadata_parts.push(format!(
+                        "<upnp:originalTrackNumber>{}</upnp:originalTrackNumber>",
+                        track_num
+                    ));
+                }
+                
+                if let Some(year) = file.year {
+                    metadata_parts.push(format!(
+                        "<dc:date>{}-01-01</dc:date>",
+                        year
+                    ));
+                }
+                
+                if let Some(ref album_artist) = file.album_artist {
+                    metadata_parts.push(format!(
+                        "<upnp:albumArtist>{}</upnp:albumArtist>",
+                        xml_escape(album_artist)
+                    ));
+                }
+                
+                metadata_parts.join("")
+            } else {
+                String::new()
+            };
+            
             // Create the XML for this item with proper error handling
             match std::panic::catch_unwind(|| {
                 format!(
                     r#"<item id="{id}" parentID="{parent_id}" restricted="1">
                     <dc:title>{title}</dc:title>
+                    {metadata}
                     <upnp:class>{upnp_class}</upnp:class>
                     <res protocolInfo="http-get:*:{mime}:*" size="{size}">{url}</res>
                 </item>"#,
                     id = file_id,
                     parent_id = xml_escape(object_id),
                     title = xml_escape(&file.filename),
+                    metadata = metadata_xml,
                     upnp_class = upnp_class,
                     mime = &file.mime_type,
                     size = file.size,

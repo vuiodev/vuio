@@ -536,7 +536,7 @@ mod tests {
             let valid_format_path = PathBuf::from("C:\\This\\Is\\A\\Valid\\Format");
             assert!(config.validate_path(&valid_format_path).is_ok());
         } else {
-            let valid_format_path = PathBuf::from("/this/is/a/valid/format");
+            let _valid_format_path = PathBuf::from("/this/is/a/valid/format");
             // On non-windows, this path won't exist, and the base validator
             // that our mock uses might not check for that, but we can't be sure.
             // A format-only check is what's intended.

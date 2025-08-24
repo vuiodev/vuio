@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use thiserror::Error;
 use tokio::fs;
+use tracing::debug;
 
 use crate::database::MediaFile;
 
@@ -471,20 +472,33 @@ impl BaseFileSystemManager {
                 let mime_type = get_mime_type_for_extension(extension);
                 let now = SystemTime::now();
                 
-                media_files.push(MediaFile {
+                let mut media_file = MediaFile {
                     id: None,
                     path: entry_path,
                     filename,
                     size: metadata.len(),
                     modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
                     mime_type,
-                    duration: None, // TODO: Extract from metadata
-                    title: None,    // TODO: Extract from metadata
-                    artist: None,   // TODO: Extract from metadata
-                    album: None,    // TODO: Extract from metadata
+                    duration: None,
+                    title: None,
+                    artist: None,
+                    album: None,
+                    genre: None,
+                    track_number: None,
+                    year: None,
+                    album_artist: None,
                     created_at: now,
                     updated_at: now,
-                });
+                };
+                
+                // Extract metadata if this is an audio file
+                if media_file.mime_type.starts_with("audio/") {
+                    if let Err(e) = extract_audio_metadata(&mut media_file).await {
+                        debug!("Failed to extract metadata for {:?}: {}", media_file.path, e);
+                    }
+                }
+                
+                media_files.push(media_file);
             }
         }
         
@@ -574,6 +588,59 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
     {
         Box::new(BaseFileSystemManager::new(true)) // Linux is case-sensitive
     }
+}
+
+/// Extract audio metadata using audiotags library
+async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::time::Duration;
+    
+    // Try to extract metadata using audiotags library
+    match audiotags::Tag::new().read_from_path(&media_file.path) {
+        Ok(tag) => {
+            // Extract basic metadata
+            if let Some(title) = tag.title() {
+                media_file.title = Some(title.to_string());
+            }
+            
+            if let Some(artist) = tag.artist() {
+                media_file.artist = Some(artist.to_string());
+            }
+            
+            if let Some(album) = tag.album_title() {
+                media_file.album = Some(album.to_string());
+            }
+            
+            if let Some(genre) = tag.genre() {
+                media_file.genre = Some(genre.to_string());
+            }
+            
+            // Extract track number
+            if let Some(track_num) = tag.track_number() {
+                media_file.track_number = Some(track_num as u32);
+            }
+            
+            // Extract year
+            if let Some(year) = tag.year() {
+                media_file.year = Some(year as u32);
+            }
+            
+            // Extract album artist
+            if let Some(album_artist) = tag.album_artist() {
+                media_file.album_artist = Some(album_artist.to_string());
+            }
+            
+            // Extract duration if available
+            if let Some(duration) = tag.duration() {
+                media_file.duration = Some(Duration::from_secs(duration as u64));
+            }
+        }
+        Err(e) => {
+            // For now, we'll just return an error but this is not critical
+            return Err(format!("Failed to extract metadata: {}", e).into());
+        }
+    }
+    
+    Ok(())
 }
 
 #[cfg(test)]

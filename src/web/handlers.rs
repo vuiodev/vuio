@@ -114,7 +114,27 @@ pub async fn content_directory_control(
         let (media_type_filter, path_prefix_str) = if params.object_id.starts_with("video") {
             ("video/", params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/'))
         } else if params.object_id.starts_with("audio") {
-            ("audio/", params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/'))
+            // Handle music categorization within audio section
+            let audio_path = params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/');
+            
+            // Check for music categorization paths
+            if audio_path.is_empty() {
+                // Root audio container - return categorization containers
+                return handle_audio_root_browse(&params, &state).await;
+            } else if audio_path.starts_with("artists") {
+                return handle_artists_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("albums") {
+                return handle_albums_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("genres") {
+                return handle_genres_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("years") {
+                return handle_years_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("playlists") {
+                return handle_playlists_browse(&params, &state, audio_path).await;
+            } else {
+                // Traditional folder browsing within audio
+                ("audio/", audio_path)
+            }
         } else if params.object_id.starts_with("image") {
             ("image/", params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/'))
         } else {
@@ -424,5 +444,458 @@ async fn send_initial_event_notification(callback_url: String, update_id: u32) {
         Err(e) => {
             warn!("Failed to send event notification to {}: {}", url, e);
         }
+    }
+}
+
+// Music categorization handlers
+
+/// Handle browsing the root audio container with music categorization
+async fn handle_audio_root_browse(
+    params: &BrowseParams,
+    state: &AppState,
+) -> Response {
+    use crate::web::xml::generate_browse_response;
+    
+    // Create virtual categorization containers
+    let virtual_containers = vec![
+        ("audio/artists", "Artists"),
+        ("audio/albums", "Albums"), 
+        ("audio/genres", "Genres"),
+        ("audio/years", "Years"),
+        ("audio/playlists", "Playlists"),
+        ("audio/folders", "Folders"),
+    ];
+    
+    // Convert to MediaDirectory for XML generation
+    let subdirectories: Vec<crate::database::MediaDirectory> = virtual_containers
+        .into_iter()
+        .map(|(id, name)| crate::database::MediaDirectory {
+            path: std::path::PathBuf::from(id),
+            name: name.to_string(),
+        })
+        .collect();
+    
+    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+            (header::HeaderName::from_static("ext"), ""),
+        ],
+        response,
+    )
+        .into_response()
+}
+    
+/// Handle browsing artists
+async fn handle_artists_browse(
+    params: &BrowseParams,
+    state: &AppState, 
+    audio_path: &str,
+) -> Response {
+    use crate::web::xml::generate_browse_response;
+    
+    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+    
+    if path_parts.len() == 1 {
+        // List all artists
+        match state.database.get_artists().await {
+            Ok(artists) => {
+                let subdirectories: Vec<crate::database::MediaDirectory> = artists
+                    .into_iter()
+                    .map(|artist| crate::database::MediaDirectory {
+                        path: std::path::PathBuf::from(format!("audio/artists/{}", artist.name)),
+                        name: format!("{} ({})", artist.name, artist.count),
+                    })
+                    .collect();
+                    
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting artists: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing artists".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else if path_parts.len() == 2 {
+        // List tracks by specific artist
+        let artist_name = path_parts[1];
+        match state.database.get_music_by_artist(artist_name).await {
+            Ok(files) => {
+                let response = generate_browse_response(&params.object_id, &[], &files, state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting music by artist {}: {}", artist_name, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing artist tracks".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Invalid artist path".to_string(),
+        )
+            .into_response()
+    }
+}
+
+/// Handle browsing albums
+async fn handle_albums_browse(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+) -> Response {
+    use crate::web::xml::generate_browse_response;
+    
+    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+    
+    if path_parts.len() == 1 {
+        // List all albums
+        match state.database.get_albums(None).await {
+            Ok(albums) => {
+                let subdirectories: Vec<crate::database::MediaDirectory> = albums
+                    .into_iter()
+                    .map(|album| crate::database::MediaDirectory {
+                        path: std::path::PathBuf::from(format!("audio/albums/{}", album.name)),
+                        name: format!("{} ({})", album.name, album.count),
+                    })
+                    .collect();
+                    
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting albums: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing albums".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else if path_parts.len() == 2 {
+        // List tracks by specific album
+        let album_name = path_parts[1];
+        match state.database.get_music_by_album(album_name, None).await {
+            Ok(files) => {
+                let response = generate_browse_response(&params.object_id, &[], &files, state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting music by album {}: {}", album_name, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing album tracks".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Invalid album path".to_string(),
+        )
+            .into_response()
+    }
+}
+
+/// Handle browsing genres
+async fn handle_genres_browse(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+) -> Response {
+    use crate::web::xml::generate_browse_response;
+    
+    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+    
+    if path_parts.len() == 1 {
+        // List all genres
+        match state.database.get_genres().await {
+            Ok(genres) => {
+                let subdirectories: Vec<crate::database::MediaDirectory> = genres
+                    .into_iter()
+                    .map(|genre| crate::database::MediaDirectory {
+                        path: std::path::PathBuf::from(format!("audio/genres/{}", genre.name)),
+                        name: format!("{} ({})", genre.name, genre.count),
+                    })
+                    .collect();
+                    
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting genres: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing genres".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else if path_parts.len() == 2 {
+        // List tracks by specific genre
+        let genre_name = path_parts[1];
+        match state.database.get_music_by_genre(genre_name).await {
+            Ok(files) => {
+                let response = generate_browse_response(&params.object_id, &[], &files, state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting music by genre {}: {}", genre_name, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing genre tracks".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Invalid genre path".to_string(),
+        )
+            .into_response()
+    }
+}
+
+/// Handle browsing years
+async fn handle_years_browse(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+) -> Response {
+    use crate::web::xml::generate_browse_response;
+    
+    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+    
+    if path_parts.len() == 1 {
+        // List all years
+        match state.database.get_years().await {
+            Ok(years) => {
+                let subdirectories: Vec<crate::database::MediaDirectory> = years
+                    .into_iter()
+                    .map(|year| crate::database::MediaDirectory {
+                        path: std::path::PathBuf::from(format!("audio/years/{}", year.name)),
+                        name: format!("{} ({})", year.name, year.count),
+                    })
+                    .collect();
+                    
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting years: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing years".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else if path_parts.len() == 2 {
+        // List tracks by specific year
+        let year_str = path_parts[1];
+        if let Ok(year) = year_str.parse::<u32>() {
+            match state.database.get_music_by_year(year).await {
+                Ok(files) => {
+                    let response = generate_browse_response(&params.object_id, &[], &files, state);
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    error!("Error getting music by year {}: {}", year, e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing year tracks".to_string(),
+                    )
+                        .into_response()
+                }
+            }
+        } else {
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "Invalid year format".to_string(),
+            )
+                .into_response()
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Invalid year path".to_string(),
+        )
+            .into_response()
+    }
+}
+
+/// Handle browsing playlists
+async fn handle_playlists_browse(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+) -> Response {
+    use crate::web::xml::generate_browse_response;
+    
+    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+    
+    if path_parts.len() == 1 {
+        // List all playlists
+        match state.database.get_playlists().await {
+            Ok(playlists) => {
+                let subdirectories: Vec<crate::database::MediaDirectory> = playlists
+                    .into_iter()
+                    .map(|playlist| crate::database::MediaDirectory {
+                        path: std::path::PathBuf::from(format!("audio/playlists/{}", playlist.id.unwrap_or(0))),
+                        name: playlist.name,
+                    })
+                    .collect();
+                    
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting playlists: {}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing playlists".to_string(),
+                )
+                    .into_response()
+            }
+        }
+    } else if path_parts.len() == 2 {
+        // List tracks in specific playlist
+        let playlist_id_str = path_parts[1];
+        if let Ok(playlist_id) = playlist_id_str.parse::<i64>() {
+            match state.database.get_playlist_tracks(playlist_id).await {
+                Ok(files) => {
+                    let response = generate_browse_response(&params.object_id, &[], &files, state);
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    error!("Error getting playlist tracks for {}: {}", playlist_id, e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing playlist tracks".to_string(),
+                    )
+                        .into_response()
+                }
+            }
+        } else {
+            (
+                StatusCode::BAD_REQUEST,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "Invalid playlist ID format".to_string(),
+            )
+                .into_response()
+        }
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Invalid playlist path".to_string(),
+        )
+            .into_response()
     }
 }

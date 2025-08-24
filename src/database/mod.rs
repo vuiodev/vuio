@@ -5,11 +5,53 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+pub mod playlist_formats;
+
 /// Represents a subdirectory in the media library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MediaDirectory {
     pub path: PathBuf,
     pub name: String,
+}
+
+/// Represents a playlist
+#[derive(Clone, Debug)]
+pub struct Playlist {
+    pub id: Option<i64>,
+    pub name: String,
+    pub description: Option<String>,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+}
+
+/// Represents a playlist entry (track in a playlist)
+#[derive(Clone, Debug)]
+pub struct PlaylistEntry {
+    pub id: Option<i64>,
+    pub playlist_id: i64,
+    pub media_file_id: i64,
+    pub position: u32,
+    pub created_at: SystemTime,
+}
+
+/// Music categorization container for organizing music content
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MusicCategory {
+    pub id: String,
+    pub name: String,
+    pub category_type: MusicCategoryType,
+    pub count: usize,
+}
+
+/// Types of music categorization
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MusicCategoryType {
+    Artist,
+    Album,
+    Genre,
+    AlbumArtist,
+    Year,
+    Playlist,
 }
 
 /// Enhanced MediaFile structure for database storage
@@ -25,6 +67,10 @@ pub struct MediaFile {
     pub title: Option<String>,
     pub artist: Option<String>,
     pub album: Option<String>,
+    pub genre: Option<String>,
+    pub track_number: Option<u32>,
+    pub year: Option<u32>,
+    pub album_artist: Option<String>,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
@@ -50,6 +96,10 @@ impl MediaFile {
             title: None,
             artist: None,
             album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
             created_at: now,
             updated_at: now,
         }
@@ -76,6 +126,10 @@ impl MediaFile {
             title: row.try_get("title")?,
             artist: row.try_get("artist")?,
             album: row.try_get("album")?,
+            genre: row.try_get("genre").ok(),
+            track_number: row.try_get::<Option<i32>, _>("track_number")?.map(|n| n as u32),
+            year: row.try_get::<Option<i32>, _>("year")?.map(|y| y as u32),
+            album_artist: row.try_get("album_artist").ok(),
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(created_timestamp as u64),
             updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(updated_timestamp as u64),
         })
@@ -130,6 +184,81 @@ pub trait DatabaseManager: Send + Sync {
 
     /// Vacuum the database to reclaim space and optimize performance
     async fn vacuum(&self) -> Result<()>;
+
+    // Music categorization methods
+    /// Get all unique artists
+    async fn get_artists(&self) -> Result<Vec<MusicCategory>>;
+
+    /// Get all albums, optionally filtered by artist
+    async fn get_albums(&self, artist: Option<&str>) -> Result<Vec<MusicCategory>>;
+
+    /// Get all genres
+    async fn get_genres(&self) -> Result<Vec<MusicCategory>>;
+
+    /// Get all years
+    async fn get_years(&self) -> Result<Vec<MusicCategory>>;
+
+    /// Get all album artists
+    async fn get_album_artists(&self) -> Result<Vec<MusicCategory>>;
+
+    /// Get music files by artist
+    async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>>;
+
+    /// Get music files by album
+    async fn get_music_by_album(&self, album: &str, artist: Option<&str>) -> Result<Vec<MediaFile>>;
+
+    /// Get music files by genre
+    async fn get_music_by_genre(&self, genre: &str) -> Result<Vec<MediaFile>>;
+
+    /// Get music files by year
+    async fn get_music_by_year(&self, year: u32) -> Result<Vec<MediaFile>>;
+
+    /// Get music files by album artist
+    async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>>;
+
+    // Playlist management methods
+    /// Create a new playlist
+    async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<i64>;
+
+    /// Get all playlists
+    async fn get_playlists(&self) -> Result<Vec<Playlist>>;
+
+    /// Get a specific playlist by ID
+    async fn get_playlist(&self, playlist_id: i64) -> Result<Option<Playlist>>;
+
+    /// Update a playlist
+    async fn update_playlist(&self, playlist: &Playlist) -> Result<()>;
+
+    /// Delete a playlist
+    async fn delete_playlist(&self, playlist_id: i64) -> Result<bool>;
+
+    /// Add a track to a playlist
+    async fn add_to_playlist(&self, playlist_id: i64, media_file_id: i64, position: Option<u32>) -> Result<i64>;
+
+    /// Remove a track from a playlist
+    async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool>;
+
+    /// Get all tracks in a playlist
+    async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>>;
+
+    /// Reorder tracks in a playlist
+    async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()>;
+
+    // Playlist file format operations
+    /// Import a playlist from a file (.m3u or .pls)
+    async fn import_playlist_file(&self, file_path: &Path, playlist_name: Option<String>) -> Result<i64> {
+        playlist_formats::PlaylistFileManager::import_playlist(self, file_path, playlist_name).await
+    }
+
+    /// Export a playlist to a file
+    async fn export_playlist_file(&self, playlist_id: i64, output_path: &Path, format: playlist_formats::PlaylistFormat) -> Result<()> {
+        playlist_formats::PlaylistFileManager::export_playlist(self, playlist_id, output_path, format).await
+    }
+
+    /// Scan directory for playlist files and import them
+    async fn scan_and_import_playlists(&self, directory: &Path) -> Result<Vec<i64>> {
+        playlist_formats::PlaylistFileManager::scan_and_import_playlists(self, directory).await
+    }
 }
 
 #[derive(Debug)]
@@ -201,8 +330,46 @@ impl SqliteDatabase {
                 title TEXT,
                 artist TEXT,
                 album TEXT,
+                genre TEXT,
+                track_number INTEGER,
+                year INTEGER,
+                album_artist TEXT,
                 created_at INTEGER NOT NULL,
                 updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create playlists table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS playlists (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT UNIQUE NOT NULL,
+                description TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            "#,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        // Create playlist entries table
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS playlist_entries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                playlist_id INTEGER NOT NULL,
+                media_file_id INTEGER NOT NULL,
+                position INTEGER NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (playlist_id) REFERENCES playlists(id) ON DELETE CASCADE,
+                FOREIGN KEY (media_file_id) REFERENCES media_files(id) ON DELETE CASCADE,
+                UNIQUE(playlist_id, media_file_id),
+                UNIQUE(playlist_id, position)
             )
             "#,
         )
@@ -227,6 +394,44 @@ impl SqliteDatabase {
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_filename ON media_files(filename)")
+            .execute(&self.pool)
+            .await?;
+
+        // Music categorization indexes
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_artist ON media_files(artist)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_album ON media_files(album)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_genre ON media_files(genre)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_year ON media_files(year)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_album_artist ON media_files(album_artist)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_track_number ON media_files(track_number)")
+            .execute(&self.pool)
+            .await?;
+
+        // Playlist indexes
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_playlist_entries_playlist_id ON playlist_entries(playlist_id)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_playlist_entries_media_file_id ON playlist_entries(media_file_id)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_playlist_entries_position ON playlist_entries(playlist_id, position)")
             .execute(&self.pool)
             .await?;
 
@@ -300,12 +505,14 @@ impl DatabaseManager for SqliteDatabase {
         let created_timestamp = Self::system_time_to_timestamp(file.created_at);
         let updated_timestamp = Self::system_time_to_timestamp(file.updated_at);
         let duration_ms = file.duration.map(|d| d.as_millis() as i64);
+        let track_number = file.track_number.map(|n| n as i64);
+        let year = file.year.map(|y| y as i64);
 
         let result = sqlx::query(
             r#"
             INSERT INTO media_files 
-            (path, parent_path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (path, parent_path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&path_str)
@@ -318,6 +525,10 @@ impl DatabaseManager for SqliteDatabase {
         .bind(&file.title)
         .bind(&file.artist)
         .bind(&file.album)
+        .bind(&file.genre)
+        .bind(track_number)
+        .bind(year)
+        .bind(&file.album_artist)
         .bind(created_timestamp)
         .bind(updated_timestamp)
         .execute(&self.pool)
@@ -328,7 +539,7 @@ impl DatabaseManager for SqliteDatabase {
 
     async fn get_all_media_files(&self) -> Result<Vec<MediaFile>> {
         let rows = sqlx::query(
-            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at FROM media_files ORDER BY filename"
+            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename"
         )
         .fetch_all(&self.pool)
         .await?;
@@ -358,12 +569,14 @@ impl DatabaseManager for SqliteDatabase {
         let modified_timestamp = Self::system_time_to_timestamp(file.modified);
         let updated_timestamp = Self::system_time_to_timestamp(SystemTime::now());
         let duration_ms = file.duration.map(|d| d.as_millis() as i64);
+        let track_number = file.track_number.map(|n| n as i64);
+        let year = file.year.map(|y| y as i64);
 
         sqlx::query(
             r#"
             UPDATE media_files 
             SET parent_path = ?, filename = ?, size = ?, modified = ?, mime_type = ?, duration = ?, 
-                title = ?, artist = ?, album = ?, updated_at = ?
+                title = ?, artist = ?, album = ?, genre = ?, track_number = ?, year = ?, album_artist = ?, updated_at = ?
             WHERE path = ?
             "#,
         )
@@ -376,6 +589,10 @@ impl DatabaseManager for SqliteDatabase {
         .bind(&file.title)
         .bind(&file.artist)
         .bind(&file.album)
+        .bind(&file.genre)
+        .bind(track_number)
+        .bind(year)
+        .bind(&file.album_artist)
         .bind(updated_timestamp)
         .bind(&path_str)
         .execute(&self.pool)
@@ -389,7 +606,7 @@ impl DatabaseManager for SqliteDatabase {
 
         let rows = sqlx::query(
             r#"
-            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at 
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
             FROM media_files 
             WHERE path LIKE ?
             ORDER BY filename
@@ -422,7 +639,7 @@ impl DatabaseManager for SqliteDatabase {
         // 1. Get all direct file children efficiently
         let file_rows = sqlx::query(
             r#"
-            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at 
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
             FROM media_files 
             WHERE parent_path = ? AND mime_type LIKE ?
             ORDER BY filename
@@ -516,7 +733,7 @@ impl DatabaseManager for SqliteDatabase {
 
         let row = sqlx::query(
             r#"
-            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at 
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
             FROM media_files 
             WHERE path = ?
             "#,
@@ -731,6 +948,472 @@ impl DatabaseManager for SqliteDatabase {
     async fn vacuum(&self) -> Result<()> {
         sqlx::query("VACUUM").execute(&self.pool).await?;
 
+        Ok(())
+    }
+
+    // Music categorization methods
+    async fn get_artists(&self) -> Result<Vec<MusicCategory>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT artist, COUNT(*) as count 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND artist IS NOT NULL AND artist != ''
+            GROUP BY artist 
+            ORDER BY artist COLLATE NOCASE
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut categories = Vec::new();
+        for row in rows {
+            let artist: String = row.try_get("artist")?;
+            let count: i64 = row.try_get("count")?;
+            categories.push(MusicCategory {
+                id: format!("artist:{}", artist),
+                name: artist,
+                category_type: MusicCategoryType::Artist,
+                count: count as usize,
+            });
+        }
+
+        Ok(categories)
+    }
+
+    async fn get_albums(&self, artist: Option<&str>) -> Result<Vec<MusicCategory>> {
+        let rows = if let Some(artist_filter) = artist {
+            sqlx::query(
+                r#"
+                SELECT album, COUNT(*) as count 
+                FROM media_files 
+                WHERE mime_type LIKE 'audio/%' AND album IS NOT NULL AND album != '' AND artist = ?
+                GROUP BY album 
+                ORDER BY album COLLATE NOCASE
+                "#
+            )
+            .bind(artist_filter)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT album, COUNT(*) as count 
+                FROM media_files 
+                WHERE mime_type LIKE 'audio/%' AND album IS NOT NULL AND album != ''
+                GROUP BY album 
+                ORDER BY album COLLATE NOCASE
+                "#
+            )
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut categories = Vec::new();
+        for row in rows {
+            let album: String = row.try_get("album")?;
+            let count: i64 = row.try_get("count")?;
+            let id = if let Some(artist_filter) = artist {
+                format!("album:{}:{}", artist_filter, album)
+            } else {
+                format!("album:{}", album)
+            };
+            categories.push(MusicCategory {
+                id,
+                name: album,
+                category_type: MusicCategoryType::Album,
+                count: count as usize,
+            });
+        }
+
+        Ok(categories)
+    }
+
+    async fn get_genres(&self) -> Result<Vec<MusicCategory>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT genre, COUNT(*) as count 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND genre IS NOT NULL AND genre != ''
+            GROUP BY genre 
+            ORDER BY genre COLLATE NOCASE
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut categories = Vec::new();
+        for row in rows {
+            let genre: String = row.try_get("genre")?;
+            let count: i64 = row.try_get("count")?;
+            categories.push(MusicCategory {
+                id: format!("genre:{}", genre),
+                name: genre,
+                category_type: MusicCategoryType::Genre,
+                count: count as usize,
+            });
+        }
+
+        Ok(categories)
+    }
+
+    async fn get_years(&self) -> Result<Vec<MusicCategory>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT year, COUNT(*) as count 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND year IS NOT NULL
+            GROUP BY year 
+            ORDER BY year DESC
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut categories = Vec::new();
+        for row in rows {
+            let year: i64 = row.try_get("year")?;
+            let count: i64 = row.try_get("count")?;
+            categories.push(MusicCategory {
+                id: format!("year:{}", year),
+                name: year.to_string(),
+                category_type: MusicCategoryType::Year,
+                count: count as usize,
+            });
+        }
+
+        Ok(categories)
+    }
+
+    async fn get_album_artists(&self) -> Result<Vec<MusicCategory>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT album_artist, COUNT(*) as count 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND album_artist IS NOT NULL AND album_artist != ''
+            GROUP BY album_artist 
+            ORDER BY album_artist COLLATE NOCASE
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut categories = Vec::new();
+        for row in rows {
+            let album_artist: String = row.try_get("album_artist")?;
+            let count: i64 = row.try_get("count")?;
+            categories.push(MusicCategory {
+                id: format!("album_artist:{}", album_artist),
+                name: album_artist,
+                category_type: MusicCategoryType::AlbumArtist,
+                count: count as usize,
+            });
+        }
+
+        Ok(categories)
+    }
+
+    async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND artist = ?
+            ORDER BY album, track_number, filename
+            "#
+        )
+        .bind(artist)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    async fn get_music_by_album(&self, album: &str, artist: Option<&str>) -> Result<Vec<MediaFile>> {
+        let rows = if let Some(artist_filter) = artist {
+            sqlx::query(
+                r#"
+                SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+                FROM media_files 
+                WHERE mime_type LIKE 'audio/%' AND album = ? AND artist = ?
+                ORDER BY track_number, filename
+                "#
+            )
+            .bind(album)
+            .bind(artist_filter)
+            .fetch_all(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                r#"
+                SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+                FROM media_files 
+                WHERE mime_type LIKE 'audio/%' AND album = ?
+                ORDER BY track_number, filename
+                "#
+            )
+            .bind(album)
+            .fetch_all(&self.pool)
+            .await?
+        };
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    async fn get_music_by_genre(&self, genre: &str) -> Result<Vec<MediaFile>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND genre = ?
+            ORDER BY artist, album, track_number, filename
+            "#
+        )
+        .bind(genre)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    async fn get_music_by_year(&self, year: u32) -> Result<Vec<MediaFile>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND year = ?
+            ORDER BY artist, album, track_number, filename
+            "#
+        )
+        .bind(year as i64)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+            FROM media_files 
+            WHERE mime_type LIKE 'audio/%' AND album_artist = ?
+            ORDER BY album, track_number, filename
+            "#
+        )
+        .bind(album_artist)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    // Playlist management methods
+    async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<i64> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO playlists (name, description, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            "#
+        )
+        .bind(name)
+        .bind(description)
+        .bind(now)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    async fn get_playlists(&self) -> Result<Vec<Playlist>> {
+        let rows = sqlx::query(
+            "SELECT id, name, description, created_at, updated_at FROM playlists ORDER BY name"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut playlists = Vec::new();
+        for row in rows {
+            let created_timestamp: i64 = row.try_get("created_at")?;
+            let updated_timestamp: i64 = row.try_get("updated_at")?;
+            playlists.push(Playlist {
+                id: Some(row.try_get("id")?),
+                name: row.try_get("name")?,
+                description: row.try_get("description")?,
+                created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(created_timestamp as u64),
+                updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(updated_timestamp as u64),
+            });
+        }
+
+        Ok(playlists)
+    }
+
+    async fn get_playlist(&self, playlist_id: i64) -> Result<Option<Playlist>> {
+        let row = sqlx::query(
+            "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?"
+        )
+        .bind(playlist_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some(row) = row {
+            let created_timestamp: i64 = row.try_get("created_at")?;
+            let updated_timestamp: i64 = row.try_get("updated_at")?;
+            Ok(Some(Playlist {
+                id: Some(row.try_get("id")?),
+                name: row.try_get("name")?,
+                description: row.try_get("description")?,
+                created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(created_timestamp as u64),
+                updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(updated_timestamp as u64),
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    async fn update_playlist(&self, playlist: &Playlist) -> Result<()> {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(
+            "UPDATE playlists SET name = ?, description = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(&playlist.name)
+        .bind(&playlist.description)
+        .bind(now)
+        .bind(playlist.id.unwrap())
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn delete_playlist(&self, playlist_id: i64) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM playlists WHERE id = ?")
+            .bind(playlist_id)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn add_to_playlist(&self, playlist_id: i64, media_file_id: i64, position: Option<u32>) -> Result<i64> {
+        let final_position = if let Some(pos) = position {
+            pos
+        } else {
+            // Get the next position in the playlist
+            let max_position: Option<i32> = sqlx::query_scalar(
+                "SELECT MAX(position) FROM playlist_entries WHERE playlist_id = ?"
+            )
+            .bind(playlist_id)
+            .fetch_optional(&self.pool)
+            .await?
+            .flatten();
+            
+            (max_position.unwrap_or(-1) + 1) as u32
+        };
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let result = sqlx::query(
+            "INSERT INTO playlist_entries (playlist_id, media_file_id, position, created_at) VALUES (?, ?, ?, ?)"
+        )
+        .bind(playlist_id)
+        .bind(media_file_id)
+        .bind(final_position as i64)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.last_insert_rowid())
+    }
+
+    async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool> {
+        let result = sqlx::query(
+            "DELETE FROM playlist_entries WHERE playlist_id = ? AND media_file_id = ?"
+        )
+        .bind(playlist_id)
+        .bind(media_file_id)
+        .execute(&self.pool)
+        .await?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT m.id, m.path, m.filename, m.size, m.modified, m.mime_type, m.duration, 
+                   m.title, m.artist, m.album, m.genre, m.track_number, m.year, m.album_artist, 
+                   m.created_at, m.updated_at
+            FROM media_files m
+            JOIN playlist_entries pe ON m.id = pe.media_file_id
+            WHERE pe.playlist_id = ?
+            ORDER BY pe.position
+            "#
+        )
+        .bind(playlist_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut files = Vec::new();
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+
+        for (media_file_id, position) in track_positions {
+            sqlx::query(
+                "UPDATE playlist_entries SET position = ? WHERE playlist_id = ? AND media_file_id = ?"
+            )
+            .bind(*position as i64)
+            .bind(playlist_id)
+            .bind(*media_file_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        tx.commit().await?;
         Ok(())
     }
 }

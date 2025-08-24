@@ -455,10 +455,69 @@ where
 
     /// Extract media metadata (title, artist, duration, etc.)
     async fn extract_media_metadata(media_file: &mut MediaFile) -> Result<()> {
-        // For now, this is a placeholder. In a real implementation, you would use
-        // libraries like `ffprobe`, `taglib`, or similar to extract metadata
+        // Check if this is an audio file that we can extract metadata from
+        if !media_file.mime_type.starts_with("audio/") {
+            // For non-audio files, just extract basic info from filename
+            Self::extract_basic_metadata_from_filename(media_file);
+            return Ok(());
+        }
+
+        // Try to extract metadata using audiotags library
+        match audiotags::Tag::new().read_from_path(&media_file.path) {
+            Ok(tag) => {
+                // Extract basic metadata
+                if let Some(title) = tag.title() {
+                    media_file.title = Some(title.to_string());
+                }
+                
+                if let Some(artist) = tag.artist() {
+                    media_file.artist = Some(artist.to_string());
+                }
+                
+                if let Some(album) = tag.album_title() {
+                    media_file.album = Some(album.to_string());
+                }
+                
+                if let Some(genre) = tag.genre() {
+                    media_file.genre = Some(genre.to_string());
+                }
+                
+                // Extract track number
+                if let Some(track_num) = tag.track_number() {
+                    media_file.track_number = Some(track_num as u32);
+                }
+                
+                // Extract year
+                if let Some(year) = tag.year() {
+                    media_file.year = Some(year as u32);
+                }
+                
+                // Extract album artist
+                if let Some(album_artist) = tag.album_artist() {
+                    media_file.album_artist = Some(album_artist.to_string());
+                }
+                
+                // Extract duration if available
+                if let Some(duration) = tag.duration() {
+                    media_file.duration = Some(Duration::from_secs(duration as u64));
+                }
+                
+                debug!("Extracted metadata for {:?}: title={:?}, artist={:?}, album={:?}, genre={:?}, track={:?}, year={:?}", 
+                    media_file.path, media_file.title, media_file.artist, media_file.album, 
+                    media_file.genre, media_file.track_number, media_file.year);
+            }
+            Err(e) => {
+                debug!("Failed to extract metadata from {:?}: {}, falling back to filename parsing", media_file.path, e);
+                // Fallback to basic metadata extraction from filename
+                Self::extract_basic_metadata_from_filename(media_file);
+            }
+        }
         
-        // Extract basic info from filename
+        Ok(())
+    }
+    
+    /// Extract basic metadata from filename as fallback
+    fn extract_basic_metadata_from_filename(media_file: &mut MediaFile) {
         if let Some(stem) = media_file.path.file_stem() {
             let stem_str = stem.to_string_lossy();
             
@@ -470,12 +529,17 @@ where
             } else {
                 media_file.title = Some(stem_str.to_string());
             }
+            
+            // Try to extract track number from filename if it starts with digits
+            if let Some(first_space) = stem_str.find(' ') {
+                let potential_track = &stem_str[..first_space];
+                if let Ok(track_num) = potential_track.parse::<u32>() {
+                    if track_num > 0 && track_num <= 999 { // Reasonable track number range
+                        media_file.track_number = Some(track_num);
+                    }
+                }
+            }
         }
-
-        // For video/audio files, you could extract duration here
-        // This would require additional dependencies like ffprobe-rs or similar
-        
-        Ok(())
     }
 
     /// Flush any remaining operations in the queue
@@ -689,6 +753,90 @@ mod tests {
         }
 
         async fn vacuum(&self) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn get_directory_listing(
+            &self,
+            _parent_path: &Path,
+            _media_type_filter: &str,
+        ) -> anyhow::Result<(Vec<crate::database::MediaDirectory>, Vec<MediaFile>)> {
+            Ok((vec![], vec![]))
+        }
+
+        async fn get_artists(&self) -> anyhow::Result<Vec<crate::database::MusicCategory>> {
+            Ok(vec![])
+        }
+
+        async fn get_albums(&self, _artist: Option<&str>) -> anyhow::Result<Vec<crate::database::MusicCategory>> {
+            Ok(vec![])
+        }
+
+        async fn get_genres(&self) -> anyhow::Result<Vec<crate::database::MusicCategory>> {
+            Ok(vec![])
+        }
+
+        async fn get_years(&self) -> anyhow::Result<Vec<crate::database::MusicCategory>> {
+            Ok(vec![])
+        }
+
+        async fn get_album_artists(&self) -> anyhow::Result<Vec<crate::database::MusicCategory>> {
+            Ok(vec![])
+        }
+
+        async fn get_music_by_artist(&self, _artist: &str) -> anyhow::Result<Vec<MediaFile>> {
+            Ok(vec![])
+        }
+
+        async fn get_music_by_album(&self, _album: &str, _artist: Option<&str>) -> anyhow::Result<Vec<MediaFile>> {
+            Ok(vec![])
+        }
+
+        async fn get_music_by_genre(&self, _genre: &str) -> anyhow::Result<Vec<MediaFile>> {
+            Ok(vec![])
+        }
+
+        async fn get_music_by_year(&self, _year: u32) -> anyhow::Result<Vec<MediaFile>> {
+            Ok(vec![])
+        }
+
+        async fn get_music_by_album_artist(&self, _album_artist: &str) -> anyhow::Result<Vec<MediaFile>> {
+            Ok(vec![])
+        }
+
+        async fn create_playlist(&self, _name: &str, _description: Option<&str>) -> anyhow::Result<i64> {
+            Ok(1)
+        }
+
+        async fn get_playlists(&self) -> anyhow::Result<Vec<crate::database::Playlist>> {
+            Ok(vec![])
+        }
+
+        async fn get_playlist(&self, _playlist_id: i64) -> anyhow::Result<Option<crate::database::Playlist>> {
+            Ok(None)
+        }
+
+        async fn update_playlist(&self, _playlist: &crate::database::Playlist) -> anyhow::Result<()> {
+            Ok(())
+        }
+
+        async fn delete_playlist(&self, _playlist_id: i64) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn add_to_playlist(&self, _playlist_id: i64, _media_file_id: i64, _position: Option<u32>) -> anyhow::Result<i64> {
+            Ok(1)
+        }
+
+        async fn remove_from_playlist(&self, _playlist_id: i64, _media_file_id: i64) -> anyhow::Result<bool> {
+            Ok(false)
+        }
+
+        async fn get_playlist_tracks(&self, _playlist_id: i64) -> anyhow::Result<Vec<MediaFile>> {
+            Ok(vec![])
+        }
+
+        async fn reorder_playlist(&self, _playlist_id: i64, _track_positions: &[(i64, u32)]) -> anyhow::Result<()> {
             Ok(())
         }
     }
