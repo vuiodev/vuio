@@ -47,8 +47,10 @@ impl ConfigValidator {
         // Validate server IP if specified
         if let Some(ip) = &config.server.ip {
             if !ip.is_empty() && ip != "0.0.0.0" {
-                ip.parse::<IpAddr>()
-                    .with_context(|| format!("Invalid server IP address: {}", ip))?;
+            // Trim whitespace before parsing
+            let trimmed_ip = ip.trim();
+            trimmed_ip.parse::<IpAddr>()
+                .with_context(|| format!("Invalid server IP address: {}", ip))?;
             }
         }
 
