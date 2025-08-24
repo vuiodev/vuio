@@ -5,13 +5,27 @@ use crate::{
 };
 use tracing::warn;
 
-/// XML escape helper
+/// XML escape helper with enhanced Unicode support
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    let mut result = String::with_capacity(s.len() + s.len() / 4);
+    
+    for ch in s.chars() {
+        match ch {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#39;"),
+            // Handle control characters (except tab, newline, carriage return)
+            c if (c as u32) < 32 && c != '\t' && c != '\n' && c != '\r' => {
+                result.push_str(&format!("&#{};", c as u32));
+            },
+            // Handle other potentially problematic characters
+            c => result.push(c),
+        }
+    }
+    
+    result
 }
 
 /// Get the server's IP address for use in URLs from the application state.
@@ -179,6 +193,25 @@ pub fn generate_browse_response(
     files: &[MediaFile],
     state: &AppState,
 ) -> String {
+    generate_browse_response_with_totals(object_id, subdirectories, files, state, None)
+}
+
+pub fn generate_browse_response_with_totals(
+    object_id: &str,
+    subdirectories: &[MediaDirectory],
+    files: &[MediaFile],
+    state: &AppState,
+    total_matches: Option<usize>,
+) -> String {
+    use tracing::{debug, warn, error};
+    
+    debug!(
+        "Generating browse response for object_id: '{}', {} subdirs, {} files",
+        object_id,
+        subdirectories.len(),
+        files.len()
+    );
+    
     let server_ip = get_server_ip(state);
     let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">"#);
 
@@ -190,18 +223,32 @@ pub fn generate_browse_response(
         3
     } else {
         // Add sub-containers to DIDL
-        for container in subdirectories {
+        for (idx, container) in subdirectories.iter().enumerate() {
+            if idx % 100 == 0 && idx > 0 {
+                debug!("Processing subdirectory {}/{}: {}", idx, subdirectories.len(), container.name);
+            }
+            
             let container_id = format!("{}/{}", object_id.trim_end_matches('/'), container.name);
-            didl.push_str(&format!(
+            let container_xml = format!(
                 r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class></container>"#,
                 xml_escape(&container_id),
                 xml_escape(object_id),
                 xml_escape(&container.name)
-            ));
+            );
+            didl.push_str(&container_xml);
         }
 
-        // Add items to DIDL
-        for file in files {
+        // Add items to DIDL with enhanced processing and error handling
+        for (idx, file) in files.iter().enumerate() {
+            if idx % 100 == 0 && idx > 0 {
+                debug!("Processing file {}/{}: '{}'", idx, files.len(), file.filename);
+            }
+            
+            // Log files with potentially problematic characters
+            if file.filename.chars().any(|c| c as u32 > 127) {
+                debug!("Processing file with Unicode characters: '{}' ({})", file.filename, file.path.display());
+            }
+            
             let file_id = file.id.unwrap_or(0);
             let url = format!(
                 "http://{}:{}/media/{}",
@@ -210,31 +257,69 @@ pub fn generate_browse_response(
                 file_id
             );
             let upnp_class = get_upnp_class(&file.mime_type);
-            didl.push_str(&format!(
-                r#"<item id="{id}" parentID="{parent_id}" restricted="1">
+            
+            // Create the XML for this item with proper error handling
+            match std::panic::catch_unwind(|| {
+                format!(
+                    r#"<item id="{id}" parentID="{parent_id}" restricted="1">
                     <dc:title>{title}</dc:title>
                     <upnp:class>{upnp_class}</upnp:class>
                     <res protocolInfo="http-get:*:{mime}:*" size="{size}">{url}</res>
                 </item>"#,
-                id = file_id,
-                parent_id = xml_escape(object_id),
-                title = xml_escape(&file.filename),
-                upnp_class = upnp_class,
-                mime = &file.mime_type,
-                size = file.size,
-                url = xml_escape(&url)
-            ));
+                    id = file_id,
+                    parent_id = xml_escape(object_id),
+                    title = xml_escape(&file.filename),
+                    upnp_class = upnp_class,
+                    mime = &file.mime_type,
+                    size = file.size,
+                    url = xml_escape(&url)
+                )
+            }) {
+                Ok(item_xml) => {
+                    didl.push_str(&item_xml);
+                },
+                Err(_) => {
+                    error!("Failed to generate XML for file: '{}' ({})", file.filename, file.path.display());
+                    // Create a simplified entry for problematic files
+                    let safe_title = file.filename.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || " .-_".contains(*c))
+                        .collect::<String>();
+                    let fallback_xml = format!(
+                        r#"<item id="{id}" parentID="{parent_id}" restricted="1">
+                        <dc:title>{title}</dc:title>
+                        <upnp:class>{upnp_class}</upnp:class>
+                        <res protocolInfo="http-get:*:{mime}:*" size="{size}">{url}</res>
+                    </item>"#,
+                        id = file_id,
+                        parent_id = xml_escape(object_id),
+                        title = xml_escape(&safe_title),
+                        upnp_class = upnp_class,
+                        mime = &file.mime_type,
+                        size = file.size,
+                        url = xml_escape(&url)
+                    );
+                    didl.push_str(&fallback_xml);
+                }
+            }
         }
 
-        subdirectories.len() + files.len()
+        let total_items = subdirectories.len() + files.len();
+        if total_items > 1000 {
+            warn!("Large browse response: {} items for object_id: {}", total_items, object_id);
+        }
+        
+        total_items
     };
 
     didl.push_str("</DIDL-Lite>");
-    let total_matches = number_returned;
+    let final_total_matches = total_matches.unwrap_or(number_returned);
 
     let update_id = state.content_update_id.load(std::sync::atomic::Ordering::Relaxed);
     
-    format!(
+    debug!("Browse response completed: {} items, DIDL size: {} bytes, total matches: {}", 
+           number_returned, didl.len(), final_total_matches);
+    
+    let final_response = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
     <s:Body>
@@ -248,7 +333,10 @@ pub fn generate_browse_response(
 </s:Envelope>"#,
         xml_escape(&didl),
         number_returned,
-        total_matches,
+        final_total_matches,
         update_id
-    )
+    );
+    
+    debug!("Final XML response size: {} bytes", final_response.len());
+    final_response
 }

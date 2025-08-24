@@ -1,4 +1,5 @@
 use crate::{
+    database::MediaDirectory,
     error::AppError,
     state::AppState,
     web::xml::{generate_browse_response, generate_description_xml, generate_scpd_xml},
@@ -37,14 +38,50 @@ pub async fn content_directory_scpd() -> impl IntoResponse {
     )
 }
 
-/// Extracts the ObjectID from a SOAP Browse request.
-fn get_object_id(body: &str) -> &str {
-    if let Some(start) = body.find("<ObjectID>") {
+/// Extracts browse parameters from SOAP request
+#[derive(Debug, Clone)]
+struct BrowseParams {
+    object_id: String,
+    starting_index: u32,
+    requested_count: u32,
+}
+
+fn parse_browse_params(body: &str) -> BrowseParams {
+    let object_id = if let Some(start) = body.find("<ObjectID>") {
         if let Some(end) = body.find("</ObjectID>") {
-            return &body[start + 10..end];
+            body[start + 10..end].to_string()
+        } else {
+            "0".to_string()
         }
+    } else {
+        "0".to_string()
+    };
+    
+    let starting_index = if let Some(start) = body.find("<StartingIndex>") {
+        if let Some(end) = body.find("</StartingIndex>") {
+            body[start + 15..end].parse().unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    
+    let requested_count = if let Some(start) = body.find("<RequestedCount>") {
+        if let Some(end) = body.find("</RequestedCount>") {
+            body[start + 16..end].parse().unwrap_or(0)
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    
+    BrowseParams {
+        object_id,
+        starting_index,
+        requested_count,
     }
-    "0" // Default to root if not found
 }
 
 pub async fn content_directory_control(
@@ -52,11 +89,12 @@ pub async fn content_directory_control(
     body: String,
 ) -> Response {
     if body.contains("<u:Browse") {
-        let object_id = get_object_id(&body);
-        info!("Browse request for ObjectID: {}", object_id);
+        let params = parse_browse_params(&body);
+        info!("Browse request - ObjectID: {}, StartingIndex: {}, RequestedCount: {}", 
+              params.object_id, params.starting_index, params.requested_count);
 
         // Handle root browse request (ObjectID "0")
-        if object_id == "0" {
+        if params.object_id == "0" {
             // For the root, we typically return the top-level containers (Video, Audio, Image).
             // The generate_browse_response function should be smart enough to create these
             // when given an object_id of "0" and empty lists of subdirectories and files.
@@ -73,17 +111,17 @@ pub async fn content_directory_control(
         }
 
         // Determine media type filter and path prefix from ObjectID
-        let (media_type_filter, path_prefix_str) = if object_id.starts_with("video") {
-            ("video/", object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/'))
-        } else if object_id.starts_with("audio") {
-            ("audio/", object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/'))
-        } else if object_id.starts_with("image") {
-            ("image/", object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/'))
+        let (media_type_filter, path_prefix_str) = if params.object_id.starts_with("video") {
+            ("video/", params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/'))
+        } else if params.object_id.starts_with("audio") {
+            ("audio/", params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/'))
+        } else if params.object_id.starts_with("image") {
+            ("image/", params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/'))
         } else {
             // This case might happen for deeper browsing or custom object IDs.
             // Assume no specific type filter for the database query, and the object_id itself
             // represents the path relative to the media root.
-            ("", object_id)
+            ("", params.object_id.as_str())
         };
 
         // Determine the base path for the media type.
@@ -95,10 +133,68 @@ pub async fn content_directory_control(
             media_root.join(path_prefix_str)
         };
         
-        // Query the database for the directory listing
-        match state.database.get_directory_listing(&browse_path, media_type_filter).await {
-            Ok((subdirectories, files)) => {
-                let response = generate_browse_response(object_id, &subdirectories, &files, &state);
+        // Query the database for the directory listing with timeout
+        let query_future = state.database.get_directory_listing(&browse_path, media_type_filter);
+        let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
+        
+        match tokio::time::timeout(timeout_duration, query_future).await {
+            Ok(Ok((subdirectories, files))) => {
+                debug!("Database query completed: {} subdirs, {} files for path: {}", 
+                       subdirectories.len(), files.len(), browse_path.display());
+                       
+                // Apply pagination if requested
+                let starting_index = params.starting_index as usize;
+                let requested_count = if params.requested_count == 0 { 
+                    // If RequestedCount is 0, return all items (but limit to prevent hanging)
+                    2000 
+                } else { 
+                    std::cmp::min(params.requested_count as usize, 2000) 
+                };
+                
+                // Combine directories and files for pagination
+                let mut all_items = Vec::new();
+                for subdir in &subdirectories {
+                    all_items.push((subdir.clone(), None));
+                }
+                for file in &files {
+                    all_items.push((MediaDirectory { path: file.path.clone(), name: String::new() }, Some(file.clone())));
+                }
+                
+                let total_matches = all_items.len();
+                let end_index = std::cmp::min(starting_index + requested_count, total_matches);
+                
+                if starting_index >= total_matches {
+                    // Starting index is beyond available items
+                    let response = generate_browse_response(&params.object_id, &[], &[], &state);
+                    return (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response();
+                }
+                
+                // Extract paginated items
+                let paginated_items = &all_items[starting_index..end_index];
+                let mut paginated_subdirs = Vec::new();
+                let mut paginated_files = Vec::new();
+                
+                for (item, file_opt) in paginated_items {
+                    if let Some(file) = file_opt {
+                        paginated_files.push(file.clone());
+                    } else {
+                        paginated_subdirs.push(item.clone());
+                    }
+                }
+                
+                debug!("Returning paginated results: {} subdirs, {} files (index {}-{} of {})",
+                       paginated_subdirs.len(), paginated_files.len(), 
+                       starting_index, end_index, total_matches);
+                
+                let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, &state);
                 (
                     StatusCode::OK,
                     [
@@ -108,13 +204,22 @@ pub async fn content_directory_control(
                     response,
                 )
                     .into_response()
-            }
-            Err(e) => {
-                error!("Error getting directory listing for {}: {}", object_id, e);
+            },
+            Ok(Err(e)) => {
+                error!("Database error getting directory listing for {}: {}", params.object_id, e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                     "Error browsing content".to_string(),
+                )
+                    .into_response()
+            },
+            Err(_timeout) => {
+                error!("Database query timeout for object_id: {} (path: {})", params.object_id, browse_path.display());
+                (
+                    StatusCode::REQUEST_TIMEOUT,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Request timeout - directory too large".to_string(),
                 )
                     .into_response()
             }
