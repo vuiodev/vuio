@@ -62,14 +62,40 @@ setup_directories() {
     log "Setting up directories and permissions"
     
     # Ensure directories exist
-    mkdir -p /config /media /app
+    mkdir -p /config /app
     
-    # Set ownership
-    chown -R vuio:vuio /config /media /app
+    # Create media directory if it doesn't exist, but don't fail if it's read-only
+    if [ ! -d "/media" ]; then
+        mkdir -p /media 2>/dev/null || log "Warning: Could not create /media directory (may be read-only)"
+    fi
     
-    # Set permissions
-    chmod 755 /config /media /app
+    # Set ownership for directories we can control
+    chown -R vuio:vuio /config /app
+    
+    # Try to set ownership on media directory, but don't fail if it's read-only
+    if [ -d "/media" ]; then
+        if chown -R vuio:vuio /media 2>/dev/null; then
+            log "Successfully set ownership on /media directory"
+        else
+            log "Warning: Could not change ownership of /media directory (likely read-only)"
+            log "This is normal for read-only media mounts and should not affect functionality"
+            
+            # Check if we can at least read the media directory
+            if [ -r "/media" ]; then
+                log "Media directory is readable, continuing..."
+            else
+                log "Error: Media directory is not readable by current user"
+                log "Please ensure the media volume is mounted with appropriate read permissions"
+            fi
+        fi
+    fi
+    
+    # Set permissions for directories we can control
+    chmod 755 /config /app 2>/dev/null || true
     chmod +x /app/vuio
+    
+    # Try to set permissions on media directory if possible
+    chmod 755 /media 2>/dev/null || log "Warning: Could not set permissions on /media (likely read-only)"
     
     log "Directory setup completed"
 }

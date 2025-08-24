@@ -10,6 +10,7 @@ A comprehensive, cross-platform DLNA/UPnP media server written in Rust with adva
 - **HTTP Range Streaming** - Efficient streaming with seek support for large media files
 - **Dynamic XML Generation** - Standards-compliant device and service descriptions
 - **Multi-format Support** - Handles MKV, MP4, AVI, MP3, FLAC, JPEG, PNG, and many more formats
+- **Read-Only Media Support** - Works seamlessly with read-only file systems and network storage
 
 ### Cross-Platform Integration
 - **Windows Support** - UAC integration, Windows Firewall detection, Windows Defender awareness
@@ -144,7 +145,8 @@ services:
     
     volumes:
       - ./vuio-config:/config
-      - /path/to/your/media:/media  # Mount your media directory
+      # Recommended: Mount media as read-only for security
+      - /path/to/your/media:/media:ro
       
     environment:
       - VUIO_SERVER_IP=192.168.1.126  # YOUR HOST IP HERE
@@ -157,33 +159,75 @@ services:
 
 #### Volume Mapping
 
-```bash
-# Configuration and database persistence
-./vuio-config:/config
+**Read-Only Media Support (Recommended):**
+VuIO fully supports read-only media directories, which is the recommended approach for production deployments. This provides several benefits:
+- Prevents accidental modification of your media files
+- Works with network storage that may be mounted read-only
+- Eliminates permission issues with Docker containers
+- Provides better security by reducing write access
 
-# Media library (adjust to your paths)
+```bash
+# Recommended: Mount media as read-only
+/path/to/your/media:/media:ro
+
+# Configuration and database persistence (read-write required)
+./vuio-config:/config
+```
+
+**Multiple Directory Examples:**
+```yaml
+volumes:
+  # Configuration and database (read-write)
+  - ./vuio-config:/config
+  
+  # Media directories (read-only recommended)
+  - /home/user/Movies:/media/movies:ro
+  - /home/user/TV-Shows:/media/tv:ro
+  - /home/user/Music:/media/music:ro
+  - /home/user/Pictures:/media/pictures:ro
+  
+  # Network storage example
+  - /mnt/nas/media:/media/nas:ro
+```
+
+**Legacy Read-Write Mounting:**
+```bash
+# Only use read-write if you need the server to modify files
 /home/user/Videos:/media/videos
 /home/user/Music:/media/music
 /home/user/Pictures:/media/pictures
-
-# Multiple media directories
-volumes:
-  - ./vuio-config:/config
-  - /raid1/movies:/media/movies
-  - /raid2/tv-shows:/media/tv
-  - /nas/music:/media/music
 ```
 
 #### Docker Run Command
 
 ```bash
+# Recommended: Read-only media mount
 docker run -d \
   --name vuio-server \
   --restart unless-stopped \
   --network host \
   --cap-add NET_ADMIN \
   --cap-add NET_RAW \
-  -v /path/to/your/media:/media \
+  -v /path/to/your/media:/media:ro \
+  -v ./vuio-config:/config \
+  -e VUIO_SERVER_IP=192.168.1.126 \
+  -e VUIO_PORT=8080 \
+  -e VUIO_MEDIA_DIR=/media \
+  -e VUIO_SERVER_NAME="My DLNA Server" \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  vuio:latest
+
+# Multiple read-only media directories
+docker run -d \
+  --name vuio-server \
+  --restart unless-stopped \
+  --network host \
+  --cap-add NET_ADMIN \
+  --cap-add NET_RAW \
+  -v /path/to/movies:/media/movies:ro \
+  -v /path/to/music:/media/music:ro \
+  -v /path/to/pictures:/media/pictures:ro \
   -v ./vuio-config:/config \
   -e VUIO_SERVER_IP=192.168.1.126 \
   -e VUIO_PORT=8080 \
@@ -384,6 +428,20 @@ cargo test config::tests
 ## 🐛 Troubleshooting
 
 ### Common Issues
+
+**Read-Only File System Errors (Docker)**
+If you see errors like `chown: Read-only file system`, this is normal when mounting media directories as read-only:
+- ✅ **Recommended**: Mount media directories as read-only (`:ro`) for security
+- ✅ The application will detect and handle read-only mounts gracefully
+- ✅ Only the `/config` directory needs write access for database and configuration
+- ⚠️ Warnings about read-only media directories can be safely ignored
+
+```yaml
+# Correct Docker Compose volume configuration
+volumes:
+  - ./vuio-config:/config          # Read-write for database
+  - /path/to/media:/media:ro       # Read-only for media files
+```
 
 **Port Already in Use**
 ```bash

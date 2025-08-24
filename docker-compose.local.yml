@@ -20,8 +20,28 @@ services:
     volumes:
       # Persist configuration and database
       - ./vuio-config:/config
+      
       # Mount your media library (adjust path as needed)
+      # RECOMMENDED: Mount as read-only (:ro) for safety
+      # This prevents the container from accidentally modifying your media files
+      # and eliminates permission issues with read-only file systems
+      
+      # Example 1: Local test media (read-write for development)
       - ./test-media:/media
+      
+      # Example 2: Read-only mount (recommended for production)
+      # - /path/to/your/media:/media:ro
+      
+      # Example 3: Multiple media directories
+      # - /path/to/movies:/media/movies:ro
+      # - /path/to/tv-shows:/media/tv:ro
+      # - /path/to/music:/media/music:ro
+      
+      # Example 4: Network storage (NFS/SMB)
+      # - type: bind
+      #   source: /mnt/nas/media
+      #   target: /media
+      #   read_only: true
       
     environment:
       # User/Group ID mapping

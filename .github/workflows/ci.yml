@@ -199,12 +199,8 @@ jobs:
   # ===================================================================
   build_and_push_docker:
     name: Build and Push Docker Image
-    # This job runs for tag pushes or when manually triggered with 'release' or 'docker'
     if: |
-      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
-      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release') ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'docker')
-    # This job no longer depends on test_and_check
     runs-on: ubuntu-latest
     permissions:
       contents: read
