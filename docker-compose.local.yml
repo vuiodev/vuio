@@ -9,7 +9,9 @@ services:
       dockerfile: Dockerfile
     container_name: vuio-server-local
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "1902:1902/udp"  # SSDP discovery
+      - "8080:8080"      # HTTP server
     
     volumes:
       # Persist configuration and database
@@ -30,6 +32,8 @@ services:
       
       # Set the correct network interface for DLNA discovery
       - VUIO_SSDP_INTERFACE=Auto
+      # Override IP for SSDP responses (use host IP for OrbStack)
+      - VUIO_HOST_IP=192.168.1.126
       
       # Set SSDP port to avoid OrbStack conflict
       - VUIO_SSDP_PORT=1902

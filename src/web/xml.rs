@@ -44,6 +44,13 @@ fn get_server_ip(state: &AppState) -> String {
 fn get_primary_interface_ip_sync() -> Option<String> {
     use std::process::Command;
     
+    // Check if host IP is overridden via environment variable (for containers)
+    if let Ok(host_ip) = std::env::var("VUIO_HOST_IP") {
+        if !host_ip.is_empty() {
+            return Some(host_ip);
+        }
+    }
+    
     // Try to get the default route interface first (most reliable method)
     if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
         let route_output = String::from_utf8_lossy(&output.stdout);

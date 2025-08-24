@@ -2,6 +2,7 @@
 /target/
 /builds/
 **/*.rs.bk
+/vuio-config/
 
 # IDEs and editors
 /.idea/

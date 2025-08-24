@@ -437,11 +437,39 @@ async fn get_server_ip(state: &AppState) -> String {
     "127.0.0.1".to_string()
 }
 
-/// Auto-detect the primary network interface IP address (similar to MiniDLNA approach)
+/// Auto-detect the primary network interface IP address (cross-platform approach)
 async fn get_primary_interface_ip() -> Option<String> {
     use std::process::Command;
     
-    // Try to get the default route interface first (most reliable method)
+    // Check if host IP is overridden via environment variable (for containers)
+    if let Ok(host_ip) = std::env::var("VUIO_HOST_IP") {
+        if !host_ip.is_empty() {
+            return Some(host_ip);
+        }
+    }
+    
+    // Method 1: Try Linux 'ip route' command first
+    if let Some(ip) = try_ip_route_detection() {
+        return Some(ip);
+    }
+    
+    // Method 2: Try ifconfig (works on both Linux and macOS containers)
+    if let Some(ip) = try_ifconfig_detection() {
+        return Some(ip);
+    }
+    
+    // Method 3: Try 'ip addr' as fallback
+    if let Some(ip) = try_ip_addr_detection() {
+        return Some(ip);
+    }
+    
+    None
+}
+
+/// Try to detect IP using 'ip route' (Linux)
+fn try_ip_route_detection() -> Option<String> {
+    use std::process::Command;
+    
     if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
         let route_output = String::from_utf8_lossy(&output.stdout);
         if let Some(line) = route_output.lines().next() {
@@ -466,23 +494,83 @@ async fn get_primary_interface_ip() -> Option<String> {
             }
         }
     }
+    None
+}
+
+/// Try to detect IP using 'ifconfig' (works on Linux and macOS)
+fn try_ifconfig_detection() -> Option<String> {
+    use std::process::Command;
     
-    // Fallback: try to find any non-loopback interface with an IP
-    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
-        let ip_str = String::from_utf8_lossy(&output.stdout);
-        for line in ip_str.lines() {
-            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
-                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
-                    if let Some(ip) = ip_part.split('/').next() {
-                        // Prefer private network ranges (like MiniDLNA does)
-                        if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.") {
-                            return Some(ip.to_string());
+    if let Ok(output) = Command::new("ifconfig").output() {
+        let ifconfig_str = String::from_utf8_lossy(&output.stdout);
+        let mut current_interface = String::new();
+        let mut found_ips = Vec::new();
+        
+        for line in ifconfig_str.lines() {
+            // New interface starts (no leading whitespace)
+            if !line.starts_with(' ') && !line.starts_with('\t') && line.contains(':') {
+                if let Some(iface_name) = line.split(':').next() {
+                    current_interface = iface_name.to_string();
+                }
+            }
+            // Look for inet addresses
+            else if line.trim().starts_with("inet ") {
+                if let Some(inet_part) = line.trim().strip_prefix("inet ") {
+                    if let Some(ip_str) = inet_part.split_whitespace().next() {
+                        if !ip_str.starts_with("127.") && !ip_str.starts_with("169.254.") {
+                            // Prefer private network ranges and non-loopback interfaces
+                            let priority = if current_interface == "lo" || current_interface.starts_with("docker") {
+                                0
+                            } else if ip_str.starts_with("192.168.") || ip_str.starts_with("10.") || ip_str.starts_with("172.") {
+                                3
+                            } else {
+                                1
+                            };
+                            found_ips.push((priority, ip_str.to_string()));
                         }
                     }
                 }
             }
         }
+        
+        // Return the highest priority IP
+        found_ips.sort_by(|a, b| b.0.cmp(&a.0));
+        if let Some((_, ip)) = found_ips.first() {
+            return Some(ip.clone());
+        }
     }
+    None
+}
+
+/// Try to detect IP using 'ip addr' (Linux fallback)
+fn try_ip_addr_detection() -> Option<String> {
+    use std::process::Command;
     
+    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
+        let ip_str = String::from_utf8_lossy(&output.stdout);
+        let mut found_ips = Vec::new();
+        
+        for line in ip_str.lines() {
+            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
+                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                    if let Some(ip) = ip_part.split('/').next() {
+                        // Prefer private network ranges
+                        let priority = if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.") {
+                            2
+                        } else {
+                            1
+                        };
+                        found_ips.push((priority, ip.to_string()));
+                    }
+                }
+            }
+        }
+        
+        // Return the highest priority IP
+        found_ips.sort_by(|a, b| b.0.cmp(&a.0));
+        if let Some((_, ip)) = found_ips.first() {
+            return Some(ip.clone());
+        }
+    }
     None
 }
