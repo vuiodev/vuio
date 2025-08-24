@@ -194,10 +194,6 @@ docker run -d \
   vuio:latest
 ```
 
-Check documentation for [Docker](DOCKER.md).
-
-
-
 ### Quick Start
 ```bash
 # Run with default settings (scans ~/Videos, ~/Music, ~/Pictures)

@@ -72,45 +72,98 @@ impl SsdpSocket {
     
     /// Configure socket with optimized options for multicast support
     fn configure_socket_optimized(socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::io::AsRawFd;
-        
-        let fd = socket.as_raw_fd();
-        
-        // Enable SO_REUSEADDR (critical for Docker containers)
-        let optval: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
-        } else {
-            debug!("Enabled SO_REUSEADDR");
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            
+            let fd = socket.as_raw_fd();
+            
+            // Enable SO_REUSEADDR (critical for Docker containers)
+            let optval: libc::c_int = 1;
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_REUSEADDR,
+                    &optval as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&optval) as libc::socklen_t,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Enabled SO_REUSEADDR");
+            }
+            
+            // Enable SO_BROADCAST for better compatibility
+            let bcast: libc::c_int = 1;
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::SOL_SOCKET,
+                    libc::SO_BROADCAST,
+                    &bcast as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&bcast) as libc::socklen_t,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set SO_BROADCAST: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Enabled SO_BROADCAST");
+            }
+            
+            debug!("Applied optimized socket configuration");
         }
         
-        // Enable SO_BROADCAST for better compatibility
-        let bcast: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_BROADCAST,
-                &bcast as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&bcast) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!("Failed to set SO_BROADCAST: {}", std::io::Error::last_os_error());
-        } else {
-            debug!("Enabled SO_BROADCAST");
+        #[cfg(windows)]
+        {
+            // Windows socket configuration using platform-specific APIs
+            use std::os::windows::io::AsRawSocket;
+            
+            let socket_handle = socket.as_raw_socket();
+            
+            // Windows socket constants
+            const SOL_SOCKET: i32 = 0xffff;
+            const SO_REUSEADDR: i32 = 0x0004;
+            const SO_BROADCAST: i32 = 0x0020;
+            
+            // Enable SO_REUSEADDR on Windows
+            let optval: i32 = 1;
+            let ret = unsafe {
+                libc::setsockopt(
+                    socket_handle as usize,
+                    SOL_SOCKET,
+                    SO_REUSEADDR,
+                    &optval as *const _ as *const libc::c_char,
+                    std::mem::size_of_val(&optval) as libc::c_int,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set SO_REUSEADDR on Windows: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Enabled SO_REUSEADDR on Windows");
+            }
+            
+            // Enable SO_BROADCAST on Windows
+            let bcast: i32 = 1;
+            let ret = unsafe {
+                libc::setsockopt(
+                    socket_handle as usize,
+                    SOL_SOCKET,
+                    SO_BROADCAST,
+                    &bcast as *const _ as *const libc::c_char,
+                    std::mem::size_of_val(&bcast) as libc::c_int,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set SO_BROADCAST on Windows: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Enabled SO_BROADCAST on Windows");
+            }
+            
+            debug!("Applied optimized socket configuration on Windows");
         }
         
-        debug!("Applied optimized socket configuration");
         Ok(())
     }
     
@@ -153,64 +206,138 @@ impl SsdpSocket {
     
     /// Configure multicast-specific socket options
     fn configure_multicast_socket_options(socket: &UdpSocket, bind_addr: std::net::Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::io::AsRawFd;
-        
-        let fd = socket.as_raw_fd();
-        
-        // Set multicast TTL to 4 for standard range
-        let ttl: libc::c_int = 4;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_MULTICAST_TTL,
-                &ttl as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&ttl) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!("Failed to set IP_MULTICAST_TTL: {}", std::io::Error::last_os_error());
-        } else {
-            debug!("Set multicast TTL to 4");
-        }
-        
-        // Disable multicast loopback for efficiency
-        let loop_val: libc::c_int = 0;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_MULTICAST_LOOP,
-                &loop_val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&loop_val) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!("Failed to set IP_MULTICAST_LOOP: {}", std::io::Error::last_os_error());
-        } else {
-            debug!("Disabled multicast loopback");
-        }
-        
-        // Set multicast interface if not INADDR_ANY
-        if !bind_addr.is_unspecified() {
-            let mc_if = libc::in_addr { s_addr: u32::from(bind_addr).to_be() };
+        #[cfg(unix)]
+        {
+            use std::os::unix::io::AsRawFd;
+            
+            let fd = socket.as_raw_fd();
+            
+            // Set multicast TTL to 4 for standard range
+            let ttl: libc::c_int = 4;
             let ret = unsafe {
                 libc::setsockopt(
                     fd,
                     libc::IPPROTO_IP,
-                    libc::IP_MULTICAST_IF,
-                    &mc_if as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&mc_if) as libc::socklen_t,
+                    libc::IP_MULTICAST_TTL,
+                    &ttl as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&ttl) as libc::socklen_t,
                 )
             };
             if ret != 0 {
-                warn!("Failed to set IP_MULTICAST_IF: {}", std::io::Error::last_os_error());
+                warn!("Failed to set IP_MULTICAST_TTL: {}", std::io::Error::last_os_error());
             } else {
-                debug!("Set multicast interface to {}", bind_addr);
+                debug!("Set multicast TTL to 4");
             }
+            
+            // Disable multicast loopback for efficiency
+            let loop_val: libc::c_int = 0;
+            let ret = unsafe {
+                libc::setsockopt(
+                    fd,
+                    libc::IPPROTO_IP,
+                    libc::IP_MULTICAST_LOOP,
+                    &loop_val as *const _ as *const libc::c_void,
+                    std::mem::size_of_val(&loop_val) as libc::socklen_t,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set IP_MULTICAST_LOOP: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Disabled multicast loopback");
+            }
+            
+            // Set multicast interface if not INADDR_ANY
+            if !bind_addr.is_unspecified() {
+                let mc_if = libc::in_addr { s_addr: u32::from(bind_addr).to_be() };
+                let ret = unsafe {
+                    libc::setsockopt(
+                        fd,
+                        libc::IPPROTO_IP,
+                        libc::IP_MULTICAST_IF,
+                        &mc_if as *const _ as *const libc::c_void,
+                        std::mem::size_of_val(&mc_if) as libc::socklen_t,
+                    )
+                };
+                if ret != 0 {
+                    warn!("Failed to set IP_MULTICAST_IF: {}", std::io::Error::last_os_error());
+                } else {
+                    debug!("Set multicast interface to {}", bind_addr);
+                }
+            }
+            
+            debug!("Applied optimized multicast socket configuration");
         }
         
-        debug!("Applied optimized multicast socket configuration");
+        #[cfg(windows)]
+        {
+            // Windows multicast socket configuration
+            use std::os::windows::io::AsRawSocket;
+            
+            let socket_handle = socket.as_raw_socket();
+            
+            // Windows IP protocol constants
+            const IPPROTO_IP: i32 = 0;
+            const IP_MULTICAST_TTL: i32 = 10;
+            const IP_MULTICAST_LOOP: i32 = 11;
+            const IP_MULTICAST_IF: i32 = 9;
+            
+            // Set multicast TTL to 4 for standard range on Windows
+            let ttl: u32 = 4;
+            let ret = unsafe {
+                libc::setsockopt(
+                    socket_handle as usize,
+                    IPPROTO_IP,
+                    IP_MULTICAST_TTL,
+                    &ttl as *const _ as *const libc::c_char,
+                    std::mem::size_of_val(&ttl) as libc::c_int,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set IP_MULTICAST_TTL on Windows: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Set multicast TTL to 4 on Windows");
+            }
+            
+            // Disable multicast loopback for efficiency on Windows
+            let loop_val: u32 = 0;
+            let ret = unsafe {
+                libc::setsockopt(
+                    socket_handle as usize,
+                    IPPROTO_IP,
+                    IP_MULTICAST_LOOP,
+                    &loop_val as *const _ as *const libc::c_char,
+                    std::mem::size_of_val(&loop_val) as libc::c_int,
+                )
+            };
+            if ret != 0 {
+                warn!("Failed to set IP_MULTICAST_LOOP on Windows: {}", std::io::Error::last_os_error());
+            } else {
+                debug!("Disabled multicast loopback on Windows");
+            }
+            
+            // Set multicast interface if not INADDR_ANY (Windows specific)
+            if !bind_addr.is_unspecified() {
+                let addr_bytes = bind_addr.octets();
+                let in_addr = u32::from_be_bytes(addr_bytes);
+                let ret = unsafe {
+                    libc::setsockopt(
+                        socket_handle as usize,
+                        IPPROTO_IP,
+                        IP_MULTICAST_IF,
+                        &in_addr as *const _ as *const libc::c_char,
+                        std::mem::size_of_val(&in_addr) as libc::c_int,
+                    )
+                };
+                if ret != 0 {
+                    warn!("Failed to set IP_MULTICAST_IF on Windows: {}", std::io::Error::last_os_error());
+                } else {
+                    debug!("Set multicast interface to {} on Windows", bind_addr);
+                }
+            }
+            
+            debug!("Applied optimized multicast socket configuration on Windows");
+        }
+        
         Ok(())
     }
     
