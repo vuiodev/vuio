@@ -47,6 +47,12 @@ impl LinuxNetworkManager {
         match UdpSocket::bind(socket_addr).await {
             Ok(socket) => {
                 debug!("Successfully bound to port {} on Linux", port);
+                
+                // Set socket options for better multicast support (like MiniDLNA)
+                if let Err(e) = self.configure_multicast_socket(&socket) {
+                    warn!("Failed to configure multicast socket options: {}", e);
+                }
+                
                 Ok(socket)
             }
             Err(e) => {
@@ -64,6 +70,61 @@ impl LinuxNetworkManager {
                 }
             }
         }
+    }
+    
+    /// Configure socket for optimal multicast support (similar to MiniDLNA)
+    fn configure_multicast_socket(&self, socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::io::AsRawFd;
+        
+        let fd = socket.as_raw_fd();
+        
+        // Enable SO_REUSEADDR
+        let optval: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
+        }
+        
+        // Set multicast TTL
+        let ttl: libc::c_int = 4; // Same as MiniDLNA default
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_MULTICAST_TTL,
+                &ttl as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&ttl) as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!("Failed to set IP_MULTICAST_TTL: {}", std::io::Error::last_os_error());
+        }
+        
+        // Enable multicast loopback (important for Docker containers)
+        let loop_val: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::IPPROTO_IP,
+                libc::IP_MULTICAST_LOOP,
+                &loop_val as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&loop_val) as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!("Failed to set IP_MULTICAST_LOOP: {}", std::io::Error::last_os_error());
+        }
+        
+        debug!("Configured multicast socket options for optimal Docker compatibility");
+        Ok(())
     }
     
     /// Detect Linux firewall status
@@ -614,76 +675,14 @@ impl LinuxNetworkManager {
         namespaces
     }
     
-    /// Enable multicast on Linux socket with proper interface binding
-    async fn enable_multicast_linux(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
-        let (selected_interface_name, local_addr) = {
-            let selected_interface = if let Some(iface) = interface {
-                iface
-            } else {
-                // Use the first suitable interface
-                socket.interfaces.iter()
-                    .find(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
-                    .ok_or_else(|| PlatformError::NetworkConfig("No suitable interface for multicast on Linux".to_string()))?
-            };
-            
-            // For Docker containers, prioritize configured server IP
-            let effective_ip = if self.is_running_in_docker() {
-                if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
-                    if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
-                        info!("Docker detected: Using configured server IP {} for multicast instead of interface IP {}", 
-                              server_ip, selected_interface.ip_address);
-                        server_ip
-                    } else {
-                        selected_interface.ip_address
-                    }
-                } else {
-                    selected_interface.ip_address
-                }
-            } else {
-                selected_interface.ip_address
-            };
-            
-            (selected_interface.name.clone(), effective_ip)
-        };
-        
-        match socket.enable_multicast(group, local_addr).await {
-            Ok(()) => {
-                info!("Successfully enabled multicast on Linux for group {} via interface {} ({})", 
-                      group, selected_interface_name, local_addr);
-                Ok(())
-            }
-            Err(e) => {
-                warn!("Failed to enable multicast on Linux: {}", e);
-                
-                // Provide Linux-specific troubleshooting advice
-                let mut error_msg = format!("Multicast failed on Linux: {}", e);
-                
-                if !self.is_elevated() && self.requires_elevation(socket.port) {
-                    error_msg.push_str("\nTip: Try running with sudo if using a privileged port.");
-                }
-                
-                error_msg.push_str("\nTip: Check firewall settings (iptables, ufw, firewalld).");
-                error_msg.push_str("\nTip: Ensure the network interface supports multicast.");
-                error_msg.push_str(&format!("\nTip: Try using interface {} explicitly.", selected_interface_name));
-                error_msg.push_str("\nTip: Check if running in a network namespace that restricts multicast.");
-                
-                if self.is_running_in_docker() {
-                    error_msg.push_str("\nTip: Ensure Docker container is running with 'network_mode: host'.");
-                    error_msg.push_str("\nTip: Check that VUIO_SERVER_IP environment variable is set correctly.");
-                }
-                
-                Err(PlatformError::NetworkConfig(error_msg))
-            }
-        }
-    }
-}
 
-#[async_trait]
-impl NetworkManager for LinuxNetworkManager {
+
+}
     async fn create_ssdp_socket(&self) -> PlatformResult<SsdpSocket> {
         self.create_ssdp_socket_with_config(&self.config).await
     }
     
+    /// Create SSDP socket with MiniDLNA-style configuration for Docker compatibility
     async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket> {
         let mut _last_error = None;
         
@@ -699,12 +698,20 @@ impl NetworkManager for LinuxNetworkManager {
                     return Err(PlatformError::NetworkConfig("No suitable network interfaces found on Linux".to_string()));
                 }
                 
-                return Ok(SsdpSocket {
+                // Create MiniDLNA-style socket
+                let mut ssdp_socket = SsdpSocket {
                     socket,
                     port: config.primary_port,
                     interfaces: suitable_interfaces,
                     multicast_enabled: false,
-                });
+                };
+                
+                // Apply MiniDLNA-style configuration
+                if let Err(e) = Self::apply_minidlna_socket_config(&ssdp_socket.socket) {
+                    warn!("Failed to apply MiniDLNA socket configuration: {}", e);
+                }
+                
+                return Ok(ssdp_socket);
             }
             Err(e) => {
                 warn!("Primary port {} failed on Linux: {}", config.primary_port, e);
@@ -716,18 +723,25 @@ impl NetworkManager for LinuxNetworkManager {
         for &port in &config.fallback_ports {
             match self.try_bind_port_linux(port).await {
                 Ok(socket) => {
-                    info!("Using fallback port {} on Linux", port);
+                    info!("Using fallback port {} on Linux (MiniDLNA style)", port);
                     let interfaces = self.get_local_interfaces().await?;
                     let suitable_interfaces: Vec<_> = interfaces.into_iter()
                         .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
                         .collect();
                     
-                    return Ok(SsdpSocket {
+                    let mut ssdp_socket = SsdpSocket {
                         socket,
                         port,
                         interfaces: suitable_interfaces,
                         multicast_enabled: false,
-                    });
+                    };
+                    
+                    // Apply MiniDLNA-style configuration
+                    if let Err(e) = Self::apply_minidlna_socket_config(&ssdp_socket.socket) {
+                        warn!("Failed to apply MiniDLNA socket configuration: {}", e);
+                    }
+                    
+                    return Ok(ssdp_socket);
                 }
                 Err(e) => {
                     debug!("Fallback port {} failed on Linux: {}", port, e);
@@ -740,6 +754,46 @@ impl NetworkManager for LinuxNetworkManager {
         Err(_last_error.unwrap_or_else(|| 
             PlatformError::NetworkConfig("All ports failed on Linux".to_string())
         ))
+    }
+    
+    /// Apply MiniDLNA-style socket configuration
+    fn apply_minidlna_socket_config(socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::io::AsRawFd;
+        
+        let fd = socket.as_raw_fd();
+        
+        // Enable SO_REUSEADDR (critical for Docker)
+        let optval: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_REUSEADDR,
+                &optval as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&optval) as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
+        }
+        
+        // Enable SO_BROADCAST
+        let bcast: libc::c_int = 1;
+        let ret = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                libc::SO_BROADCAST,
+                &bcast as *const _ as *const libc::c_void,
+                std::mem::size_of_val(&bcast) as libc::socklen_t,
+            )
+        };
+        if ret != 0 {
+            warn!("Failed to set SO_BROADCAST: {}", std::io::Error::last_os_error());
+        }
+        
+        debug!("Applied MiniDLNA-style socket configuration");
+        Ok(())
     }
     
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
@@ -768,7 +822,113 @@ impl NetworkManager for LinuxNetworkManager {
     }
     
     async fn join_multicast_group(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
-        self.enable_multicast_linux(socket, group, interface).await
+        // MiniDLNA approach: Join multicast on all suitable interfaces
+        let mut successful_joins = 0;
+        let mut last_error = None;
+        
+        if let Some(specific_interface) = interface {
+            // Join on specific interface only
+            match self.enable_multicast_linux_single(socket, group, specific_interface).await {
+                Ok(()) => {
+                    info!("Successfully joined multicast group {} on interface {} (MiniDLNA style)", 
+                          group, specific_interface.name);
+                    return Ok(());
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
+        } else {
+            // Join on all suitable interfaces (MiniDLNA approach)
+            for iface in &socket.interfaces {
+                if !iface.is_loopback && iface.is_up && iface.supports_multicast {
+                    match self.enable_multicast_linux_single(socket, group, iface).await {
+                        Ok(()) => {
+                            info!("Successfully joined multicast group {} on interface {} (MiniDLNA style)", 
+                                  group, iface.name);
+                            successful_joins += 1;
+                        }
+                        Err(e) => {
+                            warn!("Failed to join multicast group {} on interface {}: {}", 
+                                  group, iface.name, e);
+                            last_error = Some(e);
+                        }
+                    }
+                }
+            }
+            
+            if successful_joins > 0 {
+                info!("Successfully joined multicast on {}/{} interfaces (MiniDLNA style)", 
+                      successful_joins, socket.interfaces.len());
+                return Ok(());
+            } else {
+                return Err(last_error.unwrap_or_else(|| 
+                    PlatformError::NetworkConfig("Failed to join multicast on any interface".to_string())
+                ));
+            }
+        }
+    }
+    
+    /// Join multicast on a single interface (MiniDLNA style)
+    async fn enable_multicast_linux_single(&self, socket: &mut SsdpSocket, group: IpAddr, interface: &NetworkInterface) -> PlatformResult<()> {
+        let effective_ip = if self.is_running_in_docker() {
+            // Priority 1: Use configured server IP if available and not loopback
+            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+                if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
+                    if !server_ip.is_loopback() {
+                        info!("Docker detected: Using configured server IP {} for multicast instead of interface IP {} (MiniDLNA style)", 
+                              server_ip, interface.ip_address);
+                        server_ip
+                    } else {
+                        // Use ANY address for loopback server IP in Docker (like MiniDLNA with INADDR_ANY)
+                        info!("Docker detected with loopback server IP: Using INADDR_ANY for multicast (MiniDLNA style)");
+                        "0.0.0.0".parse().unwrap()
+                    }
+                } else {
+                    interface.ip_address
+                }
+            } else if interface.ip_address.is_loopback() {
+                // If interface IP is loopback and no server IP configured, use ANY (MiniDLNA approach)
+                info!("Docker detected with loopback interface IP: Using INADDR_ANY for multicast (MiniDLNA style)");
+                "0.0.0.0".parse().unwrap()
+            } else {
+                interface.ip_address
+            }
+        } else {
+            interface.ip_address
+        };
+        
+        match socket.enable_multicast(group, effective_ip).await {
+            Ok(()) => {
+                info!("Successfully enabled multicast on Linux for group {} via interface {} ({}) - MiniDLNA style", 
+                      group, interface.name, effective_ip);
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to enable multicast on Linux interface {}: {}", interface.name, e);
+                
+                // Provide Linux-specific troubleshooting advice
+                let mut error_msg = format!("Multicast failed on Linux interface {}: {}", interface.name, e);
+                
+                if !self.is_elevated() && self.requires_elevation(socket.port) {
+                    error_msg.push_str("\nTip: Try running with sudo if using a privileged port.");
+                }
+                
+                error_msg.push_str("\nTip: Check firewall settings (iptables, ufw, firewalld).");
+                error_msg.push_str("\nTip: Ensure the network interface supports multicast.");
+                error_msg.push_str(&format!("\nTip: Try using interface {} explicitly.", interface.name));
+                error_msg.push_str("\nTip: Check if running in a network namespace that restricts multicast.");
+                
+                if self.is_running_in_docker() {
+                    error_msg.push_str("\nTip: Ensure Docker container is running with 'network_mode: host'.");
+                    error_msg.push_str("\nTip: Check that VUIO_SERVER_IP environment variable is set correctly.");
+                    error_msg.push_str("\nTip: Consider using 'docker run --privileged' for multicast support.");
+                    error_msg.push_str("\nTip: MiniDLNA-style configuration applied for better Docker compatibility.");
+                }
+                
+                Err(PlatformError::NetworkConfig(error_msg))
+            }
+        }
     }
     
     async fn send_multicast(&self, socket: &SsdpSocket, data: &[u8], group: SocketAddr) -> PlatformResult<()> {

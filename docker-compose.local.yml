@@ -11,6 +11,14 @@ services:
     restart: unless-stopped
     network_mode: host
     
+    # Add capabilities for better multicast support
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    
+    # Ensure container has access to network interfaces
+    privileged: false  # Start with false, can be changed to true if needed
+    
     volumes:
       # Persist configuration and database
       - ./vuio-config:/config

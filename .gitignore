@@ -3,6 +3,7 @@
 /builds/
 **/*.rs.bk
 /vuio-config/
+/minidlna/
 
 # IDEs and editors
 /.idea/
