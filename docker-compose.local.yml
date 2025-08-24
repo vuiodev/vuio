@@ -28,15 +28,15 @@ services:
       - VUIO_SERVER_NAME=VuIO
       - VUIO_BIND_INTERFACE=0.0.0.0
       
-      # Set the correct network interface for DLNA discovery
-      - VUIO_SSDP_INTERFACE=Auto
+      # Set the correct network interface for DLNA discovery  
+      # Force specific network interface for multicast
+      - VUIO_SSDP_INTERFACE=enp12s0
       
-      # Set server IP for DLNA announcements (Docker/container environments)
-      # On macOS Docker Desktop, uncomment and set this to your Mac's IP address for DLNA discovery
-      # Find your IP: ifconfig | grep "inet " | grep -v 127.0.0.1
-      # - VUIO_SERVER_IP=192.168.1.126  # Replace with your actual Mac IP
+      # Set server IP for DLNA announcements (Required for Linux Docker)
+      # This is critical for proper DLNA discovery when using host networking
+      - VUIO_SERVER_IP=192.168.1.60  # Your Linux host IP address
       
-      # Set SSDP port to avoid OrbStack conflict
+      # Set SSDP port to avoid conflicts (port 1900 is in use)
       - VUIO_SSDP_PORT=1902
       
       # Enable debug logging

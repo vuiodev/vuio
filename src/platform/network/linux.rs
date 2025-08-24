@@ -215,7 +215,7 @@ impl LinuxNetworkManager {
     fn parse_ip_addr_output(&self, output: &str) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
         let mut current_interface: Option<String> = None;
-        let mut current_ip: Option<IpAddr> = None;
+        let mut current_ips: Vec<IpAddr> = Vec::new();
         let mut is_up = false;
         let mut supports_multicast = false;
         let mut is_loopback = false;
@@ -223,19 +223,26 @@ impl LinuxNetworkManager {
         for line in output.lines() {
             let line = line.trim();
             
-            // Interface line: "2: eth0: <BROADCAST,MULTicast,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000"
+            // Interface line: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000"
             if let Some(colon_pos) = line.find(':') {
                 if let Some(second_colon) = line[colon_pos + 1..].find(':') {
                     let second_colon_pos = colon_pos + 1 + second_colon;
                     
-                    // Save previous interface
-                    if let (Some(name), Some(ip)) = (&current_interface, &current_ip) {
-                        if !name.starts_with("lo") { // Skip loopback
+                    // Save previous interface with the best IP
+                    if let Some(name) = &current_interface {
+                        if !name.starts_with("lo") && !current_ips.is_empty() {
+                            // Choose the best IP address (prefer non-localhost)
+                            let best_ip = current_ips.iter()
+                                .find(|ip| !ip.is_loopback())
+                                .or_else(|| current_ips.first())
+                                .copied()
+                                .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+                            
                             let interface_type = self.determine_linux_interface_type(name);
                             interfaces.push(NetworkInterface {
                                 name: name.clone(),
-                                ip_address: *ip,
-                                is_loopback,
+                                ip_address: best_ip,
+                                is_loopback: is_loopback && best_ip.is_loopback(),
                                 is_up,
                                 supports_multicast,
                                 interface_type,
@@ -246,7 +253,7 @@ impl LinuxNetworkManager {
                     // Parse new interface
                     let interface_name = line[colon_pos + 1..second_colon_pos].trim().to_string();
                     current_interface = Some(interface_name.clone());
-                    current_ip = None;
+                    current_ips.clear();
                     is_loopback = interface_name.starts_with("lo");
                     
                     // Parse flags
@@ -268,7 +275,7 @@ impl LinuxNetworkManager {
                         // Remove CIDR notation if present
                         let ip_str = ip_part.split('/').next().unwrap_or(ip_part);
                         if let Ok(ip) = ip_str.parse::<IpAddr>() {
-                            current_ip = Some(ip);
+                            current_ips.push(ip);
                         }
                     }
                 }
@@ -276,17 +283,34 @@ impl LinuxNetworkManager {
         }
         
         // Don't forget the last interface
-        if let (Some(name), Some(ip)) = (current_interface, current_ip) {
-            if !name.starts_with("lo") { // Skip loopback
+        if let Some(name) = current_interface {
+            if !name.starts_with("lo") && !current_ips.is_empty() {
+                // Choose the best IP address (prefer non-localhost)
+                let best_ip = current_ips.iter()
+                    .find(|ip| !ip.is_loopback())
+                    .or_else(|| current_ips.first())
+                    .copied()
+                    .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
+                
                 let interface_type = self.determine_linux_interface_type(&name);
                 interfaces.push(NetworkInterface {
                     name,
-                    ip_address: ip,
-                    is_loopback,
+                    ip_address: best_ip,
+                    is_loopback: is_loopback && best_ip.is_loopback(),
                     is_up,
                     supports_multicast,
                     interface_type,
                 });
+            }
+        }
+        
+        // If we still don't have any good interfaces, try a different approach
+        if interfaces.is_empty() || interfaces.iter().all(|i| i.ip_address.is_loopback()) {
+            debug!("Standard interface detection failed, trying alternative methods");
+            if let Ok(alt_interfaces) = self.get_interfaces_alternative_method() {
+                if !alt_interfaces.is_empty() {
+                    return Ok(alt_interfaces);
+                }
             }
         }
         
@@ -333,6 +357,115 @@ impl LinuxNetworkManager {
         Ok(interfaces)
     }
     
+    /// Alternative method to get network interfaces when standard detection fails
+    fn get_interfaces_alternative_method(&self) -> PlatformResult<Vec<NetworkInterface>> {
+        let mut interfaces = Vec::new();
+        
+        // Try to get the default route interface and its IP
+        if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
+            if output.status.success() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines() {
+                    if line.contains("default") && line.contains("dev") {
+                        // Parse: "default via 192.168.1.1 dev enp12s0 proto dhcp metric 100"
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let Some(dev_idx) = parts.iter().position(|&x| x == "dev") {
+                            if let Some(interface_name) = parts.get(dev_idx + 1) {
+                                if let Some(ip) = self.get_interface_ip_robust(interface_name) {
+                                    let interface_type = self.determine_linux_interface_type(interface_name);
+                                    interfaces.push(NetworkInterface {
+                                        name: interface_name.to_string(),
+                                        ip_address: ip,
+                                        is_loopback: false,
+                                        is_up: true,
+                                        supports_multicast: true,
+                                        interface_type,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        // If still no interfaces, try to use the configured server IP with best guess interface
+        if interfaces.is_empty() {
+            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+                if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
+                    // Find the most likely interface name
+                    let interface_name = if let Ok(output) = Command::new("ip").args(&["route", "get", &server_ip_str]).output() {
+                        let output_str = String::from_utf8_lossy(&output.stdout);
+                        output_str.lines()
+                            .find_map(|line| {
+                                if line.contains("dev") {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if let Some(dev_idx) = parts.iter().position(|&x| x == "dev") {
+                                        parts.get(dev_idx + 1).map(|s| s.to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                            .unwrap_or_else(|| "enp12s0".to_string()) // Fallback based on your logs
+                    } else {
+                        "enp12s0".to_string()
+                    };
+                    
+                    let interface_type = self.determine_linux_interface_type(&interface_name);
+                    interfaces.push(NetworkInterface {
+                        name: interface_name,
+                        ip_address: server_ip,
+                        is_loopback: false,
+                        is_up: true,
+                        supports_multicast: true,
+                        interface_type,
+                    });
+                }
+            }
+        }
+        
+        Ok(interfaces)
+    }
+    
+    /// Get IP address for a specific interface with more robust methods
+    fn get_interface_ip_robust(&self, interface_name: &str) -> Option<IpAddr> {
+        // First try the standard method
+        if let Some(ip) = self.get_interface_ip(interface_name) {
+            if !ip.is_loopback() {
+                return Some(ip);
+            }
+        }
+        
+        // Try using ip route to find the source IP for this interface
+        if let Ok(output) = Command::new("ip")
+            .args(&["route", "show", "dev", interface_name])
+            .output()
+        {
+            if output.status.success() {
+                let output_str = String::from_utf8_lossy(&output.stdout);
+                for line in output_str.lines() {
+                    if line.contains("src") {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let Some(src_idx) = parts.iter().position(|&x| x == "src") {
+                            if let Some(ip_str) = parts.get(src_idx + 1) {
+                                if let Ok(ip) = ip_str.parse::<IpAddr>() {
+                                    if !ip.is_loopback() {
+                                        return Some(ip);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        None
+    }
+
     /// Get IP address for a specific interface
     fn get_interface_ip(&self, interface_name: &str) -> Option<IpAddr> {
         match Command::new("ip")
