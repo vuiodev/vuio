@@ -47,20 +47,20 @@ pub struct SsdpSocket {
 }
 
 impl SsdpSocket {
-    /// Create a new SSDP socket bound to the specified port with MiniDLNA-style configuration
+    /// Create a new SSDP socket bound to the specified port with optimized configuration
     pub async fn new(port: u16, interfaces: Vec<NetworkInterface>) -> PlatformResult<Self> {
-        // Like MiniDLNA: bind to INADDR_ANY for receive socket
+        // Bind to INADDR_ANY for receive socket
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port));
         let socket = UdpSocket::bind(socket_addr)
             .await
             .map_err(|e| PlatformError::NetworkConfig(format!("Failed to bind to port {}: {}", port, e)))?;
         
-        // Apply MiniDLNA-style socket options
-        if let Err(e) = Self::configure_socket_like_minidlna(&socket) {
-            warn!("Failed to configure socket options like MiniDLNA: {}", e);
+        // Apply optimized socket options
+        if let Err(e) = Self::configure_socket_optimized(&socket) {
+            warn!("Failed to configure socket options: {}", e);
         }
         
-        debug!("Created SSDP socket bound to port {} with MiniDLNA-style configuration", port);
+        debug!("Created SSDP socket bound to port {} with optimized configuration", port);
         
         Ok(SsdpSocket {
             socket,
@@ -70,8 +70,8 @@ impl SsdpSocket {
         })
     }
     
-    /// Configure socket with MiniDLNA-style options for optimal multicast support
-    fn configure_socket_like_minidlna(socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
+    /// Configure socket with optimized options for multicast support
+    fn configure_socket_optimized(socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::io::AsRawFd;
         
         let fd = socket.as_raw_fd();
@@ -90,7 +90,7 @@ impl SsdpSocket {
         if ret != 0 {
             warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
         } else {
-            debug!("Enabled SO_REUSEADDR (MiniDLNA style)");
+            debug!("Enabled SO_REUSEADDR");
         }
         
         // Enable SO_BROADCAST for better compatibility
@@ -107,27 +107,27 @@ impl SsdpSocket {
         if ret != 0 {
             warn!("Failed to set SO_BROADCAST: {}", std::io::Error::last_os_error());
         } else {
-            debug!("Enabled SO_BROADCAST (MiniDLNA style)");
+            debug!("Enabled SO_BROADCAST");
         }
         
-        debug!("Applied MiniDLNA-style socket configuration");
+        debug!("Applied optimized socket configuration");
         Ok(())
     }
     
-    /// Enable multicast on this socket for the specified group (MiniDLNA style)
+    /// Enable multicast on this socket for the specified group
     pub async fn enable_multicast(&mut self, multicast_addr: IpAddr, local_addr: IpAddr) -> PlatformResult<()> {
         match (multicast_addr, local_addr) {
             (IpAddr::V4(multi_v4), IpAddr::V4(local_v4)) => {
-                // MiniDLNA approach: For receive socket, join multicast on each interface
+                // For receive socket, join multicast on each interface
                 // For Docker containers, use INADDR_ANY if local is loopback
                 let bind_addr = if local_v4.is_loopback() {
-                    info!("Docker container detected: Using INADDR_ANY instead of loopback {} for multicast binding (MiniDLNA style)", local_v4);
+                    info!("Docker container detected: Using INADDR_ANY instead of loopback {} for multicast binding", local_v4);
                     std::net::Ipv4Addr::UNSPECIFIED
                 } else {
                     local_v4
                 };
                 
-                // Apply additional MiniDLNA-style socket options for multicast
+                // Apply additional optimized socket options for multicast
                 if let Err(e) = Self::configure_multicast_socket_options(&self.socket, bind_addr) {
                     warn!("Failed to configure multicast socket options: {}", e);
                 }
@@ -135,7 +135,7 @@ impl SsdpSocket {
                 self.socket.join_multicast_v4(multi_v4, bind_addr)
                     .map_err(|e| PlatformError::NetworkConfig(format!("Failed to join multicast group: {}", e)))?;
                 self.multicast_enabled = true;
-                info!("Enabled multicast on {}:{} for group {} (bind addr: {}) - MiniDLNA style", local_v4, self.port, multi_v4, bind_addr);
+                info!("Enabled multicast on {}:{} for group {} (bind addr: {})", local_v4, self.port, multi_v4, bind_addr);
                 Ok(())
             }
             (IpAddr::V6(multi_v6), _) => {
@@ -144,20 +144,20 @@ impl SsdpSocket {
                 self.socket.join_multicast_v6(&multi_v6, 0)
                     .map_err(|e| PlatformError::NetworkConfig(format!("Failed to join IPv6 multicast group: {}", e)))?;
                 self.multicast_enabled = true;
-                info!("Enabled IPv6 multicast on port {} for group {} - MiniDLNA style", self.port, multi_v6);
+                info!("Enabled IPv6 multicast on port {} for group {}", self.port, multi_v6);
                 Ok(())
             }
             _ => Err(PlatformError::NetworkConfig("IP version mismatch for multicast".to_string()))
         }
     }
     
-    /// Configure multicast-specific socket options like MiniDLNA
+    /// Configure multicast-specific socket options
     fn configure_multicast_socket_options(socket: &UdpSocket, bind_addr: std::net::Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::io::AsRawFd;
         
         let fd = socket.as_raw_fd();
         
-        // Set multicast TTL to 4 (same as MiniDLNA)
+        // Set multicast TTL to 4 for standard range
         let ttl: libc::c_int = 4;
         let ret = unsafe {
             libc::setsockopt(
@@ -171,10 +171,10 @@ impl SsdpSocket {
         if ret != 0 {
             warn!("Failed to set IP_MULTICAST_TTL: {}", std::io::Error::last_os_error());
         } else {
-            debug!("Set multicast TTL to 4 (MiniDLNA style)");
+            debug!("Set multicast TTL to 4");
         }
         
-        // Disable multicast loopback for efficiency (like MiniDLNA notify sockets)
+        // Disable multicast loopback for efficiency
         let loop_val: libc::c_int = 0;
         let ret = unsafe {
             libc::setsockopt(
@@ -188,7 +188,7 @@ impl SsdpSocket {
         if ret != 0 {
             warn!("Failed to set IP_MULTICAST_LOOP: {}", std::io::Error::last_os_error());
         } else {
-            debug!("Disabled multicast loopback (MiniDLNA style)");
+            debug!("Disabled multicast loopback");
         }
         
         // Set multicast interface if not INADDR_ANY
@@ -206,11 +206,11 @@ impl SsdpSocket {
             if ret != 0 {
                 warn!("Failed to set IP_MULTICAST_IF: {}", std::io::Error::last_os_error());
             } else {
-                debug!("Set multicast interface to {} (MiniDLNA style)", bind_addr);
+                debug!("Set multicast interface to {}", bind_addr);
             }
         }
         
-        debug!("Applied MiniDLNA-style multicast socket configuration");
+        debug!("Applied optimized multicast socket configuration");
         Ok(())
     }
     

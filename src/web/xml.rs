@@ -30,7 +30,7 @@ fn get_server_ip(state: &AppState) -> String {
         }
     }
     
-    // Auto-detect the primary network interface IP (like MiniDLNA does)
+    // Auto-detect the primary network interface IP
     if let Some(ip) = get_primary_interface_ip_sync() {
         return ip;
     }
@@ -84,7 +84,7 @@ fn get_primary_interface_ip_sync() -> Option<String> {
             if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
                 if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
                     if let Some(ip) = ip_part.split('/').next() {
-                        // Prefer private network ranges (like MiniDLNA does)
+                        // Prefer private network ranges for local discovery
                         if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.") {
                             return Some(ip.to_string());
                         }
