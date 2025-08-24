@@ -1,1 +1,0 @@
-This is a sample media file for testing DLNA server functionality.
