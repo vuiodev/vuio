@@ -32,9 +32,9 @@ services:
       - VUIO_SSDP_INTERFACE=Auto
       
       # Set server IP for DLNA announcements (Docker/container environments)
-      # On macOS Docker Desktop, set this to your Mac's IP address for DLNA discovery
+      # On macOS Docker Desktop, uncomment and set this to your Mac's IP address for DLNA discovery
       # Find your IP: ifconfig | grep "inet " | grep -v 127.0.0.1
-      - VUIO_SERVER_IP=192.168.1.126  # Replace with your actual Mac IP
+      # - VUIO_SERVER_IP=192.168.1.126  # Replace with your actual Mac IP
       
       # Set SSDP port to avoid OrbStack conflict
       - VUIO_SSDP_PORT=1902

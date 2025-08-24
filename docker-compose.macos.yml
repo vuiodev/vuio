@@ -38,10 +38,11 @@ services:
       - VUIO_SSDP_INTERFACE=eth0
       - VUIO_SSDP_PORT=1902
       
-      # CRITICAL: Set this to your Mac's actual IP address
+      # CRITICAL: Set this to your Mac's actual IP address for DLNA discovery
       # Find it with: ifconfig | grep "inet " | grep -v 127.0.0.1
-      # This tells DLNA clients where to connect back to
-      - VUIO_SERVER_IP=host.docker.internal  # Special Docker Desktop hostname
+      # Uncomment and set your actual IP:
+      # - VUIO_SERVER_IP=192.168.1.126  # Replace with your actual Mac IP
+      # Note: host.docker.internal may not work for DLNA clients
       
       # Enable debug logging to troubleshoot networking
       - RUST_LOG=debug

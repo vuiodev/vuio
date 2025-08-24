@@ -138,7 +138,7 @@ Use `docker-compose.macvlan.yml` for this setup.
 | `VUIO_PORT` | 8080 | HTTP server port |
 | `VUIO_SERVER_NAME` | VuIO | DLNA server name |
 | `VUIO_BIND_INTERFACE` | 0.0.0.0 | Server bind interface |
-| `VUIO_SERVER_IP` | auto-detect | Specific IP for DLNA announcements |
+| `VUIO_SERVER_IP` | auto-detect | Optional: Set specific IP for DLNA announcements (only needed if auto-detection fails) |
 | `VUIO_SSDP_INTERFACE` | Auto | SSDP multicast interface |
 | `VUIO_MEDIA_DIR` | /media | Media directory path |
 
@@ -193,12 +193,12 @@ volumes:
    ```yaml
    - VUIO_SSDP_INTERFACE=eth0  # Use your actual interface
    ```
-5. Set specific server IP for Docker environments:
+5. Set specific server IP for Docker environments (only if auto-detection fails):
    ```yaml
    - VUIO_SERVER_IP=192.168.1.100  # Use your host machine's IP
    ```
 
-**Note:** The `VUIO_SERVER_IP` variable is particularly useful in Docker environments where the container's internal IP differs from the host machine's IP that DLNA clients need to connect to. This removes the need for complex network interface detection and provides a reliable way to specify the correct IP for DLNA announcements.
+**Note:** The `VUIO_SERVER_IP` variable should only be set when the application's automatic IP detection fails. VuIO first tries to use any explicitly configured server IP, then falls back to the primary network interface detected at startup. This variable is particularly useful in Docker environments where the container's internal IP differs from the host machine's IP that DLNA clients need to connect to, but should only be used as a last resort when automatic detection doesn't work properly.
 
 ### Configuration File Issues
 

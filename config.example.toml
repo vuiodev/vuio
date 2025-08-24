@@ -12,7 +12,7 @@ port = 8080
 interface = "0.0.0.0"
 name = "VuIO Server"
 uuid = "auto-generated-on-first-run"
-# ip = "192.168.1.100"  # Optional: Set specific IP for DLNA announcements (useful for Docker)
+# ip = "192.168.1.100"  # Optional: Set specific IP for DLNA announcements (auto-detected if not set)
 
 [network]
 ssdp_port = 1900
