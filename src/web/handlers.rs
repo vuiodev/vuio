@@ -6,14 +6,14 @@ use crate::{
 use axum::{
     body::Body,
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode, Method},
+    http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
 use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 pub async fn root_handler() -> &'static str {
     "VuIO Media Server"
@@ -54,17 +54,71 @@ pub async fn content_directory_control(
     if body.contains("<u:Browse") {
         let object_id = get_object_id(&body);
         info!("Browse request for ObjectID: {}", object_id);
-        let media_files = state.media_files.read().await;
-        let response = generate_browse_response(object_id, &media_files, &state);
-        (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                (header::HeaderName::from_static("ext"), ""),
-            ],
-            response,
-        )
-            .into_response()
+
+        // Handle root browse request (ObjectID "0")
+        if object_id == "0" {
+            // For the root, we typically return the top-level containers (Video, Audio, Image).
+            // The generate_browse_response function should be smart enough to create these
+            // when given an object_id of "0" and empty lists of subdirectories and files.
+            let response = generate_browse_response("0", &[], &[], &state);
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                    (header::HeaderName::from_static("ext"), ""),
+                ],
+                response,
+            )
+                .into_response();
+        }
+
+        // Determine media type filter and path prefix from ObjectID
+        let (media_type_filter, path_prefix_str) = if object_id.starts_with("video") {
+            ("video/", object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/'))
+        } else if object_id.starts_with("audio") {
+            ("audio/", object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/'))
+        } else if object_id.starts_with("image") {
+            ("image/", object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/'))
+        } else {
+            // This case might happen for deeper browsing or custom object IDs.
+            // Assume no specific type filter for the database query, and the object_id itself
+            // represents the path relative to the media root.
+            ("", object_id)
+        };
+
+        // Determine the base path for the media type.
+        // For now, we assume all media is under one primary root.
+        let media_root = state.config.get_primary_media_dir();
+        let browse_path = if path_prefix_str.is_empty() {
+            media_root.clone()
+        } else {
+            media_root.join(path_prefix_str)
+        };
+        
+        // Query the database for the directory listing
+        match state.database.get_directory_listing(&browse_path, media_type_filter).await {
+            Ok((subdirectories, files)) => {
+                let response = generate_browse_response(object_id, &subdirectories, &files, &state);
+                (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    response,
+                )
+                    .into_response()
+            }
+            Err(e) => {
+                error!("Error getting directory listing for {}: {}", object_id, e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                    "Error browsing content".to_string(),
+                )
+                    .into_response()
+            }
+        }
     } else {
         (
             StatusCode::NOT_IMPLEMENTED,

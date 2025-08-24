@@ -1,8 +1,7 @@
 // src\web\xml.rs
-use crate::{database::MediaFile, state::AppState};
-use std::{
-    collections::HashSet,
-    path::{Component, Path, PathBuf},
+use crate::{
+    database::{MediaDirectory, MediaFile},
+    state::AppState,
 };
 use tracing::warn;
 
@@ -176,11 +175,13 @@ pub fn generate_scpd_xml() -> String {
 
 pub fn generate_browse_response(
     object_id: &str,
+    subdirectories: &[MediaDirectory],
     files: &[MediaFile],
     state: &AppState,
 ) -> String {
     let server_ip = get_server_ip(state);
     let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">"#);
+
     let number_returned = if object_id == "0" {
         // Root directory: show containers for media types
         didl.push_str(r#"<container id="video" parentID="0" restricted="1"><dc:title>Video</dc:title><upnp:class>object.container</upnp:class></container>"#);
@@ -188,93 +189,26 @@ pub fn generate_browse_response(
         didl.push_str(r#"<container id="image" parentID="0" restricted="1"><dc:title>Pictures</dc:title><upnp:class>object.container</upnp:class></container>"#);
         3
     } else {
-        let mut sub_containers = HashSet::new();
-        let mut items = Vec::new();
-
-        let (media_type_filter, path_prefix_str) = if object_id.starts_with("video") {
-            ("video/", object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/'))
-        } else if object_id.starts_with("audio") {
-            ("audio/", object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/'))
-        } else if object_id.starts_with("image") {
-            ("image/", object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/'))
-        } else {
-            ("", "")
-        };
-        
-        let media_root = state.config.get_primary_media_dir();
-        // Create a Path from the ObjectID's path part for reliable comparison
-        let browse_path = Path::new(path_prefix_str);
-
-        tracing::info!("Browse request - media_root: {:?}, browse_path: {:?}, media_type_filter: {}", media_root, browse_path, media_type_filter);
-        tracing::info!("Total files to filter: {}", files.len());
-
-        for file in files.iter().filter(|f| f.mime_type.starts_with(media_type_filter)) {
-            tracing::debug!("Processing file: {:?} with mime_type: {}", file.path, file.mime_type);
-            
-            // Try to get relative path from media_root, handling case sensitivity and path normalization
-            let relative_path_result = if cfg!(windows) {
-                // On Windows, do case-insensitive comparison
-                let file_path_lower = file.path.to_string_lossy().to_lowercase();
-                let media_root_lower = media_root.to_string_lossy().to_lowercase();
-                
-                if file_path_lower.starts_with(&media_root_lower) {
-                    // Manually strip the prefix and create a relative path
-                    let remaining = &file.path.to_string_lossy()[media_root.to_string_lossy().len()..];
-                    let remaining = remaining.trim_start_matches(['/', '\\']);
-                    if remaining.is_empty() {
-                        Ok(PathBuf::new())
-                    } else {
-                        Ok(PathBuf::from(remaining))
-                    }
-                } else {
-                    Err(())
-                }
-            } else {
-                // On Unix systems, use standard strip_prefix
-                file.path.strip_prefix(&media_root).map(|p| p.to_path_buf()).map_err(|_| ())
-            };
-            
-            if let Ok(relative_path) = relative_path_result {
-                tracing::debug!("Relative path: {:?}", relative_path);
-                if let Some(parent_path) = relative_path.parent() {
-                    tracing::debug!("Parent path: {:?}, browse_path: {:?}", parent_path, browse_path);
-                    // Check if the file is a direct child of the directory we're browsing
-                    if parent_path == browse_path {
-                        tracing::debug!("Adding file as direct child: {:?}", file.filename);
-                        items.push(file);
-                    } 
-                    // Check if the file is in an immediate subdirectory
-                    else if parent_path.starts_with(browse_path) {
-                        if let Ok(path_after_browse) = parent_path.strip_prefix(browse_path) {
-                            if let Some(Component::Normal(name)) = path_after_browse.components().next() {
-                                sub_containers.insert(name.to_string_lossy().to_string());
-                            }
-                        }
-                    }
-                }
-            } else {
-                tracing::debug!("Failed to strip prefix from file path: {:?}", file.path);
-            }
-        }
-        
-        // Add containers to DIDL
-        let mut sorted_containers: Vec<_> = sub_containers.into_iter().collect();
-        sorted_containers.sort_by_key(|a| a.to_lowercase());
-        for container_name in &sorted_containers {
-            let container_id = format!("{}/{}", object_id.trim_end_matches('/'), container_name);
+        // Add sub-containers to DIDL
+        for container in subdirectories {
+            let container_id = format!("{}/{}", object_id.trim_end_matches('/'), container.name);
             didl.push_str(&format!(
                 r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class></container>"#,
                 xml_escape(&container_id),
                 xml_escape(object_id),
-                xml_escape(container_name)
+                xml_escape(&container.name)
             ));
         }
 
         // Add items to DIDL
-        items.sort_by_key(|f| f.filename.to_lowercase());
-        for file in &items {
+        for file in files {
             let file_id = file.id.unwrap_or(0);
-            let url = format!("http://{}:{}/media/{}", server_ip, state.config.server.port, file_id);
+            let url = format!(
+                "http://{}:{}/media/{}",
+                server_ip,
+                state.config.server.port,
+                file_id
+            );
             let upnp_class = get_upnp_class(&file.mime_type);
             didl.push_str(&format!(
                 r#"<item id="{id}" parentID="{parent_id}" restricted="1">
@@ -291,8 +225,8 @@ pub fn generate_browse_response(
                 url = xml_escape(&url)
             ));
         }
-        
-        sorted_containers.len() + items.len()
+
+        subdirectories.len() + files.len()
     };
 
     didl.push_str("</DIDL-Lite>");

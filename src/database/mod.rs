@@ -1,8 +1,16 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use sqlx::{Row, SqlitePool};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+/// Represents a subdirectory in the media library.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct MediaDirectory {
+    pub path: PathBuf,
+    pub name: String,
+}
 
 /// Enhanced MediaFile structure for database storage
 #[derive(Clone, Debug)]
@@ -95,6 +103,13 @@ pub trait DatabaseManager: Send + Sync {
     /// Get all files in a specific directory
     async fn get_files_in_directory(&self, dir: &Path) -> Result<Vec<MediaFile>>;
 
+    /// Get directory listing (subdirectories and files) for a given path and media type
+    async fn get_directory_listing(
+        &self,
+        parent_path: &Path,
+        media_type_filter: &str,
+    ) -> Result<(Vec<MediaDirectory>, Vec<MediaFile>)>;
+
     /// Remove media files that no longer exist on disk
     async fn cleanup_missing_files(&self, existing_paths: &[PathBuf]) -> Result<usize>;
 
@@ -177,6 +192,7 @@ impl SqliteDatabase {
             CREATE TABLE IF NOT EXISTS media_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT UNIQUE NOT NULL,
+                parent_path TEXT NOT NULL,
                 filename TEXT NOT NULL,
                 size INTEGER NOT NULL,
                 modified INTEGER NOT NULL,
@@ -195,6 +211,10 @@ impl SqliteDatabase {
 
         // Create indexes for better query performance
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_path ON media_files(path)")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_parent_path ON media_files(parent_path)")
             .execute(&self.pool)
             .await?;
 
@@ -275,6 +295,7 @@ impl DatabaseManager for SqliteDatabase {
 
     async fn store_media_file(&self, file: &MediaFile) -> Result<i64> {
         let path_str = file.path.to_string_lossy().to_string();
+        let parent_path_str = file.path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
         let modified_timestamp = Self::system_time_to_timestamp(file.modified);
         let created_timestamp = Self::system_time_to_timestamp(file.created_at);
         let updated_timestamp = Self::system_time_to_timestamp(file.updated_at);
@@ -283,11 +304,12 @@ impl DatabaseManager for SqliteDatabase {
         let result = sqlx::query(
             r#"
             INSERT INTO media_files 
-            (path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (path, parent_path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&path_str)
+        .bind(&parent_path_str)
         .bind(&file.filename)
         .bind(file.size as i64)
         .bind(modified_timestamp)
@@ -332,6 +354,7 @@ impl DatabaseManager for SqliteDatabase {
 
     async fn update_media_file(&self, file: &MediaFile) -> Result<()> {
         let path_str = file.path.to_string_lossy().to_string();
+        let parent_path_str = file.path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
         let modified_timestamp = Self::system_time_to_timestamp(file.modified);
         let updated_timestamp = Self::system_time_to_timestamp(SystemTime::now());
         let duration_ms = file.duration.map(|d| d.as_millis() as i64);
@@ -339,11 +362,12 @@ impl DatabaseManager for SqliteDatabase {
         sqlx::query(
             r#"
             UPDATE media_files 
-            SET filename = ?, size = ?, modified = ?, mime_type = ?, duration = ?, 
+            SET parent_path = ?, filename = ?, size = ?, modified = ?, mime_type = ?, duration = ?, 
                 title = ?, artist = ?, album = ?, updated_at = ?
             WHERE path = ?
             "#,
         )
+        .bind(&parent_path_str)
         .bind(&file.filename)
         .bind(file.size as i64)
         .bind(modified_timestamp)
@@ -381,6 +405,81 @@ impl DatabaseManager for SqliteDatabase {
         }
 
         Ok(files)
+    }
+
+    async fn get_directory_listing(
+        &self,
+        parent_path: &Path,
+        media_type_filter: &str,
+    ) -> Result<(Vec<MediaDirectory>, Vec<MediaFile>)> {
+        let parent_path_str = parent_path.to_string_lossy().to_string();
+        let mime_filter_str = if media_type_filter.is_empty() {
+            "%".to_string()
+        } else {
+            format!("{}%", media_type_filter)
+        };
+
+        // 1. Get all direct file children efficiently
+        let file_rows = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, created_at, updated_at 
+            FROM media_files 
+            WHERE parent_path = ? AND mime_type LIKE ?
+            ORDER BY filename
+            "#,
+        )
+        .bind(&parent_path_str)
+        .bind(&mime_filter_str)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut files = Vec::new();
+        for row in file_rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        // 2. Get all unique subdirectory paths that contain matching files
+        let like_path_prefix = if parent_path_str.is_empty() {
+            "%".to_string()
+        } else {
+            format!("{}/%", parent_path_str)
+        };
+
+        let subdir_rows = sqlx::query(
+            r#"
+            SELECT DISTINCT parent_path 
+            FROM media_files 
+            WHERE parent_path LIKE ? AND parent_path != ? AND mime_type LIKE ?
+            "#,
+        )
+        .bind(&like_path_prefix)
+        .bind(&parent_path_str)
+        .bind(&mime_filter_str)
+        .fetch_all(&self.pool)
+        .await?;
+        
+        let mut subdirectories = HashSet::new();
+        for row in subdir_rows {
+            let descendant_parent_path_str: String = row.try_get("parent_path")?;
+            let descendant_parent_path = PathBuf::from(descendant_parent_path_str);
+            
+            if let Ok(relative_path) = descendant_parent_path.strip_prefix(parent_path) {
+                if let Some(first_component) = relative_path.components().next() {
+                    if let std::path::Component::Normal(name) = first_component {
+                        let final_subdir_path = parent_path.join(name);
+                        subdirectories.insert(MediaDirectory {
+                            path: final_subdir_path,
+                            name: name.to_string_lossy().to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        let mut sorted_subdirectories: Vec<_> = subdirectories.into_iter().collect();
+        sorted_subdirectories.sort_by_key(|d| d.name.to_lowercase());
+
+        Ok((sorted_subdirectories, files))
     }
 
     async fn cleanup_missing_files(&self, existing_paths: &[PathBuf]) -> Result<usize> {
@@ -650,14 +749,14 @@ impl SqliteDatabase {
     async fn check_common_issues(&self, health: &mut DatabaseHealth) -> Result<()> {
         // Check for orphaned records or inconsistencies
         let orphaned_count: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM media_files WHERE path = '' OR filename = ''")
+            sqlx::query_scalar("SELECT COUNT(*) FROM media_files WHERE path = '' OR filename = '' OR parent_path = ''")
                 .fetch_one(&self.pool)
                 .await?;
 
         if orphaned_count > 0 {
             health.issues.push(DatabaseIssue {
                 severity: IssueSeverity::Warning,
-                description: format!("Found {} records with empty path or filename", orphaned_count),
+                description: format!("Found {} records with empty path, filename, or parent_path", orphaned_count),
                 table_affected: Some("media_files".to_string()),
                 suggested_action: "Clean up orphaned records".to_string(),
             });
@@ -700,7 +799,7 @@ impl SqliteDatabase {
     /// Attempt to repair database corruption
     async fn attempt_repair(&self) -> Result<bool> {
         // Try to clean up orphaned records
-        sqlx::query("DELETE FROM media_files WHERE path = '' OR filename = ''")
+        sqlx::query("DELETE FROM media_files WHERE path = '' OR filename = '' OR parent_path = ''")
             .execute(&self.pool)
             .await?;
 
@@ -728,7 +827,7 @@ impl SqliteDatabase {
     /// Clean up orphaned and invalid records
     pub async fn cleanup_invalid_records(&self) -> Result<usize> {
         let result =
-            sqlx::query("DELETE FROM media_files WHERE path = '' OR filename = '' OR size < 0")
+            sqlx::query("DELETE FROM media_files WHERE path = '' OR filename = '' OR parent_path = '' OR size < 0")
                 .execute(&self.pool)
                 .await?;
 
@@ -887,12 +986,12 @@ mod tests {
         db.store_media_file(&valid_file).await.unwrap();
 
         // Manually insert invalid records
-        sqlx::query("INSERT INTO media_files (path, filename, size, modified, mime_type, created_at, updated_at) VALUES ('', 'empty.mp4', 1024, 0, 'video/mp4', 0, 0)")
+        sqlx::query("INSERT INTO media_files (path, parent_path, filename, size, modified, mime_type, created_at, updated_at) VALUES ('', '', 'empty.mp4', 1024, 0, 'video/mp4', 0, 0)")
             .execute(&db.pool)
             .await
             .unwrap();
 
-        sqlx::query("INSERT INTO media_files (path, filename, size, modified, mime_type, created_at, updated_at) VALUES ('/test/valid.mp4', '', 1024, 0, 'video/mp4', 0, 0)")
+        sqlx::query("INSERT INTO media_files (path, parent_path, filename, size, modified, mime_type, created_at, updated_at) VALUES ('/test/valid.mp4', '/test', '', 1024, 0, 'video/mp4', 0, 0)")
             .execute(&db.pool)
             .await
             .unwrap();
@@ -951,5 +1050,146 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(count_after, 2);
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_empty() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let parent_path = PathBuf::from("/media");
+        let (dirs, files) = db.get_directory_listing(&parent_path, "").await.unwrap();
+
+        assert!(dirs.is_empty());
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_with_files_and_subdirs() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let parent_path = PathBuf::from("/media");
+
+        // Direct files
+        let file1 = MediaFile::new(parent_path.join("a.mp4"), 100, "video/mp4".to_string());
+        let file2 = MediaFile::new(parent_path.join("b.mp3"), 200, "audio/mpeg".to_string());
+        db.store_media_file(&file1).await.unwrap();
+        db.store_media_file(&file2).await.unwrap();
+
+        // Files in subdirectories
+        let subdir1_path = parent_path.join("Videos");
+        let file3 = MediaFile::new(subdir1_path.join("c.mp4"), 300, "video/mp4".to_string());
+        db.store_media_file(&file3).await.unwrap();
+
+        let subdir2_path = parent_path.join("Music");
+        let file4 = MediaFile::new(subdir2_path.join("d.mp3"), 400, "audio/mpeg".to_string());
+        db.store_media_file(&file4).await.unwrap();
+
+        // File in nested subdirectory (should appear as part of immediate subdir)
+        let nested_subdir_path = subdir1_path.join("Action");
+        let file5 = MediaFile::new(nested_subdir_path.join("e.mp4"), 500, "video/mp4".to_string());
+        db.store_media_file(&file5).await.unwrap();
+
+        // Test without filter
+        let (dirs, files) = db.get_directory_listing(&parent_path, "").await.unwrap();
+
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.contains(&MediaDirectory { path: subdir2_path.clone(), name: "Music".to_string() }));
+        assert!(dirs.contains(&MediaDirectory { path: subdir1_path.clone(), name: "Videos".to_string() }));
+        assert_eq!(dirs[0].name, "Music"); // Sorted alphabetically
+        assert_eq!(dirs[1].name, "Videos");
+
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].filename, "a.mp4");
+        assert_eq!(files[1].filename, "b.mp3");
+
+        // Test with video filter
+        let (dirs_video, files_video) = db.get_directory_listing(&parent_path, "video").await.unwrap();
+        assert_eq!(dirs_video.len(), 1); // Only "Videos" should be listed as it contains video files
+        assert!(dirs_video.contains(&MediaDirectory { path: subdir1_path.clone(), name: "Videos".to_string() }));
+        assert!(!dirs_video.contains(&MediaDirectory { path: subdir2_path.clone(), name: "Music".to_string() })); // Music dir should NOT be listed
+        assert_eq!(files_video.len(), 1);
+        assert_eq!(files_video[0].filename, "a.mp4");
+
+        // Test with audio filter
+        let (dirs_audio, files_audio) = db.get_directory_listing(&parent_path, "audio").await.unwrap();
+        assert_eq!(dirs_audio.len(), 1); // Only "Music" should be listed
+        assert!(dirs_audio.contains(&MediaDirectory { path: subdir2_path.clone(), name: "Music".to_string() }));
+        assert!(!dirs_audio.contains(&MediaDirectory { path: subdir1_path.clone(), name: "Videos".to_string() })); // Videos dir should NOT be listed
+        assert_eq!(files_audio.len(), 1);
+        assert_eq!(files_audio[0].filename, "b.mp3");
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_subdir_only() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let parent_path = PathBuf::from("/media/Videos");
+        let file1 = MediaFile::new(parent_path.join("movie.mp4"), 100, "video/mp4".to_string());
+        db.store_media_file(&file1).await.unwrap();
+
+        let (dirs, files) = db.get_directory_listing(&parent_path, "").await.unwrap();
+        assert!(dirs.is_empty());
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "movie.mp4");
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_nested_subdirs_only() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let parent_path = PathBuf::from("/media");
+        let subdir1_path = parent_path.join("Movies");
+        let subdir2_path = subdir1_path.join("Action");
+        let file1 = MediaFile::new(subdir2_path.join("movie.mp4"), 100, "video/mp4".to_string());
+        db.store_media_file(&file1).await.unwrap();
+
+        let (dirs, files) = db.get_directory_listing(&parent_path, "").await.unwrap();
+        assert_eq!(dirs.len(), 1);
+        assert_eq!(dirs[0].name, "Movies");
+        assert!(files.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_root_path() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let root_path = PathBuf::from("/");
+
+        let file1 = MediaFile::new(root_path.join("root_file.txt"), 10, "text/plain".to_string());
+        let file2 = MediaFile::new(root_path.join("Videos").join("movie.mp4"), 100, "video/mp4".to_string());
+        let file3 = MediaFile::new(root_path.join("Music").join("song.mp3"), 50, "audio/mpeg".to_string());
+
+        db.store_media_file(&file1).await.unwrap();
+        db.store_media_file(&file2).await.unwrap();
+        db.store_media_file(&file3).await.unwrap();
+
+        let (dirs, files) = db.get_directory_listing(&root_path, "").await.unwrap();
+
+        assert_eq!(dirs.len(), 2);
+        assert!(dirs.iter().any(|d| d.name == "Music"));
+        assert!(dirs.iter().any(|d| d.name == "Videos"));
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].filename, "root_file.txt");
+
+        let (dirs_video, files_video) = db.get_directory_listing(&root_path, "video").await.unwrap();
+        assert_eq!(dirs_video.len(), 1);
+        assert!(dirs_video.iter().any(|d| d.name == "Videos"));
+        assert_eq!(files_video.len(), 0); // root_file.txt is not video
     }
 }
