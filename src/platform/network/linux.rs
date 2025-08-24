@@ -314,6 +314,21 @@ impl LinuxNetworkManager {
             }
         }
         
+        // Special handling for Docker containers - prioritize configured server IP
+        if self.is_running_in_docker() && interfaces.iter().all(|i| i.ip_address.is_loopback()) {
+            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+                if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
+                    // Replace all loopback IPs with the configured server IP for the primary interface
+                    if let Some(primary_interface) = interfaces.iter_mut().find(|i| i.is_up && i.supports_multicast) {
+                        info!("Docker container detected: Overriding interface {} IP from {} to configured server IP {}", 
+                              primary_interface.name, primary_interface.ip_address, server_ip);
+                        primary_interface.ip_address = server_ip;
+                        primary_interface.is_loopback = false;
+                    }
+                }
+            }
+        }
+        
         Ok(interfaces)
     }
     
@@ -357,11 +372,65 @@ impl LinuxNetworkManager {
         Ok(interfaces)
     }
     
+    /// Check if we're running in a Docker container
+    fn is_running_in_docker(&self) -> bool {
+        // Check for Docker-specific files
+        std::path::Path::new("/.dockerenv").exists() || 
+        std::fs::read_to_string("/proc/1/cgroup")
+            .map(|content| content.contains("docker") || content.contains("containerd"))
+            .unwrap_or(false)
+    }
+
     /// Alternative method to get network interfaces when standard detection fails
     fn get_interfaces_alternative_method(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
         
-        // Try to get the default route interface and its IP
+        // Priority 1: If we have VUIO_SERVER_IP configured and we're in Docker, use it directly
+        if self.is_running_in_docker() {
+            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+                if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
+                    // Find the interface that should be used for this IP
+                    let interface_name = std::env::var("VUIO_SSDP_INTERFACE")
+                        .unwrap_or_else(|_| {
+                            // Try to determine from routing table
+                            if let Ok(output) = Command::new("ip").args(&["route", "get", &server_ip_str]).output() {
+                                let output_str = String::from_utf8_lossy(&output.stdout);
+                                output_str.lines()
+                                    .find_map(|line| {
+                                        if line.contains("dev") {
+                                            let parts: Vec<&str> = line.split_whitespace().collect();
+                                            if let Some(dev_idx) = parts.iter().position(|&x| x == "dev") {
+                                                parts.get(dev_idx + 1).map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .unwrap_or_else(|| "enp12s0".to_string())
+                            } else {
+                                "enp12s0".to_string()
+                            }
+                        });
+                    
+                    let interface_type = self.determine_linux_interface_type(&interface_name);
+                    interfaces.push(NetworkInterface {
+                        name: interface_name.clone(),
+                        ip_address: server_ip,
+                        is_loopback: false,
+                        is_up: true,
+                        supports_multicast: true,
+                        interface_type,
+                    });
+                    
+                    info!("Docker detected: Using configured server IP {} for interface {}", server_ip, interface_name);
+                    return Ok(interfaces);
+                }
+            }
+        }
+        
+        // Priority 2: Try to get the default route interface and its IP
         if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
             if output.status.success() {
                 let output_str = String::from_utf8_lossy(&output.stdout);
@@ -389,7 +458,7 @@ impl LinuxNetworkManager {
             }
         }
         
-        // If still no interfaces, try to use the configured server IP with best guess interface
+        // Priority 3: If still no interfaces, try to use the configured server IP with best guess interface  
         if interfaces.is_empty() {
             if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
@@ -432,6 +501,27 @@ impl LinuxNetworkManager {
     
     /// Get IP address for a specific interface with more robust methods
     fn get_interface_ip_robust(&self, interface_name: &str) -> Option<IpAddr> {
+        // First check if we're in Docker and have a configured server IP
+        if self.is_running_in_docker() {
+            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+                if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
+                    // Check if this interface should use the configured server IP
+                    if let Ok(ssdp_interface) = std::env::var("VUIO_SSDP_INTERFACE") {
+                        if interface_name == ssdp_interface {
+                            debug!("Using configured server IP {} for Docker interface {}", server_ip, interface_name);
+                            return Some(server_ip);
+                        }
+                    } else {
+                        // If no specific SSDP interface is configured, use server IP for primary interfaces
+                        if interface_name.starts_with("enp") || interface_name.starts_with("eth") {
+                            debug!("Using configured server IP {} for Docker interface {}", server_ip, interface_name);
+                            return Some(server_ip);
+                        }
+                    }
+                }
+            }
+        }
+        
         // First try the standard method
         if let Some(ip) = self.get_interface_ip(interface_name) {
             if !ip.is_loopback() {
@@ -535,7 +625,25 @@ impl LinuxNetworkManager {
                     .find(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
                     .ok_or_else(|| PlatformError::NetworkConfig("No suitable interface for multicast on Linux".to_string()))?
             };
-            (selected_interface.name.clone(), selected_interface.ip_address)
+            
+            // For Docker containers, prioritize configured server IP
+            let effective_ip = if self.is_running_in_docker() {
+                if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+                    if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
+                        info!("Docker detected: Using configured server IP {} for multicast instead of interface IP {}", 
+                              server_ip, selected_interface.ip_address);
+                        server_ip
+                    } else {
+                        selected_interface.ip_address
+                    }
+                } else {
+                    selected_interface.ip_address
+                }
+            } else {
+                selected_interface.ip_address
+            };
+            
+            (selected_interface.name.clone(), effective_ip)
         };
         
         match socket.enable_multicast(group, local_addr).await {
@@ -558,6 +666,11 @@ impl LinuxNetworkManager {
                 error_msg.push_str("\nTip: Ensure the network interface supports multicast.");
                 error_msg.push_str(&format!("\nTip: Try using interface {} explicitly.", selected_interface_name));
                 error_msg.push_str("\nTip: Check if running in a network namespace that restricts multicast.");
+                
+                if self.is_running_in_docker() {
+                    error_msg.push_str("\nTip: Ensure Docker container is running with 'network_mode: host'.");
+                    error_msg.push_str("\nTip: Check that VUIO_SERVER_IP environment variable is set correctly.");
+                }
                 
                 Err(PlatformError::NetworkConfig(error_msg))
             }
