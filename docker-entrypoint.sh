@@ -227,9 +227,9 @@ EOF
     # Handle network interface selection
     local ssdp_interface="${VUIO_SSDP_INTERFACE:-Auto}"
     if [ "$ssdp_interface" = "Auto" ] || [ "$ssdp_interface" = "All" ]; then
-        echo "interface_selection = { type = \"$ssdp_interface\" }" >> "$config_file"
+        echo "interface_selection = \"$ssdp_interface\"" >> "$config_file"
     else
-        echo "interface_selection = { type = \"Specific\", value = \"$ssdp_interface\" }" >> "$config_file"
+        echo "interface_selection = \"$ssdp_interface\"" >> "$config_file"
     fi
     
     # Add media and database configuration
