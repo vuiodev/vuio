@@ -17,29 +17,77 @@ fn xml_escape(s: &str) -> String {
 
 /// Get the server's IP address for use in URLs from the application state.
 fn get_server_ip(state: &AppState) -> String {
-    // 1. Use the primary interface detected at startup.
-    if let Some(iface) = state.platform_info.get_primary_interface() {
-        return iface.ip_address.to_string();
+    // Use the SSDP interface from config if it's a specific IP address
+    match &state.config.network.interface_selection {
+        crate::config::NetworkInterfaceConfig::Specific(ip) => {
+            return ip.clone();
+        }
+        _ => {
+            // For Auto or All, fallback to server interface if it's not 0.0.0.0
+            if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
+                return state.config.server.interface.clone();
+            }
+        }
     }
-
-    // 2. Fallback to the configured server interface if it's not a wildcard.
-    if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-        return state.config.server.interface.clone();
+    
+    // Auto-detect the primary network interface IP (like MiniDLNA does)
+    if let Some(ip) = get_primary_interface_ip_sync() {
+        return ip;
     }
-
-    // 3. Fallback to trying to find any usable interface from the list.
-    if let Some(iface) = state
-        .platform_info
-        .network_interfaces
-        .iter()
-        .find(|i| !i.is_loopback && i.is_up)
-    {
-        return iface.ip_address.to_string();
-    }
-
-    // 4. Final fallback.
-    warn!("Could not determine a specific server IP for XML description; falling back to 127.0.0.1.");
+    
+    // Last resort
+    warn!("Could not auto-detect IP, falling back to 127.0.0.1");
     "127.0.0.1".to_string()
+}
+
+/// Synchronous version of primary interface IP detection
+fn get_primary_interface_ip_sync() -> Option<String> {
+    use std::process::Command;
+    
+    // Try to get the default route interface first (most reliable method)
+    if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
+        let route_output = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = route_output.lines().next() {
+            // Parse "default via X.X.X.X dev eth0" to get interface name
+            if let Some(dev_pos) = line.find(" dev ") {
+                let interface_part = &line[dev_pos + 5..];
+                if let Some(interface_name) = interface_part.split_whitespace().next() {
+                    // Get IP for this interface
+                    if let Ok(ip_output) = Command::new("ip").args(&["addr", "show", interface_name]).output() {
+                        let ip_str = String::from_utf8_lossy(&ip_output.stdout);
+                        for line in ip_str.lines() {
+                            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") {
+                                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                                    if let Some(ip) = ip_part.split('/').next() {
+                                        return Some(ip.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback: try to find any non-loopback interface with an IP
+    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
+        let ip_str = String::from_utf8_lossy(&output.stdout);
+        for line in ip_str.lines() {
+            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
+                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                    if let Some(ip) = ip_part.split('/').next() {
+                        // Prefer private network ranges (like MiniDLNA does)
+                        if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.") {
+                            return Some(ip.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    None
 }
 
 /// Get the appropriate UPnP class for a given MIME type.

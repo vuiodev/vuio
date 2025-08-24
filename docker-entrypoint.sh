@@ -219,7 +219,7 @@ name = "${VUIO_SERVER_NAME:-VuIO}"
 uuid = "$uuid"
 
 [network]
-ssdp_port = 1900
+ssdp_port = ${VUIO_SSDP_PORT:-1900}
 multicast_ttl = 4
 announce_interval_seconds = 300
 EOF

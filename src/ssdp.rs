@@ -6,8 +6,6 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 const SSDP_MULTICAST_ADDR: &str = "239.255.255.250";
-const SSDP_PORT: u16 = 1900;
-const ANNOUNCE_INTERVAL_SECS: u64 = 300; // Announce every 5 minutes
 
 pub fn run_ssdp_service(state: AppState) -> Result<()> {
     let network_manager = Arc::new(PlatformNetworkManager::new());
@@ -40,7 +38,8 @@ async fn ssdp_search_responder(state: AppState, network_manager: Arc<PlatformNet
     // Create SSDP socket with retry logic
     let mut socket = None;
     for attempt in 1..=MAX_SOCKET_RETRIES {
-        let ssdp_config = SsdpConfig::default();
+        let mut ssdp_config = SsdpConfig::default();
+        ssdp_config.primary_port = state.config.network.ssdp_port;
         match network_manager.create_ssdp_socket_with_config(&ssdp_config).await {
             Ok(s) => {
                 info!("Successfully created SSDP socket on port {} (attempt {})", s.port, attempt);
@@ -211,7 +210,7 @@ async fn ssdp_search_responder(state: AppState, network_manager: Arc<PlatformNet
 }
 
 async fn ssdp_announcer(state: AppState, network_manager: Arc<PlatformNetworkManager>) {
-    let mut interval = interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
+    let mut interval = interval(Duration::from_secs(state.config.network.announce_interval_seconds));
     let mut consecutive_failures = 0;
     const MAX_CONSECUTIVE_FAILURES: u32 = 5;
     
@@ -254,7 +253,8 @@ async fn send_ssdp_alive(state: &AppState, network_manager: &PlatformNetworkMana
     // Create a temporary socket for announcements with retry logic
     let mut socket = None;
     for attempt in 1..=MAX_SOCKET_CREATION_RETRIES {
-        let ssdp_config = SsdpConfig::default();
+        let mut ssdp_config = SsdpConfig::default();
+        ssdp_config.primary_port = state.config.network.ssdp_port;
         match network_manager.create_ssdp_socket_with_config(&ssdp_config).await {
             Ok(s) => {
                 socket = Some(s);
@@ -291,7 +291,7 @@ async fn send_ssdp_alive(state: &AppState, network_manager: &PlatformNetworkMana
         "urn:schemas-upnp-org:service:ContentDirectory:1"
     ];
     
-    let multicast_addr = format!("{}:{}", SSDP_MULTICAST_ADDR, SSDP_PORT).parse::<SocketAddr>()?;
+    let multicast_addr = format!("{}:{}", SSDP_MULTICAST_ADDR, state.config.network.ssdp_port).parse::<SocketAddr>()?;
     
     for service_type in &service_types {
         let (nt, usn) = match *service_type {
@@ -319,7 +319,7 @@ async fn send_ssdp_alive(state: &AppState, network_manager: &PlatformNetworkMana
             NTS: ssdp:alive\r\n\
             SERVER: VuIO/1.0 UPnP/1.0\r\n\
             USN: {}\r\n\r\n",
-            SSDP_MULTICAST_ADDR, SSDP_PORT,
+            SSDP_MULTICAST_ADDR, state.config.network.ssdp_port,
             server_ip, config.server.port, nt, usn
         );
 
@@ -413,22 +413,76 @@ async fn create_ssdp_response(state: &AppState, _ssdp_port: u16, service_type: &
 }
 
 async fn get_server_ip(state: &AppState) -> String {
-    // 1. Use the primary interface detected at startup. This is the main path.
-    if let Some(iface) = state.platform_info.get_primary_interface() {
-        return iface.ip_address.to_string();
-    }
-
-    // 2. If the primary selection logic fails, log a clear warning and try the configured interface.
-    warn!("Primary interface selection failed. This might happen if no suitable network connection (Ethernet/WiFi with a private IP) was found.");
-    if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-        warn!("Falling back to configured server interface: {}", state.config.server.interface);
-        return state.config.server.interface.clone();
+    // Use the SSDP interface from config if it's a specific IP address
+    match &state.config.network.interface_selection {
+        crate::config::NetworkInterfaceConfig::Specific(ip) => {
+            return ip.clone();
+        }
+        _ => {
+            // For Auto or All, fallback to server interface if it's not 0.0.0.0
+            if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
+                return state.config.server.interface.clone();
+            }
+        }
     }
     
-    // 3. As a last resort, log a critical error and use localhost.
-    // NO re-detection.
-    error!("FATAL: Could not determine a usable server IP address from startup information.");
-    error!("Please check your network connection and ensure you have a valid private IP (e.g., 192.168.x.x).");
-    error!("Falling back to 127.0.0.1 - DLNA clients will NOT be able to connect.");
+    // Auto-detect the primary network interface IP (like MiniDLNA does)
+    if let Some(ip) = get_primary_interface_ip().await {
+        debug!("Auto-detected primary interface IP: {}", ip);
+        return ip;
+    }
+    
+    // Last resort
+    warn!("Could not auto-detect IP, falling back to 127.0.0.1");
     "127.0.0.1".to_string()
+}
+
+/// Auto-detect the primary network interface IP address (similar to MiniDLNA approach)
+async fn get_primary_interface_ip() -> Option<String> {
+    use std::process::Command;
+    
+    // Try to get the default route interface first (most reliable method)
+    if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
+        let route_output = String::from_utf8_lossy(&output.stdout);
+        if let Some(line) = route_output.lines().next() {
+            // Parse "default via X.X.X.X dev eth0" to get interface name
+            if let Some(dev_pos) = line.find(" dev ") {
+                let interface_part = &line[dev_pos + 5..];
+                if let Some(interface_name) = interface_part.split_whitespace().next() {
+                    // Get IP for this interface
+                    if let Ok(ip_output) = Command::new("ip").args(&["addr", "show", interface_name]).output() {
+                        let ip_str = String::from_utf8_lossy(&ip_output.stdout);
+                        for line in ip_str.lines() {
+                            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") {
+                                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                                    if let Some(ip) = ip_part.split('/').next() {
+                                        return Some(ip.to_string());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    // Fallback: try to find any non-loopback interface with an IP
+    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
+        let ip_str = String::from_utf8_lossy(&output.stdout);
+        for line in ip_str.lines() {
+            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
+                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
+                    if let Some(ip) = ip_part.split('/').next() {
+                        // Prefer private network ranges (like MiniDLNA does)
+                        if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.") {
+                            return Some(ip.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    None
 }

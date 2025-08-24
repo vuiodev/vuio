@@ -1,0 +1,38 @@
+version: '3.8'
+
+# No custom networks needed with host networking
+
+services:
+  vuio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vuio-server-local
+    restart: unless-stopped
+    network_mode: host
+    
+    volumes:
+      # Persist configuration and database
+      - ./vuio-config:/config
+      # Mount your media library (adjust path as needed)
+      - /Users/alex/Downloads:/media
+      
+    environment:
+      # User/Group ID mapping
+      - PUID=1000  # Run 'id -u' to find your user ID
+      - PGID=1000  # Run 'id -g' to find your group ID
+      
+      # Application configuration
+      - VUIO_PORT=8080
+      - VUIO_MEDIA_DIR=/media
+      - VUIO_SERVER_NAME=VuIO
+      - VUIO_BIND_INTERFACE=0.0.0.0
+      
+      # Set the correct network interface for DLNA discovery
+      - VUIO_SSDP_INTERFACE=Auto
+      
+      # Set SSDP port to avoid OrbStack conflict
+      - VUIO_SSDP_PORT=1902
+      
+      # Enable debug logging
+      - RUST_LOG=debug
