@@ -62,7 +62,141 @@ cargo build --release
 
 ### Docker
 
+Docker will not work on MacOS due to the lack of a compatible multicast implementation.
+
+#### Quick Start with Docker Compose
+
+```bash
+# Clone the repository
+git clone https://github.com/vuiodev/vuio.git
+cd vuio
+
+# Build and run with Docker Compose
+docker-compose -f docker-compose.local.yml up --build
+```
+
+#### Docker Environment Variables
+
+**Essential Configuration:**
+```bash
+# Server Configuration
+VUIO_PORT=8080                    # HTTP server port
+VUIO_SERVER_NAME="VuIO"           # DLNA server name
+VUIO_BIND_INTERFACE=0.0.0.0       # Network interface to bind
+
+# CRITICAL: Set your host IP for DLNA announcements
+VUIO_SERVER_IP=192.168.1.126      # Replace with YOUR host IP address
+
+# Media Configuration
+VUIO_MEDIA_DIR=/media              # Media directory inside container
+
+# SSDP Configuration (if port 1900 conflicts)
+VUIO_SSDP_PORT=1902               # Alternative SSDP port
+
+# User/Group Mapping
+PUID=1000                          # Your user ID (run 'id -u')
+PGID=1000                          # Your group ID (run 'id -g')
+
+# Debugging
+RUST_LOG=debug                     # Enable debug logging
+```
+
+#### Finding Your Host IP Address
+
+**Linux:**
+```bash
+# Method 1: Using ip command (Linux)
+ip route get 1.1.1.1 | grep -oP 'src \K[0-9.]+'
+
+# Method 2: Using ifconfig
+ifconfig | grep 'inet ' | grep -v '127.0.0.1' | head -1 | awk '{print $2}'
+
+# Method 3: Using hostname
+hostname -I | awk '{print $1}'
+```
+
+**Windows:**
+```cmd
+# Using ipconfig
+ipconfig | findstr "IPv4"
+```
+
+#### Docker Compose Configuration
+
+**Key Settings for DLNA:**
+- `network_mode: host` - **Required** for multicast/DLNA discovery
+- `cap_add: [NET_ADMIN, NET_RAW]` - Enhanced networking capabilities
+- `VUIO_SERVER_IP` - **Must match your host IP address**
+
+```yaml
+services:
+  vuio:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: vuio-server-local
+    restart: unless-stopped
+    network_mode: host  # REQUIRED for DLNA
+    
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    
+    volumes:
+      - ./vuio-config:/config
+      - /path/to/your/media:/media  # Mount your media directory
+      
+    environment:
+      - VUIO_SERVER_IP=192.168.1.126  # YOUR HOST IP HERE
+      - VUIO_PORT=8080
+      - VUIO_MEDIA_DIR=/media
+      - VUIO_SERVER_NAME=VuIO
+      - PUID=1000
+      - PGID=1000
+```
+
+#### Volume Mapping
+
+```bash
+# Configuration and database persistence
+./vuio-config:/config
+
+# Media library (adjust to your paths)
+/home/user/Videos:/media/videos
+/home/user/Music:/media/music
+/home/user/Pictures:/media/pictures
+
+# Multiple media directories
+volumes:
+  - ./vuio-config:/config
+  - /raid1/movies:/media/movies
+  - /raid2/tv-shows:/media/tv
+  - /nas/music:/media/music
+```
+
+#### Docker Run Command
+
+```bash
+docker run -d \
+  --name vuio-server \
+  --restart unless-stopped \
+  --network host \
+  --cap-add NET_ADMIN \
+  --cap-add NET_RAW \
+  -v /path/to/your/media:/media \
+  -v ./vuio-config:/config \
+  -e VUIO_SERVER_IP=192.168.1.126 \
+  -e VUIO_PORT=8080 \
+  -e VUIO_MEDIA_DIR=/media \
+  -e VUIO_SERVER_NAME="My DLNA Server" \
+  -e PUID=1000 \
+  -e PGID=1000 \
+  vuio:latest
+```
+
 Check documentation for [Docker](DOCKER.md).
+
+
 
 ### Quick Start
 ```bash
@@ -281,10 +415,12 @@ sudo setcap 'cap_net_bind_service=+ep' ./target/release/vuio
 - Check platform-specific file system case sensitivity
 
 **DLNA Clients Can't Find Server**
+- ✅ **Docker Users**: The application now works perfectly with Docker host networking mode
 - Verify firewall settings
-- Check multicast support on network interface
+- Check multicast support on network interface  
 - Ensure SSDP port (1900) is not blocked
 - Try specifying network interface in configuration
+- For Docker: Use `network_mode: host` for full multicast support
 
 ### Diagnostic Information
 
