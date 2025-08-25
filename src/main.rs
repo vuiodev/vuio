@@ -10,7 +10,6 @@ use vuio::{
     web,
 };
 use std::{net::SocketAddr, sync::Arc, path::PathBuf};
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 /// Parse early command line arguments to get debug flag and config file path
@@ -108,19 +107,15 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Perform initial media scan or load from database
-    let media_files = match perform_initial_media_scan(&config, &database).await {
-        Ok(files) => Arc::new(RwLock::new(files)),
-        Err(e) => {
-            error!("Failed to perform initial media scan: {}", e);
-            return Err(e);
-        }
-    };
+    // Perform initial media scan (database only, no in-memory cache)
+    if let Err(e) = perform_initial_media_scan(&config, &database).await {
+        error!("Failed to perform initial media scan: {}", e);
+        return Err(e);
+    }
 
     // Create shared application state
     let app_state = AppState {
         config: config.clone(),
-        media_files: media_files.clone(),
         database: database.clone(),
         platform_info: platform_info.clone(),
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
@@ -137,7 +132,6 @@ async fn main() -> anyhow::Result<()> {
         platform_info.clone(),
         config.clone(),
         database.clone(),
-        media_files.clone(),
     ).await?;
 
     // Start SSDP discovery service with platform abstraction
@@ -174,14 +168,12 @@ async fn start_platform_adaptation(
     platform_info: Arc<PlatformInfo>,
     config: Arc<AppConfig>,
     database: Arc<dyn DatabaseManager>,
-    media_files: Arc<RwLock<Vec<database::MediaFile>>>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     info!("Starting platform adaptation services...");
     
     let platform_info_clone = platform_info.clone();
     let config_clone = config.clone();
     let database_clone = database.clone();
-    let media_files_clone = media_files.clone();
     
     let handle = tokio::spawn(async move {
         let mut network_check_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -195,7 +187,7 @@ async fn start_platform_adaptation(
                     }
                 }
                 _ = config_check_interval.tick() => {
-                    if let Err(e) = check_and_reload_configuration(&config_clone, &database_clone, &media_files_clone).await {
+                    if let Err(e) = check_and_reload_configuration(&config_clone, &database_clone).await {
                         warn!("Configuration reload check failed: {}", e);
                     }
                 }
@@ -294,7 +286,6 @@ async fn check_and_adapt_network_changes(platform_info: &Arc<PlatformInfo>) -> a
 async fn check_and_reload_configuration(
     config: &Arc<AppConfig>,
     database: &Arc<dyn DatabaseManager>,
-    media_files: &Arc<RwLock<Vec<database::MediaFile>>>,
 ) -> anyhow::Result<()> {
     let config_path = AppConfig::get_platform_config_file_path();
     
@@ -311,7 +302,7 @@ async fn check_and_reload_configuration(
             
             match AppConfig::load_from_file(&config_path) {
                 Ok(new_config) => {
-                    if let Err(e) = handle_configuration_changes(config, &new_config, database, media_files).await {
+                    if let Err(e) = handle_configuration_changes(config, &new_config, database).await {
                         warn!("Failed to handle configuration changes: {}", e);
                     }
                 }
@@ -330,7 +321,6 @@ async fn handle_configuration_changes(
     old_config: &Arc<AppConfig>,
     new_config: &AppConfig,
     database: &Arc<dyn DatabaseManager>,
-    media_files: &Arc<RwLock<Vec<database::MediaFile>>>,
 ) -> anyhow::Result<()> {
     let mut changes_detected = false;
     
@@ -408,10 +398,7 @@ async fn handle_configuration_changes(
         }
 
         if cache_needs_reload {
-            info!("Reloading in-memory media cache due to directory changes...");
-            let all_files = database.get_all_media_files().await?;
-            *media_files.write().await = all_files;
-            info!("In-memory cache updated with {} files.", media_files.read().await.len());
+            info!("Directory changes detected - database has been updated");
         }
     }
     
@@ -803,7 +790,7 @@ async fn validate_and_cleanup_deleted_files(
 }
 
 /// Perform initial media scan, using database cache when possible
-async fn perform_initial_media_scan(config: &AppConfig, database: &Arc<dyn DatabaseManager>) -> anyhow::Result<Vec<database::MediaFile>> {
+async fn perform_initial_media_scan(config: &AppConfig, database: &Arc<dyn DatabaseManager>) -> anyhow::Result<()> {
     info!("Performing initial media scan...");
 
     if config.media.scan_on_startup {
@@ -844,38 +831,25 @@ async fn perform_initial_media_scan(config: &AppConfig, database: &Arc<dyn Datab
 
         info!("Initial media scan completed - total files scanned: {}, total changes: {}", total_files_scanned, total_changes);
 
-        // After scan, load all media files from the database for the application state
-        let all_media_files = database.get_all_media_files().await
-            .context("Failed to load media files from database after scan")?;
-
-        info!("Loaded {} total media files from database", all_media_files.len());
+        // Validate files to catch any that were deleted while app was offline
+        if config.media.cleanup_deleted_files {
+            let all_media_files = database.get_all_media_files().await
+                .context("Failed to load media files from database after scan")?;
+            validate_and_cleanup_deleted_files(database.clone(), all_media_files).await?;
+        }
         
-        // Even after a full scan, validate files to catch any that were deleted while app was offline
-        // This is important because the scan only covers configured directories
-        let validated_files = if config.media.cleanup_deleted_files {
-            validate_and_cleanup_deleted_files(database.clone(), all_media_files).await?
-        } else {
-            all_media_files
-        };
-        
-        Ok(validated_files)
+        Ok(())
     } else {
-        info!("Loading media files from database cache (scan on startup disabled)");
-
-        let cached_files = database.get_all_media_files().await
-            .context("Failed to load media files from database")?;
-
-        info!("Loaded {} media files from database cache", cached_files.len());
+        info!("Skipping full scan (scan on startup disabled)");
 
         // Validate that cached files still exist on disk and remove any that don't (if enabled)
-        let validated_files = if config.media.cleanup_deleted_files {
-            validate_and_cleanup_deleted_files(database.clone(), cached_files).await?
-        } else {
-            info!("Cleanup of deleted files is disabled");
-            cached_files
-        };
+        if config.media.cleanup_deleted_files {
+            let cached_files = database.get_all_media_files().await
+                .context("Failed to load media files from database")?;
+            validate_and_cleanup_deleted_files(database.clone(), cached_files).await?;
+        }
 
-        Ok(validated_files)
+        Ok(())
     }
 }
 
@@ -954,7 +928,6 @@ async fn handle_file_system_event(
     app_state: &AppState,
 ) -> anyhow::Result<()> {
     let database = &app_state.database;
-    let media_files = &app_state.media_files;
     match event {
         FileSystemEvent::Created(path) => {
             // Check if this is a directory or a file
@@ -967,16 +940,7 @@ async fn handle_file_system_event(
                     Ok(scan_result) => {
                         info!("Scanned new directory {}: {}", path.display(), scan_result.summary());
                         
-                        // Update in-memory cache with newly found files
-                        if !scan_result.new_files.is_empty() {
-                            let mut files = media_files.write().await;
-                            for new_file in &scan_result.new_files {
-                                // Only add if not already in cache
-                                if !files.iter().any(|f| f.path == new_file.path) {
-                                    files.push(new_file.clone());
-                                }
-                            }
-                        }
+                        // Files are already stored in database by the scanner
                         
                         info!("Added {} media files from new directory: {}", scan_result.new_files.len(), path.display());
                         
@@ -1019,9 +983,7 @@ async fn handle_file_system_event(
                 let file_id = database.store_media_file(&media_file).await?;
                 media_file.id = Some(file_id);
                 
-                // Add to in-memory cache
-                let mut files = media_files.write().await;
-                files.push(media_file);
+                // File is already stored in database
                 
                 info!("Added new media file to database: {}", path.display());
                 
@@ -1041,11 +1003,7 @@ async fn handle_file_system_event(
                 
                 database.update_media_file(&existing_file).await?;
                 
-                // Update in-memory cache
-                let mut files = media_files.write().await;
-                if let Some(cached_file) = files.iter_mut().find(|f| f.path == path) {
-                    *cached_file = existing_file;
-                }
+                // File is already updated in database
                 
                 info!("Updated media file in database: {}", path.display());
                 
@@ -1126,20 +1084,9 @@ async fn handle_file_system_event(
                 info!("Sample database paths: {:?}", sample_paths);
             }
             
-            // Remove from in-memory cache (case-insensitive on Windows)
-            let mut files = media_files.write().await;
-            let initial_count = files.len();
-            files.retain(|f| {
-                let normalized_file_path = f.path.to_string_lossy().to_lowercase();
-                !normalized_file_path.starts_with(&normalized_deleted_path)
-            });
-            let removed_from_cache = initial_count - files.len();
-            
-            info!("Cache cleanup: removed {} files from in-memory cache", removed_from_cache);
-            
-            if total_removed > 0 || removed_from_cache > 0 {
-                info!("Total cleanup: {} files from database, {} from cache for path: {}", 
-                      total_removed, removed_from_cache, path.display());
+            if total_removed > 0 {
+                info!("Total cleanup: {} files removed from database for path: {}", 
+                      total_removed, path.display());
                 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state);
@@ -1167,13 +1114,10 @@ async fn handle_file_system_event(
                 if !files_in_old_path.is_empty() {
                     info!("Updating {} media files for renamed directory", files_in_old_path.len());
                     
-                    // Remove old files from database and cache
-                    let mut files = media_files.write().await;
+                    // Remove old files from database
                     for old_file in &files_in_old_path {
                         database.remove_media_file(&old_file.path).await?;
-                        files.retain(|f| f.path != old_file.path);
                     }
-                    drop(files); // Release the lock before scanning
                     
                     // Scan the new directory location
                     let scanner = media::MediaScanner::with_database(database.clone());
@@ -1181,13 +1125,7 @@ async fn handle_file_system_event(
                         Ok(scan_result) => {
                             info!("Rescanned renamed directory {}: {}", to.display(), scan_result.summary());
                             
-                            // Update in-memory cache with newly found files
-                            if !scan_result.new_files.is_empty() {
-                                let mut files = media_files.write().await;
-                                for new_file in &scan_result.new_files {
-                                    files.push(new_file.clone());
-                                }
-                            }
+                            // Files are already stored in database by the scanner
                             
                             // Increment update ID to notify DLNA clients
                             increment_content_update_id(app_state);
@@ -1217,10 +1155,8 @@ async fn handle_file_system_event(
                     return Ok(());
                 }
                 
-                // Remove old file from database and cache
+                // Remove old file from database
                 database.remove_media_file(&from).await?;
-                let mut files = media_files.write().await;
-                files.retain(|f| f.path != from);
                 
                 // Create MediaFile record for new location
                 let metadata = tokio::fs::metadata(&to).await?;
@@ -1231,9 +1167,6 @@ async fn handle_file_system_event(
                 // Store in database
                 let file_id = database.store_media_file(&media_file).await?;
                 media_file.id = Some(file_id);
-                
-                // Add to in-memory cache
-                files.push(media_file);
                 
                 info!("Renamed media file: {} -> {}", from.display(), to.display());
                 

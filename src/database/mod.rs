@@ -170,6 +170,9 @@ pub trait DatabaseManager: Send + Sync {
     /// Get a specific file by path
     async fn get_file_by_path(&self, path: &Path) -> Result<Option<MediaFile>>;
 
+    /// Get a specific file by ID
+    async fn get_file_by_id(&self, id: i64) -> Result<Option<MediaFile>>;
+
     /// Get database statistics
     async fn get_stats(&self) -> Result<DatabaseStats>;
 
@@ -658,6 +661,8 @@ impl DatabaseManager for SqliteDatabase {
         // 2. Get all unique subdirectory paths that contain matching files
         let like_path_prefix = if parent_path_str.is_empty() {
             "%".to_string()
+        } else if parent_path_str == "/" {
+            "/%".to_string()
         } else {
             format!("{}/%", parent_path_str)
         };
@@ -739,6 +744,24 @@ impl DatabaseManager for SqliteDatabase {
             "#,
         )
         .bind(&path_str)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some(row) => Ok(Some(MediaFile::from_row(&row)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn get_file_by_id(&self, id: i64) -> Result<Option<MediaFile>> {
+        let row = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+            FROM media_files 
+            WHERE id = ?
+            "#,
+        )
+        .bind(id)
         .fetch_optional(&self.pool)
         .await?;
 

@@ -724,6 +724,11 @@ mod tests {
             Ok(files.get(path).cloned())
         }
 
+        async fn get_file_by_id(&self, id: i64) -> anyhow::Result<Option<MediaFile>> {
+            let files = self.files.read().await;
+            Ok(files.values().find(|f| f.id == Some(id)).cloned())
+        }
+
         async fn get_stats(&self) -> anyhow::Result<crate::database::DatabaseStats> {
             let files = self.files.read().await;
             Ok(crate::database::DatabaseStats {
