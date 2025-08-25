@@ -6,7 +6,7 @@ use tokio::time::interval;
 use tracing::{debug, error, info, warn};
 
 const SSDP_MULTICAST_ADDR: &str = "239.255.255.250";
-const SSDP_PORT: u16 = 1900;
+const SSDP_MULTICAST_PORT: u16 = 1900; // Standard SSDP port - NEVER change this
 const ANNOUNCE_INTERVAL_SECS: u64 = 300; // Announce every 5 minutes
 
 pub fn run_ssdp_service(state: AppState) -> Result<()> {
@@ -15,6 +15,8 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
     // Log the IP that will be used for SSDP announcements
     let server_ip = get_server_ip(&state);
     info!("SSDP service starting - using server IP: {}", server_ip);
+    info!("SSDP will listen on port: {}", state.config.network.ssdp_port);
+    info!("SSDP multicast will use standard port: {}", SSDP_MULTICAST_PORT);
 
     // Use unified service for Docker compatibility (single socket like MiniDLNA)
     let service_state = state.clone();
@@ -40,7 +42,7 @@ async fn ssdp_unified_service(state: AppState, network_manager: Arc<PlatformNetw
     let mut socket = None;
     for attempt in 1..=MAX_SOCKET_RETRIES {
         let ssdp_config = SsdpConfig {
-            primary_port: SSDP_PORT,
+            primary_port: state.config.network.ssdp_port,
             fallback_ports: vec![], // Don't use fallback ports in Docker
             multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
             announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
@@ -92,7 +94,7 @@ async fn create_docker_ssdp_socket(
     config: &SsdpConfig
 ) -> Result<crate::platform::network::SsdpSocket> {
     // In Docker, we need to bind to 0.0.0.0 to receive multicast traffic
-    let _bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), SSDP_PORT);
+    let _bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.primary_port);
     
     match network_manager.create_ssdp_socket_with_config(config).await {
         Ok(mut socket) => {
@@ -113,8 +115,6 @@ async fn set_docker_socket_options(_socket: &mut crate::platform::network::SsdpS
     debug!("Setting Docker-optimized socket options");
     Ok(())
 }
-
-
 
 /// Task for handling SSDP announcements
 async fn ssdp_announcer_task(
@@ -166,7 +166,7 @@ async fn ssdp_responder_task(
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: u32 = 5;
     
-    info!("SSDP M-SEARCH responder started");
+    info!("SSDP M-SEARCH responder started on port {}", state.config.network.ssdp_port);
     
     loop {
         let recv_result = {
@@ -266,13 +266,16 @@ fn determine_response_types(request: &str) -> Vec<&'static str> {
 }
 
 /// Send SSDP NOTIFY announcements
+/// CRITICAL: Always use standard SSDP multicast port (1900) for announcements
 async fn send_ssdp_notify(
     state: &AppState,
     network_manager: &PlatformNetworkManager,
     socket: &Arc<tokio::sync::Mutex<crate::platform::network::SsdpSocket>>
 ) -> Result<()> {
     let server_ip = get_server_ip(state);
-    let multicast_addr: SocketAddr = format!("{}:{}", SSDP_MULTICAST_ADDR, SSDP_PORT).parse()?;
+    
+    // FIXED: Always use standard SSDP multicast port (1900) for announcements
+    let multicast_addr: SocketAddr = format!("{}:{}", SSDP_MULTICAST_ADDR, SSDP_MULTICAST_PORT).parse()?;
     
     let service_types = [
         ("upnp:rootdevice", format!("uuid:{}::upnp:rootdevice", state.config.server.uuid)),
@@ -299,8 +302,8 @@ async fn send_ssdp_notify(
             BOOTID.UPNP.ORG: 1\r\n\
             CONFIGID.UPNP.ORG: 1\r\n\
             \r\n",
-            SSDP_MULTICAST_ADDR, SSDP_PORT,
-            server_ip, state.config.server.port,
+            SSDP_MULTICAST_ADDR, SSDP_MULTICAST_PORT, // Use standard multicast port in HOST header
+            server_ip, state.config.server.port,      // Use your server port for LOCATION
             nt, usn
         );
 
@@ -313,7 +316,7 @@ async fn send_ssdp_notify(
             
             match result {
                 Ok(()) => {
-                    debug!("Successfully sent NOTIFY for {} via multicast", nt);
+                    debug!("Successfully sent NOTIFY for {} via multicast to {}:{}", nt, SSDP_MULTICAST_ADDR, SSDP_MULTICAST_PORT);
                     success = true;
                     break;
                 }
@@ -384,7 +387,7 @@ fn create_ssdp_response(state: &AppState, service_type: &str) -> String {
         CONFIGID.UPNP.ORG: 1\r\n\
         \r\n",
         chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT"),
-        server_ip, state.config.server.port,
+        server_ip, state.config.server.port,  // Use your server port for LOCATION
         st, usn
     )
 }
