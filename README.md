@@ -2,6 +2,13 @@
 
 A comprehensive, cross-platform DLNA/UPnP media server written in Rust with advanced platform integration, real-time file monitoring, and robust database management. Built with Axum, Tokio, and SQLite for high performance and reliability.
 
+Windows, Linux, Mac Os (Native), and Docker fully supported
+x64 and ARM64 supported
+
+0.0.12 is Latest Stable Release
+
+docker-compose -f docker-compose.yml up
+
 ## 🚀 Features
 
 ### Core DLNA/UPnP Functionality
@@ -45,18 +52,6 @@ A comprehensive, cross-platform DLNA/UPnP media server written in Rust with adva
 - **Platform-Aware Defaults** - Intelligent defaults based on operating system
 - **TOML Configuration** - Human-readable configuration with comprehensive validation
 - **Multiple Media Directories** - Support for monitoring multiple locations
-
-### Security & Permissions
-- **Security Checks** - Platform-specific privilege and permission validation
-- **Secure Defaults** - Minimal privilege operation with graceful degradation
-- **Firewall Integration** - Automatic detection and guidance for network access
-- **Permission Management** - Proper handling of file system and network permissions
-
-### Diagnostics & Monitoring
-- **Comprehensive Diagnostics** - Detailed system and platform information
-- **Startup Validation** - Pre-flight checks for optimal operation
-- **Network Analysis** - Interface detection and connectivity testing
-- **Performance Monitoring** - Resource usage and health metrics
 
 ## 🛠️ Installation & Usage
 
@@ -203,14 +198,6 @@ volumes:
   - /mnt/nas/media:/media/nas:ro
 ```
 
-**Legacy Read-Write Mounting:**
-```bash
-# Only use read-write if you need the server to modify files
-/home/user/Videos:/media/videos
-/home/user/Music:/media/music
-/home/user/Pictures:/media/pictures
-```
-
 #### Docker Run Command
 
 ```bash
@@ -226,7 +213,6 @@ docker run -d \
   -e VUIO_SERVER_IP=192.168.1.126 \
   -e VUIO_PORT=8080 \
   -e VUIO_MEDIA_DIR=/media \
-  -e VUIO_SERVER_NAME="My DLNA Server" \
   -e PUID=1000 \
   -e PGID=1000 \
   vuio:latest
@@ -245,7 +231,6 @@ docker run -d \
   -e VUIO_SERVER_IP=192.168.1.126 \
   -e VUIO_PORT=8080 \
   -e VUIO_MEDIA_DIR=/media \
-  -e VUIO_SERVER_NAME="My DLNA Server" \
   -e PUID=1000 \
   -e PGID=1000 \
   vuio:latest
@@ -394,46 +379,6 @@ VuIO provides professional-grade audio features that rival commercial media serv
 
 VuIO organizes your music collection into intuitive categories accessible through any DLNA client:
 
-**Browse by Artists:**
-```
-Audio > Artists > [Artist Name] > [All Tracks by Artist]
-```
-- Lists all unique artists with track counts
-- Shows all tracks by selected artist, sorted by album and track number
-- Supports various artists and featured artist metadata
-
-**Browse by Albums:**
-```
-Audio > Albums > [Album Name] > [Album Tracks]
-```
-- Lists all albums with track counts
-- Can be filtered by specific artist
-- Proper track ordering by track number
-
-**Browse by Genres:**
-```
-Audio > Genres > [Genre] > [All Tracks in Genre]
-```
-- Automatic genre categorization from metadata
-- Supports multiple genres per track
-- Custom genre organization
-
-**Browse by Years:**
-```
-Audio > Years > [Year] > [All Tracks from Year]
-```
-- Organizes music by release year
-- Perfect for exploring music by era
-- Handles albums spanning multiple years
-
-**Browse by Album Artists:**
-```
-Audio > Album Artists > [Album Artist] > [All Albums]
-```
-- Proper handling of compilation albums
-- Separates album artists from track artists
-- Ideal for classical and soundtrack collections
-
 ### Playlist Management
 
 **Playlist Creation & Management:**
@@ -495,21 +440,6 @@ POST /api/playlists/scan
   "directory": "/path/to/playlists"
 }
 ```
-
-### DLNA Client Compatibility
-
-**Tested DLNA Clients:**
-- **VLC Media Player** - Full audio browsing and playback
-- **Kodi/XBMC** - Complete music library integration
-- **Windows Media Player** - Native Windows DLNA support
-- **BubbleUPnP (Android)** - Advanced mobile music browsing
-- **Hi-Fi Cast (iOS)** - Premium iOS audio streaming
-- **Smart TVs** - Samsung, LG, Sony, and other DLNA-enabled TVs
-
-**Audio Streaming Features:**
-- **Gapless Playback** - Seamless album listening experience
-- **HTTP Range Requests** - Efficient seeking and resume
-- **Multiple Bitrates** - Automatic quality selection
 
 ### Music Library Organization
 
@@ -615,110 +545,9 @@ VuIO is built with a modular, cross-platform architecture:
 
 ## 🧪 Testing
 
-Run the comprehensive test suite:
-
 ```bash
-# Run all tests
 cargo test
-
-# Run with output
-cargo test -- --nocapture
-
-# Run specific test modules
-cargo test platform::tests
-cargo test database::tests
-cargo test config::tests
 ```
-
-**Test Coverage:**
-- ✅ 91 tests passing (including audio features)
-- ✅ Platform detection and capabilities
-- ✅ Database operations and health checks
-- ✅ Configuration management and validation
-- ✅ File system monitoring and events
-- ✅ Network interface detection
-- ✅ SSDP socket creation and binding
-- ✅ Media file scanning and metadata
-- ✅ Audio metadata extraction and categorization
-- ✅ Playlist management (M3U/PLS import/export)
-- ✅ Music categorization and browsing
-- ✅ Error handling and recovery
-
-## 🐛 Troubleshooting
-
-### Common Issues
-
-**Read-Only File System Errors (Docker)**
-If you see errors like `chown: Read-only file system`, this is normal when mounting media directories as read-only:
-- ✅ **Recommended**: Mount media directories as read-only (`:ro`) for security
-- ✅ The application will detect and handle read-only mounts gracefully
-- ✅ Only the `/config` directory needs write access for database and configuration
-- ⚠️ Warnings about read-only media directories can be safely ignored
-
-```yaml
-# Correct Docker Compose volume configuration
-volumes:
-  - ./vuio-config:/config          # Read-write for database
-  - /path/to/media:/media:ro       # Read-only for media files
-```
-
-**Port Already in Use**
-```bash
-# Check what's using the port
-netstat -tulpn | grep :8080  # Linux
-netstat -an | grep :8080     # macOS/Windows
-
-# Use a different port
-./vuio -p 9090
-```
-
-**Permission Denied**
-```bash
-# Linux: Use capabilities instead of root
-sudo setcap 'cap_net_bind_service=+ep' ./target/release/vuio
-
-# Or run on unprivileged port
-./vuio -p 8080
-```
-
-**No Media Files Found**
-- Check directory permissions
-- Verify supported file extensions
-- Review exclude patterns in configuration
-- Check platform-specific file system case sensitivity
-
-**DLNA Clients Can't Find Server**
-- ✅ **Docker Users**: The application now works perfectly with Docker host networking mode
-- Verify firewall settings
-- Check multicast support on network interface  
-- Ensure SSDP port (1900) is not blocked
-- Try specifying network interface in configuration
-- For Docker: Use `network_mode: host` for full multicast support
-
-**Audio Files Not Showing Metadata**
-- Verify audio files have embedded ID3 tags or metadata
-- Check that file extensions are included in `supported_extensions`
-- Enable debug logging to see metadata extraction attempts: `RUST_LOG=debug`
-- Supported metadata formats: ID3v1/v2, Vorbis Comments, APE tags, MP4 metadata
-- For files without metadata, titles will be extracted from filenames
-
-**Music Categories Are Empty**
-- Ensure audio files have proper artist/album/genre metadata
-- Check that the media directory scanning completed successfully
-- Verify database contains audio files: look for `mime_type LIKE 'audio/%'` entries
-- Re-scan the media directory if metadata was added after initial scan
-
-**Playlists Not Importing**
-- Verify playlist files are in M3U or PLS format
-- Check that file paths in playlists point to actual media files
-- Ensure playlist files are not excluded by `exclude_patterns`
-- Use absolute paths in playlist files for best compatibility
-
-**Poor DLNA Audio Performance**
-- Enable database vacuuming for large music libraries: `vacuum_on_startup = true`
-- Use read-only media mounts to improve Docker performance
-- Consider disabling `scan_on_startup` for very large collections
-- Monitor database size and consider periodic cleanup
 
 ### Diagnostic Information
 
@@ -726,13 +555,6 @@ Generate a diagnostic report:
 ```bash
 RUST_LOG=debug ./vuio 2>&1 | tee vuio-debug.log
 ```
-
-The application provides comprehensive startup diagnostics including:
-- Platform capabilities and limitations
-- Network interface analysis
-- Port availability testing
-- File system permissions
-- Database health status
 
 ## 🤝 Contributing
 
