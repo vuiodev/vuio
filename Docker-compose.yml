@@ -2,18 +2,44 @@ version: '3.8'
 
 services:
   vuio:
-    image: ghcr.io/vuiodev/vuio:latest
-    container_name: vuio-server
+    network_mode: host
+    image: ghcr.io/vuiodev/vuio:v0.0.12
+    container_name: vuio-server-local
     restart: unless-stopped
     
-    # Use host networking for DLNA/UPnP compatibility
-    network_mode: host
+    # Add capabilities for better multicast support
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    
+    # Ensure container has access to network interfaces
+    privileged: false  # Start with false, can be changed to true if needed
     
     volumes:
       # Persist configuration and database
       - ./vuio-config:/config
+      
       # Mount your media library (adjust path as needed)
-      - /path/to/your/media:/media
+      # RECOMMENDED: Mount as read-only (:ro) for safety
+      # This prevents the container from accidentally modifying your media files
+      # and eliminates permission issues with read-only file systems
+      
+      # Example 1: Local test media (read-write for development)
+      - ./test-media:/media
+      
+      # Example 2: Read-only mount (recommended for production)
+      # - /path/to/your/media:/media:ro
+      
+      # Example 3: Multiple media directories
+      # - /path/to/movies:/media/movies:ro
+      # - /path/to/tv-shows:/media/tv:ro
+      # - /path/to/music:/media/music:ro
+      
+      # Example 4: Network storage (NFS/SMB)
+      # - type: bind
+      #   source: /mnt/nas/media
+      #   target: /media
+      #   read_only: true
       
     environment:
       # User/Group ID mapping
@@ -26,9 +52,12 @@ services:
       - VUIO_SERVER_NAME=VuIO
       - VUIO_BIND_INTERFACE=0.0.0.0
       
-      # Let Vuio auto-detect the best interface
-      - VUIO_SSDP_INTERFACE=Auto
+      # Set server IP for DLNA announcements (Required for Docker host networking)
+      # This ensures DLNA announcements use the correct IP address
+      - VUIO_SERVER_IP=192.168.1.126  # Your host IP address
       
-      # Set server IP for DLNA announcements (Docker/container environments)
-      # Uncomment and set to your host machine's IP address for proper DLNA discovery
-      # - VUIO_SERVER_IP=192.168.1.100
+      # Set SSDP port to avoid conflicts (port 1900 is in use)
+      - VUIO_SSDP_PORT=1902
+      
+      # Enable debug logging
+      - RUST_LOG=debug
