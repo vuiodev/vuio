@@ -82,6 +82,9 @@ Docker will not work on MacOS due to the lack of a compatible multicast implemen
 git clone https://github.com/vuiodev/vuio.git
 cd vuio
 
+# Run from remote repo
+docker-compose -f docker-compose.yml up
+
 # Build and run with Docker Compose
 docker-compose -f docker-compose.local.yml up --build
 ```
