@@ -60,8 +60,9 @@ impl MediaScanner {
 
     /// Simple recursive directory scan that returns files without database operations
     pub async fn scan_directory_recursively_simple(&self, directory: &Path) -> Result<Vec<MediaFile>> {
-        let mut all_files = Vec::new();
-        let mut dirs_to_scan = vec![directory.to_path_buf()];
+        let mut all_files = Vec::with_capacity(1000); // Pre-allocate capacity
+        let mut dirs_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
+        dirs_to_scan.push(directory.to_path_buf());
 
         while let Some(current_dir) = dirs_to_scan.pop() {
             // Scan current directory for files
@@ -151,10 +152,10 @@ impl MediaScanner {
     ) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         
-        // Create lookup maps for efficient comparison
+        // Create lookup maps for efficient comparison with pre-allocated capacity
         // Use both original and normalized paths to handle legacy database entries
-        let mut existing_by_original: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::new();
-        let mut existing_by_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::new();
+        let mut existing_by_original: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(existing_files.len());
+        let mut existing_by_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(existing_files.len());
         
         for existing_file in existing_files {
             let normalized_path = self.filesystem_manager.normalize_path(&existing_file.path);
@@ -165,17 +166,12 @@ impl MediaScanner {
             existing_by_normalized.insert(normalized_path, existing_file);
         }
         
-        // Current files paths - normalize for consistent comparison
-        let current_normalized: std::collections::HashMap<PathBuf, MediaFile> = current_files
-            .iter()
-            .map(|f| {
-                let normalized_path = self.filesystem_manager.normalize_path(&f.path);
-                
-
-                
-                (normalized_path, f.clone())
-            })
-            .collect();
+        // Current files paths - normalize for consistent comparison with pre-allocated capacity
+        let mut current_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(current_files.len());
+        for f in &current_files {
+            let normalized_path = self.filesystem_manager.normalize_path(&f.path);
+            current_normalized.insert(normalized_path, f.clone());
+        }
         
         let current_paths: HashSet<PathBuf> = current_normalized.keys().cloned().collect();
         
@@ -304,7 +300,8 @@ impl MediaScanner {
         let all_existing_files = self.database_manager.get_all_media_files().await?;
         
         let mut combined_result = ScanResult::new();
-        let mut directories_to_scan = vec![normalized_root.clone()];
+        let mut directories_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
+        directories_to_scan.push(normalized_root.clone());
         
         while let Some(current_dir) = directories_to_scan.pop() {
             // Scan current directory with the pre-loaded existing files
@@ -374,15 +371,15 @@ pub struct ScanResult {
 }
 
 impl ScanResult {
-    /// Create a new empty scan result
+    /// Create a new empty scan result with pre-allocated capacity
     pub fn new() -> Self {
         Self {
-            new_files: Vec::new(),
-            updated_files: Vec::new(),
-            removed_files: Vec::new(),
-            unchanged_files: Vec::new(),
+            new_files: Vec::with_capacity(100),
+            updated_files: Vec::with_capacity(50),
+            removed_files: Vec::with_capacity(50),
+            unchanged_files: Vec::with_capacity(1000),
             total_scanned: 0,
-            errors: Vec::new(),
+            errors: Vec::with_capacity(10),
         }
     }
     

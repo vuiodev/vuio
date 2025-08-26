@@ -60,28 +60,29 @@ pub struct CrossPlatformWatcher {
 impl CrossPlatformWatcher {
     /// Create a new cross-platform file system watcher
     pub fn new() -> Self {
-        let (event_sender, event_receiver) = mpsc::channel(1000);
+        let (event_sender, event_receiver) = mpsc::channel(256); // Reduced buffer size for memory efficiency
         
-        // Define supported media file extensions
-        let media_extensions = [
+        // Define supported media file extensions with pre-allocated capacity
+        let mut media_extensions = HashSet::with_capacity(32);
+        let extensions = [
             // Video formats
             "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpg", "mpeg",
             // Audio formats  
             "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "aiff",
             // Image formats
             "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "svg",
-        ]
-        .iter()
-        .map(|ext| ext.to_lowercase())
-        .collect();
+        ];
+        for ext in &extensions {
+            media_extensions.insert(ext.to_lowercase());
+        }
 
         Self {
             debouncer: Arc::new(RwLock::new(None)),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
-            watched_paths: Arc::new(RwLock::new(HashSet::new())),
+            watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))), // Pre-allocate capacity
             media_extensions,
-            debounce_duration: Duration::from_millis(100), // 100ms debounce
+            debounce_duration: Duration::from_millis(250), // 250ms debounce for reduced event frequency
         }
     }
 
@@ -97,7 +98,7 @@ impl CrossPlatformWatcher {
 
     /// Convert notify events to our FileSystemEvent enum
     fn convert_events(&self, events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
-        let mut fs_events = Vec::new();
+        let mut fs_events = Vec::with_capacity(events.len()); // Pre-allocate capacity
         
         for event in events {
             match event.event.kind {
@@ -219,9 +220,9 @@ impl CrossPlatformWatcher {
                                 debouncer: Arc::new(RwLock::new(None)),
                                 event_sender: event_sender.clone(),
                                 event_receiver: Arc::new(RwLock::new(None)),
-                                watched_paths: Arc::new(RwLock::new(HashSet::new())),
+                                watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))),
                                 media_extensions: media_extensions.clone(),
-                                debounce_duration: Duration::from_millis(100),
+                                debounce_duration: Duration::from_millis(250),
                             };
                             
                             let fs_events = watcher.convert_events(relevant_events);
@@ -329,7 +330,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
         // If we can't get the original receiver, create a new channel
         // This shouldn't happen in normal usage
         warn!("Creating new event receiver - original may have been consumed");
-        let (_, receiver) = mpsc::channel(1000);
+        let (_, receiver) = mpsc::channel(256); // Reduced buffer size
         receiver
     }
 

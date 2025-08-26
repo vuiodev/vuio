@@ -304,7 +304,7 @@ pub struct SqliteDatabase {
 }
 
 impl SqliteDatabase {
-    /// Create a new SQLite database manager
+    /// Create a new SQLite database manager with optimized pool settings
     pub async fn new(db_path: PathBuf) -> Result<Self> {
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -312,7 +312,15 @@ impl SqliteDatabase {
         }
 
         let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
-        let pool = SqlitePool::connect(&database_url).await?;
+        
+        // Configure connection pool for memory efficiency
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)  // Reduced from default 10 to 2 for single-thread runtime
+            .min_connections(1)  // Keep minimum connection alive
+            .idle_timeout(std::time::Duration::from_secs(300))  // 5 min idle timeout
+            .max_lifetime(std::time::Duration::from_secs(1800)) // 30 min max lifetime
+            .connect(&database_url)
+            .await?;
 
         Ok(Self { pool, db_path })
     }
@@ -493,7 +501,10 @@ impl DatabaseManager for SqliteDatabase {
         sqlx::query("PRAGMA foreign_keys = ON")
             .execute(&self.pool)
             .await?;
-        sqlx::query("PRAGMA cache_size = -10000") // 10MB cache
+        sqlx::query("PRAGMA cache_size = -2000") // 2MB cache (reduced for memory efficiency)
+            .execute(&self.pool)
+            .await?;
+        sqlx::query("PRAGMA mmap_size = 0") // Disable memory mapping to reduce memory usage
             .execute(&self.pool)
             .await?;
 
@@ -542,12 +553,12 @@ impl DatabaseManager for SqliteDatabase {
 
     async fn get_all_media_files(&self) -> Result<Vec<MediaFile>> {
         let rows = sqlx::query(
-            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename"
+            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename LIMIT 5000"
         )
         .fetch_all(&self.pool)
         .await?;
 
-        let mut files = Vec::new();
+        let mut files = Vec::with_capacity(rows.len()); // Pre-allocate capacity
         for row in rows {
             files.push(MediaFile::from_row(&row)?);
         }
@@ -613,13 +624,14 @@ impl DatabaseManager for SqliteDatabase {
             FROM media_files 
             WHERE path LIKE ?
             ORDER BY filename
+            LIMIT 1000
             "#,
         )
         .bind(&dir_str)
         .fetch_all(&self.pool)
         .await?;
 
-        let mut files = Vec::new();
+        let mut files = Vec::with_capacity(rows.len()); // Pre-allocate capacity
         for row in rows {
             files.push(MediaFile::from_row(&row)?);
         }
@@ -653,7 +665,7 @@ impl DatabaseManager for SqliteDatabase {
         .fetch_all(&self.pool)
         .await?;
 
-        let mut files = Vec::new();
+        let mut files = Vec::with_capacity(file_rows.len()); // Pre-allocate capacity
         for row in file_rows {
             files.push(MediaFile::from_row(&row)?);
         }

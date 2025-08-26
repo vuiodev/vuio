@@ -45,8 +45,8 @@ where
             database,
             watcher,
             event_receiver: None,
-            processing_queue: Arc::new(RwLock::new(HashMap::new())),
-            batch_interval: Duration::from_millis(1000), // Process batches every second
+            processing_queue: Arc::new(RwLock::new(HashMap::with_capacity(256))), // Pre-allocate capacity
+            batch_interval: Duration::from_millis(2000), // Process batches every 2 seconds for reduced frequency
             is_running: Arc::new(RwLock::new(false)),
         }
     }
@@ -631,7 +631,7 @@ where
 
     /// Recursively scan a directory for media files
     async fn scan_directory_recursive(directory: &Path) -> Result<Vec<PathBuf>> {
-        let mut media_files = Vec::new();
+        let mut media_files = Vec::with_capacity(1000); // Pre-allocate capacity
         let mut entries = tokio::fs::read_dir(directory).await?;
 
         while let Some(entry) = entries.next_entry().await? {

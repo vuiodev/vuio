@@ -51,7 +51,7 @@ fn parse_early_args() -> (bool, Option<String>) {
     }
 }
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // Parse command line arguments first to get debug flag
     let (debug_enabled, config_file_path) = parse_early_args();

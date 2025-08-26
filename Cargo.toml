@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1.47", features = ["rt-multi-thread", "net", "fs", "time", "sync", "macros", "io-util", "signal"] }
+tokio = { version = "1.47", features = ["rt", "net", "fs", "time", "sync", "macros", "io-util", "signal"] }
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.18", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
