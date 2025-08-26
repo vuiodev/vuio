@@ -645,9 +645,7 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
     config.validate_for_platform()
         .context("Configuration validation failed")?;
     
-    // Save the configuration (creates file if it doesn't exist, updates if needed)
-    config.save_to_file(&config_path)
-        .context("Failed to save configuration file")?;
+    // Configuration is already loaded/created by load_or_create - no need to save again
     
     info!("Configuration initialized successfully");
     info!("Server will listen on: {}:{}", config.server.interface, config.server.port);

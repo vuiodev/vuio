@@ -309,9 +309,6 @@ impl AppConfig {
             // Ensure the loaded configuration uses platform-appropriate defaults for missing values
             config.apply_platform_defaults()?;
             
-            // Re-save the configuration if it was updated with platform defaults
-            config.save_to_file(config_path)?;
-            
             Ok(config)
         } else {
             // Ensure platform directories exist before creating configuration
@@ -1297,13 +1294,10 @@ impl ConfigManager {
         self.config.read().await.clone()
     }
 
-    /// Update the configuration and save to file
+    /// Update the configuration in memory only - do not save to file
     pub async fn update_config(&self, new_config: AppConfig) -> Result<()> {
         // Validate the new configuration
         ConfigValidator::validate(&new_config)?;
-        
-        // Save to file
-        new_config.save_to_file(&self.config_path)?;
         
         let old_config = {
             let mut config_guard = self.config.write().await;
@@ -1460,9 +1454,9 @@ mod tests {
         
         assert_eq!(manager.get_config().await.server.port, 9090);
         
-        // Test reload
+        // Test reload - should revert to original file value since we don't save changes
         manager.reload().await?;
-        assert_eq!(manager.get_config().await.server.port, 9090);
+        assert_eq!(manager.get_config().await.server.port, 8080);
         
         Ok(())
     }
