@@ -11,7 +11,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
-use tokio::fs::File;
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, warn};

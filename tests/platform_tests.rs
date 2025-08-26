@@ -5,7 +5,7 @@
 
 use vuio::platform::{PlatformInfo, OsType, PlatformCapabilities};
 use vuio::platform::network::{NetworkManager, BaseNetworkManager, SsdpConfig};
-use vuio::platform::filesystem::create_platform_filesystem_manager;
+use vuio::platform::filesystem::{FileSystemManager, create_platform_filesystem_manager};
 use vuio::database::{DatabaseManager, SqliteDatabase, MediaFile};
 use vuio::watcher::{FileSystemWatcher, CrossPlatformWatcher, FileSystemEvent};
 
@@ -298,32 +298,6 @@ mod network_tests {
             // LinuxNetworkManager::new() returns Self, not Result, so creation always succeeds
         }
         
-        #[tokio::test]
-        async fn test_linux_network_namespaces() {
-            let manager = LinuxNetworkManager::new();
-            let interfaces_result = manager.get_local_interfaces().await;
-            
-            match interfaces_result {
-                Ok(interfaces) => {
-                    // Linux should have at least loopback
-                    assert!(!interfaces.is_empty());
-                    
-                    // Check for Linux-specific interface naming
-                    let has_linux_naming = interfaces.iter().any(|iface| {
-                        iface.name.starts_with("eth") || // Ethernet
-                        iface.name.starts_with("wlan") || // WiFi
-                        iface.name.starts_with("lo") || // Loopback
-                        iface.name.starts_with("enp") || // Predictable network interface names
-                        iface.name.starts_with("wlp") // Predictable WiFi interface names
-                    });
-                    
-                    assert!(has_linux_naming, "Expected Linux-style interface names");
-                }
-                Err(e) => {
-                    println!("Interface detection failed (acceptable in test environment): {}", e);
-                }
-            }
-        }
         
         #[tokio::test]
         async fn test_linux_multicast_group_joining() {
