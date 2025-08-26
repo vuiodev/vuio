@@ -62,7 +62,7 @@ setup_directories() {
     log "Setting up directories and permissions"
     
     # Ensure directories exist
-    mkdir -p /config /app
+    mkdir -p /config /app /data
     
     # Create media directory if it doesn't exist, but don't fail if it's read-only
     if [ ! -d "/media" ]; then
@@ -70,7 +70,7 @@ setup_directories() {
     fi
     
     # Set ownership for directories we can control
-    chown -R vuio:vuio /config /app
+    chown -R vuio:vuio /config /app /data
     
     # Try to set ownership on media directory, but don't fail if it's read-only
     if [ -d "/media" ]; then
@@ -299,7 +299,7 @@ path = "${VUIO_MEDIA_DIR:-/media}"
 recursive = true
 
 [database]
-path = "/config/media.db"
+path = "${VUIO_DB_PATH:-/config/media.db}"
 vacuum_on_startup = false
 backup_enabled = true
 EOF
