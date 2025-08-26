@@ -411,11 +411,18 @@ impl BaseFileSystemManager {
     
     /// Common file info extraction
     pub async fn get_file_info_common(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
-        let metadata = fs::metadata(path).await?;
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .await?
+            .metadata()
+            .await?;
         
         let permissions = FilePermissions {
-            readable: !metadata.permissions().readonly(),
-            writable: !metadata.permissions().readonly(),
+            readable: true, // Always readable for media files
+            writable: false, // Enforce read-only access to media files
             executable: false, // Will be overridden by platform-specific implementations
             platform_details: HashMap::new(),
         };
@@ -527,7 +534,13 @@ impl FileSystemManager for BaseFileSystemManager {
     }
     
     async fn is_accessible(&self, path: &Path) -> bool {
-        fs::metadata(path).await.is_ok()
+        // Check accessibility with read-only access
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .await
+            .is_ok()
     }
     
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {

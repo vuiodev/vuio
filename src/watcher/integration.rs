@@ -420,7 +420,14 @@ where
 
     /// Create a MediaFile from a file path
     async fn create_media_file_from_path(path: &Path) -> Result<MediaFile> {
-        let metadata = tokio::fs::metadata(path).await?;
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .await?
+            .metadata()
+            .await?;
         let size = metadata.len();
         let modified = metadata.modified().unwrap_or(SystemTime::now());
 
@@ -440,7 +447,14 @@ where
 
     /// Update metadata for an existing MediaFile
     async fn update_media_file_metadata(media_file: &mut MediaFile) -> Result<()> {
-        let metadata = tokio::fs::metadata(&media_file.path).await?;
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&media_file.path)
+            .await?
+            .metadata()
+            .await?;
         media_file.size = metadata.len();
         media_file.modified = metadata.modified().unwrap_or(SystemTime::now());
         media_file.updated_at = SystemTime::now();

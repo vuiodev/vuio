@@ -58,7 +58,7 @@ fn get_primary_interface_ip_sync() -> Option<String> {
     use std::process::Command;
     
     // Check if host IP is overridden via environment variable (for containers)
-    if let Ok(host_ip) = std::env::var("VUIO_HOST_IP") {
+    if let Ok(host_ip) = std::env::var("VUIO_IP") {
         if !host_ip.is_empty() {
             return Some(host_ip);
         }

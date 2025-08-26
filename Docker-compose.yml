@@ -16,45 +16,52 @@ services:
     privileged: false  # Start with false, can be changed to true if needed
     
     volumes:
-      # Persist configuration and database
-      - ./vuio-config:/config
+      # Persist database
+      - ./vuio-data:/data
       
-      # Mount your media library (adjust path as needed)
-      # RECOMMENDED: Mount as read-only (:ro) for safety
-      # This prevents the container from accidentally modifying your media files
-      # and eliminates permission issues with read-only file systems
+      # Mount your media library (always read-only)
+      # VuIO enforces read-only access to media files at the application level
+      # Docker :ro mount provides additional security layer
       
-      # Example 1: Local test media (read-write for development)
+      # Example 1: Single media directory
       - ./test-media:/media
       
-      # Example 2: Read-only mount (recommended for production)
-      # - /path/to/your/media:/media:ro
+      # Example 2: Multiple media directories
+      # Mount each directory and configure via environment variable:
+      # - /path/to/movies:/media/movies
+      # - /path/to/tv-shows:/media/tv
+      # - /path/to/music:/media/music
+      # Then set: VUIO_MEDIA_DIRS=/media/movies,/media/tv,/media/music
       
-      # Example 3: Multiple media directories
-      # - /path/to/movies:/media/movies:ro
-      # - /path/to/tv-shows:/media/tv:ro
-      # - /path/to/music:/media/music:ro
-      
-      # Example 4: Network storage (NFS/SMB)
+      # Example 3: Network storage (NFS/SMB)
       # - type: bind
       #   source: /mnt/nas/media
       #   target: /media
-      #   read_only: true
       
     environment:
-      # User/Group ID mapping
-      - PUID=1000  # Run 'id -u' to find your user ID
-      - PGID=1000  # Run 'id -g' to find your group ID
-      
-      # Application configuration
+      # Server Configuration
       - VUIO_PORT=8080
-      - VUIO_MEDIA_DIR=/media
+      - VUIO_INTERFACE=0.0.0.0
       - VUIO_SERVER_NAME=VuIO
-      - VUIO_BIND_INTERFACE=0.0.0.0
+      # Fixed UUID for consistency. 
+      # CHANGE THIS if running multiple instances on same LAN
+      - VUIO_UUID=550e8400-e29b-41d4-a716-446655440000  
+      - VUIO_IP=192.168.1.173  # Required for Docker host networking
       
-      # Set server IP for DLNA announcements (Required for Docker host networking)
-      # This ensures DLNA announcements use the correct IP address
-      - VUIO_SERVER_IP=192.168.1.173
+      # Media Configuration
+      - VUIO_MEDIA_DIRS=/media  # Comma-separated for multiple dirs: /media/movies,/media/tv,/media/music
+      - VUIO_SCAN_ON_STARTUP=true
+      - VUIO_WATCH_CHANGES=true
+      - VUIO_CLEANUP_DELETED=true
+      
+      # Network Configuration
+      - VUIO_MULTICAST_TTL=4
+      - VUIO_ANNOUNCE_INTERVAL=300
+      
+      # Database Configuration
+      - VUIO_DB_PATH=/data/vuio.db
+      - VUIO_DB_VACUUM=false
+      - VUIO_DB_BACKUP=true
       
       # Enable debug logging
       - RUST_LOG=debug

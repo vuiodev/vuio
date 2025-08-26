@@ -266,7 +266,13 @@ pub async fn serve_media(
         .map_err(|_| AppError::NotFound)?
         .ok_or(AppError::NotFound)?;
 
-    let mut file = File::open(&file_info.path).await.map_err(AppError::Io)?;
+    // Enforce read-only access to media files
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(false)
+        .open(&file_info.path)
+        .await
+        .map_err(AppError::Io)?;
     let file_size = file_info.size;
 
     let mut response_builder = Response::builder()

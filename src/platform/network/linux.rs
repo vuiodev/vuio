@@ -377,7 +377,7 @@ impl LinuxNetworkManager {
         
         // Special handling for Docker containers - prioritize configured server IP
         if self.is_running_in_docker() && interfaces.iter().all(|i| i.ip_address.is_loopback()) {
-            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+            if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Replace all loopback IPs with the configured server IP for the primary interface
                     if let Some(primary_interface) = interfaces.iter_mut().find(|i| i.is_up && i.supports_multicast) {
@@ -448,7 +448,7 @@ impl LinuxNetworkManager {
         
         // Priority 1: If we have VUIO_SERVER_IP configured and we're in Docker, use it directly
         if self.is_running_in_docker() {
-            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+            if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Find the interface that should be used for this IP
                     let interface_name = std::env::var("VUIO_SSDP_INTERFACE")
@@ -521,7 +521,7 @@ impl LinuxNetworkManager {
         
         // Priority 3: If still no interfaces, try to use the configured server IP with best guess interface  
         if interfaces.is_empty() {
-            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+            if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Find the most likely interface name
                     let interface_name = if let Ok(output) = Command::new("ip").args(&["route", "get", &server_ip_str]).output() {
@@ -564,7 +564,7 @@ impl LinuxNetworkManager {
     fn get_interface_ip_robust(&self, interface_name: &str) -> Option<IpAddr> {
         // First check if we're in Docker and have a configured server IP
         if self.is_running_in_docker() {
-            if let Ok(server_ip_str) = std::env::var("VUIO_SERVER_IP") {
+            if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Check if this interface should use the configured server IP
                     if let Ok(ssdp_interface) = std::env::var("VUIO_SSDP_INTERFACE") {

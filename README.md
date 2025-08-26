@@ -89,24 +89,43 @@ docker-compose -f docker-compose.local.yml up --build
 **Essential Configuration:**
 ```bash
 # Server Configuration
-VUIO_PORT=8080                    # HTTP server port
-VUIO_SERVER_NAME="VuIO"           # DLNA server name
-VUIO_BIND_INTERFACE=0.0.0.0       # Network interface to bind
+VUIO_PORT=8080                                        # HTTP server port
+VUIO_SERVER_NAME="VuIO DLNA Server"                   # DLNA server name
+VUIO_INTERFACE=0.0.0.0                               # Network interface to bind
+VUIO_UUID=550e8400-e29b-41d4-a716-446655440000       # Fixed UUID (CHANGE THIS for multiple instances)
 
 # CRITICAL: Set your host IP for DLNA announcements
-VUIO_SERVER_IP=192.168.1.126      # Replace with YOUR host IP address
+VUIO_IP=192.168.1.126                                # Replace with YOUR host IP address
 
 # Media Configuration
-VUIO_MEDIA_DIR=/media              # Media directory inside container
+VUIO_MEDIA_DIRS=/media                               # Single directory
+# VUIO_MEDIA_DIRS=/media/movies,/media/tv,/media/music # Multiple directories (comma-separated)
+VUIO_SCAN_ON_STARTUP=true                           # Scan media on startup
+VUIO_WATCH_CHANGES=true                             # Enable file system monitoring
+VUIO_CLEANUP_DELETED=true                           # Remove deleted files from database
 
-# Note: SSDP port is hardcoded to 1900 (DLNA standard) and cannot be changed
+# Network Configuration
+VUIO_MULTICAST_TTL=4                                # Multicast TTL
+VUIO_ANNOUNCE_INTERVAL=300                          # SSDP announcement interval (seconds)
 
-# User/Group Mapping
-PUID=1000                          # Your user ID (run 'id -u')
-PGID=1000                          # Your group ID (run 'id -g')
+# Database Configuration
+VUIO_DB_PATH=/data/vuio.db                          # Database file path
+VUIO_DB_VACUUM=false                                # Vacuum database on startup
+VUIO_DB_BACKUP=true                                 # Enable database backups
 
 # Debugging
-RUST_LOG=debug                     # Enable debug logging
+RUST_LOG=debug                                      # Enable debug logging
+```
+
+**Generate a unique UUID for multiple instances:**
+```bash
+# On macOS/Linux
+uuidgen
+
+# On Windows (PowerShell)
+[System.Guid]::NewGuid()
+
+# Or use online UUID generators
 ```
 
 #### Finding Your Host IP Address
@@ -127,6 +146,35 @@ hostname -I | awk '{print $1}'
 ```cmd
 # Using ipconfig
 ipconfig | findstr "IPv4"
+```
+
+#### Docker Volume Mounting for Multiple Media Directories
+
+**Single Media Directory:**
+```yaml
+volumes:
+  - ./test-media:/media
+```
+
+**Multiple Media Directories:**
+```yaml
+volumes:
+  # Mount each directory separately
+  - /path/to/movies:/media/movies
+  - /path/to/tv-shows:/media/tv
+  - /path/to/music:/media/music
+  
+# Then configure via environment variable:
+environment:
+  - VUIO_MEDIA_DIRS=/media/movies,/media/tv,/media/music
+```
+
+**Network Storage (NFS/SMB):**
+```yaml
+volumes:
+  - type: bind
+    source: /mnt/nas/media
+    target: /media
 ```
 
 #### Docker Compose Configuration
@@ -156,10 +204,11 @@ services:
       - /path/to/your/media:/media:ro
       
     environment:
-      - VUIO_SERVER_IP=192.168.1.126  # YOUR HOST IP HERE
+      - VUIO_IP=192.168.1.126         # YOUR HOST IP HERE
       - VUIO_PORT=8080
-      - VUIO_MEDIA_DIR=/media
+      - VUIO_MEDIA_DIRS=/media
       - VUIO_SERVER_NAME=VuIO
+      - VUIO_DB_PATH=/data/vuio.db
       - PUID=1000
       - PGID=1000
 ```
@@ -167,15 +216,15 @@ services:
 #### Volume Mapping
 
 **Read-Only Media Support (Recommended):**
-VuIO fully supports read-only media directories, which is the recommended approach for production deployments. This provides several benefits:
-- Prevents accidental modification of your media files
+VuIO enforces read-only access to all media directories at the application level. This provides several benefits:
+- Prevents any modification of your media files
 - Works with network storage that may be mounted read-only
 - Eliminates permission issues with Docker containers
-- Provides better security by reducing write access
+- Provides better security by design
 
 ```bash
-# Recommended: Mount media as read-only
-/path/to/your/media:/media:ro
+# Media directories (application enforces read-only access)
+/path/to/your/media:/media
 
 # Configuration and database persistence (read-write required)
 ./vuio-config:/config
@@ -209,9 +258,10 @@ docker run -d \
   --cap-add NET_RAW \
   -v /path/to/your/media:/media:ro \
   -v ./vuio-config:/config \
-  -e VUIO_SERVER_IP=192.168.1.126 \
+  -e VUIO_IP=192.168.1.126 \
   -e VUIO_PORT=8080 \
-  -e VUIO_MEDIA_DIR=/media \
+  -e VUIO_MEDIA_DIRS=/media \
+  -e VUIO_DB_PATH=/data/vuio.db \
   -e PUID=1000 \
   -e PGID=1000 \
   vuio:latest
@@ -227,9 +277,10 @@ docker run -d \
   -v /path/to/music:/media/music:ro \
   -v /path/to/pictures:/media/pictures:ro \
   -v ./vuio-config:/config \
-  -e VUIO_SERVER_IP=192.168.1.126 \
+  -e VUIO_IP=192.168.1.126 \
   -e VUIO_PORT=8080 \
-  -e VUIO_MEDIA_DIR=/media \
+  -e VUIO_MEDIA_DIRS=/media \
+  -e VUIO_DB_PATH=/data/vuio.db \
   -e PUID=1000 \
   -e PGID=1000 \
   vuio:latest
@@ -284,7 +335,51 @@ You can serve media from multiple directories using:
 
 ## ⚙️ Configuration
 
-VuIO uses a TOML configuration file with platform-specific defaults:
+VuIO supports two configuration modes:
+
+### Docker Configuration (Environment Variables Only)
+When running in Docker, VuIO automatically detects the container environment and uses **only environment variables** for configuration. No config files are read or written.
+
+**Required Environment Variables:**
+```bash
+# Server Configuration
+VUIO_PORT=8080                     # HTTP server port (default: 8080)
+VUIO_INTERFACE=0.0.0.0             # Network interface to bind (default: 0.0.0.0)
+VUIO_SERVER_NAME="VuIO DLNA Server" # DLNA server name (default: "VuIO DLNA Server")
+VUIO_UUID=550e8400-e29b-41d4-a716-446655440000  # DLNA device UUID (CHANGE THIS if running multiple instances)
+VUIO_IP=192.168.1.126              # Optional: Specific IP for DLNA announcements
+
+# Media Configuration
+VUIO_MEDIA_DIRS="/media,/movies,/music" # Comma-separated media directories (default: "/media")
+VUIO_SCAN_ON_STARTUP=true          # Scan media on startup (default: true)
+VUIO_WATCH_CHANGES=true            # Enable file system monitoring (default: true)
+VUIO_CLEANUP_DELETED=true          # Remove deleted files from database (default: true)
+
+# Network Configuration
+VUIO_MULTICAST_TTL=4               # Multicast TTL (default: 4)
+VUIO_ANNOUNCE_INTERVAL=30          # SSDP announcement interval in seconds (default: 30)
+
+# Database Configuration
+VUIO_DB_PATH=/data/vuio.db         # Database file path (default: "/data/vuio.db")
+VUIO_DB_VACUUM=false               # Vacuum database on startup (default: false)
+VUIO_DB_BACKUP=false               # Enable database backups (default: false)
+```
+
+**About UUID:** The UUID is required by the DLNA/UPnP specification to uniquely identify your media server on the network. It's used in SSDP announcements and device descriptions. If not provided, VuIO generates a random UUID on startup, but for consistency across container restarts, you should set a fixed UUID. **Important:** If running multiple VuIO instances on the same LAN, each must have a unique UUID to avoid conflicts.
+
+**Generate a unique UUID:**
+```bash
+# On macOS/Linux
+uuidgen
+
+# On Windows (PowerShell)
+[System.Guid]::NewGuid()
+
+# Or use online UUID generators
+```
+
+### Native Platform Configuration (Config Files)
+When running natively (Windows, macOS, Linux), VuIO uses TOML configuration files with platform-specific defaults:
 
 **Configuration Locations:**
 - **Windows:** `%APPDATA%\VuIO\config.toml`

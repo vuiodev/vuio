@@ -116,7 +116,14 @@ impl WindowsFileSystemManager {
     
     /// Get Windows-specific file permissions
     async fn get_windows_permissions(&self, path: &Path) -> Result<FilePermissions, FileSystemError> {
-        let metadata = fs::metadata(path).await?;
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .await?
+            .metadata()
+            .await?;
         let std_permissions = metadata.permissions();
         
         let mut platform_details = HashMap::new();
@@ -128,14 +135,12 @@ impl WindowsFileSystemManager {
         // For more detailed Windows ACL information, we would need to use Windows APIs
         // This is a simplified implementation
         let permissions = FilePermissions {
-            readable: true, // If we can read metadata, we can likely read the file
-            writable: !readonly,
+            readable: true, // Always readable for media files
+            writable: false, // Enforce read-only access to media files
             executable: path.extension()
                 .and_then(|ext| ext.to_str())
-                .map(|ext| {
-                    let ext_lower = ext.to_lowercase();
-                    matches!(ext_lower.as_str(), "exe" | "bat" | "cmd" | "com" | "scr" | "msi")
-                })
+                .map(|ext| ext.to_lowercase())
+                .map(|ext| matches!(ext.as_str(), "exe" | "bat" | "cmd" | "com" | "msi" | "ps1"))
                 .unwrap_or(false),
             platform_details,
         };
@@ -308,20 +313,25 @@ impl FileSystemManager for WindowsFileSystemManager {
     async fn is_accessible(&self, path: &Path) -> bool {
         let normalized_path = self.normalize_windows_path(path);
         
-        // Try to access the path
-        match fs::metadata(&normalized_path).await {
-            Ok(_) => true,
-            Err(err) => {
-                // Log the specific error for debugging
-                tracing::debug!("Path not accessible: {} - {}", normalized_path.display(), err);
-                false
-            }
-        }
+        // Try to access the path with read-only access
+        tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&normalized_path)
+            .await
+            .is_ok()
     }
     
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
         let normalized_path = self.normalize_windows_path(path);
-        let metadata = fs::metadata(&normalized_path).await?;
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(&normalized_path)
+            .await?
+            .metadata()
+            .await?;
         
         let permissions = self.get_windows_permissions(&normalized_path).await?;
         

@@ -575,6 +575,27 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
 async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_path: Option<String>) -> anyhow::Result<AppConfig> {
     info!("Initializing configuration...");
     
+    // Check if running in Docker container
+    if AppConfig::is_running_in_docker() {
+        info!("Docker environment detected - using environment variables for configuration");
+        let config = AppConfig::from_env()
+            .context("Failed to load configuration from environment variables")?;
+        
+        info!("Configuration initialized from environment variables");
+        info!("Server will listen on: {}:{}", config.server.interface, config.server.port);
+        info!("SSDP will use hardcoded port: 1900");
+        info!("Monitoring {} director(ies) for media files", config.media.directories.len());
+        
+        for (i, dir) in config.media.directories.iter().enumerate() {
+            info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
+        }
+        
+        return Ok(config);
+    }
+    
+    // Native platform mode - use config files
+    info!("Native platform detected - using configuration files");
+    
     // Use provided config file path if available, otherwise use platform default
     let config_path = if let Some(path) = config_file_path {
         let custom_path = PathBuf::from(path);
@@ -622,19 +643,17 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
             
             return Ok(config);
         }
-        Err(e) => {
-            debug!("No valid command line arguments provided: {}", e);
-            info!("Falling back to configuration file or platform defaults");
+        Err(_) => {
+            // Fall back to file-based configuration
         }
     }
     
-    // Fall back to configuration file or defaults
+    // Load or create configuration from file
     let mut config = if config_path.exists() {
         info!("Loading existing configuration from: {}", config_path.display());
-        AppConfig::load_from_file(&config_path)
-            .context("Failed to load configuration file")?
+        AppConfig::load_or_create(&config_path)?
     } else {
-        info!("Creating new configuration with platform defaults");
+        info!("No configuration file found, using platform defaults");
         AppConfig::default_for_platform()
     };
     
@@ -644,8 +663,6 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
     
     config.validate_for_platform()
         .context("Configuration validation failed")?;
-    
-    // Configuration is already loaded/created by load_or_create - no need to save again
     
     info!("Configuration initialized successfully");
     info!("Server will listen on: {}:{}", config.server.interface, config.server.port);

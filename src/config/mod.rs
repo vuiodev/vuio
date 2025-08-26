@@ -88,6 +88,101 @@ pub struct DatabaseConfig {
 }
 
 impl AppConfig {
+    /// Check if running in Docker container
+    pub fn is_running_in_docker() -> bool {
+        // Check for Docker-specific environment variables
+        std::env::var("DOCKER_CONTAINER").is_ok() ||
+        std::env::var("CONTAINER").is_ok() ||
+        std::path::Path::new("/.dockerenv").exists() ||
+        std::fs::read_to_string("/proc/1/cgroup")
+            .map(|content| content.contains("docker") || content.contains("containerd"))
+            .unwrap_or(false)
+    }
+
+    /// Create configuration from environment variables (Docker mode)
+    pub fn from_env() -> Result<Self> {
+        let server = ServerConfig {
+            port: std::env::var("VUIO_PORT")
+                .unwrap_or_else(|_| "8080".to_string())
+                .parse()
+                .context("Invalid VUIO_PORT")?,
+            interface: std::env::var("VUIO_INTERFACE")
+                .unwrap_or_else(|_| "0.0.0.0".to_string()),
+            name: std::env::var("VUIO_SERVER_NAME")
+                .unwrap_or_else(|_| "VuIO DLNA Server".to_string()),
+            uuid: std::env::var("VUIO_UUID")
+                .unwrap_or_else(|_| Uuid::new_v4().to_string()),
+            ip: std::env::var("VUIO_IP").ok(),
+        };
+
+        let network = NetworkConfig {
+            interface_selection: NetworkInterfaceConfig::Auto,
+            multicast_ttl: std::env::var("VUIO_MULTICAST_TTL")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse()
+                .context("Invalid VUIO_MULTICAST_TTL")?,
+            announce_interval_seconds: std::env::var("VUIO_ANNOUNCE_INTERVAL")
+                .unwrap_or_else(|_| "30".to_string())
+                .parse()
+                .context("Invalid VUIO_ANNOUNCE_INTERVAL")?,
+        };
+
+        let media_dirs = std::env::var("VUIO_MEDIA_DIRS")
+            .unwrap_or_else(|_| "/media".to_string())
+            .split(',')
+            .map(|path| MonitoredDirectoryConfig {
+                path: path.trim().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: Some(vec![
+                    ".*".to_string(),
+                    "*.tmp".to_string(),
+                    "*.part".to_string(),
+                ]),
+            })
+            .collect();
+
+        let media = MediaConfig {
+            directories: media_dirs,
+            scan_on_startup: std::env::var("VUIO_SCAN_ON_STARTUP")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(true),
+            watch_for_changes: std::env::var("VUIO_WATCH_CHANGES")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(true),
+            cleanup_deleted_files: std::env::var("VUIO_CLEANUP_DELETED")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(true),
+            supported_extensions: vec![
+                "mp4".to_string(), "mkv".to_string(), "avi".to_string(),
+                "mov".to_string(), "wmv".to_string(), "flv".to_string(),
+                "webm".to_string(), "m4v".to_string(), "3gp".to_string(),
+                "mp3".to_string(), "flac".to_string(), "wav".to_string(),
+                "aac".to_string(), "ogg".to_string(), "wma".to_string(),
+                "jpg".to_string(), "jpeg".to_string(), "png".to_string(),
+                "gif".to_string(), "bmp".to_string(), "webp".to_string(),
+            ],
+        };
+
+        let database = DatabaseConfig {
+            path: Some(std::env::var("VUIO_DB_PATH")
+                .unwrap_or_else(|_| "/data/vuio.db".to_string())),
+            vacuum_on_startup: std::env::var("VUIO_DB_VACUUM")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false),
+            backup_enabled: std::env::var("VUIO_DB_BACKUP")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(false),
+        };
+
+        Ok(AppConfig {
+            server,
+            network,
+            media,
+            database,
+        })
+    }
+
     /// Create configuration from command line arguments (compatibility with old interface)
     pub async fn from_args() -> Result<(Self, bool, Option<String>)> {
         use clap::Parser;
