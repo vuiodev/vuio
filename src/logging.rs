@@ -113,13 +113,10 @@ pub async fn log_network_status() -> Result<(), PlatformError> {
         warn!("No suitable primary interface found for DLNA operations");
     }
     
-    // Log platform-specific network capabilities
+    // Log platform capabilities
     let caps = &platform_info.capabilities;
-    info!("Network capabilities:");
-    info!("  - Privileged port binding: {}", caps.can_bind_privileged_ports);
-    info!("  - Multicast support: {}", caps.supports_multicast);
-    info!("  - Firewall present: {}", caps.has_firewall);
-    info!("  - Network permissions required: {}", caps.requires_network_permissions);
+    info!("Platform capabilities:");
+    info!("  - Case-sensitive filesystem: {}", caps.case_sensitive_fs);
     
     Ok(())
 }

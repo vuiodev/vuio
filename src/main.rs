@@ -505,8 +505,6 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
     info!("Architecture: {}", std::env::consts::ARCH);
     
     info!("Platform capabilities:");
-    info!("  - Multicast support: {}", platform_info.capabilities.supports_multicast);
-    info!("  - Firewall present: {}", platform_info.capabilities.has_firewall);
     info!("  - Case-sensitive filesystem: {}", platform_info.capabilities.case_sensitive_fs);
     
     // Log network interface information
@@ -537,39 +535,6 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
         }
     }
     
-    // Platform-specific diagnostics
-    match platform_info.os_type {
-        platform::OsType::Windows => {
-            info!("Windows-specific diagnostics:");
-            if !platform_info.capabilities.can_bind_privileged_ports {
-                info!("  - Administrator privileges may be required for ports < 1024");
-            }
-            if platform_info.capabilities.has_firewall {
-                info!("  - Windows Firewall may block network connections");
-            }
-        }
-        platform::OsType::MacOS => {
-            info!("macOS-specific diagnostics:");
-            info!("  - System may prompt for network access permissions");
-            if platform_info.capabilities.has_firewall {
-                info!("  - macOS Application Firewall may block connections");
-            }
-        }
-        platform::OsType::Linux => {
-            info!("Linux-specific diagnostics:");
-            if platform_info.capabilities.has_firewall {
-                info!("  - Firewall (iptables/ufw/firewalld) may block connections");
-            }
-            info!("  - SELinux/AppArmor policies may affect file access");
-        }
-        platform::OsType::Bsd => {
-            info!("BSD-specific diagnostics:");
-            if platform_info.capabilities.has_firewall {
-                info!("  - Firewall (pf/ipfw) may block connections");
-            }
-            info!("  - BSD security policies may affect file access");
-        }
-    }
     
     Ok(platform_info)
 }

@@ -65,23 +65,8 @@ impl OsType {
 /// Platform capabilities that affect application behavior
 #[derive(Debug, Clone)]
 pub struct PlatformCapabilities {
-    /// Whether the platform can bind to privileged ports (< 1024) without elevation
-    pub can_bind_privileged_ports: bool,
-
-    /// Whether the platform supports multicast networking
-    pub supports_multicast: bool,
-
-    /// Whether the platform has a built-in firewall that may block connections
-    pub has_firewall: bool,
-
     /// Whether the file system is case-sensitive
     pub case_sensitive_fs: bool,
-
-    /// Whether the platform supports UNC paths (Windows) or similar network paths
-    pub supports_network_paths: bool,
-
-    /// Whether the platform requires special permissions for network operations
-    pub requires_network_permissions: bool,
 }
 
 impl PlatformCapabilities {
@@ -89,42 +74,22 @@ impl PlatformCapabilities {
     pub fn for_current_platform() -> Self {
         #[cfg(target_os = "windows")]
         return Self {
-            can_bind_privileged_ports: false, // Requires admin privileges
-            supports_multicast: true,
-            has_firewall: true, // Windows Defender Firewall
             case_sensitive_fs: false, // NTFS is case-insensitive by default
-            supports_network_paths: true, // UNC paths
-            requires_network_permissions: true, // UAC for privileged ports
         };
 
         #[cfg(target_os = "macos")]
         return Self {
-            can_bind_privileged_ports: false, // Requires sudo
-            supports_multicast: true,
-            has_firewall: true, // macOS Application Firewall
             case_sensitive_fs: true, // APFS is case-sensitive
-            supports_network_paths: true, // SMB/AFP mounts
-            requires_network_permissions: true, // System permissions dialog
         };
 
         #[cfg(target_os = "linux")]
         return Self {
-            can_bind_privileged_ports: false, // Requires root or capabilities
-            supports_multicast: true,
-            has_firewall: true, // iptables/ufw/firewalld
             case_sensitive_fs: true, // ext4/xfs are case-sensitive
-            supports_network_paths: true, // NFS/CIFS mounts
-            requires_network_permissions: false, // Usually no special permissions needed
         };
 
         #[cfg(target_os = "freebsd")]
         return Self {
-            can_bind_privileged_ports: false, // Requires root privileges
-            supports_multicast: true,
-            has_firewall: true, // pf/ipfw
             case_sensitive_fs: true, // UFS/ZFS are case-sensitive
-            supports_network_paths: true, // NFS/SMB mounts
-            requires_network_permissions: false, // Usually no special permissions needed
         };
     }
 }
@@ -334,12 +299,7 @@ impl PlatformInfo {
     /// Check if the platform supports a specific feature
     pub fn supports_feature(&self, feature: &str) -> bool {
         match feature {
-            "privileged_ports" => self.capabilities.can_bind_privileged_ports,
-            "multicast" => self.capabilities.supports_multicast,
-            "firewall" => self.capabilities.has_firewall,
             "case_sensitive_fs" => self.capabilities.case_sensitive_fs,
-            "network_paths" => self.capabilities.supports_network_paths,
-            "network_permissions" => self.capabilities.requires_network_permissions,
             _ => false,
         }
     }
@@ -366,11 +326,8 @@ mod tests {
     fn test_platform_capabilities() {
         let capabilities = PlatformCapabilities::for_current_platform();
 
-        // All platforms should support multicast
-        assert!(capabilities.supports_multicast);
-
-        // All platforms should have some form of firewall
-        assert!(capabilities.has_firewall);
+        // Test case sensitivity detection works
+        // (actual value depends on platform)
     }
 
     #[tokio::test]

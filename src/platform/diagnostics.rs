@@ -41,11 +41,7 @@ pub struct PlatformDiagnostics {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlatformCapabilitiesDiag {
-    pub can_bind_privileged_ports: bool,
-    pub supports_multicast: bool,
     pub case_sensitive_fs: bool,
-    pub supports_network_paths: bool,
-    pub requires_network_permissions: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -182,11 +178,7 @@ impl DiagnosticInfo {
             .unwrap_or_else(|_| "unknown".to_string());
         
         let capabilities = PlatformCapabilitiesDiag {
-            can_bind_privileged_ports: platform_info.capabilities.can_bind_privileged_ports,
-            supports_multicast: platform_info.capabilities.supports_multicast,
             case_sensitive_fs: platform_info.capabilities.case_sensitive_fs,
-            supports_network_paths: platform_info.capabilities.supports_network_paths,
-            requires_network_permissions: platform_info.capabilities.requires_network_permissions,
         };
         
         Ok(PlatformDiagnostics {
@@ -218,7 +210,7 @@ impl DiagnosticInfo {
         let primary_interface = platform_info.get_primary_interface()
             .map(|iface| iface.name.clone());
         
-        let multicast_support = platform_info.capabilities.supports_multicast;
+        let multicast_support = true; // Simplified - assume multicast support
         
         // Test port availability
         let mut port_availability = HashMap::new();
@@ -389,8 +381,6 @@ async fn collect_database_diagnostics() -> Result<DatabaseDiagnostics, PlatformE
         
         // Log platform capabilities
         tracing::info!("Platform Capabilities:");
-        tracing::info!("  - Privileged ports: {}", self.platform.capabilities.can_bind_privileged_ports);
-        tracing::info!("  - Multicast support: {}", self.platform.capabilities.supports_multicast);
         tracing::info!("  - Case-sensitive FS: {}", self.platform.capabilities.case_sensitive_fs);
         
         // Log network information
@@ -535,10 +525,6 @@ impl StartupDiagnostics {
             }
         }
         
-        // Check for required capabilities
-        if !platform_info.capabilities.supports_multicast {
-            tracing::warn!("Platform does not support multicast - DLNA discovery may be limited");
-        }
         
         Ok(())
     }
@@ -639,11 +625,7 @@ mod tests {
                 architecture: "x86_64".to_string(),
                 hostname: "test-host".to_string(),
                 capabilities: PlatformCapabilitiesDiag {
-                    can_bind_privileged_ports: false,
-                    supports_multicast: true,
                     case_sensitive_fs: true,
-                    supports_network_paths: true,
-                    requires_network_permissions: false,
                 },
                 platform_specific: HashMap::new(),
             },
