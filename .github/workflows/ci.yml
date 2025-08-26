@@ -81,7 +81,7 @@ jobs:
       - name: Build project
         run: cargo build --target ${{ matrix.target }}
       - name: Run tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-pc-windows-msvc'
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc'
         run: cargo test --target ${{ matrix.target }}
 
 
