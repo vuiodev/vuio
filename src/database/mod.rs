@@ -1765,7 +1765,11 @@ mod tests {
         let db = SqliteDatabase::new(db_path).await.unwrap();
         db.initialize().await.unwrap();
 
-        let parent_path = PathBuf::from("/media");
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
         let (dirs, files) = db.get_directory_listing(&parent_path, "").await.unwrap();
 
         assert!(dirs.is_empty());
@@ -1779,7 +1783,11 @@ mod tests {
         let db = SqliteDatabase::new(db_path).await.unwrap();
         db.initialize().await.unwrap();
 
-        let parent_path = PathBuf::from("/media");
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
 
         // Direct files
         let file1 = MediaFile::new(parent_path.join("a.mp4"), 100, "video/mp4".to_string());
@@ -1838,7 +1846,11 @@ mod tests {
         let db = SqliteDatabase::new(db_path).await.unwrap();
         db.initialize().await.unwrap();
 
-        let parent_path = PathBuf::from("/media/Videos");
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media\\Videos")
+        } else {
+            PathBuf::from("/media/Videos")
+        };
         let file1 = MediaFile::new(parent_path.join("movie.mp4"), 100, "video/mp4".to_string());
         db.store_media_file(&file1).await.unwrap();
 
@@ -1855,7 +1867,11 @@ mod tests {
         let db = SqliteDatabase::new(db_path).await.unwrap();
         db.initialize().await.unwrap();
 
-        let parent_path = PathBuf::from("/media");
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
         let subdir1_path = parent_path.join("Movies");
         let subdir2_path = subdir1_path.join("Action");
         let file1 = MediaFile::new(subdir2_path.join("movie.mp4"), 100, "video/mp4".to_string());
@@ -1874,7 +1890,11 @@ mod tests {
         let db = SqliteDatabase::new(db_path).await.unwrap();
         db.initialize().await.unwrap();
 
-        let root_path = PathBuf::from("/");
+        let root_path = if cfg!(windows) {
+            PathBuf::from("C:\\")
+        } else {
+            PathBuf::from("/")
+        };
 
         let file1 = MediaFile::new(root_path.join("root_file.txt"), 10, "text/plain".to_string());
         let file2 = MediaFile::new(root_path.join("Videos").join("movie.mp4"), 100, "video/mp4".to_string());
