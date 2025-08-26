@@ -32,10 +32,11 @@ docker-compose -f docker-compose.yml up
 - **Track Management** - Add, remove, and reorder tracks in playlists with position management
 
 ### Cross-Platform Integration
-- **Windows Support** - UAC integration, Windows Firewall detection, Windows Defender awareness
-- **macOS Support** - Gatekeeper integration, SIP detection, Application Firewall handling
-- **Linux Support** - SELinux/AppArmor awareness, capabilities management, firewall detection
-- **Platform-Specific Optimizations** - Tailored networking, file system, and security handling
+- **Windows Support** - Native networking and filesystem integration
+- **macOS Support** - Native networking and filesystem integration
+- **Linux Support** - Native networking and filesystem integration
+- **FreeBSD Support** - Native networking and filesystem integration
+- **Platform-Specific Optimizations** - Optimized networking and filesystem handling
 
 ### Advanced Database Management
 - **SQLite Database** - Persistent media library with metadata caching
@@ -381,12 +382,13 @@ uuidgen
 ```
 
 ### Native Platform Configuration (Config Files)
-When running natively (Windows, macOS, Linux), VuIO uses TOML configuration files with platform-specific defaults:
+When running natively (Windows, macOS, Linux, FreeBSD), VuIO uses TOML configuration files with platform-specific defaults:
 
 **Configuration Locations:**
 - **Windows:** `%APPDATA%\VuIO\config.toml`
 - **macOS:** `~/Library/Application Support/VuIO/config.toml`
 - **Linux:** `~/.config/vuio/config.toml`
+- **FreeBSD:** `~/.config/vuio/config.toml`
 
 **Multiple Media Directories:**
 You can monitor multiple directories by adding multiple `[[media.directories]]` sections to your configuration file. Each directory can have its own settings for recursion, file extensions, and exclude patterns.
@@ -593,20 +595,18 @@ exclude_patterns = ["*.tmp", ".*", "*.m3u", "*.pls", "*.log"]
 ## 🔧 Platform-Specific Notes
 
 ### Windows
-- Administrator privileges may be required for ports < 1024
-- Windows Firewall may prompt for network access
 - Supports UNC paths (`\\server\share`)
 - Excludes `Thumbs.db` and `desktop.ini` files automatically
 
 ### macOS
-- System may prompt for network access permissions
 - Supports network mounted volumes
 - Excludes `.DS_Store` and `.AppleDouble` files automatically
-- Gatekeeper and SIP integration for enhanced security
 
 ### Linux
-- Root privileges required for ports < 1024 (or use capabilities)
-- SELinux/AppArmor policies may affect file access
+- Supports mounted filesystems under `/media` and `/mnt`
+- Excludes `lost+found` and `.Trash-*` directories automatically
+
+### FreeBSD
 - Supports mounted filesystems under `/media` and `/mnt`
 - Excludes `lost+found` and `.Trash-*` directories automatically
 
@@ -632,10 +632,10 @@ VuIO is built with a modular, cross-platform architecture:
                                  │
          ┌─────────────────────────────────────────────────────┐
          │            Platform Layer                           │
-         │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
-         │  │   Windows   │  │    macOS    │  │    Linux    │  │
-         │  │ Integration │  │ Integration │  │ Integration │  │
-         │  └─────────────┘  └─────────────┘  └─────────────┘  │
+         │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
+         │  │   Windows   │  │    macOS    │  │    Linux    │  │   FreeBSD   │  │
+         │  │ Integration │  │ Integration │  │ Integration │  │ Integration │  │
+         │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  │
          └─────────────────────────────────────────────────────┘
 ```
 

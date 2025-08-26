@@ -81,16 +81,29 @@ impl ConfigChangeHandler for ExampleService {
 
 /// Demonstrate configuration hot-reloading functionality
 pub async fn demonstrate_config_hot_reload() -> Result<()> {
-    use tempfile::NamedTempFile;
+    use tempfile::{NamedTempFile, TempDir};
 
     info!("Starting configuration hot-reload demonstration");
 
-    // Create a temporary config file
+    // Create a temporary config file and directory
     let temp_file = NamedTempFile::new()?;
     let config_path = temp_file.path().to_path_buf();
+    let temp_dir = TempDir::new()?;
 
-    // Delete the temp file so the config system can create it
+    // Delete the temp file so we can create our own config
     std::fs::remove_file(&config_path).ok();
+
+    // Create a config with a temporary directory that exists
+    let mut config = super::AppConfig::default();
+    config.media.directories = vec![
+        super::MonitoredDirectoryConfig {
+            path: temp_dir.path().to_string_lossy().to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+        }
+    ];
+    config.save_to_file(&config_path)?;
 
     // Create the configuration watcher service
     let watcher_service = ConfigWatcherService::new(config_path.clone()).await?;
@@ -123,12 +136,16 @@ pub async fn demonstrate_config_hot_reload() -> Result<()> {
     info!("Updating configuration via file modification...");
     let mut file_config = current_config.clone();
     file_config.server.port = 8888;
+    // Use the same temp directory to avoid validation errors
     file_config.media.directories.push(super::MonitoredDirectoryConfig {
-        path: "/tmp/new_media".to_string(),
+        path: temp_dir.path().join("subdir").to_string_lossy().to_string(),
         recursive: true,
         extensions: None,
         exclude_patterns: Some(vec!["*.log".to_string()]),
     });
+    
+    // Create the subdirectory so it exists for validation
+    std::fs::create_dir_all(temp_dir.path().join("subdir"))?;
 
     // Save directly to file to simulate external modification
     file_config.save_to_file(&config_path)?;

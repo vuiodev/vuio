@@ -33,6 +33,9 @@ pub type PlatformNetworkManager = MacOSNetworkManager;
 #[cfg(target_os = "linux")]
 pub type PlatformNetworkManager = LinuxNetworkManager;
 
+#[cfg(target_os = "freebsd")]
+pub type PlatformNetworkManager = BaseNetworkManager;
+
 /// SSDP socket wrapper with platform-specific configuration
 #[derive(Debug)]
 pub struct SsdpSocket {

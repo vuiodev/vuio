@@ -601,6 +601,11 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
     {
         Box::new(BaseFileSystemManager::new(true)) // Linux is case-sensitive
     }
+    
+    #[cfg(target_os = "freebsd")]
+    {
+        Box::new(BaseFileSystemManager::new(true)) // FreeBSD is case-sensitive
+    }
 }
 
 /// Extract audio metadata using audiotags library

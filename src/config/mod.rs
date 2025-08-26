@@ -1552,12 +1552,24 @@ mod tests {
     fn test_config_file_operations() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let config_path = temp_file.path().to_path_buf();
+        let temp_dir = TempDir::new()?;
         
         // Delete the temp file so we can test creation
         std::fs::remove_file(&config_path).ok();
         
-        // Test creating default config
-        let config = AppConfig::load_or_create(&config_path)?;
+        // Create a config with a temporary directory that exists
+        let mut config = AppConfig::default();
+        config.media.directories = vec![
+            MonitoredDirectoryConfig {
+                path: temp_dir.path().to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            }
+        ];
+        
+        // Save the config
+        config.save_to_file(&config_path)?;
         assert!(config_path.exists());
         
         // Test loading existing config
@@ -1607,9 +1619,22 @@ mod tests {
     async fn test_config_manager() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let config_path = temp_file.path().to_path_buf();
+        let temp_dir = TempDir::new()?;
         
         // Delete the temp file so we can test creation
         std::fs::remove_file(&config_path).ok();
+        
+        // Create a config with a temporary directory that exists
+        let mut config = AppConfig::default();
+        config.media.directories = vec![
+            MonitoredDirectoryConfig {
+                path: temp_dir.path().to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            }
+        ];
+        config.save_to_file(&config_path)?;
         
         let manager = ConfigManager::new(&config_path)?;
         let _original_port = manager.get_config().await.server.port;
@@ -1650,6 +1675,7 @@ mod tests {
     fn test_platform_config_template_creation() -> Result<()> {
         let temp_file = NamedTempFile::new()?;
         let config_path = temp_file.path().to_path_buf();
+        let temp_dir = TempDir::new()?;
         
         // Delete the temp file so we can test creation
         std::fs::remove_file(&config_path).ok();
@@ -1666,8 +1692,19 @@ mod tests {
         assert!(content.contains("Platform:"));
         assert!(content.contains("Recommended ports"));
         
-        // Verify we can load the created configuration
-        let loaded_config = AppConfig::load_from_file(&config_path)?;
+        // Load the created configuration and replace directories with temp dir
+        let mut loaded_config = AppConfig::load_from_file(&config_path)?;
+        loaded_config.media.directories = vec![
+            MonitoredDirectoryConfig {
+                path: temp_dir.path().to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            }
+        ];
+        
+        // Validate the modified config
+        ConfigValidator::validate(&loaded_config)?;
         assert!(!loaded_config.media.supported_extensions.is_empty());
         
         Ok(())
