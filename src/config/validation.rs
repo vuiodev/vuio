@@ -59,15 +59,7 @@ impl ConfigValidator {
 
     /// Validate network configuration
     fn validate_network_config(config: &AppConfig) -> Result<()> {
-        // Validate SSDP port
-        if config.network.ssdp_port == 0 {
-            return Err(anyhow!("SSDP port cannot be 0"));
-        }
-
-        // Check for port conflicts
-        if config.network.ssdp_port == config.server.port {
-            return Err(anyhow!("SSDP port and server port cannot be the same"));
-        }
+        // Note: SSDP port is hardcoded to 1900 and no longer configurable
 
         // Validate multicast TTL
         if config.network.multicast_ttl == 0 {
@@ -366,16 +358,7 @@ mod tests {
             }
         ];
         
-        // Test invalid SSDP port
-        config.network.ssdp_port = 0;
-        assert!(ConfigValidator::validate(&config).is_err());
-        
-        // Test port conflict
-        config.network.ssdp_port = config.server.port;
-        assert!(ConfigValidator::validate(&config).is_err());
-        
-        // Test invalid TTL
-        config.network.ssdp_port = 1900;
+        // Test invalid TTL (SSDP port is now hardcoded to 1900)
         config.network.multicast_ttl = 0;
         assert!(ConfigValidator::validate(&config).is_err());
     }

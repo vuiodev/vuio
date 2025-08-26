@@ -43,7 +43,6 @@ pub struct ServerConfig {
 /// Network configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NetworkConfig {
-    pub ssdp_port: u16,
     pub interface_selection: NetworkInterfaceConfig,
     pub multicast_ttl: u8,
     pub announce_interval_seconds: u64,
@@ -474,7 +473,6 @@ impl AppConfig {
                 ip: None,
             },
             network: NetworkConfig {
-                ssdp_port: Self::get_platform_default_ssdp_port(&platform_config),
                 interface_selection: NetworkInterfaceConfig::Auto,
                 multicast_ttl: Self::get_platform_default_multicast_ttl(&platform_config),
                 announce_interval_seconds: Self::get_platform_default_announce_interval(&platform_config),
@@ -526,23 +524,6 @@ impl AppConfig {
         }
     }
 
-    /// Get platform-appropriate default SSDP port
-    fn get_platform_default_ssdp_port(platform_config: &PlatformConfig) -> u16 {
-        match platform_config.os_type {
-            crate::platform::OsType::Windows => {
-                // Windows may have issues with port 1900, but it's the DLNA standard
-                1900
-            }
-            crate::platform::OsType::MacOS => {
-                // macOS typically works fine with standard SSDP port
-                1900
-            }
-            crate::platform::OsType::Linux => {
-                // Linux typically works fine with standard SSDP port
-                1900
-            }
-        }
-    }
 
     /// Get platform-appropriate default multicast TTL
     fn get_platform_default_multicast_ttl(platform_config: &PlatformConfig) -> u8 {
@@ -860,13 +841,7 @@ impl AppConfig {
 
     /// Windows-specific configuration validation
     fn validate_windows_specific(&self, _platform_config: &PlatformConfig) -> Result<()> {
-        // Check for privileged ports
-        if self.network.ssdp_port < 1024 && self.network.ssdp_port != 1900 {
-            tracing::warn!(
-                "SSDP port {} may require administrator privileges on Windows",
-                self.network.ssdp_port
-            );
-        }
+        // Note: SSDP port is hardcoded to 1900 and may require administrator privileges on Windows
         
         if self.server.port < 1024 {
             tracing::warn!(
@@ -916,12 +891,7 @@ impl AppConfig {
             );
         }
         
-        if self.network.ssdp_port < 1024 && self.network.ssdp_port != 1900 {
-            tracing::warn!(
-                "SSDP port {} may require administrator privileges on macOS",
-                self.network.ssdp_port
-            );
-        }
+        // Note: SSDP port is hardcoded to 1900 and may require administrator privileges on macOS
         
         // Check for macOS-specific paths
         for dir_config in &self.media.directories {
@@ -955,12 +925,7 @@ impl AppConfig {
             );
         }
         
-        if self.network.ssdp_port < 1024 && self.network.ssdp_port != 1900 {
-            tracing::warn!(
-                "SSDP port {} may require root privileges on Linux",
-                self.network.ssdp_port
-            );
-        }
+        // Note: SSDP port is hardcoded to 1900 and may require root privileges on Linux
         
         // Check for common Linux mount points
         for dir_config in &self.media.directories {
@@ -1105,9 +1070,7 @@ impl AppConfig {
                 if self.server.port < 1024 {
                     issues.push("Server port requires administrator privileges on Windows".to_string());
                 }
-                if self.network.ssdp_port < 1024 && self.network.ssdp_port != 1900 {
-                    issues.push("SSDP port requires administrator privileges on Windows".to_string());
-                }
+                // Note: SSDP port is hardcoded to 1900 and requires administrator privileges on Windows
             }
             crate::platform::OsType::MacOS => {
                 if self.server.port < 1024 {
@@ -1394,7 +1357,7 @@ mod tests {
         
         // Test that platform defaults are used
         assert_eq!(config.server.port, platform_config.preferred_ports.first().copied().unwrap_or(8080));
-        assert_eq!(config.network.ssdp_port, 1900); // SSDP port should always be 1900 for DLNA compatibility
+        // Note: SSDP port is hardcoded to 1900 for DLNA compatibility
         assert!(config.media.scan_on_startup);
         assert!(config.media.watch_for_changes);
         assert!(!config.media.supported_extensions.is_empty());
@@ -1413,7 +1376,7 @@ mod tests {
         // Test deserialization
         let parsed_config: AppConfig = toml::from_str(&toml_str)?;
         assert_eq!(config.server.port, parsed_config.server.port);
-        assert_eq!(config.network.ssdp_port, parsed_config.network.ssdp_port);
+        // Note: SSDP port is hardcoded to 1900 and not serialized
         
         Ok(())
     }
@@ -1560,7 +1523,7 @@ mod tests {
         
         // Test that platform defaults are properly applied
         assert!(platform_config.preferred_ports.contains(&config.server.port));
-        assert_eq!(config.network.ssdp_port, 1900); // DLNA standard
+        // Note: SSDP port is hardcoded to 1900 for DLNA standard
         assert!(!config.server.name.is_empty());
         assert!(!config.media.supported_extensions.is_empty());
         
@@ -1590,7 +1553,7 @@ mod tests {
         
         // Test platform-specific helper methods
         assert!(!AppConfig::get_platform_default_interface(&platform_config).is_empty());
-        assert_eq!(AppConfig::get_platform_default_ssdp_port(&platform_config), 1900);
+        // Note: SSDP port is hardcoded to 1900 (get_platform_default_ssdp_port function removed)
         assert!(AppConfig::get_platform_default_multicast_ttl(&platform_config) > 0);
         assert!(AppConfig::get_platform_default_announce_interval(&platform_config) > 0);
         

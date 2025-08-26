@@ -15,8 +15,7 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
     // Log the IP that will be used for SSDP announcements
     let server_ip = get_server_ip(&state);
     info!("SSDP service starting - using server IP: {}", server_ip);
-    info!("SSDP will listen on port: {}", state.config.network.ssdp_port);
-    info!("SSDP multicast will use standard port: {}", SSDP_MULTICAST_PORT);
+    info!("SSDP will listen on hardcoded port: {}", SSDP_MULTICAST_PORT);
 
     // Use unified service for Docker compatibility (single socket like MiniDLNA)
     let service_state = state.clone();
@@ -42,7 +41,7 @@ async fn ssdp_unified_service(state: AppState, network_manager: Arc<PlatformNetw
     let mut socket = None;
     for attempt in 1..=MAX_SOCKET_RETRIES {
         let ssdp_config = SsdpConfig {
-            primary_port: state.config.network.ssdp_port,
+            primary_port: SSDP_MULTICAST_PORT,
             fallback_ports: vec![], // Don't use fallback ports in Docker
             multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
             announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
@@ -94,7 +93,7 @@ async fn create_docker_ssdp_socket(
     config: &SsdpConfig
 ) -> Result<crate::platform::network::SsdpSocket> {
     // In Docker, we need to bind to 0.0.0.0 to receive multicast traffic
-    let _bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.primary_port);
+    let _bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), SSDP_MULTICAST_PORT);
     
     match network_manager.create_ssdp_socket_with_config(config).await {
         Ok(mut socket) => {
@@ -166,7 +165,7 @@ async fn ssdp_responder_task(
     let mut consecutive_errors = 0;
     const MAX_CONSECUTIVE_ERRORS: u32 = 5;
     
-    info!("SSDP M-SEARCH responder started on port {}", state.config.network.ssdp_port);
+    info!("SSDP M-SEARCH responder started on port {}", SSDP_MULTICAST_PORT);
     
     loop {
         let recv_result = {

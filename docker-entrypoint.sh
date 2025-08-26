@@ -268,9 +268,9 @@ EOF
     cat >> "$config_file" <<EOF
 
 [network]
-ssdp_port = ${VUIO_SSDP_PORT:-1900}
 multicast_ttl = 4
 announce_interval_seconds = 300
+# Note: SSDP port is hardcoded to 1900 (DLNA standard) and cannot be changed
 EOF
 
     # Handle network interface selection

@@ -418,14 +418,9 @@ async fn handle_configuration_changes(
     }
     
     // Check for network configuration changes
-    if old_config.network.ssdp_port != new_config.network.ssdp_port ||
-       old_config.network.interface_selection != new_config.network.interface_selection {
+    if old_config.network.interface_selection != new_config.network.interface_selection {
         info!("Network configuration changed");
         changes_detected = true;
-        
-        if old_config.network.ssdp_port != new_config.network.ssdp_port {
-            info!("SSDP port changed: {} -> {}", old_config.network.ssdp_port, new_config.network.ssdp_port);
-        }
         
         if old_config.network.interface_selection != new_config.network.interface_selection {
             info!("Network interface selection changed: {:?} -> {:?}", 
@@ -618,7 +613,7 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
             
             info!("Configuration validated successfully");
             info!("Server will listen on: {}:{}", config.server.interface, config.server.port);
-            info!("SSDP will use port: {}", config.network.ssdp_port);
+            info!("SSDP will use hardcoded port: 1900");
             info!("Monitoring {} director(ies) for media files", config.media.directories.len());
             
             for (i, dir) in config.media.directories.iter().enumerate() {
@@ -656,7 +651,7 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
     
     info!("Configuration initialized successfully");
     info!("Server will listen on: {}:{}", config.server.interface, config.server.port);
-    info!("SSDP will use port: {}", config.network.ssdp_port);
+    info!("SSDP will use hardcoded port: 1900");
     info!("Monitoring {} director(ies) for media files", config.media.directories.len());
     
     for (i, dir) in config.media.directories.iter().enumerate() {

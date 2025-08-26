@@ -99,8 +99,7 @@ VUIO_SERVER_IP=192.168.1.126      # Replace with YOUR host IP address
 # Media Configuration
 VUIO_MEDIA_DIR=/media              # Media directory inside container
 
-# SSDP Configuration (if port 1900 conflicts)
-VUIO_SSDP_PORT=1902               # Alternative SSDP port
+# Note: SSDP port is hardcoded to 1900 (DLNA standard) and cannot be changed
 
 # User/Group Mapping
 PUID=1000                          # Your user ID (run 'id -u')

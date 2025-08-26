@@ -787,7 +787,6 @@ name = "VuIO Server"
 uuid = "test-uuid-windows"
 
 [network]
-ssdp_port = 8080
 interface_selection = "Auto"
 multicast_ttl = 4
 announce_interval_seconds = 300
@@ -818,10 +817,10 @@ name = "VuIO Server"
 uuid = "test-uuid-unix"
 
 [network]
-ssdp_port = 8080
 interface_selection = "Auto"
 multicast_ttl = 4
 announce_interval_seconds = 300
+# Note: SSDP port is hardcoded to 1900 (DLNA standard) and cannot be changed
 
 [[media.directories]]
 path = "/home/user/Videos"

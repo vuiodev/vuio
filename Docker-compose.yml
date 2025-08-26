@@ -54,10 +54,7 @@ services:
       
       # Set server IP for DLNA announcements (Required for Docker host networking)
       # This ensures DLNA announcements use the correct IP address
-      - VUIO_SERVER_IP=192.168.1.126  # Your host IP address
-      
-      # Set SSDP port to avoid conflicts (port 1900 is in use)
-      - VUIO_SSDP_PORT=1902
+      - VUIO_SERVER_IP=192.168.1.173
       
       # Enable debug logging
       - RUST_LOG=debug

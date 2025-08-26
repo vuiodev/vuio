@@ -15,10 +15,10 @@ uuid = "auto-generated-on-first-run"
 # ip = "192.168.1.100"  # Optional: Set specific IP for DLNA announcements (auto-detected if not set)
 
 [network]
-ssdp_port = 1900
 multicast_ttl = 4
 announce_interval_seconds = 300
 interface_selection = "Auto"  # Options: "Auto", "All", or specific interface name
+# Note: SSDP port is hardcoded to 1900 (DLNA standard) and cannot be changed
 
 [media]
 scan_on_startup = true
