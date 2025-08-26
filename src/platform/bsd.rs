@@ -207,17 +207,8 @@ pub fn _is_elevated() -> bool {
         return user == "root";
     }
     
-    // Fallback to libc check if available
-    #[cfg(all(target_os = "freebsd", feature = "system-libs"))]
-    {
-        unsafe { libc::geteuid() == 0 }
-    }
-    
-    #[cfg(not(all(target_os = "freebsd", feature = "system-libs")))]
-    {
-        // Conservative fallback - assume not elevated
-        false
-    }
+    // Conservative fallback - assume not elevated to avoid linking issues
+    false
 }
 
 /// Check BSD firewall status
