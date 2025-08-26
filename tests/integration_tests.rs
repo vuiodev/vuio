@@ -3,9 +3,9 @@
 //! These tests verify that different components work together correctly
 //! across Windows, macOS, and Linux platforms.
 
-use vuio::platform::{PlatformInfo, OsType};
+use vuio::platform::PlatformInfo;
 use vuio::platform::network::{NetworkManager, SsdpConfig};
-use vuio::platform::filesystem::{FileSystemManager, create_platform_filesystem_manager};
+use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::database::{DatabaseManager, SqliteDatabase, MediaFile};
 use vuio::watcher::{FileSystemWatcher, CrossPlatformWatcher, FileSystemEvent};
 use vuio::config::{AppConfig, MonitoredDirectoryConfig};
@@ -238,7 +238,7 @@ mod file_serving_tests {
             ("image.jpg", b"fake jpg content", "image/jpeg"),
         ];
         
-        for (filename, content, expected_mime) in &test_files {
+        for (filename, content, _expected_mime) in &test_files {
             let file_path = temp_dir.path().join(filename);
             fs::write(&file_path, *content).unwrap();
         }
