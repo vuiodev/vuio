@@ -659,12 +659,14 @@ impl DatabaseManager for SqliteDatabase {
         }
 
         // 2. Get all unique subdirectory paths that contain matching files
+        // Use the same separator that would be in the stored paths
+        let path_separator = std::path::MAIN_SEPARATOR;
         let like_path_prefix = if parent_path_str.is_empty() {
             "%".to_string()
-        } else if parent_path_str == "/" {
-            "/%".to_string()
+        } else if parent_path_str == "/" || parent_path_str == "\\" {
+            format!("{}%", path_separator)
         } else {
-            format!("{}/%", parent_path_str)
+            format!("{}{}%", parent_path_str, path_separator)
         };
 
         let subdir_rows = sqlx::query(

@@ -5,7 +5,7 @@
 
 use vuio::platform::{PlatformInfo, OsType, PlatformCapabilities};
 use vuio::platform::network::{NetworkManager, BaseNetworkManager, SsdpConfig};
-use vuio::platform::filesystem::{FileSystemManager, BaseFileSystemManager, create_platform_filesystem_manager};
+use vuio::platform::filesystem::{FileSystemManager, create_platform_filesystem_manager};
 use vuio::database::{DatabaseManager, SqliteDatabase, MediaFile};
 use vuio::watcher::{FileSystemWatcher, CrossPlatformWatcher, FileSystemEvent};
 
@@ -39,8 +39,7 @@ mod network_tests {
     mod windows_tests {
         use super::*;
         use vuio::platform::network::WindowsNetworkManager;
-        use vuio::platform::error::WindowsError;
-        
+                
         #[tokio::test]
         async fn test_windows_network_manager_creation() {
             let _manager = WindowsNetworkManager::new();
@@ -544,7 +543,7 @@ mod filesystem_tests {
         
         #[tokio::test]
         async fn test_macos_case_sensitive_paths() {
-            let manager = BaseFileSystemManager::new(true); // macOS is case-sensitive
+            let manager = create_platform_filesystem_manager();
             
             let path1 = Path::new("/Users/test/Videos/Movie.mp4");
             let path2 = Path::new("/Users/test/Videos/movie.mp4");
@@ -555,7 +554,7 @@ mod filesystem_tests {
         
         #[tokio::test]
         async fn test_macos_extension_matching() {
-            let manager = BaseFileSystemManager::new(true);
+            let manager = create_platform_filesystem_manager();
             
             let path = Path::new("/Users/test/Videos/Movie.MP4");
             let extensions = vec!["mp4".to_string(), "avi".to_string()];
@@ -574,7 +573,7 @@ mod filesystem_tests {
             let hidden_file = temp_dir.path().join(".hidden_video.mp4");
             fs::write(&hidden_file, b"test content").unwrap();
             
-            let manager = BaseFileSystemManager::new(true);
+            let manager = create_platform_filesystem_manager();
             let file_info_result = manager.get_file_info(&hidden_file).await;
             
             match file_info_result {
@@ -594,7 +593,7 @@ mod filesystem_tests {
             let test_file = temp_dir.path().join("test.mp4");
             fs::write(&test_file, b"test content").unwrap();
             
-            let manager = BaseFileSystemManager::new(true);
+            let manager = create_platform_filesystem_manager();
             let canonical_result = manager.canonicalize_path(&test_file).await;
             
             match canonical_result {
@@ -617,7 +616,7 @@ mod filesystem_tests {
         
         #[tokio::test]
         async fn test_linux_case_sensitive_paths() {
-            let manager = BaseFileSystemManager::new(true); // Linux is case-sensitive
+            let manager = create_platform_filesystem_manager(); // Linux is case-sensitive
             
             let path1 = Path::new("/home/user/Videos/Movie.mp4");
             let path2 = Path::new("/home/user/Videos/movie.mp4");
@@ -628,7 +627,7 @@ mod filesystem_tests {
         
         #[tokio::test]
         async fn test_linux_extension_matching() {
-            let manager = BaseFileSystemManager::new(true);
+            let manager = create_platform_filesystem_manager();
             
             let path = Path::new("/home/user/Videos/Movie.MP4");
             let extensions = vec!["mp4".to_string(), "avi".to_string()];
@@ -647,7 +646,7 @@ mod filesystem_tests {
             let test_file = temp_dir.path().join("test.mp4");
             fs::write(&test_file, b"test content").unwrap();
             
-            let manager = BaseFileSystemManager::new(true);
+            let manager = create_platform_filesystem_manager();
             let file_info_result = manager.get_file_info(&test_file).await;
             
             match file_info_result {
@@ -672,7 +671,7 @@ mod filesystem_tests {
             
             // Create symlink (may fail if not supported)
             if std::os::unix::fs::symlink(&original_file, &symlink_file).is_ok() {
-                let manager = BaseFileSystemManager::new(true);
+                let manager = create_platform_filesystem_manager();
                 
                 let canonical_result = manager.canonicalize_path(&symlink_file).await;
                 match canonical_result {
@@ -689,7 +688,7 @@ mod filesystem_tests {
         
         #[tokio::test]
         async fn test_linux_mount_point_detection() {
-            let manager = BaseFileSystemManager::new(true);
+            let manager = create_platform_filesystem_manager();
             
             // Test common Linux paths
             let test_paths = vec![

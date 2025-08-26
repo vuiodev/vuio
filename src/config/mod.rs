@@ -137,35 +137,33 @@ impl AppConfig {
                 // Add primary media directory
                 let media_dir = PathBuf::from(media_dir);
                 if !media_dir.exists() {
-                    anyhow::bail!("Media directory does not exist: {}", media_dir.display());
+                    tracing::warn!("Media directory does not exist: {}", media_dir.display());
+                } else if !media_dir.is_dir() {
+                    tracing::warn!("Media path is not a directory: {}", media_dir.display());
+                } else {
+                    media_directories.push(MonitoredDirectoryConfig {
+                        path: media_dir.to_string_lossy().to_string(),
+                        recursive: true,
+                        extensions: None,
+                        exclude_patterns: None,
+                    });
                 }
-                if !media_dir.is_dir() {
-                    anyhow::bail!("Media path is not a directory: {}", media_dir.display());
-                }
-                
-                media_directories.push(MonitoredDirectoryConfig {
-                    path: media_dir.to_string_lossy().to_string(),
-                    recursive: true,
-                    extensions: None,
-                    exclude_patterns: None,
-                });
                 
                 // Add additional media directories
                 for additional_dir in &args.additional_media_dirs {
                     let add_dir = PathBuf::from(additional_dir);
                     if !add_dir.exists() {
-                        anyhow::bail!("Additional media directory does not exist: {}", add_dir.display());
+                        tracing::warn!("Additional media directory does not exist: {}", add_dir.display());
+                    } else if !add_dir.is_dir() {
+                        tracing::warn!("Additional media path is not a directory: {}", add_dir.display());
+                    } else {
+                        media_directories.push(MonitoredDirectoryConfig {
+                            path: add_dir.to_string_lossy().to_string(),
+                            recursive: true,
+                            extensions: None,
+                            exclude_patterns: None,
+                        });
                     }
-                    if !add_dir.is_dir() {
-                        anyhow::bail!("Additional media path is not a directory: {}", add_dir.display());
-                    }
-                    
-                    media_directories.push(MonitoredDirectoryConfig {
-                        path: add_dir.to_string_lossy().to_string(),
-                        recursive: true,
-                        extensions: None,
-                        exclude_patterns: None,
-                    });
                 }
                 
                 config.media.directories = media_directories;
@@ -176,18 +174,17 @@ impl AppConfig {
                 for additional_dir in &args.additional_media_dirs {
                     let add_dir = PathBuf::from(additional_dir);
                     if !add_dir.exists() {
-                        anyhow::bail!("Additional media directory does not exist: {}", add_dir.display());
+                        tracing::warn!("Additional media directory does not exist: {}", add_dir.display());
+                    } else if !add_dir.is_dir() {
+                        tracing::warn!("Additional media path is not a directory: {}", add_dir.display());
+                    } else {
+                        media_directories.push(MonitoredDirectoryConfig {
+                            path: add_dir.to_string_lossy().to_string(),
+                            recursive: true,
+                            extensions: None,
+                            exclude_patterns: None,
+                        });
                     }
-                    if !add_dir.is_dir() {
-                        anyhow::bail!("Additional media path is not a directory: {}", add_dir.display());
-                    }
-                    
-                    media_directories.push(MonitoredDirectoryConfig {
-                        path: add_dir.to_string_lossy().to_string(),
-                        recursive: true,
-                        extensions: None,
-                        exclude_patterns: None,
-                    });
                 }
                 
                 config.media.directories = media_directories;
@@ -219,25 +216,24 @@ impl AppConfig {
             
             tracing::info!("Processing command line arguments with media directory: {}", media_dir.display());
             
-            // Validate that the directory exists before doing platform validation
+            // Check that the directory exists and is valid before doing platform validation
             if !media_dir.exists() {
-                anyhow::bail!("Media directory does not exist: {}", media_dir.display());
+                tracing::warn!("Media directory does not exist: {}", media_dir.display());
+            } else if !media_dir.is_dir() {
+                tracing::warn!("Media path is not a directory: {}", media_dir.display());
+            } else {
+                // Now validate the path for platform compatibility
+                if let Err(e) = platform_config.validate_path(&media_dir) {
+                    tracing::warn!("Invalid media directory for current platform: {} - {}", media_dir.display(), e);
+                } else {
+                    media_directories.push(MonitoredDirectoryConfig {
+                        path: media_dir.to_string_lossy().to_string(),
+                        recursive: true,
+                        extensions: None,
+                        exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
+                    });
+                }
             }
-            
-            if !media_dir.is_dir() {
-                anyhow::bail!("Media path is not a directory: {}", media_dir.display());
-            }
-
-            // Now validate the path for platform compatibility
-            platform_config.validate_path(&media_dir)
-                .with_context(|| format!("Invalid media directory for current platform: {}", media_dir.display()))?;
-            
-            media_directories.push(MonitoredDirectoryConfig {
-                path: media_dir.to_string_lossy().to_string(),
-                recursive: true,
-                extensions: None,
-                exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
-            });
         }
         
         // Add additional media directories
@@ -246,25 +242,24 @@ impl AppConfig {
             
             tracing::info!("Processing additional media directory: {}", additional_dir.display());
             
-            // Validate that the directory exists
+            // Check that the directory exists and is valid
             if !additional_dir.exists() {
-                anyhow::bail!("Additional media directory does not exist: {}", additional_dir.display());
+                tracing::warn!("Additional media directory does not exist: {}", additional_dir.display());
+            } else if !additional_dir.is_dir() {
+                tracing::warn!("Additional media path is not a directory: {}", additional_dir.display());
+            } else {
+                // Validate the path for platform compatibility
+                if let Err(e) = platform_config.validate_path(&additional_dir) {
+                    tracing::warn!("Invalid additional media directory for current platform: {} - {}", additional_dir.display(), e);
+                } else {
+                    media_directories.push(MonitoredDirectoryConfig {
+                        path: additional_dir.to_string_lossy().to_string(),
+                        recursive: true,
+                        extensions: None,
+                        exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
+                    });
+                }
             }
-            
-            if !additional_dir.is_dir() {
-                anyhow::bail!("Additional media path is not a directory: {}", additional_dir.display());
-            }
-
-            // Validate the path for platform compatibility
-            platform_config.validate_path(&additional_dir)
-                .with_context(|| format!("Invalid additional media directory for current platform: {}", additional_dir.display()))?;
-            
-            media_directories.push(MonitoredDirectoryConfig {
-                path: additional_dir.to_string_lossy().to_string(),
-                recursive: true,
-                extensions: None,
-                exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
-            });
         }
 
         let mut config = Self::default_for_platform();
@@ -275,6 +270,17 @@ impl AppConfig {
         }
         config.server.name = args.name;
         config.media.directories = media_directories;
+        
+        // Warn if no valid media directories were found
+        if config.media.directories.is_empty() {
+            tracing::warn!("No valid media directories found. The application will start but no media files will be available for streaming.");
+            tracing::warn!("Please ensure your media directories exist and are accessible, then restart the application.");
+        } else {
+            tracing::info!("Found {} valid media directories", config.media.directories.len());
+            for dir in &config.media.directories {
+                tracing::info!("  - {}", dir.path);
+            }
+        }
         
         tracing::info!("Using {} media directories from command line", config.media.directories.len());
         for (i, dir) in config.media.directories.iter().enumerate() {

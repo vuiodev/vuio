@@ -2,7 +2,7 @@
 use super::{InterfaceType, NetworkInterface, PlatformError, PlatformResult};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr};
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 use windows::Win32::NetworkManagement::IpHelper::{
     GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_INCLUDE_PREFIX, GAA_FLAG_SKIP_ANYCAST,
     GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER, IF_TYPE_ETHERNET_CSMACD,
@@ -241,6 +241,7 @@ pub fn gather_windows_metadata() -> PlatformResult<HashMap<String, String>> {
 }
 
 /// Check if running with administrator privileges
+#[allow(dead_code)]
 pub fn is_elevated() -> bool {
     // This is a simplified check
     // In a real implementation, you would use Windows APIs to check for admin privileges
@@ -250,6 +251,7 @@ pub fn is_elevated() -> bool {
 }
 
 /// Get Windows firewall status
+#[allow(dead_code)]
 pub fn get_firewall_status() -> PlatformResult<bool> {
     // This would use Windows APIs to check firewall status
     // For now, assume firewall is active on Windows
@@ -257,6 +259,7 @@ pub fn get_firewall_status() -> PlatformResult<bool> {
 }
 
 /// Check if a port requires elevation on Windows
+#[allow(dead_code)]
 pub fn requires_elevation(port: u16) -> bool {
     // Ports below 1024 typically require administrator privileges on Windows
     port < 1024

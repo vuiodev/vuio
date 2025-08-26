@@ -158,6 +158,7 @@ impl WindowsFileSystemManager {
     }
     
     /// Handle case-insensitive file matching for Windows
+    #[allow(dead_code)]
     fn find_actual_case(&self, path: &Path) -> Option<PathBuf> {
         // This is a simplified implementation
         // In a full implementation, we would use Windows APIs to find the actual case
