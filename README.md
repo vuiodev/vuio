@@ -348,7 +348,7 @@ When running in Docker, VuIO automatically detects the container environment and
 # Server Configuration
 VUIO_PORT=8080                     # HTTP server port (default: 8080)
 VUIO_INTERFACE=0.0.0.0             # Network interface to bind (default: 0.0.0.0)
-VUIO_SERVER_NAME="VuIO DLNA Server" # DLNA server name (default: "VuIO DLNA Server")
+VUIO_SERVER_NAME=VuIO              # DLNA server name (default: VuIO)
 VUIO_UUID=550e8400-e29b-41d4-a716-446655440000  # DLNA device UUID (CHANGE THIS if running multiple instances)
 VUIO_IP=192.168.1.126              # Optional: Specific IP for DLNA announcements
 

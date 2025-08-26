@@ -362,7 +362,9 @@ async fn collect_database_diagnostics() -> Result<DatabaseDiagnostics, PlatformE
             uptime: None,           // TODO: Implement system uptime detection
             memory_total: None,     // TODO: Implement total memory detection
             memory_available: None, // TODO: Implement available memory detection
-            cpu_count: Some(num_cpus::get() as u32),
+            cpu_count: std::thread::available_parallelism()
+                .map(|n| n.get() as u32)
+                .ok(),
             load_average: None,     // TODO: Implement load average detection
             disk_usage: HashMap::new(), // TODO: Implement disk usage detection
             process_info,

@@ -99,15 +99,6 @@ impl PlatformConfig {
         let cache_dir = dirs::cache_dir().unwrap_or_else(|| home_dir.join(".cache"));
         let data_dir = dirs::data_dir().unwrap_or_else(|| home_dir.join(".local/share"));
         
-        // Common Linux media directories
-        let default_media_dirs = vec![
-            home_dir.join("Music"),
-            home_dir.join("Videos"),
-            home_dir.join("Pictures"),
-            PathBuf::from("/media"),
-            PathBuf::from("/mnt"),
-        ];
-        
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "linux".to_string());
         metadata.insert("case_sensitive".to_string(), "true".to_string());
@@ -116,7 +107,7 @@ impl PlatformConfig {
 
         Self {
             os_type: OsType::Linux,
-            default_media_dir: default_media_dirs[0].clone(),
+            default_media_dir: Self::get_linux_default_media_dir(),
             config_dir: config_dir.join("vuio"),
             log_dir: data_dir.join("vuio/logs"),
             cache_dir: cache_dir.join("vuio"),

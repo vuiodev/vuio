@@ -1,6 +1,6 @@
 [package]
 name = "vuio"
-version = "0.1.0"
+version = "0.0.15"
 edition = "2021"
 
 [lib]
@@ -29,7 +29,6 @@ toml = "0.9"
 serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
-num_cpus = "1.17"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 audiotags = "0.5"
 
@@ -40,6 +39,7 @@ windows = { version = "0.61", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock"
 ] }
+
 
 [dev-dependencies]
 tempfile = "3.21"

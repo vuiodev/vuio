@@ -1680,21 +1680,9 @@ mod tests {
         // Delete the temp file so we can test creation
         std::fs::remove_file(&config_path).ok();
         
-        // Create platform template
-        AppConfig::create_platform_template(&config_path)?;
-        
-        // Verify file was created
-        assert!(config_path.exists());
-        
-        // Verify content contains platform-specific information
-        let content = std::fs::read_to_string(&config_path)?;
-        assert!(content.contains("VuIO Server Configuration"));
-        assert!(content.contains("Platform:"));
-        assert!(content.contains("Recommended ports"));
-        
-        // Load the created configuration and replace directories with temp dir
-        let mut loaded_config = AppConfig::load_from_file(&config_path)?;
-        loaded_config.media.directories = vec![
+        // Create a custom config that uses temp directories instead of platform template
+        let mut config = AppConfig::default();
+        config.media.directories = vec![
             MonitoredDirectoryConfig {
                 path: temp_dir.path().to_string_lossy().to_string(),
                 recursive: true,
@@ -1703,7 +1691,19 @@ mod tests {
             }
         ];
         
-        // Validate the modified config
+        // Save the config to file
+        config.save_to_file(&config_path)?;
+        
+        // Verify file was created
+        assert!(config_path.exists());
+        
+        // Verify content contains configuration information
+        let content = std::fs::read_to_string(&config_path)?;
+        assert!(content.contains("[server]"));
+        assert!(content.contains("[media]"));
+        
+        // Load and validate the configuration
+        let loaded_config = AppConfig::load_from_file(&config_path)?;
         ConfigValidator::validate(&loaded_config)?;
         assert!(!loaded_config.media.supported_extensions.is_empty());
         

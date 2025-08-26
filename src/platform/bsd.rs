@@ -202,10 +202,22 @@ pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
 
 /// Check if running as root
 pub fn _is_elevated() -> bool {
-    std::env::var("USER")
-        .map(|user| user == "root")
-        .unwrap_or(false) ||
-    unsafe { libc::geteuid() == 0 }
+    // Check USER environment variable first
+    if let Ok(user) = std::env::var("USER") {
+        return user == "root";
+    }
+    
+    // Fallback to libc check if available
+    #[cfg(all(target_os = "freebsd", feature = "system-libs"))]
+    {
+        unsafe { libc::geteuid() == 0 }
+    }
+    
+    #[cfg(not(all(target_os = "freebsd", feature = "system-libs")))]
+    {
+        // Conservative fallback - assume not elevated
+        false
+    }
 }
 
 /// Check BSD firewall status

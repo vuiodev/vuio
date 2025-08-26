@@ -230,7 +230,9 @@ pub async fn log_system_resources() {
     info!("=== System Resources ===");
     
     // Log CPU information
-    let cpu_count = num_cpus::get();
+    let cpu_count = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     info!("CPU cores: {}", cpu_count);
     
     // Log process information
