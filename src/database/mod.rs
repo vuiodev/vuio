@@ -1,8 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
+use futures_util::{Stream, StreamExt};
 use sqlx::{Row, SqlitePool};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 pub mod playlist_formats;
@@ -147,6 +149,9 @@ pub trait DatabaseManager: Send + Sync {
 
     /// Get all media files from the database
     async fn get_all_media_files(&self) -> Result<Vec<MediaFile>>;
+
+    /// Stream all media files from the database (memory efficient)
+    fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>>;
 
     /// Remove a media file record by path
     async fn remove_media_file(&self, path: &Path) -> Result<bool>;
@@ -564,6 +569,23 @@ impl DatabaseManager for SqliteDatabase {
         }
 
         Ok(files)
+    }
+
+    fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
+        Box::pin(
+            sqlx::query(
+                "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename"
+            )
+            .fetch(&self.pool)
+            .map(|row_result| {
+                row_result.and_then(|row| {
+                    MediaFile::from_row(&row).map_err(|e| sqlx::Error::ColumnDecode { 
+                        index: "media_file".to_string(), 
+                        source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+                    })
+                })
+            })
+        )
     }
 
     async fn remove_media_file(&self, path: &Path) -> Result<bool> {

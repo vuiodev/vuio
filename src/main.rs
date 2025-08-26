@@ -768,35 +768,44 @@ async fn initialize_file_watcher(config: &AppConfig, _database: Arc<dyn Database
     Ok(watcher)
 }
 
-/// Validate cached files and remove any that no longer exist on disk
+/// Validate cached files and remove any that no longer exist on disk (streaming version)
 async fn validate_and_cleanup_deleted_files(
     database: Arc<dyn DatabaseManager>,
-    cached_files: Vec<database::MediaFile>,
-) -> anyhow::Result<Vec<database::MediaFile>> {
-    info!("Validating {} cached media files...", cached_files.len());
+) -> anyhow::Result<()> {
+    use futures_util::StreamExt;
     
-    let mut valid_files = Vec::new();
+    info!("Validating cached media files (streaming)...");
+    
+    let mut stream = database.stream_all_media_files();
     let mut removed_count = 0;
+    let mut total_checked = 0;
     
-    for file in cached_files {
-        if file.path.exists() {
-            valid_files.push(file);
-        } else {
-            info!("Removing deleted file from database: {}", file.path.display());
-            if database.remove_media_file(&file.path).await? {
+    while let Some(media_file_result) = stream.next().await {
+        let media_file = media_file_result
+            .context("Failed to read media file from database stream")?;
+        
+        total_checked += 1;
+        
+        if !media_file.path.exists() {
+            info!("Removing deleted file from database: {}", media_file.path.display());
+            if database.remove_media_file(&media_file.path).await? {
                 removed_count += 1;
             }
+        }
+        
+        // Log progress every 1000 files to show we're making progress
+        if total_checked % 1000 == 0 {
+            info!("Validated {} files, removed {} deleted files so far", total_checked, removed_count);
         }
     }
     
     if removed_count > 0 {
-        info!("Cleaned up {} deleted files from database", removed_count);
+        info!("Cleaned up {} deleted files from database (checked {} total)", removed_count, total_checked);
     } else {
-        info!("All cached files are still present on disk");
+        info!("All {} cached files are still present on disk", total_checked);
     }
-    
 
-    Ok(valid_files)
+    Ok(())
 }
 
 /// Perform initial media scan, using database cache when possible
@@ -843,9 +852,7 @@ async fn perform_initial_media_scan(config: &AppConfig, database: &Arc<dyn Datab
 
         // Validate files to catch any that were deleted while app was offline
         if config.media.cleanup_deleted_files {
-            let all_media_files = database.get_all_media_files().await
-                .context("Failed to load media files from database after scan")?;
-            validate_and_cleanup_deleted_files(database.clone(), all_media_files).await?;
+            validate_and_cleanup_deleted_files(database.clone()).await?;
         }
         
         Ok(())
@@ -854,9 +861,7 @@ async fn perform_initial_media_scan(config: &AppConfig, database: &Arc<dyn Datab
 
         // Validate that cached files still exist on disk and remove any that don't (if enabled)
         if config.media.cleanup_deleted_files {
-            let cached_files = database.get_all_media_files().await
-                .context("Failed to load media files from database")?;
-            validate_and_cleanup_deleted_files(database.clone(), cached_files).await?;
+            validate_and_cleanup_deleted_files(database.clone()).await?;
         }
 
         Ok(())

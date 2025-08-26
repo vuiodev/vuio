@@ -713,6 +713,24 @@ mod tests {
             Ok(files.values().cloned().collect())
         }
 
+        fn stream_all_media_files(&self) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = std::result::Result<MediaFile, sqlx::Error>> + Send + '_>> {
+            use futures_util::stream;
+            let files = self.files.clone();
+            Box::pin(stream::unfold((files, 0), |(files, mut index)| async move {
+                let files_guard = files.read().await;
+                let files_vec: Vec<MediaFile> = files_guard.values().cloned().collect();
+                drop(files_guard);
+                
+                if index >= files_vec.len() {
+                    None
+                } else {
+                    let file = files_vec[index].clone();
+                    index += 1;
+                    Some((Ok(file), (files, index)))
+                }
+            }))
+        }
+
         async fn remove_media_file(&self, path: &Path) -> anyhow::Result<bool> {
             let mut files = self.files.write().await;
             Ok(files.remove(path).is_some())
