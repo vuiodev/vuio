@@ -20,7 +20,7 @@ pub async fn root_handler() -> &'static str {
 }
 
 pub async fn description_handler(State(state): State<AppState>) -> impl IntoResponse {
-    let xml = generate_description_xml(&state);
+    let xml = generate_description_xml(&state).await;
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/xml; charset=utf-8")],
@@ -97,7 +97,7 @@ pub async fn content_directory_control(
             // For the root, we typically return the top-level containers (Video, Audio, Image).
             // The generate_browse_response function should be smart enough to create these
             // when given an object_id of "0" and empty lists of subdirectories and files.
-            let response = generate_browse_response("0", &[], &[], &state);
+            let response = generate_browse_response("0", &[], &[], &state).await;
             return (
                 StatusCode::OK,
                 [
@@ -184,7 +184,7 @@ pub async fn content_directory_control(
                 
                 if starting_index >= total_matches {
                     // Starting index is beyond available items
-                    let response = generate_browse_response(&params.object_id, &[], &[], &state);
+                    let response = generate_browse_response(&params.object_id, &[], &[], &state).await;
                     return (
                         StatusCode::OK,
                         [
@@ -213,7 +213,7 @@ pub async fn content_directory_control(
                        paginated_subdirs.len(), paginated_files.len(), 
                        starting_index, end_index, total_matches);
                 
-                let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, &state);
+                let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, &state).await;
                 (
                     StatusCode::OK,
                     [
@@ -480,7 +480,7 @@ async fn handle_audio_root_browse(
         })
         .collect();
     
-    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state).await;
     (
         StatusCode::OK,
         [
@@ -514,7 +514,7 @@ async fn handle_artists_browse(
                     })
                     .collect();
                     
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state).await;
                 (
                     StatusCode::OK,
                     [
@@ -540,7 +540,7 @@ async fn handle_artists_browse(
         let artist_name = path_parts[1];
         match state.database.get_music_by_artist(artist_name).await {
             Ok(files) => {
-                let response = generate_browse_response(&params.object_id, &[], &files, state);
+                let response = generate_browse_response(&params.object_id, &[], &files, state).await;
                 (
                     StatusCode::OK,
                     [
@@ -593,7 +593,7 @@ async fn handle_albums_browse(
                     })
                     .collect();
                     
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state).await;
                 (
                     StatusCode::OK,
                     [
@@ -619,7 +619,7 @@ async fn handle_albums_browse(
         let album_name = path_parts[1];
         match state.database.get_music_by_album(album_name, None).await {
             Ok(files) => {
-                let response = generate_browse_response(&params.object_id, &[], &files, state);
+                let response = generate_browse_response(&params.object_id, &[], &files, state).await;
                 (
                     StatusCode::OK,
                     [
@@ -672,7 +672,7 @@ async fn handle_genres_browse(
                     })
                     .collect();
                     
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state).await;
                 (
                     StatusCode::OK,
                     [
@@ -698,7 +698,7 @@ async fn handle_genres_browse(
         let genre_name = path_parts[1];
         match state.database.get_music_by_genre(genre_name).await {
             Ok(files) => {
-                let response = generate_browse_response(&params.object_id, &[], &files, state);
+                let response = generate_browse_response(&params.object_id, &[], &files, state).await;
                 (
                     StatusCode::OK,
                     [
@@ -751,7 +751,7 @@ async fn handle_years_browse(
                     })
                     .collect();
                     
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state).await;
                 (
                     StatusCode::OK,
                     [
@@ -778,7 +778,7 @@ async fn handle_years_browse(
         if let Ok(year) = year_str.parse::<u32>() {
             match state.database.get_music_by_year(year).await {
                 Ok(files) => {
-                    let response = generate_browse_response(&params.object_id, &[], &files, state);
+                    let response = generate_browse_response(&params.object_id, &[], &files, state).await;
                     (
                         StatusCode::OK,
                         [
@@ -839,7 +839,7 @@ async fn handle_playlists_browse(
                     })
                     .collect();
                     
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state);
+                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state).await;
                 (
                     StatusCode::OK,
                     [
@@ -866,7 +866,7 @@ async fn handle_playlists_browse(
         if let Ok(playlist_id) = playlist_id_str.parse::<i64>() {
             match state.database.get_playlist_tracks(playlist_id).await {
                 Ok(files) => {
-                    let response = generate_browse_response(&params.object_id, &[], &files, state);
+                    let response = generate_browse_response(&params.object_id, &[], &files, state).await;
                     (
                         StatusCode::OK,
                         [

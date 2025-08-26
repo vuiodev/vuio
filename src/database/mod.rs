@@ -304,7 +304,7 @@ pub enum IssueSeverity {
 
 /// SQLite implementation of DatabaseManager
 pub struct SqliteDatabase {
-    pool: SqlitePool,
+    pool: std::sync::Arc<tokio::sync::RwLock<SqlitePool>>,
     db_path: PathBuf,
 }
 
@@ -327,7 +327,10 @@ impl SqliteDatabase {
             .connect(&database_url)
             .await?;
 
-        Ok(Self { pool, db_path })
+        Ok(Self { 
+            pool: std::sync::Arc::new(tokio::sync::RwLock::new(pool)), 
+            db_path 
+        })
     }
 
     /// Create database tables
@@ -355,7 +358,7 @@ impl SqliteDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         // Create playlists table
@@ -370,7 +373,7 @@ impl SqliteDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         // Create playlist entries table
@@ -389,66 +392,66 @@ impl SqliteDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         // Create indexes for better query performance
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_path ON media_files(path)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_parent_path ON media_files(parent_path)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_modified ON media_files(modified)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_mime_type ON media_files(mime_type)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_filename ON media_files(filename)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         // Music categorization indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_artist ON media_files(artist)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_album ON media_files(album)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_genre ON media_files(genre)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_year ON media_files(year)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_album_artist ON media_files(album_artist)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_track_number ON media_files(track_number)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         // Playlist indexes
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_playlist_entries_playlist_id ON playlist_entries(playlist_id)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_playlist_entries_media_file_id ON playlist_entries(media_file_id)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_playlist_entries_position ON playlist_entries(playlist_id, position)")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         // Create database metadata table for migrations
@@ -461,7 +464,7 @@ impl SqliteDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         // Set initial schema version
@@ -476,7 +479,7 @@ impl SqliteDatabase {
         .bind("schema_version")
         .bind("1")
         .bind(now)
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(())
@@ -495,22 +498,22 @@ impl DatabaseManager for SqliteDatabase {
     async fn initialize(&self) -> Result<()> {
         // Configure SQLite for better performance
         sqlx::query("PRAGMA journal_mode = WAL")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
         sqlx::query("PRAGMA synchronous = NORMAL")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
         sqlx::query("PRAGMA temp_store = MEMORY")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
         sqlx::query("PRAGMA foreign_keys = ON")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
         sqlx::query("PRAGMA cache_size = -2000") // 2MB cache (reduced for memory efficiency)
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
         sqlx::query("PRAGMA mmap_size = 0") // Disable memory mapping to reduce memory usage
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         self.create_tables().await?;
@@ -550,7 +553,7 @@ impl DatabaseManager for SqliteDatabase {
         .bind(&file.album_artist)
         .bind(created_timestamp)
         .bind(updated_timestamp)
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(result.last_insert_rowid())
@@ -560,7 +563,7 @@ impl DatabaseManager for SqliteDatabase {
         let rows = sqlx::query(
             "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename LIMIT 5000"
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::with_capacity(rows.len()); // Pre-allocate capacity
@@ -572,20 +575,29 @@ impl DatabaseManager for SqliteDatabase {
     }
 
     fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
-        Box::pin(
-            sqlx::query(
+        let pool = self.pool.clone();
+        Box::pin(async_stream::stream! {
+            let pool_guard = pool.read().await;
+            let mut stream = sqlx::query(
                 "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename"
             )
-            .fetch(&self.pool)
-            .map(|row_result| {
-                row_result.and_then(|row| {
-                    MediaFile::from_row(&row).map_err(|e| sqlx::Error::ColumnDecode { 
-                        index: "media_file".to_string(), 
-                        source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-                    })
-                })
-            })
-        )
+            .fetch(&*pool_guard);
+            
+            while let Some(row_result) = stream.next().await {
+                match row_result {
+                    Ok(row) => {
+                        match MediaFile::from_row(&row) {
+                            Ok(media_file) => yield Ok(media_file),
+                            Err(e) => yield Err(sqlx::Error::ColumnDecode { 
+                                index: "media_file".to_string(), 
+                                source: Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+                            })
+                        }
+                    },
+                    Err(e) => yield Err(e)
+                }
+            }
+        })
     }
 
     async fn remove_media_file(&self, path: &Path) -> Result<bool> {
@@ -593,7 +605,7 @@ impl DatabaseManager for SqliteDatabase {
 
         let result = sqlx::query("DELETE FROM media_files WHERE path = ?")
             .bind(&path_str)
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         Ok(result.rows_affected() > 0)
@@ -631,7 +643,7 @@ impl DatabaseManager for SqliteDatabase {
         .bind(&file.album_artist)
         .bind(updated_timestamp)
         .bind(&path_str)
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(())
@@ -650,7 +662,7 @@ impl DatabaseManager for SqliteDatabase {
             "#,
         )
         .bind(&dir_str)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::with_capacity(rows.len()); // Pre-allocate capacity
@@ -684,7 +696,7 @@ impl DatabaseManager for SqliteDatabase {
         )
         .bind(&parent_path_str)
         .bind(&mime_filter_str)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::with_capacity(file_rows.len()); // Pre-allocate capacity
@@ -713,7 +725,7 @@ impl DatabaseManager for SqliteDatabase {
         .bind(&like_path_prefix)
         .bind(&parent_path_str)
         .bind(&mime_filter_str)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
         
         let mut subdirectories = HashSet::new();
@@ -764,7 +776,7 @@ impl DatabaseManager for SqliteDatabase {
             query_builder = query_builder.bind(path);
         }
 
-        let result = query_builder.execute(&self.pool).await?;
+        let result = query_builder.execute(&*self.pool.read().await).await?;
 
         Ok(result.rows_affected() as usize)
     }
@@ -780,7 +792,7 @@ impl DatabaseManager for SqliteDatabase {
             "#,
         )
         .bind(&path_str)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&*self.pool.read().await)
         .await?;
 
         match row {
@@ -798,7 +810,7 @@ impl DatabaseManager for SqliteDatabase {
             "#,
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&*self.pool.read().await)
         .await?;
 
         match row {
@@ -810,7 +822,7 @@ impl DatabaseManager for SqliteDatabase {
     async fn get_stats(&self) -> Result<DatabaseStats> {
         // Get total files and size
         let row = sqlx::query("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM media_files")
-            .fetch_one(&self.pool)
+            .fetch_one(&*self.pool.read().await)
             .await?;
 
         let total_files: i64 = row.try_get(0)?;
@@ -917,7 +929,7 @@ impl DatabaseManager for SqliteDatabase {
         let backup_path_str = backup_path.to_string_lossy().to_string();
 
         sqlx::query(&format!("VACUUM INTO '{}'", backup_path_str))
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         // Verify backup was created successfully
@@ -972,14 +984,23 @@ impl DatabaseManager for SqliteDatabase {
         }
 
         // Close current connection
-        self.pool.close().await;
+        {
+            let pool = self.pool.read().await;
+            pool.close().await;
+        }
 
         // Replace current database with backup
         tokio::fs::copy(backup_path, &self.db_path).await?;
 
         // Reconnect to restored database
         let database_url = format!("sqlite://{}?mode=rwc", self.db_path.display());
-        let new_pool = SqlitePool::connect(&database_url).await?;
+        let new_pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(2)
+            .min_connections(1)
+            .idle_timeout(std::time::Duration::from_secs(300))
+            .max_lifetime(std::time::Duration::from_secs(1800))
+            .connect(&database_url)
+            .await?;
 
         // Configure SQLite for better performance
         sqlx::query("PRAGMA foreign_keys = ON")
@@ -991,21 +1012,27 @@ impl DatabaseManager for SqliteDatabase {
         sqlx::query("PRAGMA synchronous = NORMAL")
             .execute(&new_pool)
             .await?;
-        sqlx::query("PRAGMA cache_size = 10000")
+        sqlx::query("PRAGMA cache_size = -2000") // 2MB cache (consistent with initialize)
             .execute(&new_pool)
             .await?;
         sqlx::query("PRAGMA temp_store = MEMORY")
             .execute(&new_pool)
             .await?;
+        sqlx::query("PRAGMA mmap_size = 0") // Disable memory mapping (consistent with initialize)
+            .execute(&new_pool)
+            .await?;
 
-        // Note: We can't replace self.pool here due to borrowing rules
-        // In a real implementation, this would require restructuring or using Arc<Mutex<>>
+        // Replace the pool in the struct
+        {
+            let mut pool_guard = self.pool.write().await;
+            *pool_guard = new_pool;
+        }
 
         Ok(())
     }
 
     async fn vacuum(&self) -> Result<()> {
-        sqlx::query("VACUUM").execute(&self.pool).await?;
+        sqlx::query("VACUUM").execute(&*self.pool.read().await).await?;
 
         Ok(())
     }
@@ -1021,7 +1048,7 @@ impl DatabaseManager for SqliteDatabase {
             ORDER BY artist COLLATE NOCASE
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut categories = Vec::new();
@@ -1051,7 +1078,7 @@ impl DatabaseManager for SqliteDatabase {
                 "#
             )
             .bind(artist_filter)
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool.read().await)
             .await?
         } else {
             sqlx::query(
@@ -1063,7 +1090,7 @@ impl DatabaseManager for SqliteDatabase {
                 ORDER BY album COLLATE NOCASE
                 "#
             )
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool.read().await)
             .await?
         };
 
@@ -1097,7 +1124,7 @@ impl DatabaseManager for SqliteDatabase {
             ORDER BY genre COLLATE NOCASE
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut categories = Vec::new();
@@ -1125,7 +1152,7 @@ impl DatabaseManager for SqliteDatabase {
             ORDER BY year DESC
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut categories = Vec::new();
@@ -1153,7 +1180,7 @@ impl DatabaseManager for SqliteDatabase {
             ORDER BY album_artist COLLATE NOCASE
             "#
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut categories = Vec::new();
@@ -1181,7 +1208,7 @@ impl DatabaseManager for SqliteDatabase {
             "#
         )
         .bind(artist)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::new();
@@ -1204,7 +1231,7 @@ impl DatabaseManager for SqliteDatabase {
             )
             .bind(album)
             .bind(artist_filter)
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool.read().await)
             .await?
         } else {
             sqlx::query(
@@ -1216,7 +1243,7 @@ impl DatabaseManager for SqliteDatabase {
                 "#
             )
             .bind(album)
-            .fetch_all(&self.pool)
+            .fetch_all(&*self.pool.read().await)
             .await?
         };
 
@@ -1238,7 +1265,7 @@ impl DatabaseManager for SqliteDatabase {
             "#
         )
         .bind(genre)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::new();
@@ -1259,7 +1286,7 @@ impl DatabaseManager for SqliteDatabase {
             "#
         )
         .bind(year as i64)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::new();
@@ -1280,7 +1307,7 @@ impl DatabaseManager for SqliteDatabase {
             "#
         )
         .bind(album_artist)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::new();
@@ -1308,7 +1335,7 @@ impl DatabaseManager for SqliteDatabase {
         .bind(description)
         .bind(now)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(result.last_insert_rowid())
@@ -1318,7 +1345,7 @@ impl DatabaseManager for SqliteDatabase {
         let rows = sqlx::query(
             "SELECT id, name, description, created_at, updated_at FROM playlists ORDER BY name"
         )
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut playlists = Vec::new();
@@ -1342,7 +1369,7 @@ impl DatabaseManager for SqliteDatabase {
             "SELECT id, name, description, created_at, updated_at FROM playlists WHERE id = ?"
         )
         .bind(playlist_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&*self.pool.read().await)
         .await?;
 
         if let Some(row) = row {
@@ -1373,7 +1400,7 @@ impl DatabaseManager for SqliteDatabase {
         .bind(&playlist.description)
         .bind(now)
         .bind(playlist.id.unwrap())
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(())
@@ -1382,7 +1409,7 @@ impl DatabaseManager for SqliteDatabase {
     async fn delete_playlist(&self, playlist_id: i64) -> Result<bool> {
         let result = sqlx::query("DELETE FROM playlists WHERE id = ?")
             .bind(playlist_id)
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         Ok(result.rows_affected() > 0)
@@ -1397,7 +1424,7 @@ impl DatabaseManager for SqliteDatabase {
                 "SELECT MAX(position) FROM playlist_entries WHERE playlist_id = ?"
             )
             .bind(playlist_id)
-            .fetch_optional(&self.pool)
+            .fetch_optional(&*self.pool.read().await)
             .await?
             .flatten();
             
@@ -1416,7 +1443,7 @@ impl DatabaseManager for SqliteDatabase {
         .bind(media_file_id)
         .bind(final_position as i64)
         .bind(now)
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(result.last_insert_rowid())
@@ -1428,7 +1455,7 @@ impl DatabaseManager for SqliteDatabase {
         )
         .bind(playlist_id)
         .bind(media_file_id)
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(result.rows_affected() > 0)
@@ -1447,7 +1474,7 @@ impl DatabaseManager for SqliteDatabase {
             "#
         )
         .bind(playlist_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&*self.pool.read().await)
         .await?;
 
         let mut files = Vec::new();
@@ -1459,7 +1486,8 @@ impl DatabaseManager for SqliteDatabase {
     }
 
     async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()> {
-        let mut tx = self.pool.begin().await?;
+        let pool = self.pool.read().await;
+        let mut tx = pool.begin().await?;
 
         for (media_file_id, position) in track_positions {
             sqlx::query(
@@ -1481,7 +1509,7 @@ impl SqliteDatabase {
     /// Run SQLite integrity check
     async fn run_integrity_check(&self) -> Result<bool> {
         let result = sqlx::query_scalar::<_, String>("PRAGMA integrity_check")
-            .fetch_one(&self.pool)
+            .fetch_one(&*self.pool.read().await)
             .await?;
 
         Ok(result == "ok")
@@ -1492,7 +1520,7 @@ impl SqliteDatabase {
         // Check for orphaned records or inconsistencies
         let orphaned_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM media_files WHERE path = '' OR filename = '' OR parent_path = ''")
-                .fetch_one(&self.pool)
+                .fetch_one(&*self.pool.read().await)
                 .await?;
 
         if orphaned_count > 0 {
@@ -1508,7 +1536,7 @@ impl SqliteDatabase {
         let duplicate_count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM (SELECT path FROM media_files GROUP BY path HAVING COUNT(*) > 1)",
         )
-        .fetch_one(&self.pool)
+        .fetch_one(&*self.pool.read().await)
         .await?;
 
         if duplicate_count > 0 {
@@ -1542,7 +1570,7 @@ impl SqliteDatabase {
     async fn attempt_repair(&self) -> Result<bool> {
         // Try to clean up orphaned records
         sqlx::query("DELETE FROM media_files WHERE path = '' OR filename = '' OR parent_path = ''")
-            .execute(&self.pool)
+            .execute(&*self.pool.read().await)
             .await?;
 
         // Remove duplicates, keeping the most recent
@@ -1556,11 +1584,11 @@ impl SqliteDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         // Try to rebuild indexes
-        sqlx::query("REINDEX").execute(&self.pool).await?;
+        sqlx::query("REINDEX").execute(&*self.pool.read().await).await?;
 
         // Run integrity check again
         self.run_integrity_check().await
@@ -1570,7 +1598,7 @@ impl SqliteDatabase {
     pub async fn cleanup_invalid_records(&self) -> Result<usize> {
         let result =
             sqlx::query("DELETE FROM media_files WHERE path = '' OR filename = '' OR parent_path = '' OR size < 0")
-                .execute(&self.pool)
+                .execute(&*self.pool.read().await)
                 .await?;
 
         Ok(result.rows_affected() as usize)
@@ -1588,7 +1616,7 @@ impl SqliteDatabase {
             )
             "#,
         )
-        .execute(&self.pool)
+        .execute(&*self.pool.read().await)
         .await?;
 
         Ok(result.rows_affected() as usize)
@@ -1729,12 +1757,12 @@ mod tests {
 
         // Manually insert invalid records
         sqlx::query("INSERT INTO media_files (path, parent_path, filename, size, modified, mime_type, created_at, updated_at) VALUES ('', '', 'empty.mp4', 1024, 0, 'video/mp4', 0, 0)")
-            .execute(&db.pool)
+            .execute(&*db.pool.read().await)
             .await
             .unwrap();
 
         sqlx::query("INSERT INTO media_files (path, parent_path, filename, size, modified, mime_type, created_at, updated_at) VALUES ('/test/valid.mp4', '/test', '', 1024, 0, 'video/mp4', 0, 0)")
-            .execute(&db.pool)
+            .execute(&*db.pool.read().await)
             .await
             .unwrap();
 
@@ -1777,7 +1805,7 @@ mod tests {
 
         // Verify we have 2 unique records
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media_files")
-            .fetch_one(&db.pool)
+            .fetch_one(&*db.pool.read().await)
             .await
             .unwrap();
         assert_eq!(count, 2);
@@ -1788,7 +1816,7 @@ mod tests {
 
         // Verify count is still 2
         let count_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media_files")
-            .fetch_one(&db.pool)
+            .fetch_one(&*db.pool.read().await)
             .await
             .unwrap();
         assert_eq!(count_after, 2);

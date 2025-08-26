@@ -29,7 +29,7 @@ fn xml_escape(s: &str) -> String {
 }
 
 /// Get the server's IP address for use in URLs from the application state.
-fn get_server_ip(state: &AppState) -> String {
+async fn get_server_ip(state: &AppState) -> String {
     // Use the SSDP interface from config if it's a specific IP address
     match &state.config.network.interface_selection {
         crate::config::NetworkInterfaceConfig::Specific(ip) => {
@@ -44,7 +44,7 @@ fn get_server_ip(state: &AppState) -> String {
     }
     
     // Auto-detect the primary network interface IP
-    if let Some(ip) = get_primary_interface_ip_sync() {
+    if let Some(ip) = get_primary_interface_ip_async().await {
         return ip;
     }
     
@@ -53,9 +53,9 @@ fn get_server_ip(state: &AppState) -> String {
     "127.0.0.1".to_string()
 }
 
-/// Synchronous version of primary interface IP detection
-fn get_primary_interface_ip_sync() -> Option<String> {
-    use std::process::Command;
+/// Async version of primary interface IP detection
+async fn get_primary_interface_ip_async() -> Option<String> {
+    use tokio::process::Command;
     
     // Check if host IP is overridden via environment variable (for containers)
     if let Ok(host_ip) = std::env::var("VUIO_IP") {
@@ -65,7 +65,7 @@ fn get_primary_interface_ip_sync() -> Option<String> {
     }
     
     // Try to get the default route interface first (most reliable method)
-    if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
+    if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output().await {
         let route_output = String::from_utf8_lossy(&output.stdout);
         if let Some(line) = route_output.lines().next() {
             // Parse "default via X.X.X.X dev eth0" to get interface name
@@ -73,7 +73,7 @@ fn get_primary_interface_ip_sync() -> Option<String> {
                 let interface_part = &line[dev_pos + 5..];
                 if let Some(interface_name) = interface_part.split_whitespace().next() {
                     // Get IP for this interface
-                    if let Ok(ip_output) = Command::new("ip").args(&["addr", "show", interface_name]).output() {
+                    if let Ok(ip_output) = Command::new("ip").args(&["addr", "show", interface_name]).output().await {
                         let ip_str = String::from_utf8_lossy(&ip_output.stdout);
                         for line in ip_str.lines() {
                             if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") {
@@ -91,7 +91,7 @@ fn get_primary_interface_ip_sync() -> Option<String> {
     }
     
     // Fallback: try to find any non-loopback interface with an IP
-    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output() {
+    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output().await {
         let ip_str = String::from_utf8_lossy(&output.stdout);
         for line in ip_str.lines() {
             if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
@@ -123,7 +123,7 @@ fn get_upnp_class(mime_type: &str) -> &str {
     }
 }
 
-pub fn generate_description_xml(state: &AppState) -> String {
+pub async fn generate_description_xml(state: &AppState) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
@@ -187,16 +187,16 @@ pub fn generate_scpd_xml() -> String {
 </scpd>"#.to_string()
 }
 
-pub fn generate_browse_response(
+pub async fn generate_browse_response(
     object_id: &str,
     subdirectories: &[MediaDirectory],
     files: &[MediaFile],
     state: &AppState,
 ) -> String {
-    generate_browse_response_with_totals(object_id, subdirectories, files, state, None)
+    generate_browse_response_with_totals(object_id, subdirectories, files, state, None).await
 }
 
-pub fn generate_browse_response_with_totals(
+pub async fn generate_browse_response_with_totals(
     object_id: &str,
     subdirectories: &[MediaDirectory],
     files: &[MediaFile],
@@ -212,7 +212,7 @@ pub fn generate_browse_response_with_totals(
         files.len()
     );
     
-    let server_ip = get_server_ip(state);
+    let server_ip = get_server_ip(state).await;
     let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">"#);
 
     let number_returned = if object_id == "0" {
