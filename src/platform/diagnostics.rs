@@ -43,7 +43,6 @@ pub struct PlatformDiagnostics {
 pub struct PlatformCapabilitiesDiag {
     pub can_bind_privileged_ports: bool,
     pub supports_multicast: bool,
-    pub has_firewall: bool,
     pub case_sensitive_fs: bool,
     pub supports_network_paths: bool,
     pub requires_network_permissions: bool,
@@ -54,7 +53,6 @@ pub struct NetworkDiagnostics {
     pub interfaces: Vec<NetworkInterfaceDiag>,
     pub primary_interface: Option<String>,
     pub multicast_support: bool,
-    pub firewall_status: FirewallStatus,
     pub port_availability: HashMap<u16, bool>,
     pub connectivity_tests: HashMap<String, bool>,
 }
@@ -186,7 +184,6 @@ impl DiagnosticInfo {
         let capabilities = PlatformCapabilitiesDiag {
             can_bind_privileged_ports: platform_info.capabilities.can_bind_privileged_ports,
             supports_multicast: platform_info.capabilities.supports_multicast,
-            has_firewall: platform_info.capabilities.has_firewall,
             case_sensitive_fs: platform_info.capabilities.case_sensitive_fs,
             supports_network_paths: platform_info.capabilities.supports_network_paths,
             requires_network_permissions: platform_info.capabilities.requires_network_permissions,
@@ -234,13 +231,11 @@ impl DiagnosticInfo {
         connectivity_tests.insert("localhost".to_string(), Self::test_connectivity("127.0.0.1", 80).await);
         connectivity_tests.insert("internet".to_string(), Self::test_connectivity("8.8.8.8", 53).await);
         
-        let firewall_status = Self::detect_firewall_status(&platform_info.os_type).await;
         
         Ok(NetworkDiagnostics {
             interfaces,
             primary_interface,
             multicast_support,
-            firewall_status,
             port_availability,
             connectivity_tests,
         })
@@ -261,86 +256,12 @@ impl DiagnosticInfo {
         matches!(timeout(Duration::from_secs(5), TcpStream::connect(format!("{}:{}", host, port))).await, Ok(Ok(_)))
     }
     
-    /// Detect firewall status for the current platform
-    async fn detect_firewall_status(os_type: &OsType) -> FirewallStatus {
-        match os_type {
-            OsType::Windows => Self::detect_windows_firewall().await,
-            OsType::MacOS => Self::detect_macos_firewall().await,
-            OsType::Linux => Self::detect_linux_firewall().await,
-            OsType::Bsd => Self::detect_bsd_firewall().await,
-        }
-    }
     
-    #[cfg(target_os = "windows")]
-    async fn detect_windows_firewall() -> FirewallStatus {
-        // TODO: Implement Windows firewall detection using WMI or netsh
-        FirewallStatus::Unknown
-    }
-    
-    #[cfg(not(target_os = "windows"))]
-    async fn detect_windows_firewall() -> FirewallStatus {
-        FirewallStatus::Unknown
-    }
-    
-    #[cfg(target_os = "macos")]
-    async fn detect_macos_firewall() -> FirewallStatus {
-        // TODO: Implement macOS firewall detection
-        FirewallStatus::Unknown
-    }
-    
-    #[cfg(not(target_os = "macos"))]
-    async fn detect_macos_firewall() -> FirewallStatus {
-        FirewallStatus::Unknown
-    }
-    
-    #[cfg(target_os = "linux")]
-    async fn detect_linux_firewall() -> FirewallStatus {
-        // TODO: Implement Linux firewall detection (iptables, ufw, firewalld)
-        FirewallStatus::Unknown
-    }
-    
-    #[cfg(not(target_os = "linux"))]
-    async fn detect_linux_firewall() -> FirewallStatus {
-        FirewallStatus::Unknown
-    }
-    
-    /// Detect BSD firewall status (pf, ipfw, etc.)
-    async fn detect_bsd_firewall() -> FirewallStatus {
-        // Check for pf (Packet Filter) - most common on FreeBSD/OpenBSD
-        if let Ok(output) = std::process::Command::new("pfctl")
-            .arg("-s")
-            .arg("info")
-            .output()
-        {
-            if output.status.success() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                if stdout.contains("Status: Enabled") {
-                    return FirewallStatus::Enabled;
-                } else if stdout.contains("Status: Disabled") {
-                    return FirewallStatus::Disabled;
-                }
-            }
-        }
-        
-        // Check for ipfw (IP Firewall) - legacy FreeBSD firewall
-        if let Ok(output) = std::process::Command::new("ipfw")
-            .arg("list")
-            .output()
-        {
-            if output.status.success() {
-                return FirewallStatus::Enabled;
-            }
-        }
-        
-        FirewallStatus::Unknown
-    }
-    
-    /// Collect database diagnostic information
-    async fn collect_database_diagnostics() -> Result<DatabaseDiagnostics, PlatformError> {
+async fn collect_database_diagnostics() -> Result<DatabaseDiagnostics, PlatformError> {
         // TODO: Implement database diagnostics collection
         Ok(DatabaseDiagnostics {
             database_path: None,
-            database_exists: false,
+            database_exists: true,
             database_size: None,
             database_accessible: false,
             schema_version: None,
@@ -470,7 +391,6 @@ impl DiagnosticInfo {
         tracing::info!("Platform Capabilities:");
         tracing::info!("  - Privileged ports: {}", self.platform.capabilities.can_bind_privileged_ports);
         tracing::info!("  - Multicast support: {}", self.platform.capabilities.supports_multicast);
-        tracing::info!("  - Firewall present: {}", self.platform.capabilities.has_firewall);
         tracing::info!("  - Case-sensitive FS: {}", self.platform.capabilities.case_sensitive_fs);
         
         // Log network information
@@ -480,7 +400,6 @@ impl DiagnosticInfo {
             tracing::info!("  - Primary interface: {}", primary);
         }
         tracing::info!("  - Multicast support: {}", self.network.multicast_support);
-        tracing::info!("  - Firewall status: {:?}", self.network.firewall_status);
         
         // Log port availability
         tracing::info!("Port Availability:");
@@ -722,7 +641,6 @@ mod tests {
                 capabilities: PlatformCapabilitiesDiag {
                     can_bind_privileged_ports: false,
                     supports_multicast: true,
-                    has_firewall: true,
                     case_sensitive_fs: true,
                     supports_network_paths: true,
                     requires_network_permissions: false,
@@ -733,7 +651,6 @@ mod tests {
                 interfaces: vec![],
                 primary_interface: None,
                 multicast_support: true,
-                firewall_status: FirewallStatus::Unknown,
                 port_availability: HashMap::new(),
                 connectivity_tests: HashMap::new(),
             },
