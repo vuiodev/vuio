@@ -3,7 +3,7 @@ version: '3.8'
 services:
   vuio:
     network_mode: host
-    image: ghcr.io/vuiodev/vuio:v0.0.12
+    image: ghcr.io/vuiodev/vuio:latest
     container_name: vuio-server-local
     restart: unless-stopped
     

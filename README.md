@@ -5,9 +5,11 @@ A comprehensive, cross-platform DLNA/UPnP media server written in Rust with adva
 Windows, Linux, Mac Os (Native), and Docker fully supported
 x64 and ARM64 supported
 
-0.0.12 is Latest Stable Release
-
+```bash
+git clone https://github.com/vuiodev/vuio.git
+cd vuio
 docker-compose -f docker-compose.yml up
+```
 
 ## 🚀 Features
 
