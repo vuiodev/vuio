@@ -21,19 +21,19 @@ fn parse_early_args() -> (bool, Option<String>) {
     #[command(author, version, about, long_about = None)]
     struct EarlyArgs {
         /// The directory containing media files to serve
-        _media_dir: Option<String>,
+        media_dir: Option<String>,
 
         /// Additional media directories to serve (can be used multiple times)
         #[arg(long = "media-dir", action = clap::ArgAction::Append)]
-        _additional_media_dirs: Vec<String>,
+        additional_media_dirs: Vec<String>,
 
         /// The network port to listen on
         #[arg(short, long)]
-        _port: Option<u16>,
+        port: Option<u16>,
 
         /// The friendly name for the DLNA server
         #[arg(short, long, default_value = "VuIO Server")]
-        _name: String,
+        name: String,
 
         /// Enable debug logging
         #[arg(long)]

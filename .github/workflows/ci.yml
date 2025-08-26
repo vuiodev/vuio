@@ -80,6 +80,8 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
       - name: Build project
         run: cargo build --target ${{ matrix.target }}
+      - name: Run tests
+        run: cargo test --target ${{ matrix.target }}
 
 
   # ===================================================================

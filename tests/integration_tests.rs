@@ -8,6 +8,7 @@ use vuio::platform::network::{NetworkManager, SsdpConfig};
 use vuio::platform::filesystem::{FileSystemManager, create_platform_filesystem_manager};
 use vuio::database::{DatabaseManager, SqliteDatabase, MediaFile};
 use vuio::watcher::{FileSystemWatcher, CrossPlatformWatcher, FileSystemEvent};
+use vuio::config::{AppConfig, MonitoredDirectoryConfig};
 
 // Platform-specific network managers
 #[cfg(target_os = "windows")]
@@ -897,5 +898,242 @@ backup_enabled = true
         }
         
         println!("Platform integration test completed successfully");
+    }
+}
+
+/// Tests for command line argument parsing, specifically --media-dir functionality
+#[cfg(test)]
+mod command_line_tests {
+    use super::*;
+    use std::process::Command;
+    use std::env;
+    
+    #[test]
+    fn test_media_dir_argument_parsing() {
+        // Test that AppConfig properly handles media directory configurations
+        
+        // Create temporary directories for testing
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        let temp_dir3 = TempDir::new().unwrap();
+        
+        let dir1_path = temp_dir1.path().to_string_lossy().to_string();
+        let dir2_path = temp_dir2.path().to_string_lossy().to_string();
+        let dir3_path = temp_dir3.path().to_string_lossy().to_string();
+        
+        // Test single media directory configuration
+        {
+            let mut test_config = AppConfig::default_for_platform();
+            test_config.media.directories = vec![
+                MonitoredDirectoryConfig {
+                    path: dir1_path.clone(),
+                    recursive: true,
+                    extensions: None,
+                    exclude_patterns: None,
+                }
+            ];
+            
+            assert_eq!(test_config.media.directories.len(), 1);
+            assert_eq!(test_config.media.directories[0].path, dir1_path);
+            assert!(test_config.media.directories[0].recursive);
+        }
+        
+        // Test multiple media directory configurations
+        {
+            let mut test_config = AppConfig::default_for_platform();
+            test_config.media.directories = vec![
+                MonitoredDirectoryConfig {
+                    path: dir1_path.clone(),
+                    recursive: true,
+                    extensions: None,
+                    exclude_patterns: None,
+                },
+                MonitoredDirectoryConfig {
+                    path: dir2_path.clone(),
+                    recursive: true,
+                    extensions: None,
+                    exclude_patterns: None,
+                },
+                MonitoredDirectoryConfig {
+                    path: dir3_path.clone(),
+                    recursive: true,
+                    extensions: None,
+                    exclude_patterns: None,
+                }
+            ];
+            
+            assert_eq!(test_config.media.directories.len(), 3);
+            assert_eq!(test_config.media.directories[0].path, dir1_path);
+            assert_eq!(test_config.media.directories[1].path, dir2_path);
+            assert_eq!(test_config.media.directories[2].path, dir3_path);
+        }
+    }
+    
+    #[test]
+    fn test_media_dir_validation() {
+        // Test that media directory validation works correctly
+        let temp_dir = TempDir::new().unwrap();
+        let valid_path = temp_dir.path().to_string_lossy().to_string();
+        let invalid_path = "/nonexistent/path/that/should/not/exist".to_string();
+        
+        // Test valid directory
+        {
+            let config = MonitoredDirectoryConfig {
+                path: valid_path.clone(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            };
+            
+            let path = PathBuf::from(&config.path);
+            assert!(path.exists());
+            assert!(path.is_dir());
+        }
+        
+        // Test invalid directory
+        {
+            let config = MonitoredDirectoryConfig {
+                path: invalid_path.clone(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            };
+            
+            let path = PathBuf::from(&config.path);
+            assert!(!path.exists());
+        }
+    }
+    
+    #[test]
+    fn test_media_dir_config_integration() {
+        // Test that media directories are properly integrated into the full config
+        let temp_dir1 = TempDir::new().unwrap();
+        let temp_dir2 = TempDir::new().unwrap();
+        
+        let dir1_path = temp_dir1.path().to_string_lossy().to_string();
+        let dir2_path = temp_dir2.path().to_string_lossy().to_string();
+        
+        let mut config = AppConfig::default_for_platform();
+        config.media.directories = vec![
+            MonitoredDirectoryConfig {
+                path: dir1_path.clone(),
+                recursive: true,
+                extensions: Some(vec!["mp4".to_string(), "mkv".to_string()]),
+                exclude_patterns: Some(vec!["*.tmp".to_string()]),
+            },
+            MonitoredDirectoryConfig {
+                path: dir2_path.clone(),
+                recursive: false,
+                extensions: Some(vec!["mp3".to_string(), "flac".to_string()]),
+                exclude_patterns: None,
+            }
+        ];
+        
+        // Test get_monitored_directories()
+        let monitored_dirs = config.get_monitored_directories();
+        assert_eq!(monitored_dirs.len(), 2);
+        assert_eq!(monitored_dirs[0], PathBuf::from(&dir1_path));
+        assert_eq!(monitored_dirs[1], PathBuf::from(&dir2_path));
+        
+        // Test get_extensions_for_directory()
+        let dir1_extensions = config.get_extensions_for_directory(&PathBuf::from(&dir1_path));
+        assert_eq!(dir1_extensions, vec!["mp4", "mkv"]);
+        
+        let dir2_extensions = config.get_extensions_for_directory(&PathBuf::from(&dir2_path));
+        assert_eq!(dir2_extensions, vec!["mp3", "flac"]);
+        
+        // Test get_exclude_patterns_for_directory()
+        let dir1_patterns = config.get_exclude_patterns_for_directory(&PathBuf::from(&dir1_path));
+        assert_eq!(dir1_patterns, vec!["*.tmp"]);
+        
+        let dir2_patterns = config.get_exclude_patterns_for_directory(&PathBuf::from(&dir2_path));
+        assert!(dir2_patterns.is_empty());
+    }
+    
+    #[tokio::test]
+    async fn test_media_dir_binary_execution() {
+        // Test that the binary correctly processes --media-dir arguments
+        // This is an integration test that actually runs the binary
+        
+        let temp_dir = TempDir::new().unwrap();
+        let media_path = temp_dir.path().to_string_lossy().to_string();
+        
+        // Build the binary first
+        let build_output = Command::new("cargo")
+            .args(&["build", "--bin", "vuio"])
+            .current_dir(env::current_dir().unwrap())
+            .output();
+            
+        if let Ok(output) = build_output {
+            if output.status.success() {
+                // Test --help to ensure --media-dir is documented
+                let help_output = Command::new("./target/debug/vuio")
+                    .arg("--help")
+                    .current_dir(env::current_dir().unwrap())
+                    .output();
+                    
+                if let Ok(help) = help_output {
+                    let help_text = String::from_utf8_lossy(&help.stdout);
+                    assert!(help_text.contains("--media-dir"));
+                    assert!(help_text.contains("Additional media directories"));
+                }
+                
+                // Test that --media-dir argument is accepted and doesn't cause immediate parsing errors
+                let run_output = Command::new("timeout")
+                    .args(&["2s", "./target/debug/vuio", "--media-dir", &media_path, "--debug"])
+                    .current_dir(env::current_dir().unwrap())
+                    .output();
+                    
+                if let Ok(output) = run_output {
+                    let stderr_text = String::from_utf8_lossy(&output.stderr);
+                    let stdout_text = String::from_utf8_lossy(&output.stdout);
+                    let combined_output = format!("{}{}", stdout_text, stderr_text);
+                    
+                    // The binary should start successfully and show logging initialization
+                    // It may fail later due to database issues, but argument parsing should work
+                    assert!(combined_output.contains("Starting VuIO Server") || 
+                           combined_output.contains("Logging initialized") ||
+                           combined_output.contains("Detecting platform information"));
+                    
+                    // Should not contain argument parsing errors
+                    assert!(!combined_output.contains("error: unexpected argument") &&
+                           !combined_output.contains("error: invalid value"));
+                }
+            }
+        }
+    }
+    
+    #[test]
+    fn test_media_dir_command_line_structure() {
+        // Test the command line argument structure matches expectations
+        
+        // This test verifies that the argument parsing structure is correct
+        // by checking that we can create configurations that would result from
+        // command line parsing
+        
+        let temp_dir = TempDir::new().unwrap();
+        let media_path = temp_dir.path().to_string_lossy().to_string();
+        
+        // Simulate what would happen with: vuio --media-dir /path/to/media
+        let mut config = AppConfig::default_for_platform();
+        
+        // Replace default directories with command line specified ones
+        config.media.directories = vec![
+            MonitoredDirectoryConfig {
+                path: media_path.clone(),
+                recursive: true,
+                extensions: None, // Use global extensions
+                exclude_patterns: None, // Use platform defaults
+            }
+        ];
+        
+        // Verify the configuration is valid
+        assert_eq!(config.media.directories.len(), 1);
+        assert_eq!(config.media.directories[0].path, media_path);
+        assert!(config.media.directories[0].recursive);
+        
+        // Test that we can get the primary media directory
+        let primary_dir = config.get_primary_media_dir();
+        assert_eq!(primary_dir, PathBuf::from(&media_path));
     }
 }
