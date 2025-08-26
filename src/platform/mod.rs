@@ -14,10 +14,12 @@ mod windows;
 mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "freebsd")]
+mod bsd;
 
 // Re-export the comprehensive error types from the error module
 pub use error::{
-    ConfigurationError, DatabaseError, LinuxError, MacOSError, PlatformError, PlatformResult,
+    BsdError, ConfigurationError, DatabaseError, LinuxError, MacOSError, PlatformError, PlatformResult,
     WindowsError,
 };
 
@@ -27,6 +29,7 @@ pub enum OsType {
     Windows,
     MacOS,
     Linux,
+    Bsd,
 }
 
 impl OsType {
@@ -41,7 +44,10 @@ impl OsType {
         #[cfg(target_os = "linux")]
         return OsType::Linux;
 
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
+        #[cfg(target_os = "freebsd")]
+        return OsType::Bsd;
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
         compile_error!("Unsupported operating system");
     }
 
@@ -51,6 +57,7 @@ impl OsType {
             OsType::Windows => "Windows",
             OsType::MacOS => "macOS",
             OsType::Linux => "Linux",
+            OsType::Bsd => "FreeBSD",
         }
     }
 }
@@ -107,6 +114,16 @@ impl PlatformCapabilities {
             has_firewall: true, // iptables/ufw/firewalld
             case_sensitive_fs: true, // ext4/xfs are case-sensitive
             supports_network_paths: true, // NFS/CIFS mounts
+            requires_network_permissions: false, // Usually no special permissions needed
+        };
+
+        #[cfg(target_os = "freebsd")]
+        return Self {
+            can_bind_privileged_ports: false, // Requires root privileges
+            supports_multicast: true,
+            has_firewall: true, // pf/ipfw
+            case_sensitive_fs: true, // UFS/ZFS are case-sensitive
+            supports_network_paths: true, // NFS/SMB mounts
             requires_network_permissions: false, // Usually no special permissions needed
         };
     }
@@ -203,6 +220,11 @@ impl PlatformInfo {
         {
             linux::get_linux_version()
         }
+
+        #[cfg(target_os = "freebsd")]
+        {
+            bsd::get_bsd_version()
+        }
     }
 
     /// Detect available network interfaces
@@ -220,6 +242,11 @@ impl PlatformInfo {
         #[cfg(target_os = "linux")]
         {
             linux::detect_network_interfaces().await
+        }
+
+        #[cfg(target_os = "freebsd")]
+        {
+            bsd::detect_network_interfaces().await
         }
     }
 
@@ -252,6 +279,13 @@ impl PlatformInfo {
             #[cfg(target_os = "linux")]
             OsType::Linux => {
                 if let Ok(additional) = linux::gather_linux_metadata() {
+                    metadata.extend(additional);
+                }
+            }
+
+            #[cfg(target_os = "freebsd")]
+            OsType::Bsd => {
+                if let Ok(additional) = bsd::gather_bsd_metadata() {
                     metadata.extend(additional);
                 }
             }
@@ -321,7 +355,7 @@ mod tests {
 
         // Verify we get a valid OS type
         match os_type {
-            OsType::Windows | OsType::MacOS | OsType::Linux => {
+            OsType::Windows | OsType::MacOS | OsType::Linux | OsType::Bsd => {
                 // Valid OS type detected
                 assert!(!os_type.display_name().is_empty());
             }

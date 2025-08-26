@@ -267,6 +267,7 @@ impl DiagnosticInfo {
             OsType::Windows => Self::detect_windows_firewall().await,
             OsType::MacOS => Self::detect_macos_firewall().await,
             OsType::Linux => Self::detect_linux_firewall().await,
+            OsType::Bsd => Self::detect_bsd_firewall().await,
         }
     }
     
@@ -300,6 +301,37 @@ impl DiagnosticInfo {
     
     #[cfg(not(target_os = "linux"))]
     async fn detect_linux_firewall() -> FirewallStatus {
+        FirewallStatus::Unknown
+    }
+    
+    /// Detect BSD firewall status (pf, ipfw, etc.)
+    async fn detect_bsd_firewall() -> FirewallStatus {
+        // Check for pf (Packet Filter) - most common on FreeBSD/OpenBSD
+        if let Ok(output) = std::process::Command::new("pfctl")
+            .arg("-s")
+            .arg("info")
+            .output()
+        {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if stdout.contains("Status: Enabled") {
+                    return FirewallStatus::Enabled;
+                } else if stdout.contains("Status: Disabled") {
+                    return FirewallStatus::Disabled;
+                }
+            }
+        }
+        
+        // Check for ipfw (IP Firewall) - legacy FreeBSD firewall
+        if let Ok(output) = std::process::Command::new("ipfw")
+            .arg("list")
+            .output()
+        {
+            if output.status.success() {
+                return FirewallStatus::Enabled;
+            }
+        }
+        
         FirewallStatus::Unknown
     }
     
@@ -579,7 +611,7 @@ impl StartupDiagnostics {
         
         // Check if platform is supported
         match platform_info.os_type {
-            OsType::Windows | OsType::MacOS | OsType::Linux => {
+            OsType::Windows | OsType::MacOS | OsType::Linux | OsType::Bsd => {
                 tracing::info!("Platform {} is supported", platform_info.os_type.display_name());
             }
         }

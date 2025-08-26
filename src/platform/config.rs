@@ -41,6 +41,7 @@ impl PlatformConfig {
             OsType::Windows => Self::for_windows(),
             OsType::MacOS => Self::for_macos(),
             OsType::Linux => Self::for_linux(),
+            OsType::Bsd => Self::for_bsd(),
         }
     }
 
@@ -93,11 +94,20 @@ impl PlatformConfig {
 
     /// Linux-specific configuration
     fn for_linux() -> Self {
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home/unknown"));
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
         let config_dir = dirs::config_dir().unwrap_or_else(|| home_dir.join(".config"));
-        let data_dir = dirs::data_dir().unwrap_or_else(|| home_dir.join(".local/share"));
         let cache_dir = dirs::cache_dir().unwrap_or_else(|| home_dir.join(".cache"));
-
+        let data_dir = dirs::data_dir().unwrap_or_else(|| home_dir.join(".local/share"));
+        
+        // Common Linux media directories
+        let default_media_dirs = vec![
+            home_dir.join("Music"),
+            home_dir.join("Videos"),
+            home_dir.join("Pictures"),
+            PathBuf::from("/media"),
+            PathBuf::from("/mnt"),
+        ];
+        
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "linux".to_string());
         metadata.insert("case_sensitive".to_string(), "true".to_string());
@@ -106,7 +116,40 @@ impl PlatformConfig {
 
         Self {
             os_type: OsType::Linux,
-            default_media_dir: Self::get_linux_default_media_dir(),
+            default_media_dir: default_media_dirs[0].clone(),
+            config_dir: config_dir.join("vuio"),
+            log_dir: data_dir.join("vuio/logs"),
+            cache_dir: cache_dir.join("vuio"),
+            database_dir: data_dir.join("vuio/database"),
+            preferred_ports: vec![8080, 8081, 8082, 9090, 9091, 8000, 8001],
+            metadata,
+        }
+    }
+
+    /// BSD-specific configuration
+    fn for_bsd() -> Self {
+        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/usr/home"));
+        let config_dir = dirs::config_dir().unwrap_or_else(|| home_dir.join(".config"));
+        let cache_dir = dirs::cache_dir().unwrap_or_else(|| home_dir.join(".cache"));
+        let data_dir = dirs::data_dir().unwrap_or_else(|| home_dir.join(".local/share"));
+        
+        // Common BSD media directories
+        let default_media_dirs = vec![
+            home_dir.join("Music"),
+            home_dir.join("Videos"),
+            home_dir.join("Pictures"),
+            PathBuf::from("/mnt"),
+        ];
+        
+        let mut metadata = HashMap::new();
+        metadata.insert("platform".to_string(), "bsd".to_string());
+        metadata.insert("case_sensitive".to_string(), "true".to_string());
+        metadata.insert("path_separator".to_string(), "/".to_string());
+        metadata.insert("supports_xdg_dirs".to_string(), "true".to_string());
+
+        Self {
+            os_type: OsType::Bsd,
+            default_media_dir: default_media_dirs[0].clone(),
             config_dir: config_dir.join("vuio"),
             log_dir: data_dir.join("vuio/logs"),
             cache_dir: cache_dir.join("vuio"),
@@ -253,6 +296,34 @@ impl PlatformConfig {
                     }
                 }
             }
+
+            OsType::Bsd => {
+                // Add XDG user directories
+                if let Some(videos_dir) = dirs::video_dir() {
+                    if !directories.contains(&videos_dir) {
+                        directories.push(videos_dir);
+                    }
+                }
+                if let Some(music_dir) = dirs::audio_dir() {
+                    directories.push(music_dir);
+                }
+                if let Some(pictures_dir) = dirs::picture_dir() {
+                    directories.push(pictures_dir);
+                }
+
+                // Add common BSD media locations
+                let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/usr/home/unknown"));
+                let additional_dirs = [
+                    home_dir.join("Desktop"),
+                    PathBuf::from("/mnt"),
+                ];
+
+                for dir in &additional_dirs {
+                    if dir.exists() && !directories.contains(dir) {
+                        directories.push(dir.clone());
+                    }
+                }
+            }
         }
 
         directories
@@ -357,6 +428,13 @@ impl PlatformConfig {
                 "lost+found".to_string(), // Linux filesystem recovery
                 ".Trash-*".to_string(),   // Linux trash directories
             ],
+
+            OsType::Bsd => vec![
+                ".*".to_string(),         // Hidden files
+                "*.tmp".to_string(),      // Temporary files
+                "*.temp".to_string(),     // Temporary files
+                "lost+found".to_string(), // BSD filesystem recovery
+            ],
         }
     }
 
@@ -417,6 +495,14 @@ impl PlatformConfig {
 
             OsType::Linux => {
                 // Linux typically supports all open formats
+                extensions.extend(vec![
+                    "mka".to_string(), // Matroska audio
+                    "mks".to_string(), // Matroska subtitles
+                ]);
+            }
+
+            OsType::Bsd => {
+                // BSD typically supports all open formats
                 extensions.extend(vec![
                     "mka".to_string(), // Matroska audio
                     "mks".to_string(), // Matroska subtitles

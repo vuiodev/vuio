@@ -32,6 +32,9 @@ detect_platform() {
     case "$(uname -s)" in
         Linux*)     PLATFORM=linux;;
         Darwin*)    PLATFORM=macos;;
+        FreeBSD*)   PLATFORM=bsd;;
+        OpenBSD*)   PLATFORM=bsd;;
+        NetBSD*)    PLATFORM=bsd;;
         CYGWIN*|MINGW*|MSYS*) PLATFORM=windows;;
         *)          PLATFORM=unknown;;
     esac
@@ -77,6 +80,13 @@ install_platform_deps() {
                 brew install pkg-config openssl
             else
                 print_warning "Homebrew not found. Please install pkg-config and openssl manually."
+            fi
+            ;;
+        bsd)
+            if command -v pkg &> /dev/null; then
+                sudo pkg install -y pkgconf openssl rust
+            else
+                print_warning "pkg not found. Please install pkgconf, openssl, and rust manually."
             fi
             ;;
         windows)

@@ -31,6 +31,7 @@ function show_help() {
     echo "  - Windows: MSI installer (requires WiX Toolset)"
     echo "  - macOS: PKG installer (requires Xcode Command Line Tools)"
     echo "  - Linux: DEB and RPM packages (requires dpkg-deb and rpmbuild)"
+    echo "  - BSD: TXZ packages (requires pkg tools)"
     echo ""
     echo "Options:"
     echo "  --help, -h    Show this help message"
@@ -38,6 +39,7 @@ function show_help() {
     echo "  --windows     Build Windows packages only"
     echo "  --macos       Build macOS packages only"
     echo "  --linux       Build Linux packages only"
+    echo "  --bsd         Build BSD packages only"
     echo ""
 }
 
@@ -54,6 +56,9 @@ function detect_platform() {
     case "$(uname -s)" in
         Darwin*)    echo "macos" ;;
         Linux*)     echo "linux" ;;
+        FreeBSD*)   echo "bsd" ;;
+        OpenBSD*)   echo "bsd" ;;
+        NetBSD*)    echo "bsd" ;;
         CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
         *)          echo "unknown" ;;
     esac
@@ -169,10 +174,38 @@ function build_linux_packages() {
     fi
 }
 
+function build_bsd_packages() {
+    echo -e "${YELLOW}--- Building BSD Packages ---${NC}"
+    
+    local x64_binary="$BINARY_DIR/x86_64-unknown-freebsd/release/vuio"
+    local arm64_binary="$BINARY_DIR/aarch64-unknown-freebsd/release/vuio"
+    
+    cd bsd
+    
+    # Build FreeBSD packages
+    if [[ -f "$x64_binary" ]]; then
+        echo "Building FreeBSD package (x86_64)..."
+        ./build-pkg.sh "$x64_binary" "$OUTPUT_DIR" "$VERSION" "amd64"
+    fi
+    
+    if [[ -f "$arm64_binary" ]]; then
+        echo "Building FreeBSD package (ARM64)..."
+        ./build-pkg.sh "$arm64_binary" "$OUTPUT_DIR" "$VERSION" "arm64"
+    fi
+    
+    cd ..
+    
+    if [[ ! -f "$x64_binary" && ! -f "$arm64_binary" ]]; then
+        echo -e "${RED}✗ No BSD binaries found${NC}"
+        echo "Expected: $x64_binary or $arm64_binary"
+    fi
+}
+
 # Parse command line arguments
 BUILD_WINDOWS=false
 BUILD_MACOS=false
 BUILD_LINUX=false
+BUILD_BSD=false
 BUILD_ALL=true
 
 while [[ $# -gt 0 ]]; do
@@ -197,6 +230,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --linux)
             BUILD_LINUX=true
+            BUILD_ALL=false
+            shift
+            ;;
+        --bsd)
+            BUILD_BSD=true
             BUILD_ALL=false
             shift
             ;;
@@ -235,17 +273,22 @@ if [[ "$BUILD_ALL" == true ]]; then
         linux)
             build_linux_packages
             ;;
+        bsd)
+            build_bsd_packages
+            ;;
         *)
             echo -e "${YELLOW}Unknown platform. Building all available packages...${NC}"
             build_windows_packages || true
             build_macos_packages || true
             build_linux_packages || true
+            build_bsd_packages || true
             ;;
     esac
 else
     [[ "$BUILD_WINDOWS" == true ]] && build_windows_packages
     [[ "$BUILD_MACOS" == true ]] && build_macos_packages
     [[ "$BUILD_LINUX" == true ]] && build_linux_packages
+    [[ "$BUILD_BSD" == true ]] && build_bsd_packages
 fi
 
 # Show summary
@@ -253,7 +296,7 @@ echo ""
 echo -e "${GREEN}--- Packaging Complete ---${NC}"
 echo "Generated packages:"
 if [[ -d "$OUTPUT_DIR" ]]; then
-    ls -la "$OUTPUT_DIR"/*.{msi,pkg,deb,rpm} 2>/dev/null || echo "No packages found in output directory"
+    ls -la "$OUTPUT_DIR"/*.{msi,pkg,deb,rpm,txz} 2>/dev/null || echo "No packages found in output directory"
 else
     echo "Output directory not found: $OUTPUT_DIR"
 fi
@@ -264,3 +307,4 @@ echo "Windows MSI: msiexec /i package.msi"
 echo "macOS PKG:   sudo installer -pkg package.pkg -target /"
 echo "DEB package: sudo dpkg -i package.deb"
 echo "RPM package: sudo rpm -ivh package.rpm"
+echo "BSD package: sudo pkg add package.txz"

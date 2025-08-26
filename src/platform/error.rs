@@ -13,6 +13,9 @@ pub enum PlatformError {
     #[error("Linux-specific error: {0}")]
     Linux(#[from] LinuxError),
     
+    #[error("BSD-specific error: {0}")]
+    Bsd(#[from] BsdError),
+    
     #[error("Network configuration error: {0}")]
     NetworkConfig(String),
     
@@ -86,6 +89,37 @@ pub enum MacOSError {
     
     #[error("macOS version {version} is not supported. Minimum required version is 10.15")]
     UnsupportedVersion { version: String },
+}
+
+/// BSD-specific error types with system-specific guidance
+#[derive(Error, Debug)]
+pub enum BsdError {
+    #[error("Insufficient privileges for port {port}. Try: sudo or use alternative ports (8080, 8081, 8082)")]
+    InsufficientPrivileges { port: u16 },
+    
+    #[error("BSD firewall (pf/ipfw) is blocking connections. Check firewall rules")]
+    FirewallBlocked,
+    
+    #[error("Network interface configuration error: {interface}. Check ifconfig settings")]
+    InterfaceConfigError { interface: String },
+    
+    #[error("BSD service error: {reason}. Check service status")]
+    ServiceError { reason: String },
+    
+    #[error("Jail environment restriction: {operation}. Check jail configuration")]
+    JailRestriction { operation: String },
+    
+    #[error("User lacks permission for {operation}. Add user to group: {group}")]
+    UserPermissionDenied { operation: String, group: String },
+    
+    #[error("BSD variant {variant} has limited support. Some features may not work correctly")]
+    LimitedSupport { variant: String },
+    
+    #[error("Sysctl operation failed: {key}. Error: {reason}")]
+    SysctlFailed { key: String, reason: String },
+    
+    #[error("Package manager error: {reason}. Check pkg configuration")]
+    PackageManagerError { reason: String },
 }
 
 /// Linux-specific error types with distribution-specific guidance
@@ -182,6 +216,7 @@ impl PlatformError {
             PlatformError::Windows(err) => format!("Windows Error: {}\n\nTroubleshooting: {}", err, err.troubleshooting_guide()),
             PlatformError::MacOS(err) => format!("macOS Error: {}\n\nTroubleshooting: {}", err, err.troubleshooting_guide()),
             PlatformError::Linux(err) => format!("Linux Error: {}\n\nTroubleshooting: {}", err, err.troubleshooting_guide()),
+            PlatformError::Bsd(err) => format!("BSD Error: {}\n\nTroubleshooting: {}", err, err.troubleshooting_guide()),
             PlatformError::Database(err) => format!("Database Error: {}\n\nRecovery: {}", err, err.recovery_strategy()),
             PlatformError::Configuration(err) => format!("Configuration Error: {}\n\nSolution: {}", err, err.solution_guide()),
             _ => self.to_string(),
@@ -194,6 +229,7 @@ impl PlatformError {
             PlatformError::Windows(err) => err.is_recoverable(),
             PlatformError::MacOS(err) => err.is_recoverable(),
             PlatformError::Linux(err) => err.is_recoverable(),
+            PlatformError::Bsd(err) => err.is_recoverable(),
             PlatformError::Database(err) => err.is_recoverable(),
             PlatformError::Configuration(err) => err.is_recoverable(),
             PlatformError::NetworkConfig(_) => true,
@@ -209,6 +245,7 @@ impl PlatformError {
             PlatformError::Windows(err) => err.recovery_actions(),
             PlatformError::MacOS(err) => err.recovery_actions(),
             PlatformError::Linux(err) => err.recovery_actions(),
+            PlatformError::Bsd(err) => err.recovery_actions(),
             PlatformError::Database(err) => err.recovery_actions(),
             PlatformError::Configuration(err) => err.recovery_actions(),
             PlatformError::NetworkConfig(msg) => vec![
@@ -372,6 +409,66 @@ impl LinuxError {
                 "sudo ufw allow 1900/udp".to_string(),
                 "sudo ufw allow 8080/tcp".to_string(),
                 "Check iptables rules: sudo iptables -L".to_string(),
+            ],
+            _ => vec!["Follow troubleshooting guide".to_string()],
+        }
+    }
+}
+
+impl BsdError {
+    pub fn troubleshooting_guide(&self) -> &'static str {
+        match self {
+            BsdError::InsufficientPrivileges { .. } => 
+                "1. Use sudo to run with elevated privileges, 2. Use alternative ports (8080-8082), 3. Configure port forwarding if needed",
+            BsdError::FirewallBlocked => 
+                "1. Check pf rules: sudo pfctl -sr, 2. Check ipfw rules: sudo ipfw list, 3. Add firewall exceptions for required ports",
+            BsdError::InterfaceConfigError { .. } => 
+                "1. Check interface status: ifconfig, 2. Verify network configuration, 3. Restart networking: sudo service netif restart",
+            BsdError::ServiceError { .. } => 
+                "1. Check service status: sudo service vuio status, 2. Review service logs, 3. Verify service configuration",
+            BsdError::JailRestriction { .. } => 
+                "1. Check jail configuration, 2. Verify jail permissions, 3. Run outside jail if possible",
+            BsdError::UserPermissionDenied { .. } => 
+                "1. Add user to required group, 2. Check file permissions, 3. Use sudo if necessary",
+            BsdError::LimitedSupport { .. } => 
+                "1. Check compatibility documentation, 2. Use FreeBSD for best support, 3. Report compatibility issues",
+            BsdError::SysctlFailed { .. } => 
+                "1. Check sysctl permissions, 2. Verify sysctl key exists, 3. Use sudo for system-level changes",
+            BsdError::PackageManagerError { .. } => 
+                "1. Update package database: sudo pkg update, 2. Check pkg configuration, 3. Verify network connectivity",
+        }
+    }
+    
+    pub fn is_recoverable(&self) -> bool {
+        match self {
+            BsdError::InsufficientPrivileges { .. } => true,
+            BsdError::FirewallBlocked => true,
+            BsdError::InterfaceConfigError { .. } => true,
+            BsdError::ServiceError { .. } => true,
+            BsdError::JailRestriction { .. } => false,
+            BsdError::UserPermissionDenied { .. } => true,
+            BsdError::LimitedSupport { .. } => false,
+            BsdError::SysctlFailed { .. } => true,
+            BsdError::PackageManagerError { .. } => true,
+        }
+    }
+    
+    pub fn recovery_actions(&self) -> Vec<String> {
+        match self {
+            BsdError::InsufficientPrivileges { port } => vec![
+                format!("Use alternative port instead of {}", port),
+                "Run with sudo (not recommended for production)".to_string(),
+                "Configure port forwarding if needed".to_string(),
+            ],
+            BsdError::FirewallBlocked => vec![
+                "sudo pfctl -f /etc/pf.conf".to_string(),
+                "Add firewall rules for DLNA ports".to_string(),
+                "Check firewall status: sudo pfctl -sr".to_string(),
+            ],
+            BsdError::InterfaceConfigError { interface } => vec![
+                format!("Check interface status: ifconfig {}", interface),
+                "Restart networking: sudo service netif restart".to_string(),
+                "Verify network configuration".to_string(),
             ],
             _ => vec!["Follow troubleshooting guide".to_string()],
         }

@@ -566,6 +566,13 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
             }
             info!("  - SELinux/AppArmor policies may affect file access");
         }
+        platform::OsType::Bsd => {
+            info!("BSD-specific diagnostics:");
+            if platform_info.capabilities.has_firewall {
+                info!("  - Firewall (pf/ipfw) may block connections");
+            }
+            info!("  - BSD security policies may affect file access");
+        }
     }
     
     Ok(platform_info)
@@ -1258,6 +1265,9 @@ async fn perform_security_checks(platform_info: &PlatformInfo) -> anyhow::Result
         platform::OsType::Linux => {
             perform_linux_security_checks(platform_info).await?;
         }
+        platform::OsType::Bsd => {
+            perform_bsd_security_checks(platform_info).await?;
+        }
     }
     
     info!("Platform security checks completed successfully");
@@ -1426,6 +1436,45 @@ async fn perform_linux_security_checks(_platform_info: &PlatformInfo) -> anyhow:
         }
     } else {
         warn!("Could not determine firewall status");
+    }
+    
+    Ok(())
+}
+
+/// Perform BSD-specific security checks
+async fn perform_bsd_security_checks(_platform_info: &PlatformInfo) -> anyhow::Result<()> {
+    info!("Performing BSD security checks...");
+    
+    // Check if running as root
+    let is_root = check_bsd_root().await?;
+    if is_root {
+        warn!("Running as root user");
+        warn!("Consider running as a non-root user for better security");
+        warn!("Use sudo or doas for privileged operations");
+    } else {
+        info!("Running as non-root user");
+    }
+    
+    // Check pf firewall status
+    if let Ok(pf_info) = check_bsd_pf_status().await {
+        if !pf_info.is_empty() {
+            info!("pf firewall detected: {}", pf_info);
+            warn!("pf rules may block network connections");
+        } else {
+            info!("pf firewall not active");
+        }
+    } else {
+        info!("Could not determine pf status");
+    }
+    
+    // Check for jail environment (FreeBSD)
+    if let Ok(in_jail) = check_freebsd_jail().await {
+        if in_jail {
+            info!("Running inside FreeBSD jail");
+            warn!("Jail restrictions may limit network and file access");
+        } else {
+            info!("Not running in jail environment");
+        }
     }
     
     Ok(())
@@ -1878,4 +1927,46 @@ async fn cleanup_old_backups(backup_dir: &std::path::Path) -> anyhow::Result<()>
     }
     
     Ok(())
+}
+
+/// BSD-specific security check functions
+async fn check_bsd_root() -> anyhow::Result<bool> {
+    // Check if running as root (UID 0)
+    Ok(unsafe { libc::getuid() } == 0)
+}
+
+async fn check_bsd_pf_status() -> anyhow::Result<String> {
+    // Check pf firewall status
+    match std::process::Command::new("pfctl")
+        .arg("-s")
+        .arg("info")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            if stdout.contains("Status: Enabled") {
+                Ok("pf enabled".to_string())
+            } else if stdout.contains("Status: Disabled") {
+                Ok("pf disabled".to_string())
+            } else {
+                Ok("pf status unknown".to_string())
+            }
+        }
+        _ => Ok(String::new())
+    }
+}
+
+async fn check_freebsd_jail() -> anyhow::Result<bool> {
+    // Check if running inside FreeBSD jail
+    match std::process::Command::new("sysctl")
+        .arg("-n")
+        .arg("security.jail.jailed")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            Ok(stdout.trim() == "1")
+        }
+        _ => Ok(false)
+    }
 }

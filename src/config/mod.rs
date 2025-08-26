@@ -467,6 +467,7 @@ impl AppConfig {
                 crate::platform::OsType::Windows => "Windows",
                 crate::platform::OsType::MacOS => "macOS", 
                 crate::platform::OsType::Linux => "Linux",
+                crate::platform::OsType::Bsd => "BSD",
             }
         );
         
@@ -526,6 +527,15 @@ impl AppConfig {
                 content.push_str("# - SELinux/AppArmor policies may affect file access\n");
                 content.push_str("# - Mounted filesystems under /media and /mnt are supported\n");
                 content.push_str("# - Consider excluding 'lost+found' and '.Trash-*' directories\n");
+                content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
+                content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
+                content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
+            }
+            crate::platform::OsType::Bsd => {
+                content.push_str("# - Ports below 1024 require root privileges\n");
+                content.push_str("# - pf firewall rules may affect network access\n");
+                content.push_str("# - Mounted filesystems under /mnt are supported\n");
+                content.push_str("# - Consider excluding 'lost+found' directories\n");
                 content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
                 content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
                 content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
@@ -601,6 +611,7 @@ impl AppConfig {
             crate::platform::OsType::Windows => format!("VuIO Server ({})", hostname),
             crate::platform::OsType::MacOS => format!("VuIO Server on {}", hostname),
             crate::platform::OsType::Linux => format!("VuIO Server - {}", hostname),
+            crate::platform::OsType::Bsd => format!("VuIO Server - {}", hostname),
         }
     }
 
@@ -617,6 +628,10 @@ impl AppConfig {
             }
             crate::platform::OsType::Linux => {
                 // Linux works well with 0.0.0.0
+                "0.0.0.0".to_string()
+            }
+            crate::platform::OsType::Bsd => {
+                // BSD works well with 0.0.0.0
                 "0.0.0.0".to_string()
             }
         }
@@ -638,6 +653,10 @@ impl AppConfig {
                 // Linux typically works well with standard TTL
                 4
             }
+            crate::platform::OsType::Bsd => {
+                // BSD typically works well with standard TTL
+                4
+            }
         }
     }
 
@@ -654,6 +673,10 @@ impl AppConfig {
             }
             crate::platform::OsType::Linux => {
                 // Linux works well with standard interval
+                30
+            }
+            crate::platform::OsType::Bsd => {
+                // BSD works well with standard interval
                 30
             }
         }
@@ -932,6 +955,9 @@ impl AppConfig {
             crate::platform::OsType::Linux => {
                 self.validate_linux_specific(&platform_config)?;
             }
+            crate::platform::OsType::Bsd => {
+                self.validate_bsd_specific(&platform_config)?;
+            }
         }
         
         Ok(())
@@ -1067,6 +1093,40 @@ impl AppConfig {
         platform_config.get_log_file_path()
     }
 
+    /// BSD-specific configuration validation
+    fn validate_bsd_specific(&self, _platform_config: &PlatformConfig) -> Result<()> {
+        // Check for privileged ports
+        if self.server.port < 1024 {
+            tracing::warn!(
+                "Server port {} may require root privileges on BSD",
+                self.server.port
+            );
+        }
+        
+        // Note: SSDP port is hardcoded to 1900 and may require root privileges on BSD
+        
+        // Check for common BSD mount points
+        for dir_config in &self.media.directories {
+            let path = PathBuf::from(&dir_config.path);
+            if path.starts_with("/mnt/") {
+                tracing::info!("Mounted filesystem detected: {}", dir_config.path);
+            }
+        }
+        
+        // Validate BSD-specific exclude patterns are present
+        let has_bsd_patterns = self.media.directories.iter().any(|dir| {
+            dir.exclude_patterns.as_ref().is_some_and(|patterns| {
+                patterns.iter().any(|p| p == "lost+found")
+            })
+        });
+        
+        if !has_bsd_patterns {
+            tracing::info!("Consider adding BSD-specific exclude patterns like 'lost+found'");
+        }
+        
+        Ok(())
+    }
+
     /// Get platform-specific configuration recommendations
     pub fn get_platform_recommendations() -> Vec<String> {
         let platform_config = PlatformConfig::for_current_platform();
@@ -1093,6 +1153,13 @@ impl AppConfig {
                 recommendations.push("Mounted filesystems under /media and /mnt are supported".to_string());
                 recommendations.push("Exclude Linux system directories: lost+found, .Trash-*".to_string());
                 recommendations.push("Consider using systemd for automatic startup".to_string());
+            }
+            crate::platform::OsType::Bsd => {
+                recommendations.push("Use ports 8080-8082 to avoid root privilege requirements".to_string());
+                recommendations.push("Configure pf firewall rules if network access is denied".to_string());
+                recommendations.push("Mounted filesystems under /mnt are supported".to_string());
+                recommendations.push("Exclude BSD system directories: lost+found".to_string());
+                recommendations.push("Consider using rc.d scripts for automatic startup".to_string());
             }
         }
         
@@ -1178,6 +1245,11 @@ impl AppConfig {
             crate::platform::OsType::Linux => {
                 if self.server.port < 1024 {
                     issues.push("Server port requires root privileges on Linux".to_string());
+                }
+            }
+            crate::platform::OsType::Bsd => {
+                if self.server.port < 1024 {
+                    issues.push("Server port requires root privileges on BSD".to_string());
                 }
             }
         }
