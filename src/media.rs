@@ -296,16 +296,13 @@ impl MediaScanner {
     pub async fn scan_directory_recursive(&self, directory: &Path) -> Result<ScanResult> {
         let normalized_root = self.filesystem_manager.normalize_path(directory);
         
-        // Get all existing files from database once at the beginning
-        let all_existing_files = self.database_manager.get_all_media_files().await?;
-        
         let mut combined_result = ScanResult::new();
         let mut directories_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
         directories_to_scan.push(normalized_root.clone());
         
         while let Some(current_dir) = directories_to_scan.pop() {
-            // Scan current directory with the pre-loaded existing files
-            match self.scan_directory_with_existing_files(&current_dir, Some(&all_existing_files)).await {
+            // Scan current directory individually without pre-loading all files
+            match self.scan_directory(&current_dir).await {
                 Ok(result) => {
                     combined_result.merge(result);
                 }

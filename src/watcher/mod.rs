@@ -168,10 +168,21 @@ impl CrossPlatformWatcher {
         let event_sender = self.event_sender.clone();
         let media_extensions = self.media_extensions.clone();
         
+        // Create a weak reference to self to avoid circular references in the closure
+        let watcher_weak = Arc::downgrade(&self.debouncer);
+
         let debouncer = new_debouncer_opt(
             self.debounce_duration,
             None, // Use default tick rate
             move |result: DebounceEventResult| {
+                // Upgrade the weak reference to an Arc
+                let watcher_arc = if let Some(arc) = watcher_weak.upgrade() {
+                    arc
+                } else {
+                    // The watcher has been dropped, so we can't process events
+                    warn!("Watcher has been dropped, cannot process file events.");
+                    return;
+                };
                 match result {
                     Ok(events) => {
                         if !events.is_empty() {
@@ -216,16 +227,17 @@ impl CrossPlatformWatcher {
 
                         if !relevant_events.is_empty() {
                             info!("Processing {} relevant events", relevant_events.len());
-                            let watcher = CrossPlatformWatcher {
-                                debouncer: Arc::new(RwLock::new(None)),
+                            
+                            // Create a temporary watcher instance for event conversion
+                            let temp_watcher = CrossPlatformWatcher {
+                                debouncer: watcher_arc.clone(),
                                 event_sender: event_sender.clone(),
                                 event_receiver: Arc::new(RwLock::new(None)),
                                 watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))),
                                 media_extensions: media_extensions.clone(),
                                 debounce_duration: Duration::from_millis(250),
                             };
-                            
-                            let fs_events = watcher.convert_events(relevant_events);
+                            let fs_events = temp_watcher.convert_events(relevant_events);
                             for fs_event in fs_events {
                                 if let Err(e) = event_sender.try_send(fs_event) {
                                     error!("Failed to send file system event: {}", e);

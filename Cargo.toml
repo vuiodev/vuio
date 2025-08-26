@@ -30,8 +30,7 @@ serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
 num_cpus = "1.17"
-reqwest = { version = "0.12", features = ["json"] }
-openssl = { version = "0.10", features = ["vendored"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 audiotags = "0.5"
 
 [target.'cfg(windows)'.dependencies]
