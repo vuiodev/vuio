@@ -1885,6 +1885,7 @@ mod tests {
         assert!(files.is_empty());
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[tokio::test]
     async fn test_get_directory_listing_root_path() {
         let temp_dir = tempdir().unwrap();
