@@ -534,13 +534,18 @@ impl FileSystemManager for BaseFileSystemManager {
     }
     
     async fn is_accessible(&self, path: &Path) -> bool {
-        // Check accessibility with read-only access
-        tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(path)
-            .await
-            .is_ok()
+        // For directories, check if we can read the directory
+        if path.is_dir() {
+            tokio::fs::read_dir(path).await.is_ok()
+        } else {
+            // For files, check accessibility with read-only access
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(false)
+                .open(path)
+                .await
+                .is_ok()
+        }
     }
     
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {

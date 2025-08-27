@@ -35,11 +35,12 @@ impl WindowsFileSystemManager {
     fn normalize_windows_path(&self, path: &Path) -> PathBuf {
         let path_str = path.to_string_lossy();
         
-        // Convert forward slashes to backslashes and path to lowercase
-        let normalized = path_str.replace('/', r"\").to_lowercase();
+        // Convert forward slashes to backslashes
+        let with_backslashes = path_str.replace('/', r"\");
         
         // Handle UNC paths - don't modify server/share case
         if self.is_unc_path(path) {
+            let normalized = with_backslashes.to_lowercase();
             if let Some(first_sep) = normalized.find('\\').and_then(|p| normalized[p+1..].find('\\')) {
                 let server_share_part_end = 1 + first_sep + 1;
                  if let Some(second_sep) = normalized[server_share_part_end..].find('\\') {
@@ -51,7 +52,17 @@ impl WindowsFileSystemManager {
             return PathBuf::from(normalized);
         }
         
-        PathBuf::from(normalized)
+        // Handle drive letter paths - preserve uppercase drive letter
+        if self.has_drive_letter(Path::new(&with_backslashes)) || self.looks_like_drive_letter(&with_backslashes) {
+            if with_backslashes.len() >= 2 {
+                let drive_letter = with_backslashes.chars().nth(0).unwrap().to_ascii_uppercase();
+                let rest = &with_backslashes[1..].to_lowercase();
+                return PathBuf::from(format!("{}{}", drive_letter, rest));
+            }
+        }
+        
+        // For other paths, convert to lowercase
+        PathBuf::from(with_backslashes.to_lowercase())
     }
     
     /// Validate Windows-specific path constraints
@@ -313,13 +324,18 @@ impl FileSystemManager for WindowsFileSystemManager {
     async fn is_accessible(&self, path: &Path) -> bool {
         let normalized_path = self.normalize_windows_path(path);
         
-        // Try to access the path with read-only access
-        tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(false)
-            .open(&normalized_path)
-            .await
-            .is_ok()
+        // For directories, check if we can read the directory
+        if normalized_path.is_dir() {
+            tokio::fs::read_dir(&normalized_path).await.is_ok()
+        } else {
+            // For files, try to access the path with read-only access
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(false)
+                .open(&normalized_path)
+                .await
+                .is_ok()
+        }
     }
     
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
@@ -442,9 +458,9 @@ mod tests {
     fn test_path_normalization() {
         let manager = WindowsFileSystemManager::new();
         
-        // Test forward slash conversion and case
+        // Test forward slash conversion and case - drive letter should remain uppercase
         let normalized = manager.normalize_windows_path(Path::new("C:/Path/To/File"));
-        assert_eq!(normalized, PathBuf::from(r"c:\path\to\file"));
+        assert_eq!(normalized, PathBuf::from(r"C:\path\to\file"));
         
         // Test UNC path preservation (server/share part)
         let unc_path = Path::new(r"\\Server\Share\SubFolder");
