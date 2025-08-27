@@ -436,6 +436,7 @@ mod filesystem_tests {
     mod windows_tests {
         use super::*;
         use vuio::platform::filesystem::windows::WindowsFileSystemManager;
+        use vuio::platform::filesystem::FileSystemManager;
         
         #[tokio::test]
         async fn test_windows_filesystem_manager_creation() {

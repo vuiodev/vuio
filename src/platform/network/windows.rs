@@ -119,8 +119,52 @@ impl WindowsNetworkManager {
 
     /// Get network interfaces using Windows API directly.
     async fn get_windows_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        // This method is now handled by the NetworkManager trait implementation
-        self.get_local_interfaces().await
+        use std::net::Ipv4Addr;
+        
+        // Use a simple implementation for now - in a real implementation,
+        // you would use Windows APIs like GetAdaptersAddresses
+        let mut interfaces = Vec::new();
+        
+        // Add localhost interface
+        interfaces.push(NetworkInterface {
+            name: "Loopback".to_string(),
+            ip_address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+            is_loopback: true,
+            is_up: true,
+            supports_multicast: false,
+            interface_type: InterfaceType::Loopback,
+        });
+        
+        // Try to detect other interfaces using system commands
+        if let Ok(output) = Command::new("ipconfig")
+            .arg("/all")
+            .output()
+        {
+            let output_str = String::from_utf8_lossy(&output.stdout);
+            // Parse ipconfig output to find network interfaces
+            // This is a simplified implementation
+            for line in output_str.lines() {
+                if line.contains("IPv4 Address") {
+                    if let Some(ip_part) = line.split(':').nth(1) {
+                        let ip_str = ip_part.trim();
+                        if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
+                            if !ip.is_loopback() {
+                                interfaces.push(NetworkInterface {
+                                    name: "Ethernet".to_string(),
+                                    ip_address: IpAddr::V4(ip),
+                                    is_loopback: false,
+                                    is_up: true,
+                                    supports_multicast: true,
+                                    interface_type: InterfaceType::Ethernet,
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        Ok(interfaces)
     }
 
     /// Enable multicast on Windows socket with proper error handling

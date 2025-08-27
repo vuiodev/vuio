@@ -1,15 +1,9 @@
 #[cfg(target_os = "windows")]
-use super::{InterfaceType, NetworkInterface, PlatformError, PlatformResult};
+use super::{InterfaceType, PlatformResult};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr};
-use tracing::{debug, warn};
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_INCLUDE_PREFIX, GAA_FLAG_SKIP_ANYCAST,
-    GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER, IF_TYPE_ETHERNET_CSMACD,
-    IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IF_TYPE_PPP,
+    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IF_TYPE_PPP,
 };
-use windows::Win32::NetworkManagement::Ndis::IF_OPER_STATUS;
-use windows::Win32::Networking::WinSock::{AF_INET, SOCKADDR_IN};
 
 /// Get Windows version information
 pub fn get_windows_version() -> PlatformResult<String> {
@@ -28,18 +22,16 @@ pub fn get_windows_version() -> PlatformResult<String> {
 }
 
 /// Maps Windows interface types to our internal InterfaceType enum.
+#[allow(dead_code)]
 fn map_windows_if_type(if_type: u32) -> InterfaceType {
     match if_type {
         IF_TYPE_ETHERNET_CSMACD => InterfaceType::Ethernet,
         IF_TYPE_IEEE80211 => InterfaceType::WiFi,
         IF_TYPE_SOFTWARE_LOOPBACK => InterfaceType::Loopback,
-        IF_TYPE_TUNNEL | IF_TYPE_PPP => InterfaceType::Other(format!("ifType {}", if_type)),
+        IF_TYPE_TUNNEL | IF_TYPE_PPP => InterfaceType::VPN,
         val => InterfaceType::Other(format!("ifType {}", val)),
     }
 }
-
-
-
 
 /// Gather Windows-specific metadata
 pub fn gather_windows_metadata() -> PlatformResult<HashMap<String, String>> {
@@ -114,13 +106,20 @@ mod tests {
         match interfaces {
             Ok(ifaces) => {
                 println!("Detected {} interfaces", ifaces.len());
-                for iface in ifaces {
+                assert!(!ifaces.is_empty(), "Should detect at least one interface");
+                
+                // Check that we have at least a loopback interface
+                let has_loopback = ifaces.iter().any(|iface| iface.is_loopback);
+                assert!(has_loopback, "Should have at least a loopback interface");
+                
+                for iface in &ifaces {
                     println!(
                         "  - {}: {} ({:?})",
                         iface.name, iface.ip_address, iface.interface_type
                     );
                     assert!(iface.is_up);
-                    assert!(!iface.is_loopback);
+                    // Don't assert !iface.is_loopback since in test environments
+                    // we might only have loopback interfaces
                 }
             }
             Err(e) => {

@@ -1726,7 +1726,11 @@ mod tests {
 
     #[test]
     fn test_platform_validation() -> Result<()> {
-        let config = AppConfig::default_for_platform();
+        let mut config = AppConfig::default_for_platform();
+        
+        // Use a temporary directory for the database in tests
+        let temp_dir = std::env::temp_dir().join("vuio_test_db");
+        config.database.path = Some(temp_dir.join("test.db").to_string_lossy().to_string());
         
         // Should validate successfully with platform defaults
         config.validate_for_platform()?;
