@@ -43,7 +43,6 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
 
 // Docker-specific SSDP implementation
 fn run_ssdp_service_docker(state: AppState) -> Result<()> {
-    use std::net::{IpAddr, Ipv4Addr};
 
     let network_manager = Arc::new(PlatformNetworkManager::new());
 
@@ -598,7 +597,6 @@ async fn ssdp_unified_service_docker(
     state: AppState,
     network_manager: Arc<PlatformNetworkManager>,
 ) -> Result<()> {
-    use std::net::{IpAddr, Ipv4Addr};
 
     const MAX_SOCKET_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 2000;
