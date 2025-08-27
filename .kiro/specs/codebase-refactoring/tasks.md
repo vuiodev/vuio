@@ -72,13 +72,13 @@
   - Create WindowsSsdpAdapter, DockerSsdpAdapter, and UnixSsdpAdapter implementations
   - _Requirements: 3.1, 3.3_
 
-- [ ] 12. Replace duplicate SSDP implementations
+- [x] 12. Replace duplicate SSDP implementations
   - Remove ssdp_service_docker, ssdp_service_windows, and native implementations from ssdp.rs
   - Update main.rs to use single run_ssdp_service function with unified implementation
   - Migrate platform-specific socket configuration to adapter pattern
   - _Requirements: 3.1, 3.4_
 
-- [ ] 13. Remove duplicate IP detection code
+- [x] 13. Remove duplicate IP detection code
   - Remove get_server_ip function from web/xml.rs
   - Update XML generation functions to receive server IP from AppState
   - Ensure single source of truth for server IP in platform_info

@@ -354,22 +354,9 @@ impl UnifiedSsdpService {
         )
     }
 
-    /// Get server IP address using fallback logic
+    /// Get server IP address using unified logic from AppState
     fn get_server_ip(state: &AppState) -> String {
-        // Use the primary interface detected at startup
-        if let Some(iface) = state.platform_info.get_primary_interface() {
-            return iface.ip_address.to_string();
-        }
-
-        // Fallback to configured interface
-        if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-            warn!("Falling back to configured server interface: {}", state.config.server.interface);
-            return state.config.server.interface.clone();
-        }
-
-        // Last resort
-        error!("Could not determine server IP address, using localhost");
-        "127.0.0.1".to_string()
+        state.get_server_ip()
     }
 }
 
@@ -426,20 +413,7 @@ impl SsdpPlatformAdapter for WindowsSsdpAdapter {
     }
     
     fn get_server_ip(&self, state: &AppState) -> String {
-        // Use the primary interface detected at startup
-        if let Some(iface) = state.platform_info.get_primary_interface() {
-            return iface.ip_address.to_string();
-        }
-
-        // Fallback to configured interface
-        if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-            warn!("Falling back to configured server interface: {}", state.config.server.interface);
-            return state.config.server.interface.clone();
-        }
-
-        // Last resort
-        error!("Could not determine server IP address, using localhost");
-        "127.0.0.1".to_string()
+        state.get_server_ip()
     }
     
     fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
@@ -489,30 +463,7 @@ impl SsdpPlatformAdapter for DockerSsdpAdapter {
     }
     
     fn get_server_ip(&self, state: &AppState) -> String {
-        // Check if server IP is explicitly configured (important for Docker)
-        if let Some(server_ip) = &state.config.server.ip {
-            if !server_ip.is_empty() && server_ip != "0.0.0.0" {
-                info!("Using explicitly configured server IP for Docker: {}", server_ip);
-                return server_ip.clone();
-            }
-        }
-
-        // Use the primary interface detected at startup
-        if let Some(iface) = state.platform_info.get_primary_interface() {
-            let ip = iface.ip_address.to_string();
-            info!("Using primary interface IP for Docker: {}", ip);
-            return ip;
-        }
-
-        // Fallback to configured interface
-        if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-            warn!("Falling back to configured server interface for Docker: {}", state.config.server.interface);
-            return state.config.server.interface.clone();
-        }
-
-        // Last resort - this will likely not work in Docker
-        error!("Could not determine server IP address for Docker, using localhost (this may not work)");
-        "127.0.0.1".to_string()
+        state.get_server_ip()
     }
     
     fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
@@ -562,20 +513,7 @@ impl SsdpPlatformAdapter for UnixSsdpAdapter {
     }
     
     fn get_server_ip(&self, state: &AppState) -> String {
-        // Use the primary interface detected at startup
-        if let Some(iface) = state.platform_info.get_primary_interface() {
-            return iface.ip_address.to_string();
-        }
-
-        // Fallback to configured interface
-        if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-            warn!("Falling back to configured server interface: {}", state.config.server.interface);
-            return state.config.server.interface.clone();
-        }
-
-        // Last resort
-        error!("Could not determine server IP address, using localhost");
-        "127.0.0.1".to_string()
+        state.get_server_ip()
     }
     
     fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {

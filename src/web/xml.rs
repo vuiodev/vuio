@@ -28,37 +28,7 @@ fn xml_escape(s: &str) -> String {
     result
 }
 
-/// Get the server's IP address for use in URLs from the application state.
-async fn get_server_ip(state: &AppState) -> String {
-    // Use the SSDP interface from config if it's a specific IP address
-    match &state.config.network.interface_selection {
-        crate::config::NetworkInterfaceConfig::Specific(ip) => {
-            return ip.clone();
-        }
-        _ => {
-            // For Auto or All, fallback to server interface if it's not 0.0.0.0
-            if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
-                return state.config.server.interface.clone();
-            }
-        }
-    }
-    
-    // Use the primary interface detected at startup instead of re-detecting
-    if let Some(primary_interface) = state.platform_info.get_primary_interface() {
-        return primary_interface.ip_address.to_string();
-    }
-    
-    // Check if host IP is overridden via environment variable (for containers)
-    if let Ok(host_ip) = std::env::var("VUIO_IP") {
-        if !host_ip.is_empty() {
-            return host_ip;
-        }
-    }
-    
-    // Last resort
-    warn!("Could not auto-detect IP, falling back to 127.0.0.1");
-    "127.0.0.1".to_string()
-}
+
 
 
 
@@ -152,8 +122,9 @@ pub async fn generate_browse_response(
     subdirectories: &[MediaDirectory],
     files: &[MediaFile],
     state: &AppState,
+    server_ip: &str,
 ) -> String {
-    generate_browse_response_with_totals(object_id, subdirectories, files, state, None).await
+    generate_browse_response_with_totals(object_id, subdirectories, files, state, server_ip, None).await
 }
 
 pub async fn generate_browse_response_with_totals(
@@ -161,6 +132,7 @@ pub async fn generate_browse_response_with_totals(
     subdirectories: &[MediaDirectory],
     files: &[MediaFile],
     state: &AppState,
+    server_ip: &str,
     total_matches: Option<usize>,
 ) -> String {
     use tracing::{debug, warn};
@@ -172,7 +144,7 @@ pub async fn generate_browse_response_with_totals(
         files.len()
     );
     
-    let server_ip = get_server_ip(state).await;
+
     let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">"#);
 
     let number_returned = if object_id == "0" {
