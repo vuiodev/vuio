@@ -181,14 +181,8 @@ pub async fn content_directory_control(
         
         match tokio::time::timeout(timeout_duration, query_future).await {
             Ok(Ok((subdirectories, files))) => {
-                info!("Browse request for '{}' -> '{}' (filter: '{}') returned {} subdirs, {} files", 
+                debug!("Browse request for '{}' -> '{}' (filter: '{}') returned {} subdirs, {} files", 
                        browse_path.display(), normalized_browse_path.display(), media_type_filter, subdirectories.len(), files.len());
-                if subdirectories.len() > 0 {
-                    info!("Subdirectories found: {:?}", subdirectories.iter().map(|d| &d.name).collect::<Vec<_>>());
-                }
-                if files.len() > 0 {
-                    info!("Files found: {:?}", files.iter().take(5).map(|f| &f.filename).collect::<Vec<_>>());
-                }
                        
                 // Apply pagination if requested
                 let starting_index = params.starting_index as usize;
