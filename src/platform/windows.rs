@@ -114,10 +114,10 @@ mod tests {
                 
                 for iface in &ifaces {
                     println!(
-                        "  - {}: {} ({:?})",
-                        iface.name, iface.ip_address, iface.interface_type
+                        "  - {}: {} ({:?}) - Up: {}, Multicast: {}",
+                        iface.name, iface.ip_address, iface.interface_type, iface.is_up, iface.supports_multicast
                     );
-                    assert!(iface.is_up);
+                    // Don't assert that all interfaces are up since some may be disabled/disconnected
                     // Don't assert !iface.is_loopback since in test environments
                     // we might only have loopback interfaces
                 }
