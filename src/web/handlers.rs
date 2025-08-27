@@ -155,18 +155,24 @@ pub async fn content_directory_control(
             media_root.join(path_prefix_str)
         };
         
-        // Normalize the browse path to match how paths are stored in the database
-        // Use the same platform-specific normalization used during file scanning
-        let normalized_browse_path = state.filesystem_manager.normalize_path(&browse_path);
+        // Apply canonical path normalization to match how paths are stored in the database
+        // Use the same normalization logic used during file scanning
+        let canonical_browse_path = match state.filesystem_manager.get_canonical_path(&browse_path) {
+            Ok(canonical) => std::path::PathBuf::from(canonical),
+            Err(e) => {
+                warn!("Failed to get canonical path for browse request '{}': {}, using basic normalization", browse_path.display(), e);
+                state.filesystem_manager.normalize_path(&browse_path)
+            }
+        };
         
         // Query the database for the directory listing with timeout
-        let query_future = state.database.get_directory_listing(&normalized_browse_path, media_type_filter);
+        let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
         let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
         
         match tokio::time::timeout(timeout_duration, query_future).await {
             Ok(Ok((subdirectories, files))) => {
-                debug!("Browse request for '{}' (filter: '{}') returned {} subdirs, {} files", 
-                       browse_path.display(), media_type_filter, subdirectories.len(), files.len());
+                debug!("Browse request for '{}' -> canonical '{}' (filter: '{}') returned {} subdirs, {} files", 
+                       browse_path.display(), canonical_browse_path.display(), media_type_filter, subdirectories.len(), files.len());
                        
                 // Apply pagination if requested
                 let starting_index = params.starting_index as usize;
@@ -243,7 +249,7 @@ pub async fn content_directory_control(
                     .into_response()
             },
             Err(_timeout) => {
-                error!("Database query timeout for object_id: {} (path: {})", params.object_id, browse_path.display());
+                error!("Database query timeout for object_id: {} (path: {} -> canonical: {})", params.object_id, browse_path.display(), canonical_browse_path.display());
                 (
                     StatusCode::REQUEST_TIMEOUT,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],

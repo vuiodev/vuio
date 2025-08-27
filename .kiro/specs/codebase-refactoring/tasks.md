@@ -26,7 +26,7 @@
   - Add database indexes for efficient path-based queries
   - _Requirements: 1.1, 1.3_
 
-- [ ] 5. Update web handlers to use normalized paths
+- [x] 5. Update web handlers to use normalized paths
   - Modify content_directory_control to normalize ObjectID-derived paths before database queries
   - Apply same normalization logic used in scanning to browse request handling
   - Update path construction from ObjectID to use canonical format
