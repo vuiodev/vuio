@@ -34,13 +34,13 @@
 
 ## Phase 2: Database Query Optimization
 
-- [ ] 6. Implement efficient directory listing queries
+- [x] 6. Implement efficient directory listing queries
   - Replace get_directory_listing LIKE query with direct parent_path matching
   - Create get_direct_subdirectories method using two-query approach
   - Write unit tests to verify only direct children are returned, not all descendants
   - _Requirements: 2.1, 2.4_
 
-- [ ] 7. Create batch file cleanup operations
+- [x] 7. Create batch file cleanup operations
   - Implement batch_cleanup_missing_files using HashSet difference logic
   - Process file deletions in batches to avoid SQL parameter limits
   - Add transaction support for atomic cleanup operations

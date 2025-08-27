@@ -280,6 +280,13 @@ pub trait DatabaseManager: Send + Sync {
 
     /// Batch cleanup missing files using canonical paths and HashSet difference logic
     async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize>;
+
+    /// Get direct subdirectories that contain files matching the media type filter (internal helper)
+    async fn get_filtered_direct_subdirectories(
+        &self,
+        canonical_parent_path: &str,
+        mime_filter: &str,
+    ) -> Result<Vec<MediaDirectory>>;
 }
 
 #[derive(Debug)]
@@ -612,9 +619,11 @@ impl SqliteDatabase {
             format!("{}{}%", canonical_parent_path, path_separator)
         };
 
+        // Query both canonical and original parent paths to get correct directory names
+        // This finds all files that are descendants of the parent path
         let subdir_rows = sqlx::query(
             r#"
-            SELECT DISTINCT canonical_parent_path 
+            SELECT DISTINCT canonical_parent_path, parent_path 
             FROM media_files 
             WHERE canonical_parent_path LIKE ? AND canonical_parent_path != ?
             "#,
@@ -627,23 +636,50 @@ impl SqliteDatabase {
         let mut subdirectories = HashSet::new();
         for row in subdir_rows {
             let descendant_canonical_parent: String = row.try_get("canonical_parent_path")?;
+            let descendant_original_parent: String = row.try_get("parent_path")?;
             
-            // Extract the immediate subdirectory name
+            // Extract the immediate subdirectory name from any descendant path
             if let Some(relative_part) = descendant_canonical_parent.strip_prefix(canonical_parent_path) {
                 let relative_part = relative_part.trim_start_matches('/');
-                if let Some(first_component) = relative_part.split('/').next() {
-                    if !first_component.is_empty() {
-                        let subdir_canonical_path = if canonical_parent_path.is_empty() {
-                            first_component.to_string()
-                        } else {
-                            format!("{}/{}", canonical_parent_path, first_component)
-                        };
+                let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
+                
+                // Get the first component (immediate subdirectory)
+                if let Some(first_canonical_component) = components.first() {
+                    // Work directly with the original path to extract the directory name
+                    let original_parent_path = PathBuf::from(&descendant_original_parent);
+                    
+                    // Extract the immediate subdirectory name by finding the first component after the base path
+                    // Since we know the canonical structure, we can map it back to the original
+                    if let Some(dir_name_os) = original_parent_path.components()
+                        .skip_while(|component| {
+                            // Skip components until we find the one that corresponds to our first canonical component
+                            if let std::path::Component::Normal(name) = component {
+                                let name_str = name.to_string_lossy().to_lowercase();
+                                name_str != *first_canonical_component
+                            } else {
+                                true
+                            }
+                        })
+                        .next() {
                         
-                        // Convert canonical path back to platform path for MediaDirectory
-                        if let Ok(platform_path) = self.path_normalizer.from_canonical(&subdir_canonical_path) {
+                        if let std::path::Component::Normal(name_os) = dir_name_os {
+                            let original_name = name_os.to_string_lossy().to_string();
+                            
+                            // Reconstruct the directory path by taking the original parent path up to this component
+                            let mut subdir_path = PathBuf::new();
+                            for component in original_parent_path.components() {
+                                subdir_path.push(component);
+                                if let std::path::Component::Normal(comp_name) = component {
+                                    if comp_name.to_string_lossy().to_lowercase() == *first_canonical_component {
+                                        break;
+                                    }
+                                }
+                            }
+                            
+
                             subdirectories.insert(MediaDirectory {
-                                path: platform_path,
-                                name: first_component.to_string(),
+                                path: subdir_path,
+                                name: original_name,
                             });
                         }
                     }
@@ -657,15 +693,16 @@ impl SqliteDatabase {
         Ok(sorted_subdirectories)
     }
 
-    /// Batch cleanup missing files using HashSet difference logic
+    /// Batch cleanup missing files using HashSet difference logic with transaction support
     async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
-        if existing_canonical_paths.is_empty() {
-            return Ok(0);
-        }
+        // Note: Don't return early if existing_canonical_paths is empty - this means delete all files
 
-        // Get all canonical paths from database
+        let pool = self.pool.read().await;
+        let mut tx = pool.begin().await?;
+
+        // Get all canonical paths from database within transaction
         let rows = sqlx::query("SELECT canonical_path FROM media_files WHERE canonical_path IS NOT NULL")
-            .fetch_all(&*self.pool.read().await)
+            .fetch_all(&mut *tx)
             .await?;
 
         let mut db_canonical_paths = HashSet::new();
@@ -680,7 +717,10 @@ impl SqliteDatabase {
             .difference(existing_canonical_paths)
             .collect();
 
+
+
         if paths_to_delete.is_empty() {
+            tx.commit().await?;
             return Ok(0);
         }
 
@@ -697,10 +737,12 @@ impl SqliteDatabase {
                 query_builder = query_builder.bind(path);
             }
 
-            let result = query_builder.execute(&*self.pool.read().await).await?;
+            let result = query_builder.execute(&mut *tx).await?;
             total_deleted += result.rows_affected() as usize;
         }
 
+        // Commit the transaction atomically
+        tx.commit().await?;
         Ok(total_deleted)
     }
 
@@ -918,80 +960,108 @@ impl DatabaseManager for SqliteDatabase {
         parent_path: &Path,
         media_type_filter: &str,
     ) -> Result<(Vec<MediaDirectory>, Vec<MediaFile>)> {
-        let parent_path_str = parent_path.to_string_lossy().to_string();
+        // Convert parent path to canonical format for efficient querying
+        let canonical_parent_path = self.path_normalizer.to_canonical(parent_path)
+            .unwrap_or_else(|_| parent_path.to_string_lossy().to_string());
+        
         let mime_filter_str = if media_type_filter.is_empty() {
             "%".to_string()
         } else {
             format!("{}%", media_type_filter)
         };
-        
 
-
-        // 1. Get all direct file children efficiently
+        // 1. Get all direct file children efficiently using canonical parent path matching
         let file_rows = sqlx::query(
             r#"
             SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
             FROM media_files 
-            WHERE parent_path = ? AND mime_type LIKE ?
+            WHERE canonical_parent_path = ? AND mime_type LIKE ?
             ORDER BY filename
             "#,
         )
-        .bind(&parent_path_str)
+        .bind(&canonical_parent_path)
         .bind(&mime_filter_str)
         .fetch_all(&*self.pool.read().await)
         .await?;
 
-        let mut files = Vec::with_capacity(file_rows.len()); // Pre-allocate capacity
+        let mut files = Vec::with_capacity(file_rows.len());
         for row in file_rows {
             files.push(MediaFile::from_row(&row)?);
         }
 
-        // 2. Get all unique subdirectory paths that contain matching files
-        // Use the same separator that would be in the stored paths
-        let path_separator = std::path::MAIN_SEPARATOR;
-        let like_path_prefix = if parent_path_str.is_empty() {
-            "%".to_string()
-        } else if parent_path_str == "/" || parent_path_str == "\\" {
-            format!("{}%", path_separator)
+        // 2. Get direct subdirectories using the optimized two-query approach
+        let mut subdirectories = if media_type_filter.is_empty() {
+            // If no media type filter, use the optimized get_direct_subdirectories method
+            self.get_direct_subdirectories(&canonical_parent_path).await?
         } else {
-            format!("{}{}%", parent_path_str, path_separator)
+            // If media type filter is specified, we need to filter subdirectories that contain matching files
+            self.get_filtered_direct_subdirectories(&canonical_parent_path, &mime_filter_str).await?
         };
 
+        // Sort subdirectories by name (case-insensitive)
+        subdirectories.sort_by_key(|d| d.name.to_lowercase());
+
+        Ok((subdirectories, files))
+    }
+
+    /// Get direct subdirectories that contain files matching the media type filter
+    async fn get_filtered_direct_subdirectories(
+        &self,
+        canonical_parent_path: &str,
+        mime_filter: &str,
+    ) -> Result<Vec<MediaDirectory>> {
+        let path_separator = "/"; // Canonical paths always use forward slashes
+        let like_path_prefix = if canonical_parent_path.is_empty() {
+            "%".to_string()
+        } else if canonical_parent_path == "/" {
+            format!("{}%", path_separator)
+        } else {
+            format!("{}{}%", canonical_parent_path, path_separator)
+        };
+
+        // Query both canonical and original parent paths to get correct directory names
         let subdir_rows = sqlx::query(
             r#"
-            SELECT DISTINCT parent_path 
+            SELECT DISTINCT canonical_parent_path, parent_path 
             FROM media_files 
-            WHERE parent_path LIKE ? AND parent_path != ? AND mime_type LIKE ?
+            WHERE canonical_parent_path LIKE ? AND canonical_parent_path != ? AND mime_type LIKE ?
             "#,
         )
         .bind(&like_path_prefix)
-        .bind(&parent_path_str)
-        .bind(&mime_filter_str)
+        .bind(canonical_parent_path)
+        .bind(mime_filter)
         .fetch_all(&*self.pool.read().await)
         .await?;
         
         let mut subdirectories = HashSet::new();
         for row in subdir_rows {
-            let descendant_parent_path_str: String = row.try_get("parent_path")?;
-            let descendant_parent_path = PathBuf::from(descendant_parent_path_str);
+            let descendant_canonical_parent: String = row.try_get("canonical_parent_path")?;
+            let descendant_original_parent: String = row.try_get("parent_path")?;
             
-            if let Ok(relative_path) = descendant_parent_path.strip_prefix(parent_path) {
-                if let Some(first_component) = relative_path.components().next() {
-                    if let std::path::Component::Normal(name) = first_component {
-                        let final_subdir_path = parent_path.join(name);
+            // Check if this is a direct child by ensuring it has exactly one more path component
+            if let Some(relative_part) = descendant_canonical_parent.strip_prefix(canonical_parent_path) {
+                let relative_part = relative_part.trim_start_matches('/');
+                let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
+                
+                // Only include direct children (exactly one component deep)
+                if components.len() == 1 {
+                    // Extract the directory name directly from the original parent path
+                    let original_parent_path = PathBuf::from(&descendant_original_parent);
+                    
+                    // Get the directory name (last component of the parent path)
+                    if let Some(dir_name_os) = original_parent_path.file_name() {
+                        let dir_name = dir_name_os.to_string_lossy().to_string();
+                        
                         subdirectories.insert(MediaDirectory {
-                            path: final_subdir_path,
-                            name: name.to_string_lossy().to_string(),
+                            path: original_parent_path,
+                            name: dir_name,
                         });
                     }
                 }
             }
         }
 
-        let mut sorted_subdirectories: Vec<_> = subdirectories.into_iter().collect();
-        sorted_subdirectories.sort_by_key(|d| d.name.to_lowercase());
-
-        Ok((sorted_subdirectories, files))
+        Ok(subdirectories.into_iter().collect())
     }
 
     async fn cleanup_missing_files(&self, existing_paths: &[PathBuf]) -> Result<usize> {
@@ -2089,7 +2159,7 @@ mod tests {
         db.store_media_file(&file2).await.unwrap();
         db.store_media_file(&file3).await.unwrap();
 
-        // Simulate only file1 and file2 still exist
+        // Simulate only file1 and file2 still exist (using canonical format)
         let mut existing_paths = HashSet::new();
         existing_paths.insert("/test/video1.mp4".to_string());
         existing_paths.insert("/test/video2.mp4".to_string());
@@ -2101,6 +2171,33 @@ mod tests {
         // Verify only 2 files remain
         let remaining_files = db.get_all_media_files().await.unwrap();
         assert_eq!(remaining_files.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_batch_cleanup_transaction_atomicity() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Add test files
+        let file1 = MediaFile::new(PathBuf::from("/test/video1.mp4"), 1024, "video/mp4".to_string());
+        let file2 = MediaFile::new(PathBuf::from("/test/video2.mp4"), 2048, "video/mp4".to_string());
+        let file3 = MediaFile::new(PathBuf::from("/test/video3.mp4"), 3072, "video/mp4".to_string());
+        
+        db.store_media_file(&file1).await.unwrap();
+        db.store_media_file(&file2).await.unwrap();
+        db.store_media_file(&file3).await.unwrap();
+
+        // Test with empty existing canonical paths (should delete all files atomically)
+        let existing_canonical_paths = HashSet::new();
+        let deleted_count = db.batch_cleanup_missing_files(&existing_canonical_paths).await.unwrap();
+        assert_eq!(deleted_count, 3); // Should delete all three files
+
+        // Verify all files are gone
+        let remaining_files = db.get_all_media_files().await.unwrap();
+        assert_eq!(remaining_files.len(), 0);
     }
 
     #[tokio::test]
@@ -2343,5 +2440,244 @@ mod tests {
         assert_eq!(dirs_video.len(), 1);
         assert!(dirs_video.iter().any(|d| d.name == "Videos"));
         assert_eq!(files_video.len(), 0); // root_file.txt is not video
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_only_direct_children() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
+
+        // Create a complex nested directory structure
+        // /media/
+        //   ├── direct_file.mp4 (direct child file)
+        //   ├── Movies/ (direct child directory)
+        //   │   ├── movie1.mp4
+        //   │   └── Action/ (nested subdirectory)
+        //   │       ├── action1.mp4
+        //   │       └── Superhero/ (deeply nested subdirectory)
+        //   │           └── superhero1.mp4
+        //   └── Music/ (direct child directory)
+        //       ├── song1.mp3
+        //       └── Rock/ (nested subdirectory)
+        //           └── rock1.mp3
+
+        // Direct file in parent
+        let direct_file = MediaFile::new(parent_path.join("direct_file.mp4"), 100, "video/mp4".to_string());
+        db.store_media_file(&direct_file).await.unwrap();
+
+        // Files in immediate subdirectories (Movies and Music)
+        let movies_dir = parent_path.join("Movies");
+        let movie1 = MediaFile::new(movies_dir.join("movie1.mp4"), 200, "video/mp4".to_string());
+        db.store_media_file(&movie1).await.unwrap();
+
+        let music_dir = parent_path.join("Music");
+        let song1 = MediaFile::new(music_dir.join("song1.mp3"), 300, "audio/mpeg".to_string());
+        db.store_media_file(&song1).await.unwrap();
+
+        // Files in nested subdirectories (should NOT appear as direct children)
+        let action_dir = movies_dir.join("Action");
+        let action1 = MediaFile::new(action_dir.join("action1.mp4"), 400, "video/mp4".to_string());
+        db.store_media_file(&action1).await.unwrap();
+
+        let rock_dir = music_dir.join("Rock");
+        let rock1 = MediaFile::new(rock_dir.join("rock1.mp3"), 500, "audio/mpeg".to_string());
+        db.store_media_file(&rock1).await.unwrap();
+
+        // Files in deeply nested subdirectories (should NOT appear as direct children)
+        let superhero_dir = action_dir.join("Superhero");
+        let superhero1 = MediaFile::new(superhero_dir.join("superhero1.mp4"), 600, "video/mp4".to_string());
+        db.store_media_file(&superhero1).await.unwrap();
+
+
+
+        // Test: Get directory listing for parent path
+        let (dirs, files) = db.get_directory_listing(&parent_path, "").await.unwrap();
+
+        // Verify only direct children are returned
+        assert_eq!(files.len(), 1, "Should return only 1 direct file");
+        assert_eq!(files[0].filename, "direct_file.mp4");
+
+
+        assert_eq!(dirs.len(), 2, "Should return only 2 direct subdirectories");
+        let dir_names: Vec<String> = dirs.iter().map(|d| d.name.clone()).collect();
+        assert!(dir_names.contains(&"Movies".to_string()));
+        assert!(dir_names.contains(&"Music".to_string()));
+
+        // Verify nested directories are NOT returned as direct children
+        assert!(!dir_names.contains(&"Action".to_string()));
+        assert!(!dir_names.contains(&"Rock".to_string()));
+        assert!(!dir_names.contains(&"Superhero".to_string()));
+
+        // Test: Get directory listing for Movies subdirectory
+        let (movies_dirs, movies_files) = db.get_directory_listing(&movies_dir, "").await.unwrap();
+
+        assert_eq!(movies_files.len(), 1, "Movies should have 1 direct file");
+        assert_eq!(movies_files[0].filename, "movie1.mp4");
+
+        assert_eq!(movies_dirs.len(), 1, "Movies should have 1 direct subdirectory");
+        assert_eq!(movies_dirs[0].name, "Action");
+
+        // Verify deeply nested directories are NOT returned
+        let movies_dir_names: Vec<String> = movies_dirs.iter().map(|d| d.name.clone()).collect();
+        assert!(!movies_dir_names.contains(&"Superhero".to_string()));
+
+        // Test: Get directory listing for Action subdirectory
+        let (action_dirs, action_files) = db.get_directory_listing(&action_dir, "").await.unwrap();
+
+        assert_eq!(action_files.len(), 1, "Action should have 1 direct file");
+        assert_eq!(action_files[0].filename, "action1.mp4");
+
+        assert_eq!(action_dirs.len(), 1, "Action should have 1 direct subdirectory");
+        assert_eq!(action_dirs[0].name, "Superhero");
+    }
+
+    #[tokio::test]
+    async fn test_get_directory_listing_direct_children_with_filter() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
+
+        // Create mixed content structure
+        // /media/
+        //   ├── video.mp4 (direct video file)
+        //   ├── audio.mp3 (direct audio file)
+        //   ├── Videos/ (contains video files)
+        //   │   ├── movie.mp4
+        //   │   └── Clips/ (nested - contains video files)
+        //   │       └── clip.mp4
+        //   ├── Music/ (contains audio files)
+        //   │   ├── song.mp3
+        //   │   └── Albums/ (nested - contains audio files)
+        //   │       └── album_song.mp3
+        //   └── Mixed/ (contains both video and audio)
+        //       ├── mixed_video.mp4
+        //       └── mixed_audio.mp3
+
+        // Direct files
+        let direct_video = MediaFile::new(parent_path.join("video.mp4"), 100, "video/mp4".to_string());
+        let direct_audio = MediaFile::new(parent_path.join("audio.mp3"), 200, "audio/mpeg".to_string());
+        db.store_media_file(&direct_video).await.unwrap();
+        db.store_media_file(&direct_audio).await.unwrap();
+
+        // Videos directory with nested content
+        let videos_dir = parent_path.join("Videos");
+        let movie = MediaFile::new(videos_dir.join("movie.mp4"), 300, "video/mp4".to_string());
+        db.store_media_file(&movie).await.unwrap();
+
+        let clips_dir = videos_dir.join("Clips");
+        let clip = MediaFile::new(clips_dir.join("clip.mp4"), 400, "video/mp4".to_string());
+        db.store_media_file(&clip).await.unwrap();
+
+        // Music directory with nested content
+        let music_dir = parent_path.join("Music");
+        let song = MediaFile::new(music_dir.join("song.mp3"), 500, "audio/mpeg".to_string());
+        db.store_media_file(&song).await.unwrap();
+
+        let albums_dir = music_dir.join("Albums");
+        let album_song = MediaFile::new(albums_dir.join("album_song.mp3"), 600, "audio/mpeg".to_string());
+        db.store_media_file(&album_song).await.unwrap();
+
+        // Mixed directory
+        let mixed_dir = parent_path.join("Mixed");
+        let mixed_video = MediaFile::new(mixed_dir.join("mixed_video.mp4"), 700, "video/mp4".to_string());
+        let mixed_audio = MediaFile::new(mixed_dir.join("mixed_audio.mp3"), 800, "audio/mpeg".to_string());
+        db.store_media_file(&mixed_video).await.unwrap();
+        db.store_media_file(&mixed_audio).await.unwrap();
+
+        // Test: Video filter - should return only directories containing video files
+        let (video_dirs, video_files) = db.get_directory_listing(&parent_path, "video").await.unwrap();
+
+        assert_eq!(video_files.len(), 1, "Should return 1 direct video file");
+        assert_eq!(video_files[0].filename, "video.mp4");
+
+        assert_eq!(video_dirs.len(), 2, "Should return 2 directories containing video files");
+        let video_dir_names: Vec<String> = video_dirs.iter().map(|d| d.name.clone()).collect();
+        assert!(video_dir_names.contains(&"Videos".to_string()));
+        assert!(video_dir_names.contains(&"Mixed".to_string()));
+        assert!(!video_dir_names.contains(&"Music".to_string())); // Music dir should NOT be included
+
+        // Verify nested directories are NOT returned as direct children
+        assert!(!video_dir_names.contains(&"Clips".to_string()));
+        assert!(!video_dir_names.contains(&"Albums".to_string()));
+
+        // Test: Audio filter - should return only directories containing audio files
+        let (audio_dirs, audio_files) = db.get_directory_listing(&parent_path, "audio").await.unwrap();
+
+        assert_eq!(audio_files.len(), 1, "Should return 1 direct audio file");
+        assert_eq!(audio_files[0].filename, "audio.mp3");
+
+        assert_eq!(audio_dirs.len(), 2, "Should return 2 directories containing audio files");
+        let audio_dir_names: Vec<String> = audio_dirs.iter().map(|d| d.name.clone()).collect();
+        assert!(audio_dir_names.contains(&"Music".to_string()));
+        assert!(audio_dir_names.contains(&"Mixed".to_string()));
+        assert!(!audio_dir_names.contains(&"Videos".to_string())); // Videos dir should NOT be included
+
+        // Verify nested directories are NOT returned as direct children
+        assert!(!audio_dir_names.contains(&"Clips".to_string()));
+        assert!(!audio_dir_names.contains(&"Albums".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_get_direct_subdirectories_canonical_paths() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Test the new get_direct_subdirectories method directly
+        let parent_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
+
+        // Create test structure with canonical paths
+        let subdir1 = parent_path.join("Movies");
+        let subdir2 = parent_path.join("Music");
+        let nested_subdir = subdir1.join("Action");
+
+        let file1 = MediaFile::new(subdir1.join("movie.mp4"), 100, "video/mp4".to_string());
+        let file2 = MediaFile::new(subdir2.join("song.mp3"), 200, "audio/mpeg".to_string());
+        let file3 = MediaFile::new(nested_subdir.join("action.mp4"), 300, "video/mp4".to_string());
+
+        db.store_media_file(&file1).await.unwrap();
+        db.store_media_file(&file2).await.unwrap();
+        db.store_media_file(&file3).await.unwrap();
+
+        // Convert parent path to canonical format
+        let canonical_parent = db.path_normalizer.to_canonical(&parent_path).unwrap();
+
+        // Test get_direct_subdirectories method
+        let subdirs = db.get_direct_subdirectories(&canonical_parent).await.unwrap();
+
+        assert_eq!(subdirs.len(), 2, "Should return exactly 2 direct subdirectories");
+        let subdir_names: Vec<String> = subdirs.iter().map(|d| d.name.clone()).collect();
+        assert!(subdir_names.contains(&"Movies".to_string()));
+        assert!(subdir_names.contains(&"Music".to_string()));
+
+        // Verify nested subdirectory is NOT returned as direct child
+        assert!(!subdir_names.contains(&"Action".to_string()));
+
+        // Test with Movies subdirectory
+        let canonical_movies = db.path_normalizer.to_canonical(&subdir1).unwrap();
+        let movies_subdirs = db.get_direct_subdirectories(&canonical_movies).await.unwrap();
+
+        assert_eq!(movies_subdirs.len(), 1, "Movies should have 1 direct subdirectory");
+        assert_eq!(movies_subdirs[0].name, "Action");
     }
 }

@@ -889,6 +889,14 @@ mod tests {
         async fn batch_cleanup_missing_files(&self, _existing_canonical_paths: &std::collections::HashSet<String>) -> anyhow::Result<usize> {
             Ok(0)
         }
+
+        async fn get_filtered_direct_subdirectories(
+            &self,
+            _canonical_parent_path: &str,
+            _mime_filter: &str,
+        ) -> anyhow::Result<Vec<crate::database::MediaDirectory>> {
+            Ok(vec![])
+        }
     }
 
     #[tokio::test]
