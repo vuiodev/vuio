@@ -3,10 +3,27 @@ use crate::platform::{
     InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, Ipv6Addr};
 use std::process::Command;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
+
+/// Helper function to calculate the length of a wide string
+unsafe fn wcslen(mut s: *const u16) -> usize {
+    let mut len = 0;
+    while *s != 0 {
+        len += 1;
+        s = s.add(1);
+    }
+    len
+}
+
+/// Check if an IPv6 address is link-local
+fn is_link_local_ipv6(addr: &Ipv6Addr) -> bool {
+    let segments = addr.segments();
+    // Link-local addresses start with fe80::/10
+    (segments[0] & 0xffc0) == 0xfe80
+}
 
 /// Windows-specific network manager implementation
 pub struct WindowsNetworkManager {
@@ -119,10 +136,171 @@ impl WindowsNetworkManager {
 
     /// Get network interfaces using Windows API directly.
     async fn get_windows_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_INCLUDE_PREFIX,
+            GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER,
+            IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK,
+            IF_TYPE_TUNNEL,
+        };
+        use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, WIN32_ERROR};
+        use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
+        
+        let mut interfaces = Vec::new();
+        let mut buffer_size = 15000u32; // Start with 15KB buffer
+        let mut buffer: Vec<u8> = vec![0; buffer_size as usize];
+        
+        // Call GetAdaptersAddresses to get network interface information
+        let flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
+        
+        let result = unsafe {
+            GetAdaptersAddresses(
+                0, // AF_UNSPEC - get both IPv4 and IPv6
+                flags,
+                None,
+                Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                &mut buffer_size,
+            )
+        };
+        
+        match WIN32_ERROR(result) {
+            ERROR_BUFFER_OVERFLOW => {
+                // Buffer too small, resize and try again
+                buffer.resize(buffer_size as usize, 0);
+                let result = unsafe {
+                    GetAdaptersAddresses(
+                        0,
+                        flags,
+                        None,
+                        Some(buffer.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH),
+                        &mut buffer_size,
+                    )
+                };
+                if WIN32_ERROR(result) != ERROR_SUCCESS {
+                    warn!("GetAdaptersAddresses failed with error: {}", result);
+                    return self.fallback_interface_detection().await;
+                }
+            }
+            ERROR_SUCCESS => {
+                // Success on first try
+            }
+            _ => {
+                warn!("GetAdaptersAddresses failed with error: {}", result);
+                return self.fallback_interface_detection().await;
+            }
+        }
+        
+        // Parse the adapter information
+        let mut current_adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+        
+        while !current_adapter.is_null() {
+            let adapter = unsafe { &*current_adapter };
+            
+            // Get adapter name
+            let adapter_name = if !adapter.FriendlyName.is_null() {
+                unsafe {
+                    let name_slice = std::slice::from_raw_parts(
+                        adapter.FriendlyName.0,
+                        wcslen(adapter.FriendlyName.0),
+                    );
+                    String::from_utf16_lossy(name_slice)
+                }
+            } else {
+                "Unknown".to_string()
+            };
+            
+            // Determine interface type
+            let interface_type = match adapter.IfType {
+                IF_TYPE_ETHERNET_CSMACD => InterfaceType::Ethernet,
+                IF_TYPE_IEEE80211 => InterfaceType::WiFi,
+                IF_TYPE_SOFTWARE_LOOPBACK => InterfaceType::Loopback,
+                IF_TYPE_TUNNEL => InterfaceType::VPN,
+                _ => InterfaceType::Other(format!("Type_{}", adapter.IfType)),
+            };
+            
+            // Check if interface is up (1 = IfOperStatusUp)
+            let is_up = adapter.OperStatus.0 == 1;
+            let is_loopback = adapter.IfType == IF_TYPE_SOFTWARE_LOOPBACK;
+            
+            // Parse IP addresses
+            let mut unicast_addr = adapter.FirstUnicastAddress;
+            while !unicast_addr.is_null() {
+                let addr_info = unsafe { &*unicast_addr };
+                let socket_addr = addr_info.Address.lpSockaddr;
+                
+                if !socket_addr.is_null() {
+                    let addr_family = unsafe { (*socket_addr).sa_family };
+                    
+                    match addr_family {
+                        AF_INET => {
+                            let sockaddr_in = socket_addr as *const SOCKADDR_IN;
+                            let ip_bytes = unsafe { (*sockaddr_in).sin_addr.S_un.S_addr.to_ne_bytes() };
+                            let ip = Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+                            
+                            interfaces.push(NetworkInterface {
+                                name: adapter_name.clone(),
+                                ip_address: IpAddr::V4(ip),
+                                is_loopback,
+                                is_up,
+                                supports_multicast: !is_loopback && is_up,
+                                interface_type: interface_type.clone(),
+                            });
+                        }
+                        AF_INET6 => {
+                            let sockaddr_in6 = socket_addr as *const SOCKADDR_IN6;
+                            let ip_bytes = unsafe { (*sockaddr_in6).sin6_addr.u.Byte };
+                            let ip = Ipv6Addr::from(ip_bytes);
+                            
+                            // Skip link-local IPv6 addresses for now
+                            if !ip.is_loopback() && !is_link_local_ipv6(&ip) {
+                                interfaces.push(NetworkInterface {
+                                    name: format!("{} (IPv6)", adapter_name),
+                                    ip_address: IpAddr::V6(ip),
+                                    is_loopback,
+                                    is_up,
+                                    supports_multicast: !is_loopback && is_up,
+                                    interface_type: interface_type.clone(),
+                                });
+                            }
+                        }
+                        _ => {
+                            // Unknown address family, skip
+                        }
+                    }
+                }
+                
+                unicast_addr = addr_info.Next;
+            }
+            
+            current_adapter = adapter.Next;
+        }
+        
+        // If no interfaces found, add loopback as fallback
+        if interfaces.is_empty() {
+            interfaces.push(NetworkInterface {
+                name: "Loopback".to_string(),
+                ip_address: IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)),
+                is_loopback: true,
+                is_up: true,
+                supports_multicast: false,
+                interface_type: InterfaceType::Loopback,
+            });
+        }
+        
+        info!("Detected {} network interfaces using Windows API", interfaces.len());
+        for interface in &interfaces {
+            debug!("Interface: {} ({}) - Up: {}, Multicast: {}", 
+                   interface.name, interface.ip_address, interface.is_up, interface.supports_multicast);
+        }
+        
+        Ok(interfaces)
+    }
+    
+    /// Fallback interface detection using system commands
+    async fn fallback_interface_detection(&self) -> PlatformResult<Vec<NetworkInterface>> {
         use std::net::Ipv4Addr;
         
-        // Use a simple implementation for now - in a real implementation,
-        // you would use Windows APIs like GetAdaptersAddresses
+        warn!("Using fallback interface detection method");
         let mut interfaces = Vec::new();
         
         // Add localhost interface
@@ -136,26 +314,47 @@ impl WindowsNetworkManager {
         });
         
         // Try to detect other interfaces using system commands
-        if let Ok(output) = Command::new("ipconfig")
-            .arg("/all")
-            .output()
-        {
+        if let Ok(output) = Command::new("ipconfig").arg("/all").output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
-            // Parse ipconfig output to find network interfaces
-            // This is a simplified implementation
+            let mut current_adapter_name = String::new();
+            
             for line in output_str.lines() {
+                let line = line.trim();
+                
+                // Look for adapter names
+                if line.contains("adapter") && line.ends_with(':') {
+                    current_adapter_name = line.replace("adapter", "").replace(':', "").trim().to_string();
+                }
+                
+                // Look for IPv4 addresses
                 if line.contains("IPv4 Address") {
                     if let Some(ip_part) = line.split(':').nth(1) {
-                        let ip_str = ip_part.trim();
+                        let ip_str = ip_part.trim().replace("(Preferred)", "");
                         if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
                             if !ip.is_loopback() {
+                                let interface_type = if current_adapter_name.to_lowercase().contains("ethernet") {
+                                    InterfaceType::Ethernet
+                                } else if current_adapter_name.to_lowercase().contains("wi-fi") || 
+                                         current_adapter_name.to_lowercase().contains("wireless") {
+                                    InterfaceType::WiFi
+                                } else if current_adapter_name.to_lowercase().contains("vpn") ||
+                                         current_adapter_name.to_lowercase().contains("tunnel") {
+                                    InterfaceType::VPN
+                                } else {
+                                    InterfaceType::Other(current_adapter_name.clone())
+                                };
+                                
                                 interfaces.push(NetworkInterface {
-                                    name: "Ethernet".to_string(),
+                                    name: if current_adapter_name.is_empty() { 
+                                        "Network Interface".to_string() 
+                                    } else { 
+                                        current_adapter_name.clone() 
+                                    },
                                     ip_address: IpAddr::V4(ip),
                                     is_loopback: false,
                                     is_up: true,
                                     supports_multicast: true,
-                                    interface_type: InterfaceType::Ethernet,
+                                    interface_type,
                                 });
                             }
                         }
