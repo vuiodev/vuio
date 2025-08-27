@@ -64,9 +64,6 @@ impl WindowsNetworkManager {
 
         match UdpSocket::bind(socket_addr).await {
             Ok(socket) => {
-                // Set SO_REUSEADDR for Windows compatibility
-                // Note: tokio's UdpSocket doesn't expose setsockopt directly
-                // In a real implementation, you would use raw sockets or winapi
                 debug!("Successfully bound to port {} on Windows", port);
                 Ok(socket)
             }
@@ -86,6 +83,8 @@ impl WindowsNetworkManager {
             }
         }
     }
+
+
 
     /// Detect Windows firewall status
     async fn detect_firewall_status(&self) -> FirewallStatus {

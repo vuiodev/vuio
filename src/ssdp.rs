@@ -17,27 +17,63 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
         return run_ssdp_service_docker(state);
     }
 
-    info!("Native environment detected - using native SSDP implementation");
+    // Check if running on Windows and use unified implementation
+    #[cfg(target_os = "windows")]
+    {
+        info!("Windows environment detected - using Windows-optimized unified SSDP implementation");
+        return run_ssdp_service_windows(state);
+    }
 
+    // For non-Windows platforms, use the standard implementation
+    #[cfg(not(target_os = "windows"))]
+    {
+        info!("Native environment detected - using native SSDP implementation");
+
+        let network_manager = Arc::new(PlatformNetworkManager::new());
+
+        // Task for responding to M-SEARCH requests
+        let search_state = state.clone();
+        let search_manager = network_manager.clone();
+        tokio::spawn(async move {
+            if let Err(e) = ssdp_search_responder(search_state, search_manager).await {
+                error!("SSDP search responder failed: {}", e);
+            }
+        });
+
+        // Task for periodically sending NOTIFY announcements
+        let announce_state = state;
+        let announce_manager = network_manager;
+        tokio::spawn(async move {
+            ssdp_announcer(announce_state, announce_manager).await;
+        });
+
+        info!("SSDP service started with platform abstraction");
+        Ok(())
+    }
+}
+
+// Windows-specific SSDP implementation
+#[cfg(target_os = "windows")]
+fn run_ssdp_service_windows(state: AppState) -> Result<()> {
     let network_manager = Arc::new(PlatformNetworkManager::new());
 
-    // Task for responding to M-SEARCH requests
-    let search_state = state.clone();
-    let search_manager = network_manager.clone();
+    // Log the IP that will be used for SSDP announcements
+    let server_ip = get_server_ip_windows(&state);
+    info!(
+        "SSDP service starting (Windows mode) - using server IP: {}",
+        server_ip
+    );
+    info!("SSDP will listen on hardcoded port: {}", SSDP_PORT);
+
+    // Use unified service for Windows compatibility (single socket)
+    let service_state = state.clone();
+    let service_manager = network_manager.clone();
     tokio::spawn(async move {
-        if let Err(e) = ssdp_search_responder(search_state, search_manager).await {
-            error!("SSDP search responder failed: {}", e);
+        if let Err(e) = ssdp_unified_service_windows(service_state, service_manager).await {
+            error!("SSDP unified service failed: {}", e);
         }
     });
 
-    // Task for periodically sending NOTIFY announcements
-    let announce_state = state;
-    let announce_manager = network_manager;
-    tokio::spawn(async move {
-        ssdp_announcer(announce_state, announce_manager).await;
-    });
-
-    info!("SSDP service started with platform abstraction");
     Ok(())
 }
 
@@ -1094,4 +1130,360 @@ fn get_default_gateway_ip_docker() -> Result<String> {
     }
 
     Err(anyhow::anyhow!("No default gateway found"))
+}
+
+// ============================================================================
+// Windows-specific SSDP implementation
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+/// Get server IP for Windows environment
+fn get_server_ip_windows(state: &AppState) -> String {
+    // Use the primary interface detected at startup
+    if let Some(iface) = state.platform_info.get_primary_interface() {
+        return iface.ip_address.to_string();
+    }
+
+    // Fallback to configured interface
+    if state.config.server.interface != "0.0.0.0" && !state.config.server.interface.is_empty() {
+        warn!(
+            "Falling back to configured server interface: {}",
+            state.config.server.interface
+        );
+        return state.config.server.interface.clone();
+    }
+
+    // Last resort
+    error!("FATAL: Could not determine a usable server IP address on Windows.");
+    error!("Please check your network connection and ensure you have a valid private IP (e.g., 192.168.x.x).");
+    error!("Falling back to 127.0.0.1 - DLNA clients will NOT be able to connect.");
+    "127.0.0.1".to_string()
+}
+
+#[cfg(target_os = "windows")]
+/// Unified SSDP service using a single socket for both M-SEARCH responses and NOTIFY announcements
+/// This approach works better on Windows where socket reuse is problematic
+async fn ssdp_unified_service_windows(
+    state: AppState,
+    network_manager: Arc<PlatformNetworkManager>,
+) -> Result<()> {
+    const MAX_SOCKET_RETRIES: u32 = 5;
+    const RETRY_DELAY_MS: u64 = 2000;
+
+    info!("Starting unified SSDP service for Windows environment");
+
+    // Create SSDP socket with Windows-friendly configuration
+    let mut socket = None;
+    for attempt in 1..=MAX_SOCKET_RETRIES {
+        let ssdp_config = SsdpConfig {
+            primary_port: SSDP_PORT,
+            fallback_ports: vec![8080, 8081, 8082], // Fallback ports for Windows
+            multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
+            announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
+            max_retries: 3,
+            interfaces: Vec::new(),
+        };
+
+        match create_windows_ssdp_socket(&network_manager, &ssdp_config).await {
+            Ok(s) => {
+                info!(
+                    "Successfully created SSDP socket on port {} (attempt {})",
+                    s.port, attempt
+                );
+                socket = Some(s);
+                break;
+            }
+            Err(e) => {
+                error!("Failed to create SSDP socket (attempt {}): {}", attempt, e);
+                if attempt < MAX_SOCKET_RETRIES {
+                    warn!("Retrying socket creation in {}ms...", RETRY_DELAY_MS);
+                    tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                } else {
+                    return Err(anyhow::anyhow!(
+                        "SSDP socket creation failed after {} attempts: {}",
+                        MAX_SOCKET_RETRIES,
+                        e
+                    ));
+                }
+            }
+        }
+    }
+
+    let socket = socket.unwrap();
+    let socket_port = socket.port;
+
+    info!(
+        "Successfully configured SSDP socket on port {}",
+        socket_port
+    );
+
+    // Wrap socket in Arc<Mutex> for shared access
+    let shared_socket = Arc::new(tokio::sync::Mutex::new(socket));
+
+    // Start periodic NOTIFY announcements
+    let announce_state = state.clone();
+    let announce_manager = network_manager.clone();
+    let announce_socket = shared_socket.clone();
+    tokio::spawn(async move {
+        ssdp_announcer_task_windows(announce_state, announce_manager, announce_socket).await;
+    });
+
+    // Main loop for handling M-SEARCH requests
+    ssdp_responder_task_windows(state, network_manager, shared_socket).await
+}
+
+#[cfg(target_os = "windows")]
+/// Create SSDP socket with Windows-specific configuration
+async fn create_windows_ssdp_socket(
+    network_manager: &PlatformNetworkManager,
+    config: &SsdpConfig,
+) -> Result<crate::platform::network::SsdpSocket> {
+    use std::net::{IpAddr, Ipv4Addr};
+
+    // On Windows, bind to 0.0.0.0 to receive multicast traffic
+    let _bind_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), SSDP_PORT);
+
+    match network_manager.create_ssdp_socket_with_config(config).await {
+        Ok(mut socket) => {
+            // Join the SSDP multicast group - CRITICAL for receiving M-SEARCH requests
+            let multicast_addr = SSDP_MULTICAST_ADDR.parse().unwrap();
+            if let Err(e) = network_manager
+                .join_multicast_group(&mut socket, multicast_addr, None)
+                .await
+            {
+                error!("Failed to join SSDP multicast group: {}", e);
+                return Err(e.into());
+            }
+            info!(
+                "Successfully joined SSDP multicast group {}",
+                SSDP_MULTICAST_ADDR
+            );
+
+            Ok(socket)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// Task for handling SSDP announcements (Windows version)
+async fn ssdp_announcer_task_windows(
+    state: AppState,
+    network_manager: Arc<PlatformNetworkManager>,
+    socket: Arc<tokio::sync::Mutex<crate::platform::network::SsdpSocket>>,
+) {
+    let mut interval = interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
+    let mut consecutive_failures = 0;
+    const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+    // Send initial announcement immediately
+    if let Err(e) = send_ssdp_notify_windows(&state, &network_manager, &socket).await {
+        error!("Failed to send initial SSDP announcement: {}", e);
+    } else {
+        info!("Sent initial SSDP announcement");
+    }
+
+    loop {
+        interval.tick().await;
+
+        match send_ssdp_notify_windows(&state, &network_manager, &socket).await {
+            Ok(()) => {
+                consecutive_failures = 0;
+                debug!("Successfully sent SSDP NOTIFY announcements");
+            }
+            Err(e) => {
+                consecutive_failures += 1;
+                error!(
+                    "Failed to send SSDP NOTIFY (failure {}): {}",
+                    consecutive_failures, e
+                );
+
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    error!(
+                        "Too many consecutive SSDP announcement failures ({})",
+                        MAX_CONSECUTIVE_FAILURES
+                    );
+                    consecutive_failures = 0;
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// Task for handling M-SEARCH requests (Windows version)
+async fn ssdp_responder_task_windows(
+    state: AppState,
+    _network_manager: Arc<PlatformNetworkManager>,
+    socket: Arc<tokio::sync::Mutex<crate::platform::network::SsdpSocket>>,
+) -> Result<()> {
+    let mut buf = vec![0u8; 2048];
+    let mut consecutive_errors = 0;
+    const MAX_CONSECUTIVE_ERRORS: u32 = 10;
+
+    loop {
+        let (len, addr) = {
+            let socket_guard = socket.lock().await;
+            match socket_guard.recv_from(&mut buf).await {
+                Ok(result) => result,
+                Err(e) => {
+                    consecutive_errors += 1;
+                    error!(
+                        "Error receiving SSDP data (consecutive errors: {}): {}",
+                        consecutive_errors, e
+                    );
+
+                    if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
+                        error!(
+                            "Too many consecutive errors ({}), restarting responder",
+                            MAX_CONSECUTIVE_ERRORS
+                        );
+                        return Err(anyhow::anyhow!("SSDP responder failed: {}", e));
+                    }
+
+                    let delay = std::cmp::min(1000 * (1 << consecutive_errors.min(5)), 30000);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
+                    continue;
+                }
+            }
+        };
+
+        consecutive_errors = 0; // Reset error counter on success
+        let request = String::from_utf8_lossy(&buf[..len]);
+
+        if request.contains("M-SEARCH") {
+            debug!("Received M-SEARCH from {}", addr);
+            debug!("M-SEARCH request content: {}", request.trim());
+
+            // Handle M-SEARCH request (same logic as other platforms)
+            let mut response_types = Vec::new();
+
+            if request.contains("ssdp:all") {
+                response_types.push("upnp:rootdevice");
+                response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
+                response_types.push("urn:schemas-upnp-org:service:ContentDirectory:1");
+            } else if request.contains("upnp:rootdevice") {
+                response_types.push("upnp:rootdevice");
+            } else if request.contains("urn:schemas-upnp-org:device:MediaServer") {
+                response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
+            } else if request.contains("urn:schemas-upnp-org:service:ContentDirectory") {
+                response_types.push("urn:schemas-upnp-org:service:ContentDirectory:1");
+            } else if request.contains("ssdp:discover") {
+                response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
+            }
+
+            if !response_types.is_empty() {
+                debug!(
+                    "Sending {} SSDP response(s) to {} for types: {:?}",
+                    response_types.len(),
+                    addr,
+                    response_types
+                );
+
+                for response_type in response_types {
+                    let response = create_ssdp_response(&state, socket.lock().await.port, response_type).await;
+                    debug!(
+                        "Sending SSDP response to {} ({}): {}",
+                        addr,
+                        response_type,
+                        response.trim()
+                    );
+
+                    // Send response using the shared socket
+                    let socket_guard = socket.lock().await;
+                    if let Err(e) = socket_guard.send_to(response.as_bytes(), addr).await {
+                        warn!("Failed to send M-SEARCH response to {}: {}", addr, e);
+                    } else {
+                        debug!("Successfully sent M-SEARCH response to {} for {}", addr, response_type);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+/// Send SSDP NOTIFY messages (Windows version)
+async fn send_ssdp_notify_windows(
+    state: &AppState,
+    network_manager: &PlatformNetworkManager,
+    socket: &Arc<tokio::sync::Mutex<crate::platform::network::SsdpSocket>>,
+) -> Result<()> {
+    info!("Sending SSDP NOTIFY (alive) broadcast on Windows");
+
+    let server_ip = get_server_ip_windows(state);
+    let config = &state.config;
+
+    // Send NOTIFY for multiple service types
+    let service_types = [
+        "upnp:rootdevice",
+        "urn:schemas-upnp-org:device:MediaServer:1",
+        "urn:schemas-upnp-org:service:ContentDirectory:1",
+    ];
+
+    let multicast_addr = format!("{}:{}", SSDP_MULTICAST_ADDR, SSDP_PORT).parse::<SocketAddr>()?;
+
+    for service_type in &service_types {
+        let (nt, usn) = match *service_type {
+            "upnp:rootdevice" => (
+                "upnp:rootdevice".to_string(),
+                format!("uuid:{}::upnp:rootdevice", config.server.uuid),
+            ),
+            "urn:schemas-upnp-org:device:MediaServer:1" => (
+                "urn:schemas-upnp-org:device:MediaServer:1".to_string(),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:device:MediaServer:1",
+                    config.server.uuid
+                ),
+            ),
+            "urn:schemas-upnp-org:service:ContentDirectory:1" => (
+                "urn:schemas-upnp-org:service:ContentDirectory:1".to_string(),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:service:ContentDirectory:1",
+                    config.server.uuid
+                ),
+            ),
+            _ => continue,
+        };
+
+        let message = format!(
+            "NOTIFY * HTTP/1.1\r\n\
+            HOST: {}:{}\r\n\
+            CACHE-CONTROL: max-age=1800\r\n\
+            LOCATION: http://{}:{}/description.xml\r\n\
+            NT: {}\r\n\
+            NTS: ssdp:alive\r\n\
+            SERVER: VuIO/1.0 UPnP/1.0\r\n\
+            USN: {}\r\n\
+            \r\n",
+            SSDP_MULTICAST_ADDR, SSDP_PORT, server_ip, config.server.port, nt, usn
+        );
+
+        // Send via multicast using the shared socket
+        let socket_guard = socket.lock().await;
+        match network_manager
+            .send_multicast(&*socket_guard, message.as_bytes(), multicast_addr)
+            .await
+        {
+            Ok(()) => {
+                info!(
+                    "Successfully sent SSDP NOTIFY for {} via multicast (Windows)",
+                    service_type
+                );
+            }
+            Err(e) => {
+                warn!(
+                    "Multicast NOTIFY for {} failed on Windows: {}",
+                    service_type, e
+                );
+            }
+        }
+
+        // Small delay between different service type announcements
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    info!("All SSDP NOTIFY announcements completed on Windows");
+    Ok(())
 }
