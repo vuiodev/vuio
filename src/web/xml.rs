@@ -123,6 +123,14 @@ fn get_upnp_class(mime_type: &str) -> &str {
     }
 }
 
+/// Format duration in seconds to HH:MM:SS format for DLNA
+fn format_duration(duration_seconds: u64) -> String {
+    let hours = duration_seconds / 3600;
+    let minutes = (duration_seconds % 3600) / 60;
+    let seconds = duration_seconds % 60;
+    format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
+
 pub async fn generate_description_xml(state: &AppState) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -203,7 +211,7 @@ pub async fn generate_browse_response_with_totals(
     state: &AppState,
     total_matches: Option<usize>,
 ) -> String {
-    use tracing::{debug, warn, error};
+    use tracing::{debug, warn};
     
     debug!(
         "Generating browse response for object_id: '{}', {} subdirs, {} files",
@@ -309,51 +317,44 @@ pub async fn generate_browse_response_with_totals(
                 String::new()
             };
             
-            // Create the XML for this item with proper error handling
-            match std::panic::catch_unwind(|| {
-                format!(
-                    r#"<item id="{id}" parentID="{parent_id}" restricted="1">
-                    <dc:title>{title}</dc:title>
-                    {metadata}
-                    <upnp:class>{upnp_class}</upnp:class>
-                    <res protocolInfo="http-get:*:{mime}:*" size="{size}">{url}</res>
-                </item>"#,
-                    id = file_id,
-                    parent_id = xml_escape(object_id),
-                    title = xml_escape(&file.filename),
-                    metadata = metadata_xml,
-                    upnp_class = upnp_class,
-                    mime = &file.mime_type,
-                    size = file.size,
-                    url = xml_escape(&url)
-                )
-            }) {
-                Ok(item_xml) => {
-                    didl.push_str(&item_xml);
-                },
-                Err(_) => {
-                    error!("Failed to generate XML for file: '{}' ({})", file.filename, file.path.display());
-                    // Create a simplified entry for problematic files
-                    let safe_title = file.filename.chars()
-                        .filter(|c| c.is_ascii_alphanumeric() || " .-_".contains(*c))
-                        .collect::<String>();
-                    let fallback_xml = format!(
-                        r#"<item id="{id}" parentID="{parent_id}" restricted="1">
-                        <dc:title>{title}</dc:title>
-                        <upnp:class>{upnp_class}</upnp:class>
-                        <res protocolInfo="http-get:*:{mime}:*" size="{size}">{url}</res>
-                    </item>"#,
-                        id = file_id,
-                        parent_id = xml_escape(object_id),
-                        title = xml_escape(&safe_title),
-                        upnp_class = upnp_class,
-                        mime = &file.mime_type,
-                        size = file.size,
-                        url = xml_escape(&url)
-                    );
-                    didl.push_str(&fallback_xml);
+            // Create the XML for this item with autoplay attributes
+            // Add duration for media files if available
+            let duration_attr = if file.mime_type.starts_with("video/") || file.mime_type.starts_with("audio/") {
+                if let Some(duration) = file.duration {
+                    format!(" duration=\"{}\"", format_duration(duration.as_secs()))
+                } else {
+                    String::new()
                 }
-            }
+            } else {
+                String::new()
+            };
+
+            // Use enhanced DLNA flags that support autoplay and streaming
+            let dlna_flags = if state.config.media.autoplay_enabled {
+                "DLNA.ORG_PN=;DLNA.ORG_OP=01;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+            } else {
+                "DLNA.ORG_PN=;DLNA.ORG_OP=01;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
+            };
+
+            let item_xml = format!(
+                r#"<item id="{id}" parentID="{parent_id}" restricted="1">
+                <dc:title>{title}</dc:title>
+                {metadata}
+                <upnp:class>{upnp_class}</upnp:class>
+                <res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}"{duration}>{url}</res>
+            </item>"#,
+                id = file_id,
+                parent_id = xml_escape(object_id),
+                title = xml_escape(&file.filename),
+                metadata = metadata_xml,
+                upnp_class = upnp_class,
+                mime = &file.mime_type,
+                dlna_flags = dlna_flags,
+                size = file.size,
+                duration = duration_attr,
+                url = xml_escape(&url)
+            );
+            didl.push_str(&item_xml);
         }
 
         let total_items = subdirectories.len() + files.len();

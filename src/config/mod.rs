@@ -59,6 +59,10 @@ pub enum NetworkInterfaceConfig {
     Specific(String),
 }
 
+fn default_autoplay_enabled() -> bool {
+    true
+}
+
 /// Media configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
@@ -67,6 +71,8 @@ pub struct MediaConfig {
     pub watch_for_changes: bool,
     #[serde(default = "default_cleanup_deleted_files")]
     pub cleanup_deleted_files: bool,
+    #[serde(default = "default_autoplay_enabled")]
+    pub autoplay_enabled: bool,
     pub supported_extensions: Vec<String>,
 }
 
@@ -151,6 +157,9 @@ impl AppConfig {
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
             cleanup_deleted_files: std::env::var("VUIO_CLEANUP_DELETED")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(true),
+            autoplay_enabled: std::env::var("VUIO_AUTOPLAY")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
             supported_extensions: vec![
@@ -594,6 +603,7 @@ impl AppConfig {
                 scan_on_startup: true,
                 watch_for_changes: true,
                 cleanup_deleted_files: true,
+                autoplay_enabled: true,
                 supported_extensions: platform_config.get_default_media_extensions(),
             },
             database: DatabaseConfig {

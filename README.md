@@ -2,7 +2,7 @@
 
 A comprehensive, cross-platform DLNA/UPnP media server written in Rust with advanced platform integration, real-time file monitoring, and robust database management. Built with Axum, Tokio, and SQLite for high performance and reliability.
 
-Windows, Linux, FreeBSD, macOS, and Docker fully supported
+Windows, Linux, macOS, and Docker fully supported
 x64 and ARM64 supported
 
 ```bash
@@ -35,7 +35,6 @@ docker-compose -f docker-compose.yml up
 - **Windows Support** - Native networking and filesystem integration
 - **macOS Support** - Native networking and filesystem integration
 - **Linux Support** - Native networking and filesystem integration
-- **FreeBSD Support** - Native networking and filesystem integration
 - **Platform-Specific Optimizations** - Optimized networking and filesystem handling
 
 ### Advanced Database Management
@@ -382,13 +381,11 @@ uuidgen
 ```
 
 ### Native Platform Configuration (Config Files)
-When running natively (Windows, macOS, Linux, FreeBSD), VuIO uses TOML configuration files with platform-specific defaults:
+When running natively (Windows, macOS, Linux), VuIO uses TOML configuration files with platform-specific defaults:
 
 **Configuration Locations:**
-- **Windows:** `%APPDATA%\VuIO\config.toml`
-- **macOS:** `~/Library/Application Support/VuIO/config.toml`
-- **Linux:** `~/.config/vuio/config.toml`
-- **FreeBSD:** `~/.config/vuio/config.toml`
+- **Native Apps:** `.\config\config.toml`
+- **Docker:** `/config/config.toml`
 
 **Multiple Media Directories:**
 You can monitor multiple directories by adding multiple `[[media.directories]]` sections to your configuration file. Each directory can have its own settings for recursion, file extensions, and exclude patterns.
@@ -606,10 +603,6 @@ exclude_patterns = ["*.tmp", ".*", "*.m3u", "*.pls", "*.log"]
 - Supports mounted filesystems under `/media` and `/mnt`
 - Excludes `lost+found` and `.Trash-*` directories automatically
 
-### FreeBSD
-- Supports mounted filesystems under `/media` and `/mnt`
-- Excludes `lost+found` and `.Trash-*` directories automatically
-
 ## 🏗️ Architecture
 
 VuIO is built with a modular, cross-platform architecture:
@@ -632,10 +625,10 @@ VuIO is built with a modular, cross-platform architecture:
                                  │
          ┌─────────────────────────────────────────────────────┐
          │            Platform Layer                           │
-         │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  │
-         │  │   Windows   │  │    macOS    │  │    Linux    │  │   FreeBSD   │  │
-         │  │ Integration │  │ Integration │  │ Integration │  │ Integration │  │
-         │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘  │
+         │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  |
+         │  │   Windows   │  │    macOS    │  │    Linux    │  │
+         │  │ Integration │  │ Integration │  │ Integration │  │
+         │  └─────────────┘  └─────────────┘  └─────────────┘  │
          └─────────────────────────────────────────────────────┘
 ```
 

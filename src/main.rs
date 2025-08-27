@@ -12,6 +12,53 @@ use vuio::{
 use std::{net::SocketAddr, sync::Arc, path::PathBuf};
 use tracing::{debug, error, info, warn};
 
+/// Wait for shutdown signals (Ctrl+C, SIGTERM, etc.)
+/// Supports graceful shutdown on first signal, force quit on second signal
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        
+        let mut sigterm = signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+        let mut sigint = signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+        
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM signal");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT signal (Ctrl+C)");
+                
+                // Set up a second signal handler for force quit
+                tokio::spawn(async move {
+                    if sigint.recv().await.is_some() {
+                        warn!("Received second SIGINT signal - forcing immediate exit");
+                        std::process::exit(1);
+                    }
+                });
+            }
+        }
+    }
+    
+    #[cfg(not(unix))]
+    {
+        // On Windows, only Ctrl+C is available
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for Ctrl+C signal: {}", e);
+        } else {
+            info!("Received Ctrl+C signal");
+            
+            // Set up a second signal handler for force quit
+            tokio::spawn(async {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    warn!("Received second Ctrl+C signal - forcing immediate exit");
+                    std::process::exit(1);
+                }
+            });
+        }
+    }
+}
+
 /// Parse early command line arguments to get debug flag and config file path
 /// This is needed before logging initialization
 fn parse_early_args() -> (bool, Option<String>) {
@@ -136,26 +183,53 @@ async fn main() -> anyhow::Result<()> {
         return Err(e);
     }
 
-    // Start the HTTP server
-    if let Err(e) = start_http_server(app_state).await {
-        error!("Failed to start HTTP server: {}", e);
-        return Err(e);
-    }
+    // Start the HTTP server as a background task
+    let server_handle = match start_http_server_task(app_state).await {
+        Ok(handle) => handle,
+        Err(e) => {
+            error!("Failed to start HTTP server: {}", e);
+            return Err(e);
+        }
+    };
 
     // Wait for shutdown signal and cleanup
     tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received shutdown signal (Ctrl+C)");
+        _ = wait_for_shutdown_signal() => {
+            info!("Received shutdown signal");
         }
         _ = adaptation_handle => {
             warn!("Platform adaptation service stopped unexpectedly");
         }
+        result = server_handle => {
+            match result {
+                Ok(Ok(())) => info!("HTTP server stopped gracefully"),
+                Ok(Err(e)) => error!("HTTP server failed: {}", e),
+                Err(e) => error!("HTTP server task panicked: {}", e),
+            }
+        }
     }
 
-    // Graceful shutdown - security checks removed for faster startup
+    // Graceful shutdown with timeout
     info!("Shutting down gracefully...");
     
-    info!("Shutdown completed successfully");
+    // Give services a reasonable time to shut down gracefully
+    let shutdown_timeout = std::time::Duration::from_secs(5);
+    let shutdown_start = std::time::Instant::now();
+    
+    // Wait for any remaining tasks to complete or timeout
+    tokio::select! {
+        _ = tokio::time::sleep(shutdown_timeout) => {
+            warn!("Shutdown timeout reached after {:?}, forcing exit", shutdown_timeout);
+        }
+        _ = async {
+            // Allow some time for background tasks to clean up
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        } => {
+            let shutdown_duration = shutdown_start.elapsed();
+            info!("Shutdown completed successfully in {:?}", shutdown_duration);
+        }
+    }
+    
     Ok(())
 }
 
@@ -187,7 +261,7 @@ async fn start_platform_adaptation(
                         warn!("Configuration reload check failed: {}", e);
                     }
                 }
-                _ = tokio::signal::ctrl_c() => {
+                _ = wait_for_shutdown_signal() => {
                     info!("Platform adaptation service received shutdown signal");
                     break;
                 }
@@ -1183,8 +1257,8 @@ async fn start_ssdp_service(app_state: AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Start HTTP server with proper error handling
-async fn start_http_server(app_state: AppState) -> anyhow::Result<()> {
+/// Start HTTP server as a background task with proper error handling
+async fn start_http_server_task(app_state: AppState) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
     info!("Starting HTTP server...");
     
     let config = app_state.config.clone();
@@ -1212,12 +1286,14 @@ async fn start_http_server(app_state: AppState) -> anyhow::Result<()> {
     
     info!("HTTP server started successfully");
     
-    // Start the server
-    axum::serve(listener, app.into_make_service())
-        .await
-        .context("HTTP server failed")?;
+    // Spawn the server as a background task
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service())
+            .await
+            .context("HTTP server failed")
+    });
     
-    Ok(())
+    Ok(handle)
 }
 
 

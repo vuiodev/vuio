@@ -43,7 +43,6 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
 
 // Docker-specific SSDP implementation
 fn run_ssdp_service_docker(state: AppState) -> Result<()> {
-
     let network_manager = Arc::new(PlatformNetworkManager::new());
 
     // Log the IP that will be used for SSDP announcements
@@ -597,7 +596,6 @@ async fn ssdp_unified_service_docker(
     state: AppState,
     network_manager: Arc<PlatformNetworkManager>,
 ) -> Result<()> {
-
     const MAX_SOCKET_RETRIES: u32 = 5;
     const RETRY_DELAY_MS: u64 = 2000;
 

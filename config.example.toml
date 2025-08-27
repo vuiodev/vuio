@@ -2,17 +2,15 @@
 # Copy this file to your platform's config directory and rename to config.toml
 #
 # Platform-specific config locations:
-# - Windows: %APPDATA%\VuIO\config.toml
-# - macOS: ~/Library/Application Support/VuIO/config.toml  
-# - Linux: ~/.config/vuio/config.toml
+# - Native apps: ./config/config.toml
 # - Docker: /config/config.toml (mounted volume)
 
 [server]
 port = 8080
 interface = "0.0.0.0"
-name = "VuIO Server"
+name = "VuIO"
 uuid = "auto-generated-on-first-run"
-# ip = "192.168.1.100"  # Optional: Set specific IP for DLNA announcements (auto-detected if not set)
+ip = "192.168.1.100"
 
 [network]
 multicast_ttl = 4
