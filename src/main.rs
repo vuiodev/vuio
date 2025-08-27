@@ -241,21 +241,16 @@ async fn start_platform_adaptation(
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     info!("Starting platform adaptation services...");
     
-    let platform_info_clone = platform_info.clone();
     let config_clone = config.clone();
     let database_clone = database.clone();
     
     let handle = tokio::spawn(async move {
-        let mut network_check_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        // Disable frequent network checks to avoid repeated interface detection
+        // Network interfaces are detected once at startup and that's sufficient for most use cases
         let mut config_check_interval = tokio::time::interval(std::time::Duration::from_secs(60));
         
         loop {
             tokio::select! {
-                _ = network_check_interval.tick() => {
-                    if let Err(e) = check_and_adapt_network_changes(&platform_info_clone).await {
-                        warn!("Network adaptation check failed: {}", e);
-                    }
-                }
                 _ = config_check_interval.tick() => {
                     if let Err(e) = check_and_reload_configuration(&config_clone, &database_clone).await {
                         warn!("Configuration reload check failed: {}", e);
@@ -276,79 +271,10 @@ async fn start_platform_adaptation(
 }
 
 /// Check for network changes and adapt accordingly
-async fn check_and_adapt_network_changes(platform_info: &Arc<PlatformInfo>) -> anyhow::Result<()> {
-    // Re-detect network interfaces to check for changes
-    let current_platform_info = PlatformInfo::detect().await
-        .context("Failed to re-detect platform information")?;
-    
-    // Compare network interfaces
-    let old_interfaces = &platform_info.network_interfaces;
-    let new_interfaces = &current_platform_info.network_interfaces;
-    
-    // Check if interfaces have changed
-    let interfaces_changed = old_interfaces.len() != new_interfaces.len() ||
-        old_interfaces.iter().any(|old_iface| {
-            !new_interfaces.iter().any(|new_iface| {
-                old_iface.name == new_iface.name &&
-                old_iface.ip_address == new_iface.ip_address &&
-                old_iface.is_up == new_iface.is_up
-            })
-        });
-    
-    if interfaces_changed {
-        info!("Network interface changes detected");
-        
-        // Log changes
-        for old_iface in old_interfaces {
-            if !new_interfaces.iter().any(|new_iface| new_iface.name == old_iface.name) {
-                info!("Network interface removed: {} ({})", old_iface.name, old_iface.ip_address);
-            }
-        }
-        
-        for new_iface in new_interfaces {
-            if !old_interfaces.iter().any(|old_iface| old_iface.name == new_iface.name) {
-                info!("Network interface added: {} ({})", new_iface.name, new_iface.ip_address);
-            } else if let Some(old_iface) = old_interfaces.iter().find(|old| old.name == new_iface.name) {
-                if old_iface.ip_address != new_iface.ip_address {
-                    info!("Network interface IP changed: {} ({} -> {})", 
-                        new_iface.name, old_iface.ip_address, new_iface.ip_address);
-                }
-                if old_iface.is_up != new_iface.is_up {
-                    let status = if new_iface.is_up { "UP" } else { "DOWN" };
-                    info!("Network interface status changed: {} is now {}", new_iface.name, status);
-                }
-            }
-        }
-        
-        // Check if primary interface changed
-        let old_primary = platform_info.get_primary_interface();
-        let new_primary = current_platform_info.get_primary_interface();
-        
-        match (old_primary, new_primary) {
-            (Some(old), Some(new)) if old.name != new.name || old.ip_address != new.ip_address => {
-                info!("Primary network interface changed: {} ({}) -> {} ({})",
-                    old.name, old.ip_address, new.name, new.ip_address);
-                // TODO: Restart SSDP service with new interface
-            }
-            (Some(old), None) => {
-                warn!("Primary network interface lost: {} ({})", old.name, old.ip_address);
-                warn!("DLNA discovery may not work properly");
-            }
-            (None, Some(new)) => {
-                info!("Primary network interface available: {} ({})", new.name, new.ip_address);
-                // TODO: Start SSDP service if it wasn't running
-            }
-            _ => {} // No change in primary interface
-        }
-        
-        // Implement graceful degradation
-        if new_interfaces.is_empty() {
-            error!("No network interfaces available - DLNA functionality will be severely limited");
-        } else if new_interfaces.iter().all(|iface| !iface.supports_multicast) {
-            warn!("No multicast-capable interfaces available - DLNA discovery may not work");
-        }
-    }
-    
+async fn check_and_adapt_network_changes(_platform_info: &Arc<PlatformInfo>) -> anyhow::Result<()> {
+    // Skip network interface re-detection to avoid repeated logging
+    // Network interface detection should only happen once at startup
+    debug!("Skipping network interface re-detection - using startup configuration");
     Ok(())
 }
 
@@ -570,6 +496,7 @@ async fn handle_platform_feature_unavailable(feature: &str, error: &anyhow::Erro
 }
 
 /// Detect platform information with comprehensive diagnostics and error reporting
+/// This function should only be called once at startup to avoid repeated interface detection
 async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
     info!("Detecting platform information...");
     

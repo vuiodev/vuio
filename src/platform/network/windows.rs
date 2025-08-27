@@ -28,6 +28,7 @@ fn is_link_local_ipv6(addr: &Ipv6Addr) -> bool {
 /// Windows-specific network manager implementation
 pub struct WindowsNetworkManager {
     config: SsdpConfig,
+    cached_interfaces: std::sync::Arc<tokio::sync::RwLock<Option<Vec<NetworkInterface>>>>,
 }
 
 impl WindowsNetworkManager {
@@ -35,12 +36,23 @@ impl WindowsNetworkManager {
     pub fn new() -> Self {
         Self {
             config: SsdpConfig::default(),
+            cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
 
     /// Create a new Windows network manager with custom configuration
     pub fn with_config(config: SsdpConfig) -> Self {
-        Self { config }
+        Self { 
+            config,
+            cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Clear the cached network interfaces (forces re-detection on next call)
+    pub async fn clear_interface_cache(&self) {
+        let mut cached = self.cached_interfaces.write().await;
+        *cached = None;
+        debug!("Cleared network interface cache");
     }
 
     /// Check if the current process has administrator privileges
@@ -493,7 +505,26 @@ impl NetworkManager for WindowsNetworkManager {
     }
 
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        self.get_windows_interfaces().await
+        // Check if we have cached interfaces first
+        {
+            let cached = self.cached_interfaces.read().await;
+            if let Some(ref interfaces) = *cached {
+                debug!("Using cached network interfaces (count: {})", interfaces.len());
+                return Ok(interfaces.clone());
+            }
+        }
+
+        // No cached interfaces, detect them and cache the result
+        info!("Detecting network interfaces for the first time...");
+        let interfaces = self.get_windows_interfaces().await?;
+        
+        // Cache the result
+        {
+            let mut cached = self.cached_interfaces.write().await;
+            *cached = Some(interfaces.clone());
+        }
+        
+        Ok(interfaces)
     }
 
     async fn get_primary_interface(&self) -> PlatformResult<NetworkInterface> {

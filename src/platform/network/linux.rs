@@ -11,6 +11,7 @@ use tracing::{debug, info, warn, error};
 /// Linux-specific network manager implementation
 pub struct LinuxNetworkManager {
     config: SsdpConfig,
+    cached_interfaces: std::sync::Arc<tokio::sync::RwLock<Option<Vec<NetworkInterface>>>>,
 }
 
 impl LinuxNetworkManager {
@@ -18,12 +19,23 @@ impl LinuxNetworkManager {
     pub fn new() -> Self {
         Self {
             config: SsdpConfig::default(),
+            cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
     
     /// Create a new Linux network manager with custom configuration
     pub fn with_config(config: SsdpConfig) -> Self {
-        Self { config }
+        Self { 
+            config,
+            cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        }
+    }
+
+    /// Clear the cached network interfaces (forces re-detection on next call)
+    pub async fn clear_interface_cache(&self) {
+        let mut cached = self.cached_interfaces.write().await;
+        *cached = None;
+        debug!("Cleared network interface cache");
     }
     
     /// Check if running as root
@@ -830,7 +842,26 @@ impl NetworkManager for LinuxNetworkManager {
     }
     
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        self.get_linux_interfaces().await
+        // Check if we have cached interfaces first
+        {
+            let cached = self.cached_interfaces.read().await;
+            if let Some(ref interfaces) = *cached {
+                debug!("Using cached network interfaces (count: {})", interfaces.len());
+                return Ok(interfaces.clone());
+            }
+        }
+
+        // No cached interfaces, detect them and cache the result
+        info!("Detecting network interfaces for the first time...");
+        let interfaces = self.get_linux_interfaces().await?;
+        
+        // Cache the result
+        {
+            let mut cached = self.cached_interfaces.write().await;
+            *cached = Some(interfaces.clone());
+        }
+        
+        Ok(interfaces)
     }
     
     async fn get_primary_interface(&self) -> PlatformResult<NetworkInterface> {

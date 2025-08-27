@@ -43,9 +43,16 @@ async fn get_server_ip(state: &AppState) -> String {
         }
     }
     
-    // Auto-detect the primary network interface IP
-    if let Some(ip) = get_primary_interface_ip_async().await {
-        return ip;
+    // Use the primary interface detected at startup instead of re-detecting
+    if let Some(primary_interface) = state.platform_info.get_primary_interface() {
+        return primary_interface.ip_address.to_string();
+    }
+    
+    // Check if host IP is overridden via environment variable (for containers)
+    if let Ok(host_ip) = std::env::var("VUIO_IP") {
+        if !host_ip.is_empty() {
+            return host_ip;
+        }
     }
     
     // Last resort
@@ -53,62 +60,7 @@ async fn get_server_ip(state: &AppState) -> String {
     "127.0.0.1".to_string()
 }
 
-/// Async version of primary interface IP detection
-async fn get_primary_interface_ip_async() -> Option<String> {
-    use tokio::process::Command;
-    
-    // Check if host IP is overridden via environment variable (for containers)
-    if let Ok(host_ip) = std::env::var("VUIO_IP") {
-        if !host_ip.is_empty() {
-            return Some(host_ip);
-        }
-    }
-    
-    // Try to get the default route interface first (most reliable method)
-    if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output().await {
-        let route_output = String::from_utf8_lossy(&output.stdout);
-        if let Some(line) = route_output.lines().next() {
-            // Parse "default via X.X.X.X dev eth0" to get interface name
-            if let Some(dev_pos) = line.find(" dev ") {
-                let interface_part = &line[dev_pos + 5..];
-                if let Some(interface_name) = interface_part.split_whitespace().next() {
-                    // Get IP for this interface
-                    if let Ok(ip_output) = Command::new("ip").args(&["addr", "show", interface_name]).output().await {
-                        let ip_str = String::from_utf8_lossy(&ip_output.stdout);
-                        for line in ip_str.lines() {
-                            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") {
-                                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
-                                    if let Some(ip) = ip_part.split('/').next() {
-                                        return Some(ip.to_string());
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Fallback: try to find any non-loopback interface with an IP
-    if let Ok(output) = Command::new("ip").args(&["addr", "show"]).output().await {
-        let ip_str = String::from_utf8_lossy(&output.stdout);
-        for line in ip_str.lines() {
-            if line.trim().starts_with("inet ") && !line.contains("127.0.0.1") && !line.contains("169.254.") {
-                if let Some(ip_part) = line.trim().split_whitespace().nth(1) {
-                    if let Some(ip) = ip_part.split('/').next() {
-                        // Prefer private network ranges for local discovery
-                        if ip.starts_with("192.168.") || ip.starts_with("10.") || ip.starts_with("172.") {
-                            return Some(ip.to_string());
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    None
-}
+
 
 /// Get the appropriate UPnP class for a given MIME type.
 fn get_upnp_class(mime_type: &str) -> &str {
