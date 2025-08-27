@@ -3,7 +3,7 @@ use vuio::{
     config::AppConfig,
     database::{self, DatabaseManager, SqliteDatabase},
     logging, media,
-    platform::{self, PlatformInfo},
+    platform::{self, filesystem::create_platform_filesystem_manager, PlatformInfo},
     ssdp,
     state::AppState,
     watcher::{CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher},
@@ -157,10 +157,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Create shared application state
+    let filesystem_manager: Arc<dyn vuio::platform::filesystem::FileSystemManager> = 
+        Arc::from(create_platform_filesystem_manager());
     let app_state = AppState {
         config: config.clone(),
         database: database.clone(),
         platform_info: platform_info.clone(),
+        filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
     };
 

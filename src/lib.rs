@@ -12,7 +12,7 @@ pub mod state {
     use crate::{
         config::AppConfig,
         database::DatabaseManager,
-        platform::PlatformInfo,
+        platform::{filesystem::FileSystemManager, PlatformInfo},
     };
     use std::sync::Arc;
 
@@ -21,6 +21,7 @@ pub mod state {
         pub config: Arc<AppConfig>,
         pub database: Arc<dyn DatabaseManager>,
         pub platform_info: Arc<PlatformInfo>,
+        pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
     }
 }
