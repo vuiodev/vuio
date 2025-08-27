@@ -2,19 +2,19 @@
 
 ## Phase 1: Path Normalization Foundation
 
-- [ ] 1. Create PathNormalizer trait and core implementation
+- [x] 1. Create PathNormalizer trait and core implementation
   - Define PathNormalizer trait with to_canonical, from_canonical, and normalize_for_query methods
   - Implement WindowsPathNormalizer with lowercase, forward-slash canonical format
   - Create unit tests for path normalization edge cases (mixed case, different separators, UNC paths)
   - _Requirements: 1.1, 1.2, 1.4_
 
-- [ ] 2. Integrate path normalization into FileSystemManager
+- [x] 2. Integrate path normalization into FileSystemManager
   - Modify platform/filesystem/mod.rs to use PathNormalizer in normalize_path method
   - Update WindowsFileSystemManager to apply canonical normalization
   - Ensure canonicalize_path resolves symbolic links before normalization
   - _Requirements: 1.1, 1.4_
 
-- [ ] 3. Update MediaScanner to use canonical paths
+- [x] 3. Update MediaScanner to use canonical paths
   - Modify MediaScanner::scan_directory_recursive to normalize paths before database storage
   - Update MediaFile struct creation to use canonical path format
   - Apply normalization to both path and parent_path fields

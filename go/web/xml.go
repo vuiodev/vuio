@@ -4,7 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"log/slog"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"vuio-go/database"
@@ -106,30 +106,26 @@ func generateBrowseResponse(objectID string, subdirs []database.MediaDirectory, 
 		didl.WriteString(`<container id="video" parentID="0" restricted="1"><dc:title>Video</dc:title><upnp:class>object.container</upnp:class></container>`)
 		didl.WriteString(`<container id="audio" parentID="0" restricted="1"><dc:title>Audio</dc:title><upnp:class>object.container</upnp:class></container>`)
 		didl.WriteString(`<container id="image" parentID="0" restricted="1"><dc:title>Image</dc:title><upnp:class>object.container</upnp:class></container>`)
-	} else if strings.HasPrefix(objectID, "video") || strings.HasPrefix(objectID, "audio") || strings.HasPrefix(objectID, "image") {
-		// This logic needs to be expanded to handle the full browsing path.
-		// For simplicity, we just list the files under the primary media dir for now.
-		mediaRoot := state.GetConfig().GetPrimaryMediaDir()
-		// Convert ObjectID to a real path
-		browsePath := filepath.Join(mediaRoot, strings.TrimPrefix(objectID, "video/"))
-		
-		realSubdirs, realFiles, err := state.DB.GetDirectoryListing(browsePath, "")
+	} else {
+		// Use the subdirs and files passed from the handler
+		serverIP, err := platform.GetPrimaryIP()
 		if err != nil {
-			slog.Error("error getting dir listing for browse", "error", err, "path", browsePath)
-		} else {
-			serverIP, _ := platform.GetPrimaryIP()
-			port := state.GetConfig().Server.Port
+			slog.Error("Could not get primary IP for browse response", "error", err)
+			serverIP = "127.0.0.1" // Fallback
+		}
+		port := state.GetConfig().Server.Port
 
-			for _, dir := range realSubdirs {
-				containerID := fmt.Sprintf("%s/%s", objectID, dir.Name)
-				didl.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1"><dc:title>%s</dc:title><upnp:class>object.container</upnp:class></container>`,
-					xmlEscape(containerID), xmlEscape(objectID), xmlEscape(dir.Name)))
-			}
-			for _, file := range realFiles {
-				url := fmt.Sprintf("http://%s:%d/media/%d", serverIP, port, file.ID)
-				didl.WriteString(fmt.Sprintf(`<item id="%d" parentID="%s" restricted="1"><dc:title>%s</dc:title><upnp:class>%s</upnp:class><res protocolInfo="http-get:*:%s:*" size="%d">%s</res></item>`,
-					file.ID, xmlEscape(objectID), xmlEscape(file.Filename), getUPnPClass(file.MimeType), file.MimeType, file.Size, xmlEscape(url)))
-			}
+		for _, dir := range subdirs {
+			// Ensure containerID is correctly formed, especially for nested paths.
+			// Trim trailing slash from objectID to prevent double slashes like "video//subdir"
+			containerID := fmt.Sprintf("%s/%s", strings.TrimRight(objectID, "/"), dir.Name)
+			didl.WriteString(fmt.Sprintf(`<container id="%s" parentID="%s" restricted="1"><dc:title>%s</dc:title><upnp:class>object.container</upnp:class></container>`,
+				xmlEscape(containerID), xmlEscape(objectID), xmlEscape(dir.Name)))
+		}
+		for _, file := range files {
+			url := fmt.Sprintf("http://%s:%d/media/%d", serverIP, port, file.ID)
+			didl.WriteString(fmt.Sprintf(`<item id="%d" parentID="%s" restricted="1"><dc:title>%s</dc:title><upnp:class>%s</upnp:class><res protocolInfo="http-get:*:%s:*" size="%d">%s</res></item>`,
+				file.ID, xmlEscape(objectID), xmlEscape(file.Filename), getUPnPClass(file.MimeType), file.MimeType, file.Size, xmlEscape(url)))
 		}
 	}
 
@@ -172,7 +168,6 @@ func getUPnPClass(mimeType string) string {
 		return "object.item"
 	}
 }
-
 
 // --- XML Parsing Helpers ---
 

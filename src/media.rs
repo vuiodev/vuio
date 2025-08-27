@@ -37,23 +37,40 @@ impl MediaScanner {
     
     /// Simple directory scan that returns files without database operations
     pub async fn scan_directory_simple(&self, directory: &Path) -> Result<Vec<MediaFile>> {
-        let normalized_dir = self.filesystem_manager.normalize_path(directory);
+        // Use canonical path normalization for consistency
+        let canonical_dir = match self.filesystem_manager.get_canonical_path(directory) {
+            Ok(canonical) => PathBuf::from(canonical),
+            Err(e) => {
+                tracing::warn!("Failed to get canonical path for {}: {}, using basic normalization", directory.display(), e);
+                self.filesystem_manager.normalize_path(directory)
+            }
+        };
         
         // Validate the directory path
-        self.filesystem_manager.validate_path(&normalized_dir)?;
+        self.filesystem_manager.validate_path(&canonical_dir)?;
         
-        if !self.filesystem_manager.is_accessible(&normalized_dir).await {
+        if !self.filesystem_manager.is_accessible(&canonical_dir).await {
             return Err(anyhow::anyhow!(
                 "Directory is not accessible: {}",
-                normalized_dir.display()
+                canonical_dir.display()
             ));
         }
         
         // Scan the file system for current files
-        let fs_files = self.filesystem_manager
-            .scan_media_directory(&normalized_dir)
+        let mut fs_files = self.filesystem_manager
+            .scan_media_directory(&canonical_dir)
             .await
             .map_err(|e| anyhow::anyhow!("File system scan failed: {}", e))?;
+        
+        // Apply canonical path normalization to all scanned files
+        for file in &mut fs_files {
+            if let Ok(canonical_path) = self.filesystem_manager.get_canonical_path(&file.path) {
+                file.path = PathBuf::from(canonical_path);
+            } else {
+                // Fallback to basic normalization if canonical fails
+                file.path = self.filesystem_manager.normalize_path(&file.path);
+            }
+        }
         
         Ok(fs_files)
     }
@@ -62,12 +79,31 @@ impl MediaScanner {
     pub async fn scan_directory_recursively_simple(&self, directory: &Path) -> Result<Vec<MediaFile>> {
         let mut all_files = Vec::with_capacity(1000); // Pre-allocate capacity
         let mut dirs_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
-        dirs_to_scan.push(directory.to_path_buf());
+        
+        // Start with canonical path normalization
+        let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
+            Ok(canonical) => PathBuf::from(canonical),
+            Err(e) => {
+                tracing::warn!("Failed to get canonical path for {}: {}, using basic normalization", directory.display(), e);
+                self.filesystem_manager.normalize_path(directory)
+            }
+        };
+        
+        dirs_to_scan.push(canonical_root);
 
         while let Some(current_dir) = dirs_to_scan.pop() {
             // Scan current directory for files
             match self.filesystem_manager.scan_media_directory(&current_dir).await {
-                Ok(fs_files) => {
+                Ok(mut fs_files) => {
+                    // Apply canonical path normalization to all scanned files
+                    for file in &mut fs_files {
+                        if let Ok(canonical_path) = self.filesystem_manager.get_canonical_path(&file.path) {
+                            file.path = PathBuf::from(canonical_path);
+                        } else {
+                            // Fallback to basic normalization if canonical fails
+                            file.path = self.filesystem_manager.normalize_path(&file.path);
+                        }
+                    }
                     all_files.extend(fs_files);
                 }
                 Err(e) => warn!("Failed to scan directory {}: {}", current_dir.display(), e),
@@ -78,7 +114,12 @@ impl MediaScanner {
                 while let Ok(Some(entry)) = entries.next_entry().await {
                     let path = entry.path();
                     if path.is_dir() {
-                        dirs_to_scan.push(path);
+                        // Apply canonical normalization to subdirectory paths too
+                        let canonical_subdir = match self.filesystem_manager.get_canonical_path(&path) {
+                            Ok(canonical) => PathBuf::from(canonical),
+                            Err(_) => self.filesystem_manager.normalize_path(&path)
+                        };
+                        dirs_to_scan.push(canonical_subdir);
                     }
                 }
             }
@@ -104,15 +145,22 @@ impl MediaScanner {
     
     /// Internal method that allows passing existing files to avoid repeated database queries during recursive scans
     async fn scan_directory_with_existing_files(&self, directory: &Path, all_existing_files: Option<&[MediaFile]>) -> Result<ScanResult> {
-        let normalized_dir = self.filesystem_manager.normalize_path(directory);
+        // Use canonical path normalization for consistency
+        let canonical_dir = match self.filesystem_manager.get_canonical_path(directory) {
+            Ok(canonical) => PathBuf::from(canonical),
+            Err(e) => {
+                tracing::warn!("Failed to get canonical path for {}: {}, using basic normalization", directory.display(), e);
+                self.filesystem_manager.normalize_path(directory)
+            }
+        };
         
         // Validate the directory path
-        self.filesystem_manager.validate_path(&normalized_dir)?;
+        self.filesystem_manager.validate_path(&canonical_dir)?;
         
-        if !self.filesystem_manager.is_accessible(&normalized_dir).await {
+        if !self.filesystem_manager.is_accessible(&canonical_dir).await {
             return Err(anyhow::anyhow!(
                 "Directory is not accessible: {}",
-                normalized_dir.display()
+                canonical_dir.display()
             ));
         }
         
@@ -122,25 +170,39 @@ impl MediaScanner {
             all_files.iter()
                 .filter(|file| {
                     let file_parent = file.path.parent().unwrap_or_else(|| std::path::Path::new(""));
-                    let normalized_file_parent = self.filesystem_manager.normalize_path(file_parent);
-                    normalized_file_parent == normalized_dir
+                    // Use canonical normalization for consistent comparison
+                    let canonical_file_parent = match self.filesystem_manager.get_canonical_path(file_parent) {
+                        Ok(canonical) => PathBuf::from(canonical),
+                        Err(_) => self.filesystem_manager.normalize_path(file_parent)
+                    };
+                    canonical_file_parent == canonical_dir
                 })
                 .cloned()
                 .collect()
         } else {
             self.database_manager
-                .get_files_in_directory(&normalized_dir)
+                .get_files_in_directory(&canonical_dir)
                 .await?
         };
         
         // Scan the file system for current files
-        let current_files = self.filesystem_manager
-            .scan_media_directory(&normalized_dir)
+        let mut current_files = self.filesystem_manager
+            .scan_media_directory(&canonical_dir)
             .await
             .map_err(|e| anyhow::anyhow!("File system scan failed: {}", e))?;
         
+        // Apply canonical path normalization to all scanned files before database operations
+        for file in &mut current_files {
+            if let Ok(canonical_path) = self.filesystem_manager.get_canonical_path(&file.path) {
+                file.path = PathBuf::from(canonical_path);
+            } else {
+                // Fallback to basic normalization if canonical fails
+                file.path = self.filesystem_manager.normalize_path(&file.path);
+            }
+        }
+        
         // Perform incremental update
-        self.perform_incremental_update(&normalized_dir, existing_files, current_files).await
+        self.perform_incremental_update(&canonical_dir, existing_files, current_files).await
     }
     
     /// Perform an incremental update by comparing database state with file system state
@@ -158,19 +220,36 @@ impl MediaScanner {
         let mut existing_by_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(existing_files.len());
         
         for existing_file in existing_files {
-            let normalized_path = self.filesystem_manager.normalize_path(&existing_file.path);
-            
-
+            // Use canonical path normalization for database consistency
+            let canonical_path = match self.filesystem_manager.get_canonical_path(&existing_file.path) {
+                Ok(canonical) => PathBuf::from(canonical),
+                Err(e) => {
+                    tracing::warn!("Failed to get canonical path for {}: {}", existing_file.path.display(), e);
+                    self.filesystem_manager.normalize_path(&existing_file.path)
+                }
+            };
             
             existing_by_original.insert(existing_file.path.clone(), existing_file.clone());
-            existing_by_normalized.insert(normalized_path, existing_file);
+            existing_by_normalized.insert(canonical_path, existing_file);
         }
         
         // Current files paths - normalize for consistent comparison with pre-allocated capacity
         let mut current_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(current_files.len());
         for f in &current_files {
-            let normalized_path = self.filesystem_manager.normalize_path(&f.path);
-            current_normalized.insert(normalized_path, f.clone());
+            // Apply canonical path normalization to current files before database operations
+            let canonical_path = match self.filesystem_manager.get_canonical_path(&f.path) {
+                Ok(canonical) => PathBuf::from(canonical),
+                Err(e) => {
+                    tracing::warn!("Failed to get canonical path for {}: {}", f.path.display(), e);
+                    self.filesystem_manager.normalize_path(&f.path)
+                }
+            };
+            
+            // Create a normalized version of the MediaFile for database storage
+            let mut normalized_file = f.clone();
+            normalized_file.path = canonical_path.clone();
+            
+            current_normalized.insert(canonical_path, normalized_file);
         }
         
         let current_paths: HashSet<PathBuf> = current_normalized.keys().cloned().collect();
@@ -191,8 +270,9 @@ impl MediaScanner {
                             existing_file.path.display(), 
                             existing_file.modified, current_file.modified,
                             existing_file.size, current_file.size);
+                        
+                        // Use the canonical path from current_file (already normalized above)
                         let mut updated_file = current_file.clone();
-                        updated_file.path = normalized_current_path.clone(); // Use normalized path
                         updated_file.id = existing_file.id; // Preserve database ID
                         updated_file.created_at = existing_file.created_at; // Preserve creation time
                         updated_file.updated_at = SystemTime::now();
@@ -200,13 +280,20 @@ impl MediaScanner {
                         self.database_manager.update_media_file(&updated_file).await?;
                         result.updated_files.push(updated_file);
                     } else {
-                        // Check if the existing file path needs normalization
-                        let existing_normalized = self.filesystem_manager.normalize_path(&existing_file.path);
-                        if existing_file.path != existing_normalized {
-                            // Path needs normalization - update it in the database
-                            tracing::debug!("Normalizing path: '{}' -> '{}'", existing_file.path.display(), existing_normalized.display());
+                        // Check if the existing file path needs canonical normalization
+                        let existing_canonical = match self.filesystem_manager.get_canonical_path(&existing_file.path) {
+                            Ok(canonical) => PathBuf::from(canonical),
+                            Err(e) => {
+                                tracing::warn!("Failed to get canonical path for {}: {}", existing_file.path.display(), e);
+                                self.filesystem_manager.normalize_path(&existing_file.path)
+                            }
+                        };
+                        
+                        if existing_file.path != existing_canonical {
+                            // Path needs canonical normalization - update it in the database
+                            tracing::debug!("Normalizing path to canonical format: '{}' -> '{}'", existing_file.path.display(), existing_canonical.display());
                             let mut normalized_existing = existing_file.clone();
-                            normalized_existing.path = existing_normalized;
+                            normalized_existing.path = existing_canonical;
                             normalized_existing.updated_at = SystemTime::now();
                             
                             self.database_manager.update_media_file(&normalized_existing).await?;
@@ -217,12 +304,12 @@ impl MediaScanner {
                     }
                 }
                 None => {
-                    // New file, add to database with normalized path
-                    let mut normalized_file = current_file.clone();
-                    normalized_file.path = normalized_current_path.clone();
-                    let id = self.database_manager.store_media_file(&normalized_file).await?;
-                    normalized_file.id = Some(id);
-                    result.new_files.push(normalized_file);
+                    // New file, add to database with canonical path format
+                    // The current_file already has the canonical path from normalization above
+                    let id = self.database_manager.store_media_file(current_file).await?;
+                    let mut stored_file = current_file.clone();
+                    stored_file.id = Some(id);
+                    result.new_files.push(stored_file);
                 }
             }
         }
@@ -294,11 +381,18 @@ impl MediaScanner {
     
     /// Perform a recursive scan of a directory and its subdirectories
     pub async fn scan_directory_recursive(&self, directory: &Path) -> Result<ScanResult> {
-        let normalized_root = self.filesystem_manager.normalize_path(directory);
+        // Use canonical path normalization for consistent database storage
+        let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
+            Ok(canonical) => PathBuf::from(canonical),
+            Err(e) => {
+                tracing::warn!("Failed to get canonical path for {}: {}, using basic normalization", directory.display(), e);
+                self.filesystem_manager.normalize_path(directory)
+            }
+        };
         
         let mut combined_result = ScanResult::new();
         let mut directories_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
-        directories_to_scan.push(normalized_root.clone());
+        directories_to_scan.push(canonical_root.clone());
         
         while let Some(current_dir) = directories_to_scan.pop() {
             // Scan current directory individually without pre-loading all files
@@ -501,7 +595,7 @@ pub fn get_mime_type_legacy(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use crate::database::SqliteDatabase;
-    use crate::platform::filesystem::BaseFileSystemManager;
+    use crate::platform::filesystem::{BaseFileSystemManager, WindowsPathNormalizer};
     use std::sync::Arc;
     use tempfile::tempdir;
     
@@ -522,6 +616,42 @@ mod tests {
         let invalid_path = Path::new("/nonexistent/directory");
         let result = scanner.scan_directory(invalid_path).await;
         assert!(result.is_err());
+    }
+    
+    #[tokio::test]
+    async fn test_media_scanner_path_normalization() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        // Create database
+        let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
+        db.initialize().await.unwrap();
+        
+        // Create scanner with custom path normalizer for testing
+        let path_normalizer = Box::new(WindowsPathNormalizer::new());
+        let filesystem_manager = Box::new(BaseFileSystemManager::with_normalizer(false, path_normalizer));
+        let scanner = MediaScanner::with_filesystem_manager(filesystem_manager, db.clone());
+        
+        // Create a test media file in the temp directory
+        let test_file_path = temp_dir.path().join("test.mp4");
+        tokio::fs::write(&test_file_path, b"fake video content").await.unwrap();
+        
+        // Scan the directory
+        let result = scanner.scan_directory(temp_dir.path()).await.unwrap();
+        
+        // Verify that files were found and processed
+        assert_eq!(result.new_files.len(), 1);
+        let scanned_file = &result.new_files[0];
+        
+        // Verify that the path was normalized (should be canonical format)
+        let expected_canonical = scanner.filesystem_manager().get_canonical_path(&test_file_path).unwrap();
+        assert_eq!(scanned_file.path.to_string_lossy(), expected_canonical);
+        
+        // Verify the file was stored in the database with canonical path
+        let stored_file = db.get_file_by_path(&scanned_file.path).await.unwrap();
+        assert!(stored_file.is_some());
+        let stored_file = stored_file.unwrap();
+        assert_eq!(stored_file.path.to_string_lossy(), expected_canonical);
     }
     
     #[tokio::test]

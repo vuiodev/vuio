@@ -8,9 +8,10 @@ import (
 	"net/http"
 	"time"
 
+	"vuio-go/state"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"vuio-go/state"
 )
 
 // Server wraps the HTTP server.
@@ -82,7 +83,7 @@ func (s *Server) router() http.Handler {
 	r.Get("/description.xml", descriptionHandler)
 	r.Get("/ContentDirectory.xml", contentDirectorySCPDHandler)
 	r.Handle("/control/ContentDirectory", soapHandler(contentDirectoryControlHandler))
-	r.Handle("/event/ContentDirectory", eventSubscribeHandler)
+	r.Handle("/event/ContentDirectory", http.HandlerFunc(eventSubscribeHandler))
 	r.Get("/media/{id}", serveMediaHandler)
 
 	return r

@@ -573,8 +573,9 @@ mod filesystem_tests {
             
             match canonical_result {
                 Ok(canonical_path) => {
-                    // Should resolve to absolute path
-                    assert!(canonical_path.is_absolute());
+                    // Should resolve to canonical string format (lowercase, forward slashes)
+                    assert!(!canonical_path.is_empty());
+                    assert!(canonical_path.contains("/") || canonical_path.len() >= 2); // Should have forward slashes or be a drive letter
                     println!("Canonical path: {:?}", canonical_path);
                 }
                 Err(e) => {

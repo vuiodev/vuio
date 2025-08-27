@@ -7,15 +7,19 @@ use tokio::fs;
 /// Windows-specific file system manager
 pub struct WindowsFileSystemManager {
     base: BaseFileSystemManager,
+    path_normalizer: Box<dyn super::PathNormalizer>,
 }
 
 impl WindowsFileSystemManager {
     /// Create a new Windows file system manager
     pub fn new() -> Self {
+        let path_normalizer = Box::new(super::WindowsPathNormalizer::new());
         Self {
-            base: BaseFileSystemManager::new(false), // Windows NTFS is case-insensitive by default
+            base: BaseFileSystemManager::with_normalizer(false, Box::new(super::WindowsPathNormalizer::new())),
+            path_normalizer,
         }
     }
+}
     
     /// Check if a path is a UNC path (\\server\share\path)
     fn is_unc_path(&self, path: &Path) -> bool {
@@ -312,56 +316,56 @@ impl FileSystemManager for WindowsFileSystemManager {
             });
         }
         
-        // Use the base implementation for scanning, but with Windows-specific path handling
-        let normalized_path = self.normalize_windows_path(path);
-        self.base.scan_directory_common(&normalized_path).await
+        // Use the base implementation for scanning
+        self.base.scan_directory_common(path).await
     }
     
     fn normalize_path(&self, path: &Path) -> PathBuf {
         self.normalize_windows_path(path)
     }
     
+    fn get_canonical_path(&self, path: &Path) -> Result<String, super::PathNormalizationError> {
+        self.path_normalizer.to_canonical(path)
+    }
+    
     async fn is_accessible(&self, path: &Path) -> bool {
-        let normalized_path = self.normalize_windows_path(path);
-        
         // For directories, check if we can read the directory
-        if normalized_path.is_dir() {
-            tokio::fs::read_dir(&normalized_path).await.is_ok()
+        if path.is_dir() {
+            tokio::fs::read_dir(path).await.is_ok()
         } else {
             // For files, try to access the path with read-only access
             tokio::fs::OpenOptions::new()
                 .read(true)
                 .write(false)
-                .open(&normalized_path)
+                .open(path)
                 .await
                 .is_ok()
         }
     }
     
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
-        let normalized_path = self.normalize_windows_path(path);
         // Enforce read-only access to media files
         let metadata = tokio::fs::OpenOptions::new()
             .read(true)
             .write(false)
-            .open(&normalized_path)
+            .open(path)
             .await?
             .metadata()
             .await?;
         
-        let permissions = self.get_windows_permissions(&normalized_path).await?;
+        let permissions = self.get_windows_permissions(path).await?;
         
-        let mime_type = normalized_path
+        let mime_type = path
             .extension()
             .and_then(|ext| ext.to_str())
             .map(super::get_mime_type_for_extension)
             .unwrap_or_else(|| "application/octet-stream".to_string());
         
-        let is_hidden = self.is_hidden_windows(&normalized_path);
+        let is_hidden = self.is_hidden_windows(path);
         
         let mut platform_metadata = HashMap::new();
-        platform_metadata.insert("is_unc_path".to_string(), self.is_unc_path(&normalized_path).to_string());
-        platform_metadata.insert("has_drive_letter".to_string(), self.has_drive_letter(&normalized_path).to_string());
+        platform_metadata.insert("is_unc_path".to_string(), self.is_unc_path(path).to_string());
+        platform_metadata.insert("has_drive_letter".to_string(), self.has_drive_letter(path).to_string());
         
         Ok(FileInfo {
             size: metadata.len(),
@@ -374,31 +378,37 @@ impl FileSystemManager for WindowsFileSystemManager {
     }
     
     fn paths_equal(&self, path1: &Path, path2: &Path) -> bool {
-        // Windows paths are case-insensitive
-        let norm1 = self.normalize_windows_path(path1);
-        let norm2 = self.normalize_windows_path(path2);
-        
-        norm1.to_string_lossy().to_lowercase() == norm2.to_string_lossy().to_lowercase()
+        // Windows paths are case-insensitive - use path normalizer for comparison
+        match (self.path_normalizer.to_canonical(path1), self.path_normalizer.to_canonical(path2)) {
+            (Ok(norm1), Ok(norm2)) => norm1 == norm2,
+            _ => {
+                // Fallback to basic comparison if normalization fails
+                path1.to_string_lossy().to_lowercase() == path2.to_string_lossy().to_lowercase()
+            }
+        }
     }
     
     fn validate_path(&self, path: &Path) -> Result<(), FileSystemError> {
         self.validate_windows_path(path)
     }
     
-    async fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
-        let normalized_path = self.normalize_windows_path(path);
-        
-        match fs::canonicalize(&normalized_path).await {
-            Ok(canonical) => Ok(canonical),
+    async fn canonicalize_path(&self, path: &Path) -> Result<String, FileSystemError> {
+        // First resolve symbolic links and relative components
+        match fs::canonicalize(path).await {
+            Ok(canonical_path) => {
+                // Then apply Windows-specific path normalization to the resolved path
+                self.path_normalizer.to_canonical(&canonical_path)
+                    .map_err(|e| FileSystemError::Platform(format!("Windows path normalization failed: {}", e)))
+            }
             Err(err) => {
                 // If canonicalization fails, try to provide a helpful error
                 if err.kind() == std::io::ErrorKind::NotFound {
                     Err(FileSystemError::PathNotFound {
-                        path: normalized_path.display().to_string(),
+                        path: path.display().to_string(),
                     })
                 } else if err.kind() == std::io::ErrorKind::PermissionDenied {
                     Err(FileSystemError::AccessDenied {
-                        path: normalized_path.display().to_string(),
+                        path: path.display().to_string(),
                         reason: "Permission denied when accessing path".to_string(),
                     })
                 } else {

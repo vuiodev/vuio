@@ -6,10 +6,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath" // Added for path manipulation
 	"strconv"
+	"strings"
+
+	"vuio-go/database"
+	"vuio-go/state"
 
 	"github.com/go-chi/chi/v5"
-	"vuio-go/state"
 )
 
 func getState(r *http.Request) *state.AppState {
@@ -59,14 +63,56 @@ func contentDirectoryControlHandler(w http.ResponseWriter, r *http.Request) (str
 		params := parseBrowseParams(action)
 		slog.Info("Browse request", "ObjectID", params.ObjectID, "StartIndex", params.StartingIndex, "Count", params.RequestedCount)
 
-		listing, err := state.DB.GetDirectoryListing(params.ObjectID, "")
+		var subdirs []database.MediaDirectory
+		var files []database.MediaFile
+		var err error
+
+		if params.ObjectID == "0" {
+			// Root object ID. The response will contain the virtual directories.
+			// No database query needed for this level.
+			subdirs = []database.MediaDirectory{}
+			files = []database.MediaFile{}
+		} else {
+			// Determine browse path and filter from object ID.
+			// This is simplified and assumes a single media root. A more robust implementation
+			// would map 'video', 'audio', 'image' roots to different configured directories.
+			mediaRoot := state.Config.GetPrimaryMediaDir()
+			var browsePath string
+			var mediaTypeFilter string
+			var subPath string
+
+			if strings.HasPrefix(params.ObjectID, "video") {
+				mediaTypeFilter = "video"
+				subPath = strings.TrimPrefix(params.ObjectID, "video")
+			} else if strings.HasPrefix(params.ObjectID, "audio") {
+				mediaTypeFilter = "audio"
+				subPath = strings.TrimPrefix(params.ObjectID, "audio")
+			} else if strings.HasPrefix(params.ObjectID, "image") {
+				mediaTypeFilter = "image"
+				subPath = strings.TrimPrefix(params.ObjectID, "image")
+			} else {
+				// Fallback or handle other object IDs if necessary
+				return "", fmt.Errorf("invalid or unhandled ObjectID: %s", params.ObjectID)
+			}
+
+			// Remove any leading slash from the subPath to ensure filepath.Join works correctly
+			subPath = strings.TrimPrefix(subPath, "/")
+			browsePath = filepath.Join(mediaRoot, subPath)
+
+			subdirs, files, err = state.DB.GetDirectoryListing(browsePath, mediaTypeFilter)
+		}
+
 		if err != nil {
 			return "", err
 		}
-		
-		totalMatches := len(listing.Subdirectories) + len(listing.Files)
-		
-		response := generateBrowseResponse(params.ObjectID, listing.Subdirectories, listing.Files, totalMatches, state)
+
+		totalMatches := len(subdirs) + len(files)
+		// For the root object, there are always 3 virtual containers.
+		if params.ObjectID == "0" {
+			totalMatches = 3
+		}
+
+		response := generateBrowseResponse(params.ObjectID, subdirs, files, totalMatches, state)
 		return response, nil
 	}
 

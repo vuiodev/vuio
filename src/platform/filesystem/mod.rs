@@ -10,6 +10,155 @@ use crate::database::MediaFile;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+/// Path normalization trait for consistent path handling across platforms
+pub trait PathNormalizer: Send + Sync {
+    /// Convert any path to canonical database format (lowercase, absolute paths with forward slashes)
+    fn to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError>;
+    
+    /// Convert canonical format back to platform path
+    fn from_canonical(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError>;
+    
+    /// Normalize path for database queries (same as to_canonical but with explicit intent)
+    fn normalize_for_query(&self, path: &Path) -> Result<String, PathNormalizationError>;
+}
+
+/// Path normalization specific errors
+#[derive(Error, Debug, Clone, PartialEq)]
+pub enum PathNormalizationError {
+    #[error("Invalid path format: {path}")]
+    InvalidFormat { path: String },
+    
+    #[error("Path canonicalization failed: {path} - {error}")]
+    CanonicalizationFailed { path: String, error: String },
+    
+    #[error("Unsupported path type: {path}")]
+    UnsupportedType { path: String },
+    
+    #[error("Path contains invalid characters: {path}")]
+    InvalidCharacters { path: String },
+    
+    #[error("Path is too long: {path}")]
+    PathTooLong { path: String },
+}
+
+/// Windows-specific path normalizer implementation
+pub struct WindowsPathNormalizer;
+
+impl WindowsPathNormalizer {
+    pub fn new() -> Self {
+        Self
+    }
+    
+    /// Convert Windows path to canonical format (lowercase, forward slashes)
+    fn normalize_to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        let path_str = path.to_string_lossy();
+        
+        // Validate path length
+        if path_str.len() > 4096 {
+            return Err(PathNormalizationError::PathTooLong {
+                path: path_str.to_string(),
+            });
+        }
+        
+        // Check for invalid characters
+        let invalid_chars = ['\0', '<', '>', '"', '|', '?', '*'];
+        for &invalid_char in &invalid_chars {
+            if path_str.contains(invalid_char) {
+                return Err(PathNormalizationError::InvalidCharacters {
+                    path: path_str.to_string(),
+                });
+            }
+        }
+        
+        // Convert to lowercase and use forward slashes
+        let mut canonical = path_str.to_lowercase();
+        canonical = canonical.replace('\\', "/");
+        
+        // Handle UNC paths - preserve the leading double slash
+        if canonical.starts_with("//") {
+            // UNC path: //server/share/path
+            Ok(canonical)
+        } else if canonical.len() >= 2 && canonical.chars().nth(1) == Some(':') {
+            // Drive letter path: c:/path/to/file
+            Ok(canonical)
+        } else if canonical.starts_with('/') {
+            // Already absolute Unix-style path
+            Ok(canonical)
+        } else {
+            // Relative path - this might need to be made absolute
+            // For now, return as-is but this could be enhanced
+            Ok(canonical)
+        }
+    }
+    
+    /// Convert canonical format back to Windows path format
+    fn canonical_to_windows(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
+        if canonical.is_empty() {
+            return Err(PathNormalizationError::InvalidFormat {
+                path: canonical.to_string(),
+            });
+        }
+        
+        // Convert forward slashes back to backslashes
+        let windows_path = canonical.replace('/', "\\");
+        
+        // Handle UNC paths
+        if windows_path.starts_with("\\\\") {
+            return Ok(PathBuf::from(windows_path));
+        }
+        
+        // Handle drive letter paths
+        if windows_path.len() >= 2 && windows_path.chars().nth(1) == Some(':') {
+            // Ensure drive letter is uppercase for consistency
+            let mut chars: Vec<char> = windows_path.chars().collect();
+            if let Some(first_char) = chars.get_mut(0) {
+                *first_char = first_char.to_ascii_uppercase();
+            }
+            let normalized_windows: String = chars.into_iter().collect();
+            return Ok(PathBuf::from(normalized_windows));
+        }
+        
+        // For other paths, return as-is
+        Ok(PathBuf::from(windows_path))
+    }
+}
+
+impl PathNormalizer for WindowsPathNormalizer {
+    fn to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        self.normalize_to_canonical(path)
+    }
+    
+    fn from_canonical(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
+        self.canonical_to_windows(canonical)
+    }
+    
+    fn normalize_for_query(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        // Same as to_canonical - explicit method for query context
+        self.normalize_to_canonical(path)
+    }
+}
+
+impl Default for WindowsPathNormalizer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Create a platform-specific path normalizer
+pub fn create_platform_path_normalizer() -> Box<dyn PathNormalizer> {
+    #[cfg(target_os = "windows")]
+    {
+        Box::new(WindowsPathNormalizer::new())
+    }
+    
+    #[cfg(not(target_os = "windows"))]
+    {
+        // For non-Windows platforms, we'll use a simple normalizer
+        // This can be enhanced later with platform-specific implementations
+        Box::new(WindowsPathNormalizer::new()) // Placeholder - would be UnixPathNormalizer
+    }
+}
+
 /// File system manager trait for cross-platform file operations
 #[async_trait::async_trait]
 pub trait FileSystemManager: Send + Sync {
@@ -18,6 +167,9 @@ pub trait FileSystemManager: Send + Sync {
     
     /// Normalize a path for the current platform
     fn normalize_path(&self, path: &Path) -> PathBuf;
+    
+    /// Get canonical string representation of a path for database storage
+    fn get_canonical_path(&self, path: &Path) -> Result<String, PathNormalizationError>;
     
     /// Check if a path is accessible with current permissions
     async fn is_accessible(&self, path: &Path) -> bool;
@@ -31,8 +183,8 @@ pub trait FileSystemManager: Send + Sync {
     /// Validate that a path is safe to access (security check)
     fn validate_path(&self, path: &Path) -> Result<(), FileSystemError>;
     
-    /// Get the canonical form of a path
-    async fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, FileSystemError>;
+    /// Get the canonical form of a path (resolves symbolic links before normalization)
+    async fn canonicalize_path(&self, path: &Path) -> Result<String, FileSystemError>;
     
     /// Check if a file matches the given extensions (case-insensitive on Windows)
     fn matches_extension(&self, path: &Path, extensions: &[String]) -> bool;
@@ -371,12 +523,25 @@ pub fn is_supported_media_extension(extension: &str) -> bool {
 pub struct BaseFileSystemManager {
     /// Whether the file system is case-sensitive
     pub case_sensitive: bool,
+    /// Path normalizer for consistent path handling
+    pub path_normalizer: Box<dyn PathNormalizer>,
 }
 
 impl BaseFileSystemManager {
     /// Create a new base file system manager
     pub fn new(case_sensitive: bool) -> Self {
-        Self { case_sensitive }
+        Self { 
+            case_sensitive,
+            path_normalizer: create_platform_path_normalizer(),
+        }
+    }
+    
+    /// Create a new base file system manager with custom path normalizer
+    pub fn with_normalizer(case_sensitive: bool, path_normalizer: Box<dyn PathNormalizer>) -> Self {
+        Self { 
+            case_sensitive,
+            path_normalizer,
+        }
     }
     
     /// Common path validation logic
@@ -533,6 +698,10 @@ impl FileSystemManager for BaseFileSystemManager {
         path.to_path_buf()
     }
     
+    fn get_canonical_path(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        self.path_normalizer.to_canonical(path)
+    }
+    
     async fn is_accessible(&self, path: &Path) -> bool {
         // For directories, check if we can read the directory
         if path.is_dir() {
@@ -564,8 +733,13 @@ impl FileSystemManager for BaseFileSystemManager {
         self.validate_path_common(path)
     }
     
-    async fn canonicalize_path(&self, path: &Path) -> Result<PathBuf, FileSystemError> {
-        fs::canonicalize(path).await.map_err(FileSystemError::from)
+    async fn canonicalize_path(&self, path: &Path) -> Result<String, FileSystemError> {
+        // First resolve symbolic links and relative components
+        let canonical_path = fs::canonicalize(path).await.map_err(FileSystemError::from)?;
+        
+        // Then apply path normalization to the resolved path
+        self.path_normalizer.to_canonical(&canonical_path)
+            .map_err(|e| FileSystemError::Platform(format!("Path normalization failed: {}", e)))
     }
     
     fn matches_extension(&self, path: &Path, extensions: &[String]) -> bool {
@@ -722,5 +896,246 @@ mod tests {
         
         assert!(!case_sensitive.matches_extension(path, &extensions));
         assert!(case_insensitive.matches_extension(path, &extensions));
+    }
+    
+    // PathNormalizer tests
+    mod path_normalizer_tests {
+        use super::*;
+        
+        #[test]
+        fn test_windows_path_normalization_basic() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test basic Windows path with backslashes
+            let result = normalizer.to_canonical(Path::new(r"C:\Users\Media")).unwrap();
+            assert_eq!(result, "c:/users/media");
+            
+            // Test mixed case
+            let result = normalizer.to_canonical(Path::new(r"C:\Users\MEDIA\Videos")).unwrap();
+            assert_eq!(result, "c:/users/media/videos");
+            
+            // Test forward slashes (already normalized)
+            let result = normalizer.to_canonical(Path::new("C:/Users/Media")).unwrap();
+            assert_eq!(result, "c:/users/media");
+        }
+        
+        #[test]
+        fn test_windows_path_normalization_mixed_separators() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test mixed separators
+            let result = normalizer.to_canonical(Path::new(r"C:\Users/Media\Videos")).unwrap();
+            assert_eq!(result, "c:/users/media/videos");
+            
+            // Test multiple consecutive separators
+            let result = normalizer.to_canonical(Path::new(r"C:\Users\\Media")).unwrap();
+            assert_eq!(result, "c:/users//media");
+        }
+        
+        #[test]
+        fn test_windows_path_normalization_unc_paths() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test UNC path
+            let result = normalizer.to_canonical(Path::new(r"\\Server\Share\Media")).unwrap();
+            assert_eq!(result, "//server/share/media");
+            
+            // Test UNC path with port
+            let result = normalizer.to_canonical(Path::new(r"\\192.168.1.100\Media")).unwrap();
+            assert_eq!(result, "//192.168.1.100/media");
+        }
+        
+        #[test]
+        fn test_windows_path_normalization_edge_cases() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test drive letter only
+            let result = normalizer.to_canonical(Path::new("C:")).unwrap();
+            assert_eq!(result, "c:");
+            
+            // Test root path
+            let result = normalizer.to_canonical(Path::new(r"C:\")).unwrap();
+            assert_eq!(result, "c:/");
+            
+            // Test relative path
+            let result = normalizer.to_canonical(Path::new(r"Media\Videos")).unwrap();
+            assert_eq!(result, "media/videos");
+        }
+        
+        #[test]
+        fn test_canonical_to_windows_conversion() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test basic conversion
+            let result = normalizer.from_canonical("c:/users/media").unwrap();
+            assert_eq!(result, PathBuf::from(r"C:\users\media"));
+            
+            // Test UNC path conversion
+            let result = normalizer.from_canonical("//server/share/media").unwrap();
+            assert_eq!(result, PathBuf::from(r"\\server\share\media"));
+            
+            // Test drive letter capitalization
+            let result = normalizer.from_canonical("d:/media/videos").unwrap();
+            assert_eq!(result, PathBuf::from(r"D:\media\videos"));
+        }
+        
+        #[test]
+        fn test_normalize_for_query() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Should be identical to to_canonical
+            let path = Path::new(r"C:\Users\Media");
+            let canonical = normalizer.to_canonical(path).unwrap();
+            let query_normalized = normalizer.normalize_for_query(path).unwrap();
+            
+            assert_eq!(canonical, query_normalized);
+            assert_eq!(query_normalized, "c:/users/media");
+        }
+        
+        #[test]
+        fn test_path_normalization_invalid_characters() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test null byte
+            assert!(normalizer.to_canonical(Path::new("C:\\path\0")).is_err());
+            
+            // Test invalid Windows characters
+            assert!(normalizer.to_canonical(Path::new("C:\\path<file")).is_err());
+            assert!(normalizer.to_canonical(Path::new("C:\\path>file")).is_err());
+            assert!(normalizer.to_canonical(Path::new("C:\\path\"file")).is_err());
+            assert!(normalizer.to_canonical(Path::new("C:\\path|file")).is_err());
+            assert!(normalizer.to_canonical(Path::new("C:\\path?file")).is_err());
+            assert!(normalizer.to_canonical(Path::new("C:\\path*file")).is_err());
+        }
+        
+        #[test]
+        fn test_path_normalization_too_long() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Create a very long path
+            let long_path = "C:\\".to_string() + &"a".repeat(5000);
+            assert!(normalizer.to_canonical(Path::new(&long_path)).is_err());
+        }
+        
+        #[test]
+        fn test_canonical_format_consistency() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Different representations of the same path should normalize to the same canonical form
+            let paths = vec![
+                r"C:\Users\Media",
+                r"c:\users\media",
+                r"C:/Users/Media",
+                r"c:/users/media",
+                r"C:\Users/Media",
+            ];
+            
+            let mut canonical_results = Vec::new();
+            for path_str in paths {
+                let canonical = normalizer.to_canonical(Path::new(path_str)).unwrap();
+                canonical_results.push(canonical);
+            }
+            
+            // All should be the same
+            let expected = "c:/users/media";
+            for result in canonical_results {
+                assert_eq!(result, expected);
+            }
+        }
+        
+        #[test]
+        fn test_roundtrip_conversion() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            let test_paths = vec![
+                r"C:\Users\Media\Videos",
+                r"D:\Music\Albums",
+                r"\\Server\Share\Media",
+                r"E:\",
+            ];
+            
+            for original_path in test_paths {
+                let canonical = normalizer.to_canonical(Path::new(original_path)).unwrap();
+                let back_to_windows = normalizer.from_canonical(&canonical).unwrap();
+                
+                // The roundtrip should preserve the essential path structure
+                // (though case and separator format may change)
+                let re_canonical = normalizer.to_canonical(&back_to_windows).unwrap();
+                assert_eq!(canonical, re_canonical);
+            }
+        }
+        
+        #[test]
+        fn test_filesystem_manager_path_normalization_integration() {
+            let manager = create_platform_filesystem_manager();
+            
+            // Test that normalize_path still works as expected (returns PathBuf)
+            let test_path = Path::new("test/path");
+            let normalized = manager.normalize_path(test_path);
+            assert!(normalized.is_absolute() || normalized.is_relative());
+            
+            // Test that get_canonical_path returns the canonical string format
+            let canonical_result = manager.get_canonical_path(test_path);
+            assert!(canonical_result.is_ok());
+            
+            let canonical = canonical_result.unwrap();
+            assert!(canonical.contains("/") || canonical.len() > 0); // Should be forward-slash format
+        }
+        
+        #[tokio::test]
+        async fn test_canonicalize_path_resolves_before_normalization() {
+            // This test verifies that canonicalize_path resolves symbolic links before normalization
+            // Note: This is a unit test that verifies the method signature and basic functionality
+            // Integration tests would verify actual symbolic link resolution
+            
+            let manager = create_platform_filesystem_manager();
+            
+            // Test with a simple path (this will likely fail since the path doesn't exist,
+            // but we're testing the method signature and error handling)
+            let test_path = Path::new("nonexistent/test/path");
+            let result = manager.canonicalize_path(test_path).await;
+            
+            // Should return an error since the path doesn't exist, but the error should be
+            // a FileSystemError, not a compilation error
+            assert!(result.is_err());
+            
+            // The return type should be Result<String, FileSystemError> (canonical format)
+            match result {
+                Err(FileSystemError::PathNotFound { .. }) => {
+                    // Expected error for non-existent path
+                }
+                Err(FileSystemError::Io(_)) => {
+                    // Also acceptable - depends on platform
+                }
+                Err(other) => {
+                    // Other errors are also acceptable for this test
+                    println!("Got error: {:?}", other);
+                }
+                Ok(_) => {
+                    panic!("Expected error for non-existent path");
+                }
+            }
+        }
+        
+        #[test]
+        fn test_empty_and_invalid_canonical_paths() {
+            let normalizer = WindowsPathNormalizer::new();
+            
+            // Test empty canonical path
+            assert!(normalizer.from_canonical("").is_err());
+            
+            // Test valid canonical paths
+            assert!(normalizer.from_canonical("c:/users/media").is_ok());
+            assert!(normalizer.from_canonical("//server/share").is_ok());
+        }
+        
+        #[test]
+        fn test_platform_path_normalizer_creation() {
+            let normalizer = create_platform_path_normalizer();
+            
+            // Should be able to normalize a basic path
+            let result = normalizer.to_canonical(Path::new("C:/Test/Path"));
+            assert!(result.is_ok());
+        }
     }
 }

@@ -64,11 +64,12 @@ func (s *Scanner) ScanDirectory(dirConfig *config.MonitoredDirectoryConfig) erro
 		}
 
 		// Sync file with database
-		return s.syncFile(path, info)
+		return s.SyncFile(path, info)
 	})
 }
 
-func (s *Scanner) syncFile(path string, info os.FileInfo) error {
+// SyncFile checks a single file against the database and adds/updates it if necessary.
+func (s *Scanner) SyncFile(path string, info os.FileInfo) error {
 	existing, err := s.db.GetFileByPath(path)
 	if err != nil {
 		return fmt.Errorf("error getting file from db: %w", err)
@@ -122,15 +123,15 @@ func (s *Scanner) cleanup() error {
 // buildMediaFile creates a MediaFile struct from file info.
 func buildMediaFile(path string, info os.FileInfo) *database.MediaFile {
 	return &database.MediaFile{
-		Path:        path,
-		ParentPath:  filepath.Dir(path),
-		Filename:    info.Name(),
-		Size:        info.Size(),
-		Modified:    info.ModTime(),
-		MimeType:    getMimeType(path),
-		Title:       sql.NullString{String: strings.TrimSuffix(info.Name(), filepath.Ext(info.Name())), Valid: true},
-		CreatedAt:   time.Now(),
-		UpdatedAt:   time.Now(),
+		Path:       path,
+		ParentPath: filepath.Dir(path),
+		Filename:   info.Name(),
+		Size:       info.Size(),
+		Modified:   info.ModTime(),
+		MimeType:   getMimeType(path),
+		Title:      sql.NullString{String: strings.TrimSuffix(info.Name(), filepath.Ext(info.Name())), Valid: true},
+		CreatedAt:  time.Now(),
+		UpdatedAt:  time.Now(),
 	}
 }
 

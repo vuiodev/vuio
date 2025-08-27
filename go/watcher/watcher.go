@@ -7,9 +7,10 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/fsnotify/fsnotify"
 	"vuio-go/media"
 	"vuio-go/state"
+
+	"github.com/fsnotify/fsnotify"
 )
 
 // Watcher monitors the filesystem for changes.
@@ -103,7 +104,7 @@ func (w *Watcher) handleEvents(events []fsnotify.Event) {
 					// In a real implementation, we'd add this new dir to the watcher.
 					// For now, we'll rely on the initial recursive walk.
 				} else {
-					if err := w.scanner.syncFile(path, info); err == nil {
+					if err := w.scanner.SyncFile(path, info); err == nil {
 						contentChanged = true
 					}
 				}
@@ -112,7 +113,7 @@ func (w *Watcher) handleEvents(events []fsnotify.Event) {
 			slog.Info("File modified", "path", path)
 			info, err := os.Stat(path)
 			if err == nil {
-				if err := w.scanner.syncFile(path, info); err == nil {
+				if err := w.scanner.SyncFile(path, info); err == nil {
 					contentChanged = true
 				}
 			}
