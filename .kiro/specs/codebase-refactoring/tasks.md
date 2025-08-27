@@ -66,7 +66,7 @@
   - Clean up any imports or references to the deleted integration code
   - _Requirements: 4.1_
 
-- [ ] 11. Consolidate SSDP service implementations
+- [x] 11. Consolidate SSDP service implementations
   - Create UnifiedSsdpService struct with single implementation
   - Implement SsdpPlatformAdapter trait for platform-specific behavior
   - Create WindowsSsdpAdapter, DockerSsdpAdapter, and UnixSsdpAdapter implementations
