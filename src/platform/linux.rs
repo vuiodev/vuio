@@ -40,65 +40,6 @@ pub fn get_linux_version() -> PlatformResult<String> {
     }
 }
 
-/// Detect network interfaces on Linux
-pub async fn detect_network_interfaces() -> PlatformResult<Vec<NetworkInterface>> {
-    let mut interfaces = Vec::new();
-    
-    // Read from /proc/net/dev to get interface list
-    if let Ok(contents) = std::fs::read_to_string("/proc/net/dev") {
-        for line in contents.lines().skip(2) { // Skip header lines
-            if let Some(interface_name) = line.split(':').next() {
-                let interface_name = interface_name.trim().to_string();
-                
-                // Skip loopback
-                if interface_name == "lo" {
-                    continue;
-                }
-                
-                // Determine interface type based on name
-                let interface_type = if interface_name.starts_with("eth") {
-                    InterfaceType::Ethernet
-                } else if interface_name.starts_with("wlan") || interface_name.starts_with("wlp") {
-                    InterfaceType::WiFi
-                } else if interface_name.starts_with("tun") || interface_name.starts_with("tap") {
-                    InterfaceType::VPN
-                } else {
-                    InterfaceType::Other(interface_name.clone())
-                };
-                
-                // Check if interface is up by reading from /sys/class/net
-                let is_up = std::fs::read_to_string(format!("/sys/class/net/{}/operstate", interface_name))
-                    .map(|state| state.trim() == "up")
-                    .unwrap_or(false);
-                
-                // Create interface (with placeholder IP - would need proper parsing from ip command)
-                let interface = NetworkInterface {
-                    name: interface_name,
-                    ip_address: "127.0.0.1".parse().unwrap(), // Placeholder
-                    is_loopback: false,
-                    is_up,
-                    supports_multicast: true, // Most Linux interfaces support multicast
-                    interface_type,
-                };
-                
-                interfaces.push(interface);
-            }
-        }
-    } else {
-        // Fallback: create a basic interface
-        let interface = NetworkInterface {
-            name: "eth0".to_string(),
-            ip_address: "127.0.0.1".parse().unwrap(),
-            is_loopback: false,
-            is_up: true,
-            supports_multicast: true,
-            interface_type: InterfaceType::Ethernet,
-        };
-        interfaces.push(interface);
-    }
-    
-    Ok(interfaces)
-}
 
 /// Gather Linux-specific metadata
 pub fn gather_linux_metadata() -> PlatformResult<HashMap<String, String>> {
@@ -218,7 +159,10 @@ mod tests {
     
     #[tokio::test]
     async fn test_linux_interface_detection() {
-        let interfaces = detect_network_interfaces().await;
+        use crate::platform::network::linux::LinuxNetworkManager;
+        use crate::platform::network::NetworkManager;
+        let manager = LinuxNetworkManager::new();
+        let interfaces = manager.get_local_interfaces().await;
         assert!(interfaces.is_ok());
         let ifaces = interfaces.unwrap();
         assert!(!ifaces.is_empty());

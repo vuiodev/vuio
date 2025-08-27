@@ -47,11 +47,9 @@ impl PlatformConfig {
 
     /// Windows-specific configuration
     fn for_windows() -> Self {
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("C:\\"));
-        let app_data = dirs::data_dir().unwrap_or_else(|| home_dir.join("AppData\\Roaming"));
-        let local_app_data =
-            dirs::data_local_dir().unwrap_or_else(|| home_dir.join("AppData\\Local"));
-
+        // Use executable-relative paths for native versions
+        let exe_dir = Self::get_executable_directory();
+        
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "windows".to_string());
         metadata.insert("case_sensitive".to_string(), "false".to_string());
@@ -61,10 +59,10 @@ impl PlatformConfig {
         Self {
             os_type: OsType::Windows,
             default_media_dir: Self::get_windows_default_media_dir(),
-            config_dir: app_data.join("VuIO"),
-            log_dir: local_app_data.join("VuIO\\Logs"),
-            cache_dir: local_app_data.join("VuIO\\Cache"),
-            database_dir: local_app_data.join("VuIO\\Database"),
+            config_dir: exe_dir.join("config"),
+            log_dir: exe_dir.join("config").join("logs"),
+            cache_dir: exe_dir.join("config").join("cache"),
+            database_dir: exe_dir.join("config").join("database"),
             preferred_ports: vec![8080, 8081, 8082, 9090, 9091, 8000, 8001],
             metadata,
         }
@@ -72,7 +70,8 @@ impl PlatformConfig {
 
     /// macOS-specific configuration
     fn for_macos() -> Self {
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/Users/unknown"));
+        // Use executable-relative paths for native versions
+        let exe_dir = Self::get_executable_directory();
 
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "macos".to_string());
@@ -83,10 +82,10 @@ impl PlatformConfig {
         Self {
             os_type: OsType::MacOS,
             default_media_dir: Self::get_macos_default_media_dir(),
-            config_dir: home_dir.join("Library/Application Support/VuIO"),
-            log_dir: home_dir.join("Library/Logs/VuIO"),
-            cache_dir: home_dir.join("Library/Caches/VuIO"),
-            database_dir: home_dir.join("Library/Application Support/VuIO/Database"),
+            config_dir: exe_dir.join("config"),
+            log_dir: exe_dir.join("config").join("logs"),
+            cache_dir: exe_dir.join("config").join("cache"),
+            database_dir: exe_dir.join("config").join("database"),
             preferred_ports: vec![8080, 8081, 8082, 9090, 9091, 8000, 8001],
             metadata,
         }
@@ -94,10 +93,8 @@ impl PlatformConfig {
 
     /// Linux-specific configuration
     fn for_linux() -> Self {
-        let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
-        let config_dir = dirs::config_dir().unwrap_or_else(|| home_dir.join(".config"));
-        let cache_dir = dirs::cache_dir().unwrap_or_else(|| home_dir.join(".cache"));
-        let data_dir = dirs::data_dir().unwrap_or_else(|| home_dir.join(".local/share"));
+        // Use executable-relative paths for native versions
+        let exe_dir = Self::get_executable_directory();
         
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "linux".to_string());
@@ -108,10 +105,10 @@ impl PlatformConfig {
         Self {
             os_type: OsType::Linux,
             default_media_dir: Self::get_linux_default_media_dir(),
-            config_dir: config_dir.join("vuio"),
-            log_dir: data_dir.join("vuio/logs"),
-            cache_dir: cache_dir.join("vuio"),
-            database_dir: data_dir.join("vuio/database"),
+            config_dir: exe_dir.join("config"),
+            log_dir: exe_dir.join("config").join("logs"),
+            cache_dir: exe_dir.join("config").join("cache"),
+            database_dir: exe_dir.join("config").join("database"),
             preferred_ports: vec![8080, 8081, 8082, 9090, 9091, 8000, 8001],
             metadata,
         }
@@ -119,10 +116,10 @@ impl PlatformConfig {
 
     /// BSD-specific configuration
     fn for_bsd() -> Self {
+        // Use executable-relative paths for native versions
+        let exe_dir = Self::get_executable_directory();
+        
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/usr/home"));
-        let config_dir = dirs::config_dir().unwrap_or_else(|| home_dir.join(".config"));
-        let cache_dir = dirs::cache_dir().unwrap_or_else(|| home_dir.join(".cache"));
-        let data_dir = dirs::data_dir().unwrap_or_else(|| home_dir.join(".local/share"));
         
         // Common BSD media directories
         let default_media_dirs = vec![
@@ -141,10 +138,10 @@ impl PlatformConfig {
         Self {
             os_type: OsType::Bsd,
             default_media_dir: default_media_dirs[0].clone(),
-            config_dir: config_dir.join("vuio"),
-            log_dir: data_dir.join("vuio/logs"),
-            cache_dir: cache_dir.join("vuio"),
-            database_dir: data_dir.join("vuio/database"),
+            config_dir: exe_dir.join("config"),
+            log_dir: exe_dir.join("config").join("logs"),
+            cache_dir: exe_dir.join("config").join("cache"),
+            database_dir: exe_dir.join("config").join("database"),
             preferred_ports: vec![8080, 8081, 8082, 9090, 9091, 8000, 8001],
             metadata,
         }
@@ -340,22 +337,54 @@ impl PlatformConfig {
         &self.cache_dir
     }
 
+    /// Get the directory where the executable is located
+    fn get_executable_directory() -> PathBuf {
+        match std::env::current_exe() {
+            Ok(exe_path) => {
+                if let Some(parent) = exe_path.parent() {
+                    parent.to_path_buf()
+                } else {
+                    // Fallback to current directory if we can't get parent
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                }
+            }
+            Err(_) => {
+                // Fallback to current directory if we can't get executable path
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            }
+        }
+    }
+
     /// Ensure all platform directories exist
     pub fn ensure_directories_exist(&self) -> PlatformResult<()> {
+        // Create config directory first
         std::fs::create_dir_all(&self.config_dir).map_err(|e| {
-            PlatformError::FileSystemAccess(format!("Failed to create config directory: {}", e))
+            PlatformError::FileSystemAccess(format!(
+                "Failed to create config directory '{}': {}. Please ensure the executable has write permissions to its directory.", 
+                self.config_dir.display(), e
+            ))
         })?;
 
+        // Create subdirectories
         std::fs::create_dir_all(&self.log_dir).map_err(|e| {
-            PlatformError::FileSystemAccess(format!("Failed to create log directory: {}", e))
+            PlatformError::FileSystemAccess(format!(
+                "Failed to create log directory '{}': {}. Please ensure the config directory is writable.", 
+                self.log_dir.display(), e
+            ))
         })?;
 
         std::fs::create_dir_all(&self.cache_dir).map_err(|e| {
-            PlatformError::FileSystemAccess(format!("Failed to create cache directory: {}", e))
+            PlatformError::FileSystemAccess(format!(
+                "Failed to create cache directory '{}': {}. Please ensure the config directory is writable.", 
+                self.cache_dir.display(), e
+            ))
         })?;
 
         std::fs::create_dir_all(&self.database_dir).map_err(|e| {
-            PlatformError::FileSystemAccess(format!("Failed to create database directory: {}", e))
+            PlatformError::FileSystemAccess(format!(
+                "Failed to create database directory '{}': {}. Please ensure the config directory is writable.", 
+                self.database_dir.display(), e
+            ))
         })?;
 
         Ok(())

@@ -1,7 +1,6 @@
 #[cfg(target_os = "macos")]
-use super::{NetworkInterface, InterfaceType, PlatformResult};
+use super::PlatformResult;
 use std::collections::HashMap;
-use std::net::IpAddr;
 
 /// Get macOS version information
 pub fn get_macos_version() -> PlatformResult<String> {
@@ -21,139 +20,7 @@ pub fn get_macos_version() -> PlatformResult<String> {
     }
 }
 
-/// Determine interface type based on macOS interface name
-fn determine_macos_interface_type(name: &str) -> InterfaceType {
-    if name.starts_with("en") {
-        // This is a heuristic. en0 could be Wi-Fi on modern Macs.
-        // A more robust method would be needed for accuracy.
-        if name == "en0" {
-            InterfaceType::Ethernet 
-        } else {
-            InterfaceType::WiFi
-        }
-    } else if name.starts_with("awdl") {
-        InterfaceType::WiFi // Apple Wireless Direct Link
-    } else if name.starts_with("utun") || name.starts_with("ipsec") || name.starts_with("ppp") {
-        InterfaceType::VPN
-    } else if name.starts_with("lo") {
-        InterfaceType::Loopback
-    } else if name.starts_with("bridge") || name.starts_with("anpi") {
-        InterfaceType::Other(format!("Bridge/{}", name))
-    } else if name.starts_with("ap") || name.starts_with("llw") {
-        InterfaceType::WiFi
-    } else {
-        InterfaceType::Other(name.to_string())
-    }
-}
 
-/// Parse ifconfig output to extract network interface information
-fn parse_ifconfig_output(output: &str) -> PlatformResult<Vec<NetworkInterface>> {
-    let mut interfaces = Vec::new();
-    let mut current_interface: Option<String> = None;
-    let mut current_ip: Option<IpAddr> = None;
-    let mut is_up = false;
-    let mut supports_multicast = false;
-    let mut status_active = false;
-
-    for line in output.lines() {
-        // Detect interface name (starts at beginning of line and ends with colon)
-        if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(':') && line.contains("flags=") {
-            // Save previous interface if we have one
-            if let (Some(name), Some(ip)) = (&current_interface, &current_ip) {
-                if !name.starts_with("lo") { // Skip loopback
-                    let interface_type = determine_macos_interface_type(name);
-                    // An interface is considered 'up' if its flags say UP and its status is active.
-                    // Some virtual interfaces (VPN, awdl) don't report status but are active if UP.
-                    let final_is_up = is_up && (status_active || name.starts_with("awdl") || name.starts_with("utun"));
-                    
-                    interfaces.push(NetworkInterface {
-                        name: name.clone(),
-                        ip_address: *ip,
-                        is_loopback: name.starts_with("lo"),
-                        is_up: final_is_up,
-                        supports_multicast,
-                        interface_type,
-                    });
-                }
-            }
-            
-            // Start new interface
-            let interface_name = line.split(':').next().unwrap_or("unknown").to_string();
-            current_interface = Some(interface_name);
-            current_ip = None;
-            is_up = false;
-            supports_multicast = false;
-            status_active = false;
-            
-            // Check flags in the same line
-            if line.contains("<UP") {
-                is_up = true;
-            }
-            if line.contains("<MULTICAST") {
-                supports_multicast = true;
-            }
-        }
-        
-        // Look for IPv4 address (skip IPv6)
-        if line.trim().starts_with("inet ") && !line.contains("inet6") {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 2 {
-                if let Ok(ip) = parts[1].parse::<IpAddr>() {
-                    current_ip = Some(ip);
-                }
-            }
-        }
-        
-        // Check for status flags
-        if line.trim().starts_with("status: active") {
-            status_active = true;
-        }
-    }
-    
-    // Don't forget the last interface
-    if let (Some(name), Some(ip)) = (current_interface, current_ip) {
-        if !name.starts_with("lo") { // Skip loopback
-            let interface_type = determine_macos_interface_type(&name);
-            let final_is_up = is_up && (status_active || name.starts_with("awdl") || name.starts_with("utun"));
-            
-            interfaces.push(NetworkInterface {
-                name,
-                ip_address: ip,
-                is_loopback: false,
-                is_up: final_is_up,
-                supports_multicast,
-                interface_type,
-            });
-        }
-    }
-    
-    Ok(interfaces)
-}
-
-/// Detect network interfaces on macOS
-pub async fn detect_network_interfaces() -> PlatformResult<Vec<NetworkInterface>> {
-    // Use ifconfig to get interface information
-    match std::process::Command::new("ifconfig").output() {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            parse_ifconfig_output(&output_str)
-        }
-        _ => {
-            // Fallback: create a basic interface
-            let mut interfaces = Vec::new();
-            let interface = NetworkInterface {
-                name: "en0".to_string(),
-                ip_address: "127.0.0.1".parse().unwrap(),
-                is_loopback: false,
-                is_up: true,
-                supports_multicast: true,
-                interface_type: InterfaceType::Ethernet,
-            };
-            interfaces.push(interface);
-            Ok(interfaces)
-        }
-    }
-}
 
 /// Gather macOS-specific metadata
 pub fn gather_macos_metadata() -> PlatformResult<HashMap<String, String>> {
@@ -248,7 +115,10 @@ mod tests {
     
     #[tokio::test]
     async fn test_macos_interface_detection() {
-        let interfaces = detect_network_interfaces().await;
+        use crate::platform::network::macos::MacOSNetworkManager;
+        use crate::platform::network::NetworkManager;
+        let manager = MacOSNetworkManager::new();
+        let interfaces = manager.get_local_interfaces().await;
         assert!(interfaces.is_ok());
         let _ifaces = interfaces.unwrap();
         // In a test environment, ifconfig might not return much, but it shouldn't be an empty Vec if it works.

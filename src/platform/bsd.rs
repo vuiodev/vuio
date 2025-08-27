@@ -19,124 +19,6 @@ pub fn get_bsd_version() -> PlatformResult<String> {
     }
 }
 
-/// Detect network interfaces on BSD systems
-pub async fn detect_network_interfaces() -> PlatformResult<Vec<NetworkInterface>> {
-    let mut interfaces = Vec::new();
-    
-    // Use ifconfig to get interface information
-    match Command::new("ifconfig").arg("-a").output() {
-        Ok(output) if output.status.success() => {
-            let ifconfig_output = String::from_utf8_lossy(&output.stdout);
-            interfaces = parse_ifconfig_output(&ifconfig_output)?;
-        }
-        _ => {
-            // Fallback: create a basic interface
-            let interface = NetworkInterface {
-                name: "em0".to_string(),
-                ip_address: "127.0.0.1".parse().unwrap(),
-                is_loopback: false,
-                is_up: true,
-                supports_multicast: true,
-                interface_type: InterfaceType::Ethernet,
-            };
-            interfaces.push(interface);
-        }
-    }
-    
-    Ok(interfaces)
-}
-
-/// Parse ifconfig output to extract network interface information
-fn parse_ifconfig_output(output: &str) -> PlatformResult<Vec<NetworkInterface>> {
-    let mut interfaces = Vec::new();
-    let mut current_interface: Option<NetworkInterface> = None;
-    
-    for line in output.lines() {
-        let line = line.trim();
-        
-        // New interface line (starts with interface name and colon)
-        if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(':') {
-            // Save previous interface if it exists
-            if let Some(interface) = current_interface.take() {
-                if !interface.is_loopback {
-                    interfaces.push(interface);
-                }
-            }
-            
-            // Parse interface name
-            if let Some(name_part) = line.split(':').next() {
-                let interface_name = name_part.trim().to_string();
-                
-                // Skip loopback interface
-                if interface_name == "lo0" {
-                    current_interface = Some(NetworkInterface {
-                        name: interface_name,
-                        ip_address: "127.0.0.1".parse().unwrap(),
-                        is_loopback: true,
-                        is_up: false,
-                        supports_multicast: false,
-                        interface_type: InterfaceType::Loopback,
-                    });
-                    continue;
-                }
-                
-                // Determine interface type based on name
-                let interface_type = if interface_name.starts_with("em") || 
-                                      interface_name.starts_with("re") || 
-                                      interface_name.starts_with("igb") ||
-                                      interface_name.starts_with("bge") {
-                    InterfaceType::Ethernet
-                } else if interface_name.starts_with("wlan") || 
-                         interface_name.starts_with("ath") ||
-                         interface_name.starts_with("iwn") {
-                    InterfaceType::WiFi
-                } else if interface_name.starts_with("tun") || 
-                         interface_name.starts_with("tap") {
-                    InterfaceType::VPN
-                } else {
-                    InterfaceType::Other(interface_name.clone())
-                };
-                
-                current_interface = Some(NetworkInterface {
-                    name: interface_name,
-                    ip_address: "127.0.0.1".parse().unwrap(), // Will be updated when we find inet line
-                    is_loopback: false,
-                    is_up: false, // Will be updated when we parse flags
-                    supports_multicast: true, // Most BSD interfaces support multicast
-                    interface_type,
-                });
-            }
-        }
-        // Parse interface flags and status
-        else if line.contains("flags=") {
-            if let Some(ref mut interface) = current_interface {
-                interface.is_up = line.contains("UP") && line.contains("RUNNING");
-                interface.supports_multicast = line.contains("MULTICAST");
-            }
-        }
-        // Parse IP address
-        else if line.starts_with("inet ") && !line.contains("127.0.0.1") {
-            if let Some(ref mut interface) = current_interface {
-                // Extract IP address from "inet 192.168.1.100 netmask 0xffffff00 broadcast 192.168.1.255"
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    if let Ok(ip) = parts[1].parse::<IpAddr>() {
-                        interface.ip_address = ip;
-                    }
-                }
-            }
-        }
-    }
-    
-    // Don't forget the last interface
-    if let Some(interface) = current_interface {
-        if !interface.is_loopback {
-            interfaces.push(interface);
-        }
-    }
-    
-    Ok(interfaces)
-}
 
 /// Gather BSD-specific metadata
 pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
@@ -267,7 +149,10 @@ mod tests {
     
     #[tokio::test]
     async fn test_bsd_interface_detection() {
-        let interfaces = detect_network_interfaces().await;
+        use crate::platform::network::linux::LinuxNetworkManager;
+        use crate::platform::network::NetworkManager;
+        let manager = LinuxNetworkManager::new();
+        let interfaces = manager.get_local_interfaces().await;
         assert!(interfaces.is_ok());
         let ifaces = interfaces.unwrap();
         assert!(!ifaces.is_empty());

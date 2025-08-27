@@ -117,9 +117,10 @@ impl WindowsNetworkManager {
         }
     }
 
-    /// Get network interfaces using the shared platform implementation.
+    /// Get network interfaces using Windows API directly.
     async fn get_windows_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        crate::platform::windows::detect_network_interfaces().await
+        // This method is now handled by the NetworkManager trait implementation
+        self.get_local_interfaces().await
     }
 
     /// Enable multicast on Windows socket with proper error handling

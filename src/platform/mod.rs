@@ -196,22 +196,34 @@ impl PlatformInfo {
     async fn detect_network_interfaces() -> Result<Vec<NetworkInterface>, PlatformError> {
         #[cfg(target_os = "windows")]
         {
-            windows::detect_network_interfaces().await
+            use crate::platform::network::windows::WindowsNetworkManager;
+            use crate::platform::network::NetworkManager;
+            let manager = WindowsNetworkManager::new();
+            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
 
         #[cfg(target_os = "macos")]
         {
-            macos::detect_network_interfaces().await
+            use crate::platform::network::macos::MacOSNetworkManager;
+            use crate::platform::network::NetworkManager;
+            let manager = MacOSNetworkManager::new();
+            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
 
         #[cfg(target_os = "linux")]
         {
-            linux::detect_network_interfaces().await
+            use crate::platform::network::linux::LinuxNetworkManager;
+            use crate::platform::network::NetworkManager;
+            let manager = LinuxNetworkManager::new();
+            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
 
         #[cfg(target_os = "freebsd")]
         {
-            bsd::detect_network_interfaces().await
+            use crate::platform::network::linux::LinuxNetworkManager; // BSD uses Linux implementation
+            use crate::platform::network::NetworkManager;
+            let manager = LinuxNetworkManager::new();
+            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
     }
 
@@ -324,7 +336,7 @@ mod tests {
 
     #[test]
     fn test_platform_capabilities() {
-        let capabilities = PlatformCapabilities::for_current_platform();
+        let _capabilities = PlatformCapabilities::for_current_platform();
 
         // Test case sensitivity detection works
         // (actual value depends on platform)

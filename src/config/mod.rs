@@ -512,6 +512,7 @@ impl AppConfig {
                 content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
                 content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
                 content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
+                content.push_str("# - All directories are relative to executable location\n");
             }
             crate::platform::OsType::MacOS => {
                 content.push_str("# - System may prompt for network access permissions\n");
@@ -521,6 +522,7 @@ impl AppConfig {
                 content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
                 content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
                 content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
+                content.push_str("# - All directories are relative to executable location\n");
             }
             crate::platform::OsType::Linux => {
                 content.push_str("# - Ports below 1024 require root privileges\n");
@@ -530,6 +532,7 @@ impl AppConfig {
                 content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
                 content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
                 content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
+                content.push_str("# - All directories are relative to executable location\n");
             }
             crate::platform::OsType::Bsd => {
                 content.push_str("# - Ports below 1024 require root privileges\n");
@@ -539,6 +542,7 @@ impl AppConfig {
                 content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
                 content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
                 content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
+                content.push_str("# - All directories are relative to executable location\n");
             }
         }
         

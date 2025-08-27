@@ -289,11 +289,13 @@ async fn check_and_reload_configuration(
     if let Ok(metadata) = tokio::fs::metadata(&config_path).await {
         let modified = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
         
-        // For simplicity, we'll check if the file was modified in the last minute
-        // In a real implementation, we'd track the last known modification time
-        let one_minute_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        // Skip change detection for files modified in the last 2 minutes to avoid
+        // detecting newly created config files as "changed"
+        let two_minutes_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
+        let five_minutes_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
         
-        if modified > one_minute_ago {
+        // Only check for changes if file was modified between 2-5 minutes ago
+        if modified > five_minutes_ago && modified < two_minutes_ago {
             info!("Configuration file may have been modified, checking for changes...");
             
             match AppConfig::load_from_file(&config_path) {
@@ -617,12 +619,19 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
     }
     
     // Load or create configuration from file
-    let mut config = if config_path.exists() {
+    let (mut config, _config_was_created) = if config_path.exists() {
         info!("Loading existing configuration from: {}", config_path.display());
-        AppConfig::load_or_create(&config_path)?
+        (AppConfig::load_or_create(&config_path)?, false)
     } else {
-        info!("No configuration file found, using platform defaults");
-        AppConfig::default_for_platform()
+        info!("No configuration file found, creating default configuration");
+        let default_config = AppConfig::default_for_platform();
+        
+        // Create the config file with platform defaults
+        default_config.save_to_file(&config_path)
+            .with_context(|| format!("Failed to create default configuration file at: {}", config_path.display()))?;
+        
+        info!("Created default configuration file at: {}", config_path.display());
+        (default_config, true)
     };
     
     // Apply platform-specific defaults and validation

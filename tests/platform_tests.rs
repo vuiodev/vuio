@@ -5,7 +5,7 @@
 
 use vuio::platform::{PlatformInfo, OsType, PlatformCapabilities};
 use vuio::platform::network::{NetworkManager, BaseNetworkManager, SsdpConfig};
-use vuio::platform::filesystem::{FileSystemManager, create_platform_filesystem_manager};
+use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::database::{DatabaseManager, SqliteDatabase, MediaFile};
 use vuio::watcher::{FileSystemWatcher, CrossPlatformWatcher, FileSystemEvent};
 
