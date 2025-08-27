@@ -15,6 +15,25 @@ use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, warn};
 
+/// Normalize Windows path to match database storage format
+/// Converts drive letter to uppercase and rest to lowercase
+fn normalize_windows_path_for_query(path: &std::path::Path) -> std::path::PathBuf {
+    let path_str = path.to_string_lossy();
+    
+    // Convert forward slashes to backslashes
+    let with_backslashes = path_str.replace('/', r"\");
+    
+    // Handle drive letter paths - preserve uppercase drive letter, lowercase rest
+    if with_backslashes.len() >= 2 && with_backslashes.chars().nth(1) == Some(':') {
+        let drive_letter = with_backslashes.chars().nth(0).unwrap().to_ascii_uppercase();
+        let rest = &with_backslashes[1..].to_lowercase();
+        std::path::PathBuf::from(format!("{}{}", drive_letter, rest))
+    } else {
+        // For other paths, convert to lowercase
+        std::path::PathBuf::from(with_backslashes.to_lowercase())
+    }
+}
+
 pub async fn root_handler() -> &'static str {
     "VuIO Media Server"
 }
@@ -152,14 +171,24 @@ pub async fn content_directory_control(
             media_root.join(path_prefix_str)
         };
         
+        // Normalize the browse path to match how paths are stored in the database
+        // On Windows: convert to uppercase drive letter + lowercase path
+        let normalized_browse_path = normalize_windows_path_for_query(&browse_path);
+        
         // Query the database for the directory listing with timeout
-        let query_future = state.database.get_directory_listing(&browse_path, media_type_filter);
+        let query_future = state.database.get_directory_listing(&normalized_browse_path, media_type_filter);
         let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
         
         match tokio::time::timeout(timeout_duration, query_future).await {
             Ok(Ok((subdirectories, files))) => {
-                debug!("Database query completed: {} subdirs, {} files for path: {}", 
-                       subdirectories.len(), files.len(), browse_path.display());
+                info!("Browse request for '{}' -> '{}' (filter: '{}') returned {} subdirs, {} files", 
+                       browse_path.display(), normalized_browse_path.display(), media_type_filter, subdirectories.len(), files.len());
+                if subdirectories.len() > 0 {
+                    info!("Subdirectories found: {:?}", subdirectories.iter().map(|d| &d.name).collect::<Vec<_>>());
+                }
+                if files.len() > 0 {
+                    info!("Files found: {:?}", files.iter().take(5).map(|f| &f.filename).collect::<Vec<_>>());
+                }
                        
                 // Apply pagination if requested
                 let starting_index = params.starting_index as usize;
@@ -234,7 +263,7 @@ pub async fn content_directory_control(
                     .into_response()
             },
             Err(_timeout) => {
-                error!("Database query timeout for object_id: {} (path: {})", params.object_id, browse_path.display());
+                error!("Database query timeout for object_id: {} (path: {} -> {})", params.object_id, browse_path.display(), normalized_browse_path.display());
                 (
                     StatusCode::REQUEST_TIMEOUT,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],

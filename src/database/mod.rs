@@ -684,6 +684,19 @@ impl DatabaseManager for SqliteDatabase {
         } else {
             format!("{}%", media_type_filter)
         };
+        
+        // Debug: Let's see what we're actually querying for
+        tracing::info!("Querying database: parent_path='{}', mime_filter='{}'", parent_path_str, mime_filter_str);
+        
+        // Debug: Show some sample parent_path values from the database
+        let sample_paths = sqlx::query("SELECT DISTINCT parent_path FROM media_files WHERE mime_type LIKE ? LIMIT 10")
+            .bind(&mime_filter_str)
+            .fetch_all(&*self.pool.read().await)
+            .await?;
+        let sample_path_strings: Vec<String> = sample_paths.iter()
+            .map(|row| row.get::<String, _>("parent_path"))
+            .collect();
+        tracing::info!("Sample parent_path values in database: {:?}", sample_path_strings);
 
         // 1. Get all direct file children efficiently
         let file_rows = sqlx::query(
