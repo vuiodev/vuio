@@ -876,6 +876,19 @@ mod tests {
         async fn reorder_playlist(&self, _playlist_id: i64, _track_positions: &[(i64, u32)]) -> anyhow::Result<()> {
             Ok(())
         }
+
+        async fn get_files_with_path_prefix(&self, _canonical_prefix: &str) -> anyhow::Result<Vec<MediaFile>> {
+            let files = self.files.read().await;
+            Ok(files.values().cloned().collect())
+        }
+
+        async fn get_direct_subdirectories(&self, _canonical_parent_path: &str) -> anyhow::Result<Vec<crate::database::MediaDirectory>> {
+            Ok(vec![])
+        }
+
+        async fn batch_cleanup_missing_files(&self, _existing_canonical_paths: &std::collections::HashSet<String>) -> anyhow::Result<usize> {
+            Ok(0)
+        }
     }
 
     #[tokio::test]

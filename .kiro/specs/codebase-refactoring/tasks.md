@@ -20,7 +20,7 @@
   - Apply normalization to both path and parent_path fields
   - _Requirements: 1.1, 1.2_
 
-- [ ] 4. Modify database schema for canonical path storage
+- [x] 4. Modify database schema for canonical path storage
   - Create database migration to add canonical_path and canonical_parent_path columns
   - Update SqliteDatabase::store_media_file to store canonical paths
   - Add database indexes for efficient path-based queries

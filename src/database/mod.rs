@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
+use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
+
 pub mod playlist_formats;
 
 /// Represents a subdirectory in the media library.
@@ -267,6 +269,17 @@ pub trait DatabaseManager: Send + Sync {
     async fn scan_and_import_playlists(&self, directory: &Path) -> Result<Vec<i64>> {
         playlist_formats::PlaylistFileManager::scan_and_import_playlists(self, directory).await
     }
+
+    // New methods for efficient path-based queries using canonical paths
+
+    /// Get files with a specific canonical path prefix (for efficient directory deletion)
+    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>>;
+
+    /// Get direct subdirectories using canonical paths (optimized two-query approach)
+    async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>>;
+
+    /// Batch cleanup missing files using canonical paths and HashSet difference logic
+    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize>;
 }
 
 #[derive(Debug)]
@@ -306,6 +319,7 @@ pub enum IssueSeverity {
 pub struct SqliteDatabase {
     pool: std::sync::Arc<tokio::sync::RwLock<SqlitePool>>,
     db_path: PathBuf,
+    path_normalizer: Box<dyn PathNormalizer>,
 }
 
 impl SqliteDatabase {
@@ -329,7 +343,8 @@ impl SqliteDatabase {
 
         Ok(Self { 
             pool: std::sync::Arc::new(tokio::sync::RwLock::new(pool)), 
-            db_path 
+            db_path,
+            path_normalizer: create_platform_path_normalizer(),
         })
     }
 
@@ -341,6 +356,8 @@ impl SqliteDatabase {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 path TEXT UNIQUE NOT NULL,
                 parent_path TEXT NOT NULL,
+                canonical_path TEXT,
+                canonical_parent_path TEXT,
                 filename TEXT NOT NULL,
                 size INTEGER NOT NULL,
                 modified INTEGER NOT NULL,
@@ -401,6 +418,15 @@ impl SqliteDatabase {
             .await?;
 
         sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_parent_path ON media_files(parent_path)")
+            .execute(&*self.pool.read().await)
+            .await?;
+
+        // Create indexes for canonical paths (efficient path-based queries)
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_canonical_path ON media_files(canonical_path)")
+            .execute(&*self.pool.read().await)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_canonical_parent_path ON media_files(canonical_parent_path)")
             .execute(&*self.pool.read().await)
             .await?;
 
@@ -477,12 +503,205 @@ impl SqliteDatabase {
             "INSERT OR IGNORE INTO database_metadata (key, value, updated_at) VALUES (?, ?, ?)",
         )
         .bind("schema_version")
-        .bind("1")
+        .bind("2")  // Updated to version 2 for canonical paths
         .bind(now)
         .execute(&*self.pool.read().await)
         .await?;
 
         Ok(())
+    }
+
+    /// Run database migrations to update schema
+    async fn run_migrations(&self) -> Result<()> {
+        // Get current schema version
+        let current_version = self.get_schema_version().await?;
+        
+        // Apply migrations based on current version
+        if current_version < 2 {
+            self.migrate_to_version_2().await?;
+        }
+        
+        Ok(())
+    }
+
+    /// Get current schema version from database
+    async fn get_schema_version(&self) -> Result<i32> {
+        let row = sqlx::query("SELECT value FROM database_metadata WHERE key = 'schema_version'")
+            .fetch_optional(&*self.pool.read().await)
+            .await?;
+        
+        match row {
+            Some(row) => {
+                let version_str: String = row.try_get("value")?;
+                Ok(version_str.parse().unwrap_or(1))
+            }
+            None => Ok(1), // Default to version 1 if not found
+        }
+    }
+
+    /// Migrate database to version 2 (add canonical path columns)
+    async fn migrate_to_version_2(&self) -> Result<()> {
+        tracing::info!("Migrating database to version 2 (canonical paths)");
+        
+        // Add canonical path columns if they don't exist
+        let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN canonical_path TEXT")
+            .execute(&*self.pool.read().await)
+            .await; // Ignore error if column already exists
+        
+        let _ = sqlx::query("ALTER TABLE media_files ADD COLUMN canonical_parent_path TEXT")
+            .execute(&*self.pool.read().await)
+            .await; // Ignore error if column already exists
+        
+        // Create indexes for canonical paths
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_canonical_path ON media_files(canonical_path)")
+            .execute(&*self.pool.read().await)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_files_canonical_parent_path ON media_files(canonical_parent_path)")
+            .execute(&*self.pool.read().await)
+            .await?;
+        
+        // Update schema version
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        
+        sqlx::query("UPDATE database_metadata SET value = ?, updated_at = ? WHERE key = 'schema_version'")
+            .bind("2")
+            .bind(now)
+            .execute(&*self.pool.read().await)
+            .await?;
+        
+        tracing::info!("Database migration to version 2 completed");
+        Ok(())
+    }
+
+    /// Get files with canonical path prefix for efficient directory operations
+    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
+        let prefix_pattern = format!("{}%", canonical_prefix);
+        
+        let rows = sqlx::query(
+            r#"
+            SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+            FROM media_files 
+            WHERE canonical_path LIKE ?
+            ORDER BY canonical_path
+            "#,
+        )
+        .bind(&prefix_pattern)
+        .fetch_all(&*self.pool.read().await)
+        .await?;
+
+        let mut files = Vec::with_capacity(rows.len());
+        for row in rows {
+            files.push(MediaFile::from_row(&row)?);
+        }
+
+        Ok(files)
+    }
+
+    /// Get direct subdirectories using canonical paths (optimized approach)
+    async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
+        let path_separator = "/"; // Canonical paths always use forward slashes
+        let like_path_prefix = if canonical_parent_path.is_empty() {
+            "%".to_string()
+        } else if canonical_parent_path == "/" {
+            format!("{}%", path_separator)
+        } else {
+            format!("{}{}%", canonical_parent_path, path_separator)
+        };
+
+        let subdir_rows = sqlx::query(
+            r#"
+            SELECT DISTINCT canonical_parent_path 
+            FROM media_files 
+            WHERE canonical_parent_path LIKE ? AND canonical_parent_path != ?
+            "#,
+        )
+        .bind(&like_path_prefix)
+        .bind(canonical_parent_path)
+        .fetch_all(&*self.pool.read().await)
+        .await?;
+        
+        let mut subdirectories = HashSet::new();
+        for row in subdir_rows {
+            let descendant_canonical_parent: String = row.try_get("canonical_parent_path")?;
+            
+            // Extract the immediate subdirectory name
+            if let Some(relative_part) = descendant_canonical_parent.strip_prefix(canonical_parent_path) {
+                let relative_part = relative_part.trim_start_matches('/');
+                if let Some(first_component) = relative_part.split('/').next() {
+                    if !first_component.is_empty() {
+                        let subdir_canonical_path = if canonical_parent_path.is_empty() {
+                            first_component.to_string()
+                        } else {
+                            format!("{}/{}", canonical_parent_path, first_component)
+                        };
+                        
+                        // Convert canonical path back to platform path for MediaDirectory
+                        if let Ok(platform_path) = self.path_normalizer.from_canonical(&subdir_canonical_path) {
+                            subdirectories.insert(MediaDirectory {
+                                path: platform_path,
+                                name: first_component.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut sorted_subdirectories: Vec<_> = subdirectories.into_iter().collect();
+        sorted_subdirectories.sort_by_key(|d| d.name.to_lowercase());
+
+        Ok(sorted_subdirectories)
+    }
+
+    /// Batch cleanup missing files using HashSet difference logic
+    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        if existing_canonical_paths.is_empty() {
+            return Ok(0);
+        }
+
+        // Get all canonical paths from database
+        let rows = sqlx::query("SELECT canonical_path FROM media_files WHERE canonical_path IS NOT NULL")
+            .fetch_all(&*self.pool.read().await)
+            .await?;
+
+        let mut db_canonical_paths = HashSet::new();
+        for row in rows {
+            if let Ok(canonical_path) = row.try_get::<String, _>("canonical_path") {
+                db_canonical_paths.insert(canonical_path);
+            }
+        }
+
+        // Find paths to delete (in database but not in existing files)
+        let paths_to_delete: Vec<_> = db_canonical_paths
+            .difference(existing_canonical_paths)
+            .collect();
+
+        if paths_to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        // Process deletions in batches to avoid SQL parameter limits
+        const BATCH_SIZE: usize = 500;
+        let mut total_deleted = 0;
+
+        for batch in paths_to_delete.chunks(BATCH_SIZE) {
+            let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!("DELETE FROM media_files WHERE canonical_path IN ({})", placeholders);
+
+            let mut query_builder = sqlx::query(&query);
+            for path in batch {
+                query_builder = query_builder.bind(path);
+            }
+
+            let result = query_builder.execute(&*self.pool.read().await).await?;
+            total_deleted += result.rows_affected() as usize;
+        }
+
+        Ok(total_deleted)
     }
 
     /// Convert SystemTime to Unix timestamp
@@ -517,12 +736,21 @@ impl DatabaseManager for SqliteDatabase {
             .await?;
 
         self.create_tables().await?;
+        self.run_migrations().await?;
         Ok(())
     }
 
     async fn store_media_file(&self, file: &MediaFile) -> Result<i64> {
         let path_str = file.path.to_string_lossy().to_string();
         let parent_path_str = file.path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
+        
+        // Generate canonical paths for efficient querying
+        let canonical_path = self.path_normalizer.to_canonical(&file.path)
+            .unwrap_or_else(|_| path_str.clone());
+        let canonical_parent_path = file.path.parent()
+            .and_then(|parent| self.path_normalizer.to_canonical(parent).ok())
+            .unwrap_or_else(|| parent_path_str.clone());
+        
         let modified_timestamp = Self::system_time_to_timestamp(file.modified);
         let created_timestamp = Self::system_time_to_timestamp(file.created_at);
         let updated_timestamp = Self::system_time_to_timestamp(file.updated_at);
@@ -533,12 +761,14 @@ impl DatabaseManager for SqliteDatabase {
         let result = sqlx::query(
             r#"
             INSERT INTO media_files 
-            (path, parent_path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (path, parent_path, canonical_path, canonical_parent_path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(&path_str)
         .bind(&parent_path_str)
+        .bind(&canonical_path)
+        .bind(&canonical_parent_path)
         .bind(&file.filename)
         .bind(file.size as i64)
         .bind(modified_timestamp)
@@ -614,6 +844,14 @@ impl DatabaseManager for SqliteDatabase {
     async fn update_media_file(&self, file: &MediaFile) -> Result<()> {
         let path_str = file.path.to_string_lossy().to_string();
         let parent_path_str = file.path.parent().unwrap_or_else(|| Path::new("")).to_string_lossy().to_string();
+        
+        // Generate canonical paths for efficient querying
+        let canonical_path = self.path_normalizer.to_canonical(&file.path)
+            .unwrap_or_else(|_| path_str.clone());
+        let canonical_parent_path = file.path.parent()
+            .and_then(|parent| self.path_normalizer.to_canonical(parent).ok())
+            .unwrap_or_else(|| parent_path_str.clone());
+        
         let modified_timestamp = Self::system_time_to_timestamp(file.modified);
         let updated_timestamp = Self::system_time_to_timestamp(SystemTime::now());
         let duration_ms = file.duration.map(|d| d.as_millis() as i64);
@@ -623,12 +861,14 @@ impl DatabaseManager for SqliteDatabase {
         sqlx::query(
             r#"
             UPDATE media_files 
-            SET parent_path = ?, filename = ?, size = ?, modified = ?, mime_type = ?, duration = ?, 
+            SET parent_path = ?, canonical_path = ?, canonical_parent_path = ?, filename = ?, size = ?, modified = ?, mime_type = ?, duration = ?, 
                 title = ?, artist = ?, album = ?, genre = ?, track_number = ?, year = ?, album_artist = ?, updated_at = ?
             WHERE path = ?
             "#,
         )
         .bind(&parent_path_str)
+        .bind(&canonical_path)
+        .bind(&canonical_parent_path)
         .bind(&file.filename)
         .bind(file.size as i64)
         .bind(modified_timestamp)
@@ -1505,6 +1745,18 @@ impl DatabaseManager for SqliteDatabase {
         tx.commit().await?;
         Ok(())
     }
+
+    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
+        self.get_files_with_path_prefix(canonical_prefix).await
+    }
+
+    async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
+        self.get_direct_subdirectories(canonical_parent_path).await
+    }
+
+    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        self.batch_cleanup_missing_files(existing_canonical_paths).await
+    }
 }
 
 impl SqliteDatabase {
@@ -1742,6 +1994,113 @@ mod tests {
         let files = backup_db.get_all_media_files().await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename, "video.mp4");
+    }
+
+    #[tokio::test]
+    async fn test_canonical_path_storage() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Test storing a file with canonical path
+        let media_file = MediaFile::new(
+            PathBuf::from("/Test/Video.MP4"), 
+            1024, 
+            "video/mp4".to_string()
+        );
+        let id = db.store_media_file(&media_file).await.unwrap();
+        assert!(id > 0);
+
+        // Verify canonical paths are stored
+        let row = sqlx::query("SELECT canonical_path, canonical_parent_path FROM media_files WHERE id = ?")
+            .bind(id)
+            .fetch_one(&*db.pool.read().await)
+            .await
+            .unwrap();
+        
+        let canonical_path: Option<String> = row.try_get("canonical_path").unwrap();
+        let canonical_parent_path: Option<String> = row.try_get("canonical_parent_path").unwrap();
+        
+        assert!(canonical_path.is_some());
+        assert!(canonical_parent_path.is_some());
+        
+        // On Windows, paths should be normalized to lowercase with forward slashes
+        #[cfg(target_os = "windows")]
+        {
+            assert_eq!(canonical_path.unwrap(), "/test/video.mp4");
+            assert_eq!(canonical_parent_path.unwrap(), "/test");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_database_migration() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        // Create database with old schema (version 1)
+        let db = SqliteDatabase::new(db_path.clone()).await.unwrap();
+        
+        // Manually set schema version to 1 to simulate old database
+        let pool = db.pool.read().await;
+        sqlx::query("CREATE TABLE IF NOT EXISTS database_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at INTEGER NOT NULL)")
+            .execute(&*pool)
+            .await
+            .unwrap();
+        
+        sqlx::query("INSERT OR REPLACE INTO database_metadata (key, value, updated_at) VALUES (?, ?, ?)")
+            .bind("schema_version")
+            .bind("1")
+            .bind(0)
+            .execute(&*pool)
+            .await
+            .unwrap();
+        drop(pool);
+
+        // Initialize should run migration
+        db.initialize().await.unwrap();
+
+        // Verify schema version is now 2
+        let version = db.get_schema_version().await.unwrap();
+        assert_eq!(version, 2);
+
+        // Verify canonical path columns exist
+        let result = sqlx::query("SELECT canonical_path, canonical_parent_path FROM media_files LIMIT 1")
+            .fetch_optional(&*db.pool.read().await)
+            .await;
+        assert!(result.is_ok()); // Should not fail due to missing columns
+    }
+
+    #[tokio::test]
+    async fn test_batch_cleanup_missing_files() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Add test files
+        let file1 = MediaFile::new(PathBuf::from("/test/video1.mp4"), 1024, "video/mp4".to_string());
+        let file2 = MediaFile::new(PathBuf::from("/test/video2.mp4"), 2048, "video/mp4".to_string());
+        let file3 = MediaFile::new(PathBuf::from("/test/video3.mp4"), 3072, "video/mp4".to_string());
+        
+        db.store_media_file(&file1).await.unwrap();
+        db.store_media_file(&file2).await.unwrap();
+        db.store_media_file(&file3).await.unwrap();
+
+        // Simulate only file1 and file2 still exist
+        let mut existing_paths = HashSet::new();
+        existing_paths.insert("/test/video1.mp4".to_string());
+        existing_paths.insert("/test/video2.mp4".to_string());
+
+        // Run batch cleanup
+        let deleted_count = db.batch_cleanup_missing_files(&existing_paths).await.unwrap();
+        assert_eq!(deleted_count, 1); // Should delete file3
+
+        // Verify only 2 files remain
+        let remaining_files = db.get_all_media_files().await.unwrap();
+        assert_eq!(remaining_files.len(), 2);
     }
 
     #[tokio::test]
