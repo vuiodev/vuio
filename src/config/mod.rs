@@ -72,6 +72,24 @@ pub struct MediaConfig {
     pub supported_extensions: Vec<String>,
 }
 
+/// Validation mode for media directory validation
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub enum ValidationMode {
+    /// Fail if path doesn't exist or is inaccessible
+    Strict,
+    /// Log warning but continue if path doesn't exist
+    Warn,
+    /// Skip validation entirely for this directory
+    Skip,
+}
+
+impl Default for ValidationMode {
+    fn default() -> Self {
+        ValidationMode::Warn
+    }
+}
+
 /// Configuration for a monitored directory
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonitoredDirectoryConfig {
@@ -79,6 +97,8 @@ pub struct MonitoredDirectoryConfig {
     pub recursive: bool,
     pub extensions: Option<Vec<String>>,
     pub exclude_patterns: Option<Vec<String>>,
+    #[serde(default)]
+    pub validation_mode: ValidationMode,
 }
 
 /// Database configuration settings
@@ -141,6 +161,7 @@ impl AppConfig {
                     "*.tmp".to_string(),
                     "*.part".to_string(),
                 ]),
+                validation_mode: ValidationMode::Warn,
             })
             .collect();
 
@@ -231,8 +252,8 @@ impl AppConfig {
         let config: AppConfig = toml::from_str(&content)
             .with_context(|| format!("Failed to parse config file: {}", config_path.as_ref().display()))?;
         
-        // Validate the loaded configuration
-        ConfigValidator::validate(&config)?;
+        // Validate the loaded configuration with flexible directory validation
+        ConfigValidator::validate_flexible(&config)?;
         
         Ok(config)
     }
@@ -370,6 +391,7 @@ impl AppConfig {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
+                validation_mode: ValidationMode::Warn,
             }]
         } else {
             // Use the primary media directory (first one) as default
@@ -378,6 +400,7 @@ impl AppConfig {
                 recursive: true,
                 extensions: None, // Use global supported_extensions
                 exclude_patterns: Some(platform_config.get_default_exclude_patterns()),
+                validation_mode: ValidationMode::Warn,
             }]
         };
         
@@ -1191,7 +1214,7 @@ impl ConfigManager {
                         match AppConfig::load_from_file(&config_path) {
                             Ok(new_config) => {
                                 // Validate the new configuration
-                                if let Err(e) = ConfigValidator::validate(&new_config) {
+                                if let Err(e) = ConfigValidator::validate_flexible(&new_config) {
                                     tracing::warn!("Invalid configuration file, ignoring changes: {}", e);
                                     continue;
                                 }
@@ -1282,7 +1305,7 @@ impl ConfigManager {
     /// Update the configuration in memory only - do not save to file
     pub async fn update_config(&self, new_config: AppConfig) -> Result<()> {
         // Validate the new configuration
-        ConfigValidator::validate(&new_config)?;
+        ConfigValidator::validate_flexible(&new_config)?;
         
         let old_config = {
             let mut config_guard = self.config.write().await;
@@ -1383,6 +1406,7 @@ mod tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Strict,
             }
         ];
         
@@ -1414,6 +1438,7 @@ mod tests {
                     ".DS_Store".to_string(),    // macOS metadata
                     "*.tmp".to_string(),        // Temporary files
                 ]),
+                validation_mode: ValidationMode::Strict,
             }
         ];
         
@@ -1450,6 +1475,7 @@ mod tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Strict,
             }
         ];
         config.save_to_file(&config_path)?;
@@ -1506,6 +1532,7 @@ mod tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Strict,
             }
         ];
         

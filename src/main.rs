@@ -1,6 +1,6 @@
 use anyhow::Context;
 use vuio::{
-    config::{AppConfig, ConfigManager, MonitoredDirectoryConfig},
+    config::{AppConfig, ConfigManager, MonitoredDirectoryConfig, ValidationMode},
     database::{self, DatabaseManager, SqliteDatabase},
     logging, media,
     platform::{self, filesystem::{create_platform_filesystem_manager, create_platform_path_normalizer}, PlatformInfo},
@@ -122,6 +122,7 @@ fn parse_args_once() -> anyhow::Result<(bool, Option<String>, Option<AppConfig>)
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Warn,
             });
         } else {
             tracing::warn!("Media directory does not exist or is not a directory: {}", media_dir.display());
@@ -137,6 +138,7 @@ fn parse_args_once() -> anyhow::Result<(bool, Option<String>, Option<AppConfig>)
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Warn,
             });
         } else {
             tracing::warn!("Additional media directory does not exist or is not a directory: {}", additional_dir.display());

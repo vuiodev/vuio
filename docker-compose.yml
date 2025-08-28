@@ -1,17 +1,67 @@
 version: '3.8'
 
 services:
-  vuio-go:
-    # IMPORTANT: Replace 'ghcr.io/your-username/vuio-go:latest' with your actual image path.
-    image: ghcr.io/your-username/vuio-go:latest
-    container_name: vuio-go
-    # network_mode: "host" is recommended for SSDP (multicast) to work reliably.
-    network_mode: "host"
-    volumes:
-      # Mount a host directory for your media files.
-      # Example: /mnt/media on your server.
-      - /path/to/your/media:/media
-      # Mount a host directory for persistent configuration and the database.
-      # Example: /etc/vuio-go on your server.
-      - /path/to/your/config:/root/.config/vuio-go
+  vuio:
+    network_mode: host
+    image: ghcr.io/vuiodev/vuio:latest
+    container_name: vuio-server-local
     restart: unless-stopped
+    
+    # Add capabilities for better multicast support
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    
+    # Ensure container has access to network interfaces
+    privileged: false  # Start with false, can be changed to true if needed
+    
+    volumes:
+      # Persist database
+      - ./vuio-data:/data
+      
+      # Mount your media library (always read-only)
+      # VuIO enforces read-only access to media files at the application level
+      # Docker :ro mount provides additional security layer
+      
+      # Example 1: Single media directory
+      - ./test-media:/media
+      
+      # Example 2: Multiple media directories
+      # Mount each directory and configure via environment variable:
+      # - /path/to/movies:/media/movies
+      # - /path/to/tv-shows:/media/tv
+      # - /path/to/music:/media/music
+      # Then set: VUIO_MEDIA_DIRS=/media/movies,/media/tv,/media/music
+      
+      # Example 3: Network storage (NFS/SMB)
+      # - type: bind
+      #   source: /mnt/nas/media
+      #   target: /media
+      
+    environment:
+      # Server Configuration
+      - VUIO_PORT=8080
+      - VUIO_INTERFACE=0.0.0.0
+      - VUIO_SERVER_NAME=VuIO
+      # Fixed UUID for consistency. 
+      # CHANGE THIS if running multiple instances on same LAN
+      - VUIO_UUID=550e8400-e29b-41d4-a716-446655440000  
+      - VUIO_IP=192.168.1.173  # Required for Docker host networking
+      
+      # Media Configuration
+      - VUIO_MEDIA_DIRS=/media  # Comma-separated for multiple dirs: /media/movies,/media/tv,/media/music
+      - VUIO_SCAN_ON_STARTUP=true
+      - VUIO_WATCH_CHANGES=true
+      - VUIO_CLEANUP_DELETED=true
+      
+      # Network Configuration
+      - VUIO_MULTICAST_TTL=4
+      - VUIO_ANNOUNCE_INTERVAL=300
+      
+      # Database Configuration
+      - VUIO_DB_PATH=/data/vuio.db
+      - VUIO_DB_VACUUM=false
+      - VUIO_DB_BACKUP=true
+      
+      # Enable debug logging
+      - RUST_LOG=debug

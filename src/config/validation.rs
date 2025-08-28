@@ -4,7 +4,7 @@ use std::{
     path::Path,
 };
 
-use super::{AppConfig, MonitoredDirectoryConfig, NetworkInterfaceConfig};
+use super::{AppConfig, MonitoredDirectoryConfig, NetworkInterfaceConfig, ValidationMode};
 use crate::platform::config::PlatformConfig;
 
 /// Configuration validator for ensuring configuration integrity
@@ -93,9 +93,9 @@ impl ConfigValidator {
             return Err(anyhow!("At least one monitored directory must be configured"));
         }
 
-        // Validate each monitored directory
+        // Validate each monitored directory (strict mode)
         for (index, dir) in config.media.directories.iter().enumerate() {
-            Self::validate_monitored_directory(dir, index)?;
+            Self::validate_monitored_directory_strict(dir, index)?;
         }
 
         // Validate supported extensions
@@ -114,8 +114,8 @@ impl ConfigValidator {
         Ok(())
     }
 
-    /// Validate a single monitored directory configuration
-    fn validate_monitored_directory(dir: &MonitoredDirectoryConfig, index: usize) -> Result<()> {
+    /// Validate a single monitored directory configuration (strict mode - ignores validation_mode)
+    fn validate_monitored_directory_strict(dir: &MonitoredDirectoryConfig, index: usize) -> Result<()> {
         let context = format!("monitored directory {}", index);
 
         // Validate path
@@ -125,7 +125,7 @@ impl ConfigValidator {
 
         let path = Path::new(&dir.path);
         
-        // Check if path exists and is a directory
+        // Always perform strict validation regardless of validation_mode
         if !path.exists() {
             return Err(anyhow!("{}: path does not exist: {}", context, dir.path));
         }
@@ -139,6 +139,86 @@ impl ConfigValidator {
         let path_buf = std::path::PathBuf::from(&dir.path);
         platform_config.validate_path(&path_buf)
             .with_context(|| format!("{}: path failed platform validation", context))?;
+
+        // Validate extensions if specified
+        if let Some(extensions) = &dir.extensions {
+            if extensions.is_empty() {
+                return Err(anyhow!("{}: extensions list cannot be empty if specified", context));
+            }
+
+            for ext in extensions {
+                if ext.trim().is_empty() {
+                    return Err(anyhow!("{}: extension cannot be empty", context));
+                }
+                
+                // Validate extension format
+                if !ext.chars().all(|c| c.is_alphanumeric() || c == '.') {
+                    return Err(anyhow!("{}: invalid extension format: {}", context, ext));
+                }
+            }
+        }
+
+        // Validate exclude patterns if specified
+        if let Some(patterns) = &dir.exclude_patterns {
+            for pattern in patterns {
+                if pattern.trim().is_empty() {
+                    return Err(anyhow!("{}: exclude pattern cannot be empty", context));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate a single monitored directory configuration (respects validation_mode)
+    fn validate_monitored_directory(dir: &MonitoredDirectoryConfig, index: usize) -> Result<()> {
+        let context = format!("monitored directory {}", index);
+
+        // Validate path
+        if dir.path.trim().is_empty() {
+            return Err(anyhow!("{}: path cannot be empty", context));
+        }
+
+        let path = Path::new(&dir.path);
+        
+        // Handle validation based on validation mode
+        match dir.validation_mode {
+            ValidationMode::Skip => {
+                tracing::debug!("{}: validation skipped", context);
+                // Skip all path validation for this directory
+            }
+            ValidationMode::Warn => {
+                // Check if path exists and is a directory, but only warn
+                if !path.exists() {
+                    tracing::warn!("{}: path does not exist: {} (continuing startup)", context, dir.path);
+                } else if !path.is_dir() {
+                    tracing::warn!("{}: path is not a directory: {} (continuing startup)", context, dir.path);
+                } else {
+                    // Platform-specific path validation - warn on failure
+                    let platform_config = PlatformConfig::for_current_platform();
+                    let path_buf = std::path::PathBuf::from(&dir.path);
+                    if let Err(e) = platform_config.validate_path(&path_buf) {
+                        tracing::warn!("{}: path failed platform validation: {} (continuing startup)", context, e);
+                    }
+                }
+            }
+            ValidationMode::Strict => {
+                // Original strict validation behavior
+                if !path.exists() {
+                    return Err(anyhow!("{}: path does not exist: {}", context, dir.path));
+                }
+
+                if !path.is_dir() {
+                    return Err(anyhow!("{}: path is not a directory: {}", context, dir.path));
+                }
+
+                // Platform-specific path validation
+                let platform_config = PlatformConfig::for_current_platform();
+                let path_buf = std::path::PathBuf::from(&dir.path);
+                platform_config.validate_path(&path_buf)
+                    .with_context(|| format!("{}: path failed platform validation", context))?;
+            }
+        }
 
         // Validate extensions if specified
         if let Some(extensions) = &dir.extensions {
@@ -260,6 +340,46 @@ impl ConfigValidator {
         }
     }
 
+    /// Validate configuration with flexible directory validation
+    /// This method respects ValidationMode settings and allows startup to continue
+    /// when directories are temporarily unavailable
+    pub fn validate_flexible(config: &AppConfig) -> Result<()> {
+        Self::validate_server_config(config)?;
+        Self::validate_network_config(config)?;
+        Self::validate_media_config_flexible(config)?;
+        Self::validate_database_config(config)?;
+        Self::validate_platform_specific(config)?;
+        Ok(())
+    }
+
+    /// Validate media configuration with flexible directory validation
+    fn validate_media_config_flexible(config: &AppConfig) -> Result<()> {
+        // Check that we have at least one monitored directory
+        if config.media.directories.is_empty() {
+            return Err(anyhow!("At least one monitored directory must be configured"));
+        }
+
+        // Validate each monitored directory with flexible validation
+        for (index, dir) in config.media.directories.iter().enumerate() {
+            Self::validate_monitored_directory(dir, index)?;
+        }
+
+        // Validate supported extensions
+        if config.media.supported_extensions.is_empty() {
+            return Err(anyhow!("At least one supported file extension must be configured"));
+        }
+
+        // Check for duplicate extensions
+        let mut extensions = config.media.supported_extensions.clone();
+        extensions.sort();
+        extensions.dedup();
+        if extensions.len() != config.media.supported_extensions.len() {
+            return Err(anyhow!("Duplicate file extensions found in supported_extensions"));
+        }
+
+        Ok(())
+    }
+
     /// Comprehensive validation including system checks
     pub fn validate_with_system_checks(config: &AppConfig) -> Result<()> {
         // Basic configuration validation
@@ -320,6 +440,7 @@ mod tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Strict,
             }
         ];
         
@@ -355,6 +476,7 @@ mod tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Strict,
             }
         ];
         
@@ -378,6 +500,7 @@ mod tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: ValidationMode::Warn,
             }
         ];
         config.media.supported_extensions = vec![];
@@ -394,25 +517,189 @@ mod tests {
             recursive: true,
             extensions: Some(vec!["mp4".to_string()]),
             exclude_patterns: Some(vec!["*.tmp".to_string()]),
+            validation_mode: super::ValidationMode::Strict,
         };
         assert!(ConfigValidator::validate_monitored_directory(&valid_dir, 0).is_ok());
         
-        // Invalid directory (doesn't exist)
-        let invalid_dir = super::MonitoredDirectoryConfig {
+        // Invalid directory (doesn't exist) with Strict mode - should fail
+        let invalid_dir_strict = super::MonitoredDirectoryConfig {
             path: "/nonexistent/directory".to_string(),
             recursive: true,
             extensions: None,
             exclude_patterns: None,
+            validation_mode: ValidationMode::Strict,
         };
-        assert!(ConfigValidator::validate_monitored_directory(&invalid_dir, 0).is_err());
+        assert!(ConfigValidator::validate_monitored_directory(&invalid_dir_strict, 0).is_err());
         
-        // Empty path
+        // Invalid directory (doesn't exist) with Warn mode - should succeed
+        let invalid_dir_warn = super::MonitoredDirectoryConfig {
+            path: "/nonexistent/directory".to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Warn,
+        };
+        assert!(ConfigValidator::validate_monitored_directory(&invalid_dir_warn, 0).is_ok());
+        
+        // Invalid directory (doesn't exist) with Skip mode - should succeed
+        let invalid_dir_skip = super::MonitoredDirectoryConfig {
+            path: "/nonexistent/directory".to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Skip,
+        };
+        assert!(ConfigValidator::validate_monitored_directory(&invalid_dir_skip, 0).is_ok());
+        
+        // Empty path - should always fail regardless of validation mode
         let empty_path_dir = super::MonitoredDirectoryConfig {
             path: "".to_string(),
             recursive: true,
             extensions: None,
             exclude_patterns: None,
+            validation_mode: ValidationMode::Warn,
         };
         assert!(ConfigValidator::validate_monitored_directory(&empty_path_dir, 0).is_err());
+    }
+
+    #[test]
+    fn test_validation_mode_behavior() {
+        // Test that Warn mode allows startup with missing directories
+        let missing_dir_warn = super::MonitoredDirectoryConfig {
+            path: "/definitely/does/not/exist".to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Warn,
+        };
+        
+        // Should succeed with warning logged
+        assert!(ConfigValidator::validate_monitored_directory(&missing_dir_warn, 0).is_ok());
+        
+        // Test that Skip mode bypasses all validation
+        let missing_dir_skip = super::MonitoredDirectoryConfig {
+            path: "/definitely/does/not/exist".to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Skip,
+        };
+        
+        // Should succeed without any validation
+        assert!(ConfigValidator::validate_monitored_directory(&missing_dir_skip, 0).is_ok());
+        
+        // Test that Strict mode still fails for missing directories
+        let missing_dir_strict = super::MonitoredDirectoryConfig {
+            path: "/definitely/does/not/exist".to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Strict,
+        };
+        
+        // Should fail
+        assert!(ConfigValidator::validate_monitored_directory(&missing_dir_strict, 0).is_err());
+    }
+
+    #[test]
+    fn test_flexible_validation_allows_startup() {
+        use tempfile::TempDir;
+        
+        let temp_dir = TempDir::new().unwrap();
+        let mut config = AppConfig::default_for_platform();
+        
+        // Create a configuration with one valid directory and one missing directory
+        config.media.directories = vec![
+            super::MonitoredDirectoryConfig {
+                path: temp_dir.path().to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+                validation_mode: ValidationMode::Strict, // This should pass
+            },
+            super::MonitoredDirectoryConfig {
+                path: "/definitely/does/not/exist".to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+                validation_mode: ValidationMode::Warn, // This should warn but not fail
+            },
+            super::MonitoredDirectoryConfig {
+                path: "/another/missing/directory".to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+                validation_mode: ValidationMode::Skip, // This should be skipped
+            }
+        ];
+        
+        // Flexible validation should succeed
+        assert!(ConfigValidator::validate_flexible(&config).is_ok());
+        
+        // But strict validation should fail due to the missing directories
+        assert!(ConfigValidator::validate(&config).is_err());
+    }
+
+    #[test]
+    fn test_config_loading_with_missing_directories() -> Result<()> {
+        use tempfile::NamedTempFile;
+        use std::io::Write;
+        
+        let mut temp_file = NamedTempFile::new()?;
+        let temp_dir = tempfile::TempDir::new()?;
+        
+        // Create a TOML config with mixed validation modes
+        let config_content = format!(r#"
+[server]
+port = 8080
+interface = "0.0.0.0"
+name = "Test Server"
+uuid = "12345678-1234-1234-1234-123456789012"
+
+[network]
+interface_selection = "Auto"
+multicast_ttl = 4
+announce_interval_seconds = 30
+
+[media]
+scan_on_startup = true
+watch_for_changes = true
+cleanup_deleted_files = true
+autoplay_enabled = true
+supported_extensions = ["mp4", "mkv", "avi"]
+
+[[media.directories]]
+path = "{}"
+recursive = true
+validation_mode = "Strict"
+
+[[media.directories]]
+path = "/definitely/does/not/exist"
+recursive = true
+validation_mode = "Warn"
+
+[[media.directories]]
+path = "/another/missing/directory"
+recursive = true
+validation_mode = "Skip"
+
+[database]
+vacuum_on_startup = false
+backup_enabled = true
+"#, temp_dir.path().to_string_lossy());
+
+        temp_file.write_all(config_content.as_bytes())?;
+        temp_file.flush()?;
+        
+        // This should succeed with flexible validation
+        let config = AppConfig::load_from_file(temp_file.path())?;
+        
+        // Verify the configuration was loaded correctly
+        assert_eq!(config.media.directories.len(), 3);
+        assert_eq!(config.media.directories[0].validation_mode, ValidationMode::Strict);
+        assert_eq!(config.media.directories[1].validation_mode, ValidationMode::Warn);
+        assert_eq!(config.media.directories[2].validation_mode, ValidationMode::Skip);
+        
+        Ok(())
     }
 }

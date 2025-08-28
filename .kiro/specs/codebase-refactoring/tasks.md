@@ -110,7 +110,7 @@
   - Implement automatic config reload with proper debouncing
   - _Requirements: 5.3, 6.3_
 
-- [ ] 18. Improve configuration validation flexibility
+- [x] 18. Improve configuration validation flexibility
   - Change validate_monitored_directory to log warnings instead of errors for missing paths
   - Implement ValidationMode enum (Strict, Warn, Skip) for media directory validation
   - Update configuration loading to continue startup when directories are temporarily unavailable
