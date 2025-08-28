@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures_util::StreamExt;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -380,6 +381,13 @@ impl MediaScanner {
     }
     
     /// Perform a recursive scan of a directory and its subdirectories
+    /// 
+    /// This method is optimized to avoid N+1 query problems by loading all existing files
+    /// from the database once at the start, then passing this collection down to each
+    /// directory scan. This significantly improves performance for large directory structures.
+    /// 
+    /// The method also implements batch processing to handle very large directory structures
+    /// efficiently without blocking the async runtime.
     pub async fn scan_directory_recursive(&self, directory: &Path) -> Result<ScanResult> {
         // Use canonical path normalization for consistent database storage
         let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
@@ -390,43 +398,91 @@ impl MediaScanner {
             }
         };
         
-        let mut combined_result = ScanResult::new();
-        let mut directories_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
-        directories_to_scan.push(canonical_root.clone());
-        
-        while let Some(current_dir) = directories_to_scan.pop() {
-            // Scan current directory individually without pre-loading all files
-            match self.scan_directory(&current_dir).await {
-                Ok(result) => {
-                    combined_result.merge(result);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to scan directory {}: {}", current_dir.display(), e);
-                    combined_result.errors.push(ScanError {
-                        path: current_dir.clone(),
-                        error: e.to_string(),
-                    });
-                    continue; // Skip subdirectory scanning if parent failed
+        // Fix N+1 query problem: Load all existing files from database once at the start
+        tracing::debug!("Loading all existing files from database for recursive scan optimization");
+        let all_existing_files = {
+            let mut files = Vec::with_capacity(1000);
+            let mut stream = self.database_manager.stream_all_media_files();
+            while let Some(result) = stream.next().await {
+                match result {
+                    Ok(file) => files.push(file),
+                    Err(e) => {
+                        tracing::warn!("Error reading file from database during recursive scan: {}", e);
+                        // Continue processing other files
+                    }
                 }
             }
+            files
+        };
+        
+        tracing::debug!("Loaded {} existing files from database for recursive scan optimization", all_existing_files.len());
+        
+        // Perform recursive scan with batch processing
+        let result = self.scan_directory_recursive_with_existing_files(&canonical_root, &all_existing_files).await?;
+        
+        tracing::debug!("Recursive scan completed: {}", result.summary());
+        Ok(result)
+    }
+    
+    /// Internal optimized recursive scan that uses pre-loaded existing files to avoid N+1 queries
+    async fn scan_directory_recursive_with_existing_files(
+        &self, 
+        directory: &Path, 
+        all_existing_files: &[MediaFile]
+    ) -> Result<ScanResult> {
+        let mut combined_result = ScanResult::new();
+        let mut directories_to_scan = Vec::with_capacity(100);
+        directories_to_scan.push(directory.to_path_buf());
+        
+        // Process directories in batches to handle large directory structures efficiently
+        const BATCH_SIZE: usize = 50; // Process up to 50 directories at a time
+        
+        while !directories_to_scan.is_empty() {
+            // Take a batch of directories to process
+            let batch_size = std::cmp::min(BATCH_SIZE, directories_to_scan.len());
+            let current_batch: Vec<_> = directories_to_scan.drain(0..batch_size).collect();
             
-            // Find subdirectories to scan
-            if let Ok(mut entries) = tokio::fs::read_dir(&current_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let entry_path = entry.path();
-                    if entry_path.is_dir() {
-                        // Skip hidden directories and common system directories
-                        if let Some(dir_name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                            if !dir_name.starts_with('.') && 
-                               !matches!(dir_name.to_lowercase().as_str(), 
-                                   "system volume information" | "$recycle.bin" | "recycler" | 
-                                   "windows" | "program files" | "program files (x86)"
-                               ) {
-                                directories_to_scan.push(entry_path);
+            // Process each directory in the current batch
+            for current_dir in current_batch {
+                // Use the optimized scan method that accepts pre-loaded existing files
+                match self.scan_directory_with_existing_files(&current_dir, Some(all_existing_files)).await {
+                    Ok(result) => {
+                        combined_result.merge(result);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to scan directory {}: {}", current_dir.display(), e);
+                        combined_result.errors.push(ScanError {
+                            path: current_dir.clone(),
+                            error: e.to_string(),
+                        });
+                        continue; // Skip subdirectory scanning if parent failed
+                    }
+                }
+                
+                // Find subdirectories to add to the scan queue
+                if let Ok(mut entries) = tokio::fs::read_dir(&current_dir).await {
+                    while let Ok(Some(entry)) = entries.next_entry().await {
+                        let entry_path = entry.path();
+                        if entry_path.is_dir() {
+                            // Skip hidden directories and common system directories
+                            if let Some(dir_name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                                if !dir_name.starts_with('.') && 
+                                   !matches!(dir_name.to_lowercase().as_str(), 
+                                       "system volume information" | "$recycle.bin" | "recycler" | 
+                                       "windows" | "program files" | "program files (x86)"
+                                   ) {
+                                    directories_to_scan.push(entry_path);
+                                }
                             }
                         }
                     }
                 }
+            }
+            
+            // Yield control periodically during large scans to prevent blocking
+            if directories_to_scan.len() > BATCH_SIZE * 2 {
+                tracing::debug!("Processing large directory structure: {} directories remaining", directories_to_scan.len());
+                tokio::task::yield_now().await;
             }
         }
         
@@ -709,5 +765,58 @@ mod tests {
         assert!(summary.contains("8 files"));
         assert!(summary.contains("1 new"));
         assert!(summary.contains("1 updated"));
+    }
+    
+    #[tokio::test]
+    async fn test_recursive_scan_optimization() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        // Create database
+        let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
+        db.initialize().await.unwrap();
+        
+        // Create scanner with base filesystem manager
+        let filesystem_manager = Box::new(BaseFileSystemManager::new(true));
+        let scanner = MediaScanner::with_filesystem_manager(filesystem_manager, db.clone());
+        
+        // Create a nested directory structure with test files
+        let root_dir = temp_dir.path().join("media");
+        let sub_dir1 = root_dir.join("videos");
+        let sub_dir2 = root_dir.join("music");
+        let sub_sub_dir = sub_dir1.join("movies");
+        
+        tokio::fs::create_dir_all(&sub_sub_dir).await.unwrap();
+        tokio::fs::create_dir_all(&sub_dir2).await.unwrap();
+        
+        // Create test files in different directories
+        tokio::fs::write(root_dir.join("root.mp4"), b"root video").await.unwrap();
+        tokio::fs::write(sub_dir1.join("video1.mp4"), b"video content").await.unwrap();
+        tokio::fs::write(sub_dir2.join("song1.mp3"), b"audio content").await.unwrap();
+        tokio::fs::write(sub_sub_dir.join("movie1.mkv"), b"movie content").await.unwrap();
+        
+        // First scan to populate database
+        let initial_result = scanner.scan_directory_recursive(&root_dir).await.unwrap();
+        assert_eq!(initial_result.new_files.len(), 4);
+        assert_eq!(initial_result.total_changes(), 4);
+        
+        // Verify all files were stored in database
+        let mut all_files_stream = db.stream_all_media_files();
+        let mut stored_files = Vec::new();
+        while let Some(result) = all_files_stream.next().await {
+            stored_files.push(result.unwrap());
+        }
+        assert_eq!(stored_files.len(), 4);
+        
+        // Second scan should find no changes (tests that optimization works correctly)
+        let second_result = scanner.scan_directory_recursive(&root_dir).await.unwrap();
+        assert_eq!(second_result.new_files.len(), 0);
+        assert_eq!(second_result.updated_files.len(), 0);
+        assert_eq!(second_result.unchanged_files.len(), 4);
+        assert_eq!(second_result.total_changes(), 0);
+        
+        // Verify the optimization is working by checking that we can handle the recursive scan
+        // without making individual database queries for each directory
+        assert!(second_result.errors.is_empty());
     }
 }

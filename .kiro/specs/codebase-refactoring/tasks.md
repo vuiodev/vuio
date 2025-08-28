@@ -134,7 +134,7 @@
   - Update dependency versions if needed for compatibility
   - _Requirements: 6.4_
 
-- [ ] 22. Optimize media scanner recursive scanning
+- [x] 22. Optimize media scanner recursive scanning
   - Fix N+1 query problem in scan_directory_recursive by performing single database query at start
   - Pass collection of known files down through recursive calls to avoid repeated database hits
   - Implement batch processing for large directory structures
