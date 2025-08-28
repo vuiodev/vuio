@@ -129,8 +129,8 @@ impl DatabasePerformanceComparison {
         let sql_db = Arc::new(SqliteDatabase::new(sql_db_path).await?);
         sql_db.initialize().await?;
         
-        // Generate test data - more files for comprehensive testing
-        let test_files = Self::generate_test_media_files(5000);
+        // Generate test data - much larger dataset for comprehensive testing
+        let test_files = Self::generate_test_media_files(100_000);
         
         Ok(Self {
             temp_dir,
@@ -142,7 +142,20 @@ impl DatabasePerformanceComparison {
     /// Create a ZeroCopy database with the specified profile
     async fn create_zerocopy_db(&self, profile: &ZeroCopyProfile) -> Result<Arc<ZeroCopyDatabase>> {
         let db_path = self.temp_dir.path().join(format!("zerocopy_{}.db", profile.name.replace(" ", "_").replace("(", "").replace(")", "").replace(",", "")));
-        let db = Arc::new(ZeroCopyDatabase::new(db_path, Some(profile.config.clone())).await?);
+        
+        // Create a high-performance error handler for testing (minimal delays)
+        let fast_error_handler = vuio::database::error_handling::create_custom_shared_error_handler(
+            1, // max_retry_attempts - minimal retries for performance
+            std::time::Duration::from_millis(1), // base_retry_delay - 1ms instead of 100ms
+            std::time::Duration::from_millis(5), // max_retry_delay - 5ms instead of 30s
+            false, // enable_detailed_logging - disable for performance
+        );
+        
+        let db = Arc::new(ZeroCopyDatabase::new_with_error_handler(
+            db_path, 
+            Some(profile.config.clone()),
+            fast_error_handler
+        ).await?);
         db.initialize().await?;
         db.open().await?;
         Ok(db)
@@ -213,6 +226,18 @@ impl DatabasePerformanceComparison {
     pub async fn test_bulk_insert_with_profile(&self, profile: &ZeroCopyProfile) -> Result<(PerformanceMetrics, PerformanceMetrics)> {
         println!("🚀 Running bulk insert test: {}", profile.name);
         
+        // Use different dataset sizes based on profile to properly test batch performance
+        let test_files = match profile.name.as_str() {
+            name if name.contains("Minimal") => &self.test_files[..10_000.min(self.test_files.len())],
+            name if name.contains("Small") => &self.test_files[..50_000.min(self.test_files.len())],
+            name if name.contains("Medium") => &self.test_files[..100_000.min(self.test_files.len())],
+            name if name.contains("Large") => &self.test_files,
+            name if name.contains("Extreme") => &self.test_files,
+            _ => &self.test_files[..10_000.min(self.test_files.len())],
+        };
+        
+        println!("   Dataset size: {} files", test_files.len());
+        
         // Create fresh SQL database for this test to avoid conflicts
         let sql_db = self.create_sql_db(&profile.name).await?;
         
@@ -221,10 +246,10 @@ impl DatabasePerformanceComparison {
         let start_memory = Self::measure_memory_usage();
         let start_cpu = Self::measure_cpu_usage();
         
-        let sql_ids = sql_db.bulk_store_media_files(&self.test_files).await?;
+        let sql_ids = sql_db.bulk_store_media_files(test_files).await?;
         
         let sql_duration = start_time.elapsed();
-        let sql_throughput = self.test_files.len() as f64 / sql_duration.as_secs_f64();
+        let sql_throughput = test_files.len() as f64 / sql_duration.as_secs_f64();
         let sql_metrics = PerformanceMetrics {
             operation: format!("SQL Bulk Insert (vs {})", profile.name),
             duration: sql_duration,
@@ -241,10 +266,10 @@ impl DatabasePerformanceComparison {
         let start_memory = Self::measure_memory_usage();
         let start_cpu = Self::measure_cpu_usage();
         
-        let zerocopy_ids = zerocopy_db.bulk_store_media_files(&self.test_files).await?;
+        let zerocopy_ids = zerocopy_db.bulk_store_media_files(test_files).await?;
         
         let zerocopy_duration = start_time.elapsed();
-        let zerocopy_throughput = self.test_files.len() as f64 / zerocopy_duration.as_secs_f64();
+        let zerocopy_throughput = test_files.len() as f64 / zerocopy_duration.as_secs_f64();
         let zerocopy_metrics = PerformanceMetrics {
             operation: format!("ZeroCopy Bulk Insert ({})", profile.name),
             duration: zerocopy_duration,
