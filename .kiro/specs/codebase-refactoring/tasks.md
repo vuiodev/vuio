@@ -46,13 +46,13 @@
   - Add transaction support for atomic cleanup operations
   - _Requirements: 2.2, 2.5_
 
-- [ ] 8. Add path prefix query support
+- [x] 8. Add path prefix query support
   - Implement get_files_with_path_prefix for efficient directory deletion handling
   - Create database index on canonical_path for prefix queries
   - Update file deletion logic in main.rs to use prefix queries instead of loading entire database
   - _Requirements: 2.3, 2.5_
 
-- [ ] 9. Replace get_all_media_files with streaming interface
+- [x] 9. Replace get_all_media_files with streaming interface
   - Implement stream_all_media_files using async streams
   - Remove hardcoded LIMIT from get_all_media_files and mark as deprecated
   - Update code that uses get_all_media_files to use streaming or paginated queries

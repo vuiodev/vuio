@@ -3,7 +3,7 @@ use vuio::{
     config::AppConfig,
     database::{self, DatabaseManager, SqliteDatabase},
     logging, media,
-    platform::{self, filesystem::create_platform_filesystem_manager, PlatformInfo},
+    platform::{self, filesystem::{create_platform_filesystem_manager, create_platform_path_normalizer}, PlatformInfo},
     ssdp,
     state::AppState,
     watcher::{CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher},
@@ -1031,28 +1031,23 @@ async fn handle_file_system_event(
                 }
             };
             
-            // Also check for files that were in this directory path
-            let all_files = match database.get_all_media_files().await {
-                Ok(files) => files,
+            // Use efficient path prefix query to find files in the deleted directory
+            let path_normalizer = create_platform_path_normalizer();
+            let canonical_prefix = match path_normalizer.to_canonical(&path) {
+                Ok(canonical) => canonical,
                 Err(e) => {
-                    warn!("Error getting all media files: {}", e);
+                    warn!("Error normalizing deleted path {}: {}", path.display(), e);
                     return Ok(());
                 }
             };
             
-            // Normalize paths for case-insensitive comparison on Windows
-            let normalized_deleted_path = path.to_string_lossy().to_lowercase();
-            let files_in_deleted_path: Vec<_> = all_files
-                .iter()
-                .filter(|file| {
-                    let normalized_file_path = file.path.to_string_lossy().to_lowercase();
-                    let matches = normalized_file_path.starts_with(&normalized_deleted_path);
-                    if matches {
-                        info!("Found file in deleted path: {} starts with {}", file.path.display(), path.display());
-                    }
-                    matches
-                })
-                .collect();
+            let files_in_deleted_path = match database.get_files_with_path_prefix(&canonical_prefix).await {
+                Ok(files) => files,
+                Err(e) => {
+                    warn!("Error getting files with path prefix '{}': {}", canonical_prefix, e);
+                    return Ok(());
+                }
+            };
             
             let mut total_removed = if single_file_removed { 1 } else { 0 };
             
@@ -1075,9 +1070,6 @@ async fn handle_file_system_event(
                 }
             } else {
                 info!("No files found in deleted path: {}", path.display());
-                // Debug: show some database paths for comparison
-                let sample_paths: Vec<_> = all_files.iter().take(5).map(|f| f.path.display().to_string()).collect();
-                info!("Sample database paths: {:?}", sample_paths);
             }
             
             if total_removed > 0 {
@@ -1100,12 +1092,10 @@ async fn handle_file_system_event(
                 // Handle directory rename
                 info!("Directory renamed: {} -> {}", from.display(), to.display());
                 
-                // Get all files that were in the old directory path
-                let all_files = database.get_all_media_files().await?;
-                let files_in_old_path: Vec<_> = all_files
-                    .iter()
-                    .filter(|file| file.path.starts_with(&from))
-                    .collect();
+                // Use efficient path prefix query to find files in the old directory path
+                let path_normalizer = create_platform_path_normalizer();
+                let canonical_from_prefix = path_normalizer.to_canonical(&from)?;
+                let files_in_old_path = database.get_files_with_path_prefix(&canonical_from_prefix).await?;
                 
                 if !files_in_old_path.is_empty() {
                     info!("Updating {} media files for renamed directory", files_in_old_path.len());

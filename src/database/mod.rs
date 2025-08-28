@@ -150,9 +150,36 @@ pub trait DatabaseManager: Send + Sync {
     async fn store_media_file(&self, file: &MediaFile) -> Result<i64>;
 
     /// Get all media files from the database
+    /// 
+    /// # Deprecated
+    /// This method loads all files into memory and should be avoided for large libraries.
+    /// Use `stream_all_media_files()` for memory-efficient processing of large datasets.
+    #[deprecated(since = "0.0.16", note = "Use stream_all_media_files() for memory-efficient processing")]
     async fn get_all_media_files(&self) -> Result<Vec<MediaFile>>;
 
     /// Stream all media files from the database (memory efficient)
+    /// 
+    /// This method provides a memory-efficient way to process all media files without
+    /// loading them all into memory at once. Use this instead of `get_all_media_files()`
+    /// for large media libraries.
+    /// 
+    /// # Example
+    /// ```rust,no_run
+    /// use futures_util::StreamExt;
+    /// 
+    /// let mut stream = database.stream_all_media_files();
+    /// while let Some(result) = stream.next().await {
+    ///     match result {
+    ///         Ok(media_file) => {
+    ///             // Process each file individually
+    ///             println!("Processing: {}", media_file.filename);
+    ///         }
+    ///         Err(e) => {
+    ///             eprintln!("Error reading file: {}", e);
+    ///         }
+    ///     }
+    /// }
+    /// ```
     fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>>;
 
     /// Remove a media file record by path
@@ -833,7 +860,7 @@ impl DatabaseManager for SqliteDatabase {
 
     async fn get_all_media_files(&self) -> Result<Vec<MediaFile>> {
         let rows = sqlx::query(
-            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename LIMIT 5000"
+            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename"
         )
         .fetch_all(&*self.pool.read().await)
         .await?;
@@ -1817,7 +1844,7 @@ impl DatabaseManager for SqliteDatabase {
     }
 
     async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
-        self.get_files_with_path_prefix(canonical_prefix).await
+        SqliteDatabase::get_files_with_path_prefix(self, canonical_prefix).await
     }
 
     async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
@@ -2679,5 +2706,159 @@ mod tests {
 
         assert_eq!(movies_subdirs.len(), 1, "Movies should have 1 direct subdirectory");
         assert_eq!(movies_subdirs[0].name, "Action");
+    }
+
+    #[tokio::test]
+    async fn test_get_files_with_path_prefix() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create test files with different path prefixes
+        let base_path = if cfg!(windows) {
+            PathBuf::from("C:\\media")
+        } else {
+            PathBuf::from("/media")
+        };
+
+        // Files in /media/movies/
+        let movie1 = MediaFile::new(
+            base_path.join("movies").join("action").join("movie1.mp4"),
+            1000,
+            "video/mp4".to_string(),
+        );
+        let movie2 = MediaFile::new(
+            base_path.join("movies").join("comedy").join("movie2.mp4"),
+            2000,
+            "video/mp4".to_string(),
+        );
+
+        // Files in /media/music/
+        let song1 = MediaFile::new(
+            base_path.join("music").join("rock").join("song1.mp3"),
+            500,
+            "audio/mpeg".to_string(),
+        );
+        let song2 = MediaFile::new(
+            base_path.join("music").join("pop").join("song2.mp3"),
+            600,
+            "audio/mpeg".to_string(),
+        );
+
+        // File in /media/ (root level)
+        let root_file = MediaFile::new(
+            base_path.join("readme.txt"),
+            100,
+            "text/plain".to_string(),
+        );
+
+        // Store all files
+        db.store_media_file(&movie1).await.unwrap();
+        db.store_media_file(&movie2).await.unwrap();
+        db.store_media_file(&song1).await.unwrap();
+        db.store_media_file(&song2).await.unwrap();
+        db.store_media_file(&root_file).await.unwrap();
+
+        // Test: Get files with movies prefix
+        let movies_canonical_prefix = if cfg!(windows) {
+            "c:/media/movies"
+        } else {
+            "/media/movies"
+        };
+        let movies_files = db.get_files_with_path_prefix(movies_canonical_prefix).await.unwrap();
+        assert_eq!(movies_files.len(), 2, "Should return 2 movie files");
+        
+        let movie_filenames: Vec<String> = movies_files.iter().map(|f| f.filename.clone()).collect();
+        assert!(movie_filenames.contains(&"movie1.mp4".to_string()));
+        assert!(movie_filenames.contains(&"movie2.mp4".to_string()));
+
+        // Test: Get files with music prefix
+        let music_canonical_prefix = if cfg!(windows) {
+            "c:/media/music"
+        } else {
+            "/media/music"
+        };
+        let music_files = db.get_files_with_path_prefix(music_canonical_prefix).await.unwrap();
+        assert_eq!(music_files.len(), 2, "Should return 2 music files");
+        
+        let music_filenames: Vec<String> = music_files.iter().map(|f| f.filename.clone()).collect();
+        assert!(music_filenames.contains(&"song1.mp3".to_string()));
+        assert!(music_filenames.contains(&"song2.mp3".to_string()));
+
+        // Test: Get files with root media prefix (should return all files)
+        let root_canonical_prefix = if cfg!(windows) {
+            "c:/media"
+        } else {
+            "/media"
+        };
+        let all_files = db.get_files_with_path_prefix(root_canonical_prefix).await.unwrap();
+        assert_eq!(all_files.len(), 5, "Should return all 5 files");
+
+        // Test: Get files with specific subdirectory prefix
+        let action_canonical_prefix = if cfg!(windows) {
+            "c:/media/movies/action"
+        } else {
+            "/media/movies/action"
+        };
+        let action_files = db.get_files_with_path_prefix(action_canonical_prefix).await.unwrap();
+        assert_eq!(action_files.len(), 1, "Should return 1 action movie file");
+        assert_eq!(action_files[0].filename, "movie1.mp4");
+
+        // Test: Get files with non-existent prefix
+        let nonexistent_prefix = if cfg!(windows) {
+            "c:/media/nonexistent"
+        } else {
+            "/media/nonexistent"
+        };
+        let no_files = db.get_files_with_path_prefix(nonexistent_prefix).await.unwrap();
+        assert_eq!(no_files.len(), 0, "Should return no files for non-existent prefix");
+    }
+
+    #[tokio::test]
+    async fn test_stream_all_media_files() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create test files
+        let test_files = vec![
+            MediaFile::new(PathBuf::from("/media/video1.mp4"), 1000, "video/mp4".to_string()),
+            MediaFile::new(PathBuf::from("/media/video2.mp4"), 2000, "video/mp4".to_string()),
+            MediaFile::new(PathBuf::from("/media/audio1.mp3"), 500, "audio/mpeg".to_string()),
+        ];
+
+        // Store test files
+        for file in &test_files {
+            db.store_media_file(file).await.unwrap();
+        }
+
+        // Test streaming interface
+        let mut stream = db.stream_all_media_files();
+        let mut streamed_files = Vec::new();
+        
+        while let Some(result) = stream.next().await {
+            let file = result.unwrap();
+            streamed_files.push(file);
+        }
+
+        // Verify we got all files
+        assert_eq!(streamed_files.len(), 3, "Should stream all 3 files");
+        
+        // Verify files are ordered by filename (as per the query)
+        assert_eq!(streamed_files[0].filename, "audio1.mp3");
+        assert_eq!(streamed_files[1].filename, "video1.mp4");
+        assert_eq!(streamed_files[2].filename, "video2.mp4");
+
+        // Compare with deprecated get_all_media_files to ensure same results
+        #[allow(deprecated)]
+        let all_files = db.get_all_media_files().await.unwrap();
+        assert_eq!(streamed_files.len(), all_files.len(), "Streaming and get_all should return same count");
+        
+        for (streamed, all) in streamed_files.iter().zip(all_files.iter()) {
+            assert_eq!(streamed.path, all.path, "Files should be in same order");
+            assert_eq!(streamed.filename, all.filename, "Filenames should match");
+        }
     }
 }

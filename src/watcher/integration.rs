@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 use crate::database::{DatabaseManager, MediaFile};
 use crate::error::Result;
 use crate::media;
+use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 use crate::watcher::{FileSystemEvent, FileSystemWatcher};
 
 /// Service that integrates file system watching with database updates
@@ -23,6 +24,7 @@ where
     processing_queue: Arc<RwLock<HashMap<PathBuf, QueuedOperation>>>,
     batch_interval: Duration,
     is_running: Arc<RwLock<bool>>,
+    path_normalizer: Box<dyn PathNormalizer>,
 }
 
 /// Operations that can be queued for batch processing
@@ -48,6 +50,7 @@ where
             processing_queue: Arc::new(RwLock::new(HashMap::with_capacity(256))), // Pre-allocate capacity
             batch_interval: Duration::from_millis(2000), // Process batches every 2 seconds for reduced frequency
             is_running: Arc::new(RwLock::new(false)),
+            path_normalizer: create_platform_path_normalizer(),
         }
     }
 
@@ -330,13 +333,17 @@ where
 
         // Also check if this was a directory by looking for files with this path as prefix
         // This handles the case where a directory was deleted
-        match database.get_all_media_files().await {
-            Ok(all_files) => {
-                let files_in_deleted_path: Vec<_> = all_files
-                    .iter()
-                    .filter(|file| file.path.starts_with(path))
-                    .collect();
+        let path_normalizer = create_platform_path_normalizer();
+        let canonical_prefix = match path_normalizer.to_canonical(path) {
+            Ok(canonical) => canonical,
+            Err(e) => {
+                debug!("Failed to normalize path for prefix query {:?}: {}", path, e);
+                return Ok(());
+            }
+        };
 
+        match database.get_files_with_path_prefix(&canonical_prefix).await {
+            Ok(files_in_deleted_path) => {
                 if !files_in_deleted_path.is_empty() {
                     info!("Removing {} media files from deleted directory: {:?}", files_in_deleted_path.len(), path);
                     
@@ -356,7 +363,7 @@ where
                 }
             }
             Err(e) => {
-                error!("Failed to get all media files for directory cleanup: {}", e);
+                error!("Failed to get files with path prefix for directory cleanup: {}", e);
             }
         }
 
