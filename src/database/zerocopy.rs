@@ -1397,24 +1397,68 @@ impl ZeroCopyDatabase {
         self.batch_insert_files_ultra_fast(files).await
     }
     
-    /// Ultra-fast batch insert with minimal storage
+    /// High-performance batch insert with REAL data persistence
     async fn batch_insert_files_ultra_fast(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
         let start_time = Instant::now();
         
-        // Generate IDs as fast as possible
+        // Generate IDs and update files
         let mut assigned_ids: Vec<i64> = Vec::with_capacity(files.len());
-        for _ in files {
-            assigned_ids.push(self.next_media_file_id.fetch_add(1, Ordering::Relaxed) as i64);
+        let mut files_with_ids: Vec<MediaFile> = Vec::with_capacity(files.len());
+        
+        for file in files {
+            let file_id = match file.id {
+                Some(existing_id) => existing_id,
+                None => self.next_media_file_id.fetch_add(1, Ordering::Relaxed) as i64,
+            };
+            assigned_ids.push(file_id);
+            
+            let mut file_with_id = file.clone();
+            file_with_id.id = Some(file_id);
+            files_with_ids.push(file_with_id);
         }
         
-        // Minimal serialization - just create a simple buffer
-        let data_size = files.len() * 256; // Estimate 256 bytes per file
-        
-        // Fake write to memory-mapped file (just get an offset)
-        let write_offset = {
+        // Fast FlatBuffer serialization with REAL data
+        let (write_offset, data_size) = {
+            let mut builder = self.flatbuffer_builder.write().await;
+            builder.reset();
+            
+            // Serialize REAL file data
+            let _serialization_result = MediaFileSerializer::serialize_media_file_batch(
+                &mut builder,
+                &files_with_ids,
+                1, // batch_id
+                BatchOperationType::Insert,
+                None, // Skip path normalization for speed
+            )?;
+            
             let mut data_file = self.data_file.write().await;
-            let fake_data = vec![0u8; data_size];
-            data_file.append_data(&fake_data)?
+            let serialized_data = builder.finished_data();
+            
+            // Write REAL data with length prefix
+            let data_len = serialized_data.len() as u32;
+            let mut prefixed_data = Vec::with_capacity(4 + serialized_data.len());
+            prefixed_data.extend_from_slice(&data_len.to_le_bytes());
+            prefixed_data.extend_from_slice(serialized_data);
+            
+            let offset = data_file.append_data(&prefixed_data)?;
+            
+            // Use WAL instead of sync for maximum performance
+            let config = self.config.read().await;
+            let use_wal = config.enable_wal;
+            let sync_freq = config.sync_frequency.as_secs();
+            drop(config);
+            
+            if use_wal {
+                // WAL mode: Data is already written, no sync needed (WAL handles durability)
+                // WAL will be flushed to main database later in background
+            } else {
+                // Non-WAL mode: Optional sync based on configuration
+                if sync_freq <= 5 {
+                    data_file.sync_to_disk()?;
+                }
+            }
+            
+            (offset, prefixed_data.len())
         };
         
         let total_time = start_time.elapsed();

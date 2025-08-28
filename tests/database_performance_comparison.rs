@@ -35,11 +35,14 @@ pub struct ZeroCopyProfile {
 }
 
 impl ZeroCopyProfile {
-    /// Minimal configuration (default)
+    /// Minimal configuration with WAL enabled
     pub fn minimal() -> Self {
         Self {
-            name: "Minimal (1MB cache, 1K index, 100 batch)".to_string(),
-            config: ZeroCopyConfig::default(),
+            name: "Minimal (1MB cache, 1K index, 100 batch, WAL)".to_string(),
+            config: ZeroCopyConfig {
+                enable_wal: true,  // Enable WAL for maximum performance
+                ..Default::default()
+            },
         }
     }
     
