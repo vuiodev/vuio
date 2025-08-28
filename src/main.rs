@@ -1,6 +1,6 @@
 use anyhow::Context;
 use vuio::{
-    config::{AppConfig, MonitoredDirectoryConfig},
+    config::{AppConfig, ConfigManager, MonitoredDirectoryConfig},
     database::{self, DatabaseManager, SqliteDatabase},
     logging, media,
     platform::{self, filesystem::{create_platform_filesystem_manager, create_platform_path_normalizer}, PlatformInfo},
@@ -174,14 +174,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Security checks removed for faster startup
 
-    // Load or create configuration with platform-specific defaults and apply overrides
-    let config = match initialize_configuration(&platform_info, config_file_path, config_override).await {
-        Ok(config) => Arc::new(config),
+    // Initialize configuration manager with file watching
+    let config_manager = match initialize_config_manager(&platform_info, config_file_path, config_override).await {
+        Ok(manager) => Arc::new(manager),
         Err(e) => {
-            error!("Failed to initialize configuration: {}", e);
+            error!("Failed to initialize configuration manager: {}", e);
             return Err(e);
         }
     };
+    
+    // Get the current configuration
+    let config = Arc::new(config_manager.get_config().await);
 
     // Initialize database manager
     let database = match initialize_database(&config).await {
@@ -227,7 +230,7 @@ async fn main() -> anyhow::Result<()> {
     // Start runtime platform adaptation services
     let adaptation_handle = start_platform_adaptation(
         platform_info.clone(),
-        config.clone(),
+        config_manager.clone(),
         database.clone(),
     ).await?;
 
@@ -290,24 +293,30 @@ async fn main() -> anyhow::Result<()> {
 /// Start platform adaptation services for runtime detection and adaptation
 async fn start_platform_adaptation(
     _platform_info: Arc<PlatformInfo>,
-    config: Arc<AppConfig>,
+    config_manager: Arc<ConfigManager>,
     database: Arc<dyn DatabaseManager>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     info!("Starting platform adaptation services...");
     
-    let config_clone = config.clone();
-    let database_clone = database.clone();
+    let config_manager_clone = config_manager.clone();
+    let _database_clone = database.clone();
     
     let handle = tokio::spawn(async move {
-        // Disable frequent network checks to avoid repeated interface detection
-        // Network interfaces are detected once at startup and that's sufficient for most use cases
-        let mut config_check_interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        // Subscribe to configuration changes from ConfigManager
+        let mut config_changes = config_manager_clone.subscribe_to_changes();
         
         loop {
             tokio::select! {
-                _ = config_check_interval.tick() => {
-                    if let Err(e) = check_and_reload_configuration(&config_clone, &database_clone).await {
-                        warn!("Configuration reload check failed: {}", e);
+                config_event = config_changes.recv() => {
+                    match config_event {
+                        Ok(event) => {
+                            info!("Configuration change detected: {:?}", event);
+                            // Handle configuration changes as needed
+                            // For now, just log the changes - specific handling can be added later
+                        }
+                        Err(e) => {
+                            warn!("Configuration change subscription error: {}", e);
+                        }
                     }
                 }
                 _ = wait_for_shutdown_signal() => {
@@ -320,191 +329,15 @@ async fn start_platform_adaptation(
         info!("Platform adaptation service stopped");
     });
     
-    info!("Platform adaptation services started");
+    info!("Platform adaptation services started with configuration change monitoring");
     Ok(handle)
 }
 
 
 
-/// Check for configuration changes and reload if necessary
-async fn check_and_reload_configuration(
-    config: &Arc<AppConfig>,
-    database: &Arc<dyn DatabaseManager>,
-) -> anyhow::Result<()> {
-    let config_path = AppConfig::get_platform_config_file_path();
-    
-    // Check if configuration file has been modified
-    if let Ok(metadata) = tokio::fs::metadata(&config_path).await {
-        let modified = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        
-        // Skip change detection for files modified in the last 2 minutes to avoid
-        // detecting newly created config files as "changed"
-        let two_minutes_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(120);
-        let five_minutes_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(300);
-        
-        // Only check for changes if file was modified between 2-5 minutes ago
-        if modified > five_minutes_ago && modified < two_minutes_ago {
-            info!("Configuration file may have been modified, checking for changes...");
-            
-            match AppConfig::load_from_file(&config_path) {
-                Ok(new_config) => {
-                    if let Err(e) = handle_configuration_changes(config, &new_config, database).await {
-                        warn!("Failed to handle configuration changes: {}", e);
-                    }
-                }
-                Err(e) => {
-                    warn!("Failed to load updated configuration: {}", e);
-                }
-            }
-        }
-    }
-    
-    Ok(())
-}
 
-/// Handle configuration changes by updating relevant services
-async fn handle_configuration_changes(
-    old_config: &Arc<AppConfig>,
-    new_config: &AppConfig,
-    database: &Arc<dyn DatabaseManager>,
-) -> anyhow::Result<()> {
-    let mut changes_detected = false;
-    
-    // Check for media directory changes
-    let old_dirs: std::collections::HashSet<_> = old_config.media.directories
-        .iter()
-        .map(|d| &d.path)
-        .collect();
-    let new_dirs: std::collections::HashSet<_> = new_config.media.directories
-        .iter()
-        .map(|d| &d.path)
-        .collect();
-    
-    if old_dirs != new_dirs {
-        info!("Media directory configuration changed");
-        changes_detected = true;
-        
-        let scanner = media::MediaScanner::with_database(database.clone());
-        let mut cache_needs_reload = false;
 
-        // Find added directories
-        for new_dir_path_str in &new_dirs {
-            if !old_dirs.contains(new_dir_path_str) {
-                info!("New media directory added: {}", new_dir_path_str);
-                
-                if let Some(dir_config) = new_config.media.directories.iter().find(|d| &d.path == *new_dir_path_str) {
-                    let dir_path = std::path::PathBuf::from(&dir_config.path);
-                    if dir_path.exists() && dir_path.is_dir() {
-                        let scan_result = if dir_config.recursive {
-                            scanner.scan_directory_recursive(&dir_path).await
-                        } else {
-                            scanner.scan_directory(&dir_path).await
-                        };
 
-                        match scan_result {
-                            Ok(result) => {
-                                info!("Scanned new directory {}: {}", dir_config.path, result.summary());
-                                if result.has_changes() {
-                                    cache_needs_reload = true;
-                                }
-                            }
-                            Err(e) => {
-                                warn!("Failed to scan new directory {}: {}", dir_config.path, e);
-                            }
-                        }
-                    } else {
-                        warn!("Newly added directory does not exist or is not a directory: {}", dir_path.display());
-                    }
-                }
-            }
-        }
-        
-        // Find removed directories
-        for old_dir in &old_dirs {
-            if !new_dirs.contains(old_dir) {
-                info!("Media directory removed: {}", old_dir);
-                
-                // Remove files from this directory from database and cache
-                let dir_path = std::path::PathBuf::from(old_dir);
-                let files_to_remove = database.get_files_in_directory(&dir_path).await
-                    .unwrap_or_default();
-                
-                if !files_to_remove.is_empty() {
-                    cache_needs_reload = true;
-                }
-
-                for file in &files_to_remove {
-                    if let Err(e) = database.remove_media_file(&file.path).await {
-                        warn!("Failed to remove media file from database: {} - {}", file.path.display(), e);
-                    }
-                }
-                
-                info!("Removed {} files from removed directory", files_to_remove.len());
-            }
-        }
-
-        if cache_needs_reload {
-            info!("Directory changes detected - database has been updated");
-        }
-    }
-    
-    // Check for file watching changes
-    if old_config.media.watch_for_changes != new_config.media.watch_for_changes {
-        info!("File watching configuration changed: {} -> {}", 
-            old_config.media.watch_for_changes, new_config.media.watch_for_changes);
-        changes_detected = true;
-        
-        if new_config.media.watch_for_changes {
-            info!("File watching enabled - new file changes will be detected");
-            // TODO: Start file watcher if not already running
-        } else {
-            info!("File watching disabled - file changes will not be detected automatically");
-            // TODO: Stop file watcher if running
-        }
-    }
-    
-    // Check for network configuration changes
-    if old_config.network.interface_selection != new_config.network.interface_selection {
-        info!("Network configuration changed");
-        changes_detected = true;
-        
-        if old_config.network.interface_selection != new_config.network.interface_selection {
-            info!("Network interface selection changed: {:?} -> {:?}", 
-                old_config.network.interface_selection, new_config.network.interface_selection);
-        }
-        
-        // TODO: Restart SSDP service with new configuration
-        warn!("Network configuration changes require service restart to take effect");
-    }
-    
-    // Check for server configuration changes
-    if old_config.server.port != new_config.server.port ||
-       old_config.server.interface != new_config.server.interface ||
-       old_config.server.ip != new_config.server.ip {
-        info!("Server configuration changed");
-        changes_detected = true;
-        
-        if old_config.server.port != new_config.server.port {
-            info!("Server port changed: {} -> {}", old_config.server.port, new_config.server.port);
-        }
-        
-        if old_config.server.interface != new_config.server.interface {
-            info!("Server interface changed: {} -> {}", old_config.server.interface, new_config.server.interface);
-        }
-        
-        if old_config.server.ip != new_config.server.ip {
-            info!("Server IP changed: {:?} -> {:?}", old_config.server.ip, new_config.server.ip);
-        }
-        
-        warn!("Server configuration changes require application restart to take effect");
-    }
-    
-    if changes_detected {
-        info!("Configuration changes processed successfully");
-    }
-    
-    Ok(())
-}
 
 
 /// Detect platform information with comprehensive diagnostics and error reporting
@@ -554,12 +387,12 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
     Ok(platform_info)
 }
 
-/// Initialize configuration with platform-specific defaults, file loading, and command line overrides
-async fn initialize_configuration(
+/// Initialize configuration manager with platform-specific defaults, file loading, and command line overrides
+async fn initialize_config_manager(
     _platform_info: &PlatformInfo, 
     config_file_path: Option<String>,
     config_override: Option<AppConfig>
-) -> anyhow::Result<AppConfig> {
+) -> anyhow::Result<ConfigManager> {
     info!("Initializing configuration...");
     
     // Check if running in Docker container
@@ -577,7 +410,16 @@ async fn initialize_configuration(
             info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
         }
         
-        return Ok(config);
+        // Create a temporary config file for the ConfigManager
+        let temp_config_path = std::env::temp_dir().join("vuio_docker_config.toml");
+        config.save_to_file(&temp_config_path)
+            .context("Failed to save Docker configuration to temporary file")?;
+        
+        // Create ConfigManager without file watching for Docker (config is static from env vars)
+        let config_manager = ConfigManager::new(&temp_config_path)
+            .context("Failed to create ConfigManager for Docker configuration")?;
+        
+        return Ok(config_manager);
     }
     
     // Native platform mode - use config files with command line overrides
@@ -605,7 +447,16 @@ async fn initialize_configuration(
             info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
         }
         
-        return Ok(config);
+        // Create a temporary config file for the ConfigManager
+        let temp_config_path = std::env::temp_dir().join("vuio_cmdline_config.toml");
+        config.save_to_file(&temp_config_path)
+            .context("Failed to save command line configuration to temporary file")?;
+        
+        // Create ConfigManager without file watching for command line overrides
+        let config_manager = ConfigManager::new(&temp_config_path)
+            .context("Failed to create ConfigManager for command line configuration")?;
+        
+        return Ok(config_manager);
     }
     
     // Use provided config file path if available, otherwise use platform default
@@ -622,30 +473,38 @@ async fn initialize_configuration(
         default_path
     };
     
-    // Load or create configuration from file
-    let (mut config, _config_was_created) = if config_path.exists() {
+    // Create ConfigManager with file watching for configuration files
+    let config_manager = if config_path.exists() {
         info!("Loading existing configuration from: {}", config_path.display());
-        (AppConfig::load_or_create(&config_path)?, false)
+        ConfigManager::new_with_watching(&config_path).await
+            .context("Failed to create ConfigManager with file watching")?
     } else {
         info!("No configuration file found, creating default configuration");
         let default_config = AppConfig::default_for_platform();
         
+        // Apply platform-specific defaults and validation
+        let mut config = default_config;
+        config.apply_platform_defaults()
+            .context("Failed to apply platform-specific defaults")?;
+        
+        config.validate_for_platform()
+            .context("Configuration validation failed")?;
+        
         // Create the config file with platform defaults
-        default_config.save_to_file(&config_path)
+        config.save_to_file(&config_path)
             .with_context(|| format!("Failed to create default configuration file at: {}", config_path.display()))?;
         
         info!("Created default configuration file at: {}", config_path.display());
-        (default_config, true)
+        
+        // Create ConfigManager with file watching
+        ConfigManager::new_with_watching(&config_path).await
+            .context("Failed to create ConfigManager with file watching")?
     };
     
-    // Apply platform-specific defaults and validation
-    config.apply_platform_defaults()
-        .context("Failed to apply platform-specific defaults")?;
+    // Get the current configuration for logging
+    let config = config_manager.get_config().await;
     
-    config.validate_for_platform()
-        .context("Configuration validation failed")?;
-    
-    info!("Configuration initialized successfully");
+    info!("Configuration initialized successfully with file watching enabled");
     info!("Server will listen on: {}:{}", config.server.interface, config.server.port);
     info!("SSDP will use hardcoded port: 1900");
     info!("Monitoring {} director(ies) for media files", config.media.directories.len());
@@ -654,7 +513,7 @@ async fn initialize_configuration(
         info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
     }
     
-    Ok(config)
+    Ok(config_manager)
 }
 
 /// Initialize database manager with health checks and recovery

@@ -1099,7 +1099,7 @@ pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
     change_sender: broadcast::Sender<ConfigChangeEvent>,
-    _watcher: Option<notify::RecommendedWatcher>,
+    _debouncer: Option<notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::FileIdMap>>,
 }
 
 impl ConfigManager {
@@ -1113,7 +1113,7 @@ impl ConfigManager {
             config: Arc::new(RwLock::new(config)),
             config_path,
             change_sender,
-            _watcher: None,
+            _debouncer: None,
         })
     }
 
@@ -1129,59 +1129,63 @@ impl ConfigManager {
         let config_clone = config_arc.clone();
         
         // Set up file watcher
-        let watcher = Self::setup_file_watcher(path_clone, config_clone, sender_clone).await?;
+        let debouncer = Self::setup_file_watcher(path_clone, config_clone, sender_clone).await?;
         
         Ok(Self {
             config: config_arc,
             config_path,
             change_sender,
-            _watcher: Some(watcher),
+            _debouncer: Some(debouncer),
         })
     }
 
-    /// Set up file watcher for configuration changes
+    /// Set up file watcher for configuration changes using notify-debouncer-full
     async fn setup_file_watcher(
         config_path: PathBuf,
         config: Arc<RwLock<AppConfig>>,
         sender: broadcast::Sender<ConfigChangeEvent>,
-    ) -> Result<notify::RecommendedWatcher> {
-        use notify::{Event, EventKind, Watcher};
+    ) -> Result<notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::FileIdMap>> {
+        use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
         use tokio::sync::mpsc;
         
         let (tx, mut rx) = mpsc::channel(100);
         
-        let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-            if let Ok(event) = res {
-                let _ = tx.try_send(event);
-            }
-        })?;
+        // Create debounced watcher with 500ms debounce duration
+        let mut debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap> = new_debouncer(
+            Duration::from_millis(500),
+            None,
+            move |result: DebounceEventResult| {
+                let _ = tx.try_send(result);
+            },
+        )?;
         
         // Watch the config file's parent directory
         if let Some(parent) = config_path.parent() {
-            watcher.watch(parent, notify::RecursiveMode::NonRecursive)?;
+            debouncer.watch(parent, notify::RecursiveMode::NonRecursive)?;
         }
         
-        // Spawn task to handle file events
+        // Spawn task to handle debounced file events
         tokio::spawn(async move {
-            let mut last_reload = std::time::Instant::now();
-            const DEBOUNCE_DURATION: Duration = Duration::from_millis(500);
-            
-            while let Some(event) = rx.recv().await {
-                // Check if this event is for our config file
-                let is_config_file = event.paths.iter().any(|path| path == &config_path);
-                
-                if !is_config_file {
-                    continue;
-                }
-                
-                match event.kind {
-                    EventKind::Modify(_) | EventKind::Create(_) => {
-                        // Debounce rapid file changes
-                        let now = std::time::Instant::now();
-                        if now.duration_since(last_reload) < DEBOUNCE_DURATION {
+            while let Some(result) = rx.recv().await {
+                match result {
+                    Ok(events) => {
+                        // Check if any event is for our config file
+                        let config_file_modified = events.iter().any(|event| {
+                            event.paths.iter().any(|path| path == &config_path)
+                        });
+                        
+                        if !config_file_modified {
                             continue;
                         }
-                        last_reload = now;
+                        
+                        // Check if this is a modify or create event
+                        let is_relevant_event = events.iter().any(|event| {
+                            matches!(event.kind, notify::EventKind::Modify(_) | notify::EventKind::Create(_))
+                        });
+                        
+                        if !is_relevant_event {
+                            continue;
+                        }
                         
                         // Attempt to reload configuration
                         match AppConfig::load_from_file(&config_path) {
@@ -1209,12 +1213,16 @@ impl ConfigManager {
                             }
                         }
                     }
-                    _ => {}
+                    Err(errors) => {
+                        for error in errors {
+                            tracing::warn!("File watcher error: {}", error);
+                        }
+                    }
                 }
             }
         });
         
-        Ok(watcher)
+        Ok(debouncer)
     }
 
     /// Send appropriate change notifications based on configuration differences
