@@ -1,6 +1,6 @@
 use anyhow::Context;
 use vuio::{
-    config::AppConfig,
+    config::{AppConfig, MonitoredDirectoryConfig},
     database::{self, DatabaseManager, SqliteDatabase},
     logging, media,
     platform::{self, filesystem::{create_platform_filesystem_manager, create_platform_path_normalizer}, PlatformInfo},
@@ -59,14 +59,14 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
-/// Parse early command line arguments to get debug flag and config file path
-/// This is needed before logging initialization
-fn parse_early_args() -> (bool, Option<String>) {
+/// Parse command line arguments once and return configuration overrides
+/// This consolidates argument parsing into a single operation
+fn parse_args_once() -> anyhow::Result<(bool, Option<String>, Option<AppConfig>)> {
     use clap::Parser;
     
     #[derive(Parser, Debug)]
     #[command(author, version, about, long_about = None)]
-    struct EarlyArgs {
+    struct Args {
         /// The directory containing media files to serve
         media_dir: Option<String>,
 
@@ -91,17 +91,68 @@ fn parse_early_args() -> (bool, Option<String>) {
         config: Option<String>,
     }
     
-    // Parse args, but ignore errors since we'll parse them again later
-    match EarlyArgs::try_parse() {
-        Ok(args) => (args.debug, args.config),
-        Err(_) => (false, None), // Default to no debug and no config file
+    let args = Args::parse();
+    
+    // If no media directories provided, return early args only
+    if args.media_dir.is_none() && args.additional_media_dirs.is_empty() {
+        return Ok((args.debug, args.config, None));
     }
+    
+    // Build configuration from command line arguments
+    let mut config_override = AppConfig::default_for_platform();
+    
+    // Apply command line overrides
+    if let Some(port) = args.port {
+        config_override.server.port = port;
+    }
+    
+    if args.name != "VuIO Server" {
+        config_override.server.name = args.name;
+    }
+    
+    // Build media directories from arguments
+    let mut media_directories = vec![];
+    
+    // Add primary media directory if provided
+    if let Some(media_dir_str) = &args.media_dir {
+        let media_dir = std::path::PathBuf::from(media_dir_str);
+        if media_dir.exists() && media_dir.is_dir() {
+            media_directories.push(MonitoredDirectoryConfig {
+                path: media_dir.to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            });
+        } else {
+            tracing::warn!("Media directory does not exist or is not a directory: {}", media_dir.display());
+        }
+    }
+    
+    // Add additional media directories
+    for additional_dir_str in &args.additional_media_dirs {
+        let additional_dir = std::path::PathBuf::from(additional_dir_str);
+        if additional_dir.exists() && additional_dir.is_dir() {
+            media_directories.push(MonitoredDirectoryConfig {
+                path: additional_dir.to_string_lossy().to_string(),
+                recursive: true,
+                extensions: None,
+                exclude_patterns: None,
+            });
+        } else {
+            tracing::warn!("Additional media directory does not exist or is not a directory: {}", additional_dir.display());
+        }
+    }
+    
+    config_override.media.directories = media_directories;
+    
+    Ok((args.debug, args.config, Some(config_override)))
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
-    // Parse command line arguments first to get debug flag
-    let (debug_enabled, config_file_path) = parse_early_args();
+    // Parse command line arguments once and get configuration overrides
+    let (debug_enabled, config_file_path, config_override) = parse_args_once()
+        .context("Failed to parse command line arguments")?;
     
     // Initialize logging with debug flag
     if debug_enabled {
@@ -123,8 +174,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Security checks removed for faster startup
 
-    // Load or create configuration with platform-specific defaults
-    let config = match initialize_configuration(&platform_info, config_file_path).await {
+    // Load or create configuration with platform-specific defaults and apply overrides
+    let config = match initialize_configuration(&platform_info, config_file_path, config_override).await {
         Ok(config) => Arc::new(config),
         Err(e) => {
             error!("Failed to initialize configuration: {}", e);
@@ -238,7 +289,7 @@ async fn main() -> anyhow::Result<()> {
 
 /// Start platform adaptation services for runtime detection and adaptation
 async fn start_platform_adaptation(
-    platform_info: Arc<PlatformInfo>,
+    _platform_info: Arc<PlatformInfo>,
     config: Arc<AppConfig>,
     database: Arc<dyn DatabaseManager>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
@@ -273,13 +324,7 @@ async fn start_platform_adaptation(
     Ok(handle)
 }
 
-/// Check for network changes and adapt accordingly
-async fn check_and_adapt_network_changes(_platform_info: &Arc<PlatformInfo>) -> anyhow::Result<()> {
-    // Skip network interface re-detection to avoid repeated logging
-    // Network interface detection should only happen once at startup
-    debug!("Skipping network interface re-detection - using startup configuration");
-    Ok(())
-}
+
 
 /// Check for configuration changes and reload if necessary
 async fn check_and_reload_configuration(
@@ -509,8 +554,12 @@ async fn detect_platform_with_diagnostics() -> anyhow::Result<PlatformInfo> {
     Ok(platform_info)
 }
 
-/// Initialize configuration with platform-specific defaults and validation
-async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_path: Option<String>) -> anyhow::Result<AppConfig> {
+/// Initialize configuration with platform-specific defaults, file loading, and command line overrides
+async fn initialize_configuration(
+    _platform_info: &PlatformInfo, 
+    config_file_path: Option<String>,
+    config_override: Option<AppConfig>
+) -> anyhow::Result<AppConfig> {
     info!("Initializing configuration...");
     
     // Check if running in Docker container
@@ -531,8 +580,33 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
         return Ok(config);
     }
     
-    // Native platform mode - use config files
+    // Native platform mode - use config files with command line overrides
     info!("Native platform detected - using configuration files");
+    
+    // If we have command line overrides, use them directly
+    if let Some(override_config) = config_override {
+        info!("Using configuration from command line arguments");
+        
+        // Apply platform-specific defaults for any missing values
+        let mut config = override_config;
+        config.apply_platform_defaults()
+            .context("Failed to apply platform-specific defaults to command line configuration")?;
+        
+        // Validate the final configuration
+        config.validate_for_platform()
+            .context("Command line configuration validation failed")?;
+        
+        info!("Configuration validated successfully");
+        info!("Server will listen on: {}:{}", config.server.interface, config.server.port);
+        info!("SSDP will use hardcoded port: 1900");
+        info!("Monitoring {} director(ies) for media files", config.media.directories.len());
+        
+        for (i, dir) in config.media.directories.iter().enumerate() {
+            info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
+        }
+        
+        return Ok(config);
+    }
     
     // Use provided config file path if available, otherwise use platform default
     let config_path = if let Some(path) = config_file_path {
@@ -547,44 +621,6 @@ async fn initialize_configuration(_platform_info: &PlatformInfo, config_file_pat
         info!("Using default configuration file path: {}", default_path.display());
         default_path
     };
-    
-    // First, try to load from command line arguments
-    match AppConfig::from_args().await {
-        Ok((config, debug, config_path)) => {
-            if let Some(path) = config_path {
-                info!("Using configuration from file: {}", path);
-            } else {
-                info!("Using configuration from command line arguments");
-            }
-            
-            if debug {
-                debug!("Debug logging enabled via command line");
-            }
-            
-            // Apply platform-specific defaults for any missing values
-            let mut config = config;
-            config.apply_platform_defaults()
-                .context("Failed to apply platform-specific defaults to command line configuration")?;
-            
-            // Validate the final configuration
-            config.validate_for_platform()
-                .context("Command line configuration validation failed")?;
-            
-            info!("Configuration validated successfully");
-            info!("Server will listen on: {}:{}", config.server.interface, config.server.port);
-            info!("SSDP will use hardcoded port: 1900");
-            info!("Monitoring {} director(ies) for media files", config.media.directories.len());
-            
-            for (i, dir) in config.media.directories.iter().enumerate() {
-                info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
-            }
-            
-            return Ok(config);
-        }
-        Err(_) => {
-            // Fall back to file-based configuration
-        }
-    }
     
     // Load or create configuration from file
     let (mut config, _config_was_created) = if config_path.exists() {

@@ -90,7 +90,7 @@
   - Remove handle_platform_feature_unavailable function from main.rs
   - _Requirements: 4.2, 4.3_
 
-- [ ] 15. Remove unused config watcher service
+- [x] 15. Remove unused config watcher service
   - Delete src/config/watcher.rs file entirely (ConfigWatcherService and ConfigChangeRegistry)
   - Remove module declaration and any references to the abandoned config watcher system
   - Clean up imports related to the unused trait-based config change system
@@ -98,7 +98,7 @@
 
 ## Phase 4: Architecture Improvements
 
-- [ ] 16. Simplify argument parsing and startup sequence
+- [x] 16. Simplify argument parsing and startup sequence
   - Refactor main.rs to parse arguments once and apply as config overrides
   - Remove redundant parse_early_args function and duplicate argument processing
   - Consolidate config loading and argument application into single flow

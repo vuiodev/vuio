@@ -537,7 +537,7 @@ impl PlatformConfig {
     pub fn validate_path(&self, path: &Path) -> PlatformResult<()> {
         let fs_manager = create_platform_filesystem_manager();
         // The filesystem manager's validate_path only validates the format.
-        // Existence is checked by callers like AppConfig::from_args.
+        // Existence is checked by callers during configuration initialization.
         fs_manager.validate_path(path).map_err(|e: FileSystemError| {
             // Convert FileSystemError to a PlatformError for consistency.
             PlatformError::FileSystemAccess(e.user_message())
