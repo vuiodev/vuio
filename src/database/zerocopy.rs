@@ -1024,6 +1024,7 @@ pub struct BatchProcessingResult {
     pub throughput: f64, // files per second
     pub checksum: u32,
     pub errors: Vec<super::flatbuffer::BatchSerializationError>,
+    pub assigned_ids: Vec<i64>, // IDs assigned to the files
 }
 
 impl BatchProcessingResult {
@@ -1040,6 +1041,7 @@ impl BatchProcessingResult {
             throughput: 0.0,
             checksum: 0,
             errors: Vec::new(),
+            assigned_ids: Vec::new(),
         }
     }
     
@@ -1128,7 +1130,8 @@ pub struct ZeroCopyDatabase {
     batch_serializer: Arc<BatchSerializer>,
     flatbuffer_builder: Arc<RwLock<flatbuffers::FlatBufferBuilder<'static>>>,
     
-    // Playlist storage - atomic counters for ID generation
+    // Atomic counters for ID generation
+    next_media_file_id: AtomicU64,
     next_playlist_id: AtomicU64,
     next_playlist_entry_id: AtomicU64,
     
@@ -1209,6 +1212,7 @@ impl ZeroCopyDatabase {
             is_open: AtomicU64::new(0),
             batch_serializer,
             flatbuffer_builder: Arc::new(RwLock::new(flatbuffer_builder)),
+            next_media_file_id: AtomicU64::new(1),
             next_playlist_id: AtomicU64::new(1),
             next_playlist_entry_id: AtomicU64::new(1),
             playlists: Arc::new(RwLock::new(std::collections::HashMap::new())),
@@ -2097,8 +2101,26 @@ impl ZeroCopyDatabase {
         
         info!("Starting batch insert of {} files (batch ID: {})", files.len(), batch_id);
         
+        // Assign unique IDs to files that don't have them
+        let mut files_with_ids: Vec<MediaFile> = Vec::with_capacity(files.len());
+        let mut assigned_ids: Vec<i64> = Vec::with_capacity(files.len());
+        
+        for file in files {
+            let mut file_with_id = file.clone();
+            let file_id = match file.id {
+                Some(existing_id) => existing_id,
+                None => {
+                    let new_id = self.next_media_file_id.fetch_add(1, Ordering::SeqCst) as i64;
+                    file_with_id.id = Some(new_id);
+                    new_id
+                }
+            };
+            assigned_ids.push(file_id);
+            files_with_ids.push(file_with_id);
+        }
+        
         // Generate canonical paths for all files
-        let canonical_paths: Result<Vec<String>> = files
+        let canonical_paths: Result<Vec<String>> = files_with_ids
             .iter()
             .map(|file| self.path_normalizer.to_canonical(&file.path).map_err(|e| anyhow!("Path normalization failed: {}", e)))
             .collect();
@@ -2112,7 +2134,7 @@ impl ZeroCopyDatabase {
             
             MediaFileSerializer::serialize_media_file_batch(
                 &mut builder,
-                files,
+                &files_with_ids,
                 batch_id,
                 BatchOperationType::Insert,
                 Some(&canonical_paths),
@@ -2163,7 +2185,7 @@ impl ZeroCopyDatabase {
         // Update indexes
         {
             let mut index_manager = self.index_manager.write().await;
-            for (i, file) in files.iter().enumerate() {
+            for (i, file) in files_with_ids.iter().enumerate() {
                 let canonical_path = &canonical_paths[i];
                 let mut file_with_canonical = file.clone();
                 file_with_canonical.path = PathBuf::from(canonical_path);
@@ -2176,12 +2198,12 @@ impl ZeroCopyDatabase {
         let total_time = start_time.elapsed();
         let memory_used = serialization_result.serialized_size as u64; // Estimate memory usage from serialized data size
         let cache_hits = 0; // No cache hits for insert operations
-        let cache_misses = files.len() as u64; // All files are new, so all are cache misses
+        let cache_misses = files_with_ids.len() as u64; // All files are new, so all are cache misses
         
         // Record comprehensive batch operation
         self.performance_tracker.record_batch_operation_comprehensive(
             true,
-            files.len(),
+            files_with_ids.len(),
             total_time,
             memory_used,
             cache_hits,
@@ -2190,17 +2212,17 @@ impl ZeroCopyDatabase {
         ).await;
         
         // Also record legacy metrics for backward compatibility
-        self.performance_tracker.record_batch_operation(true, files.len(), total_time);
+        self.performance_tracker.record_batch_operation(true, files_with_ids.len(), total_time);
         
-        for _ in files {
-            self.performance_tracker.record_file_operation(FileOperationType::Insert, total_time / files.len() as u32);
+        for _ in &files_with_ids {
+            self.performance_tracker.record_file_operation(FileOperationType::Insert, total_time / files_with_ids.len() as u32);
         }
         
-        let throughput = files.len() as f64 / total_time.as_secs_f64();
+        let throughput = files_with_ids.len() as f64 / total_time.as_secs_f64();
         
         info!(
             "Batch insert completed: {} files in {:?} ({:.0} files/sec)",
-            files.len(),
+            files_with_ids.len(),
             total_time,
             throughput
         );
@@ -2208,7 +2230,7 @@ impl ZeroCopyDatabase {
         Ok(BatchProcessingResult {
             batch_id,
             operation_type: BatchOperationType::Insert,
-            files_processed: files.len(),
+            files_processed: files_with_ids.len(),
             processing_time: total_time,
             serialization_time: serialization_result.serialization_time,
             write_offset,
@@ -2218,6 +2240,7 @@ impl ZeroCopyDatabase {
                 &self.flatbuffer_builder.read().await.finished_data()
             )?.checksum,
             errors: serialization_result.errors,
+            assigned_ids,
         })
     }
     
@@ -2229,6 +2252,7 @@ impl ZeroCopyDatabase {
         let mut total_errors = Vec::new();
         let mut total_data_size = 0;
         let mut total_serialization_time = Duration::from_nanos(0);
+        let mut all_assigned_ids = Vec::new();
         
         info!("Processing {} files in chunks of {} (total chunks: {})", 
               total_files, chunk_size, (total_files + chunk_size - 1) / chunk_size);
@@ -2240,6 +2264,7 @@ impl ZeroCopyDatabase {
             total_errors.extend(chunk_result.errors);
             total_data_size += chunk_result.data_size;
             total_serialization_time += chunk_result.serialization_time;
+            all_assigned_ids.extend(chunk_result.assigned_ids);
             
             // Log progress every 10 chunks or on last chunk
             if chunk_index % 10 == 0 || chunk_index == (total_files + chunk_size - 1) / chunk_size - 1 {
@@ -2281,6 +2306,7 @@ impl ZeroCopyDatabase {
             throughput,
             checksum: 0, // Not applicable for chunked processing
             errors: total_errors,
+            assigned_ids: all_assigned_ids,
         })
     }
     
@@ -2420,6 +2446,7 @@ impl ZeroCopyDatabase {
                 &self.flatbuffer_builder.read().await.finished_data()
             )?.checksum,
             errors: serialization_result.errors,
+            assigned_ids: Vec::new(), // No new IDs assigned for updates
         })
     }
     
@@ -2470,6 +2497,7 @@ impl ZeroCopyDatabase {
             throughput,
             checksum: 0, // Not applicable for chunked processing
             errors: total_errors,
+            assigned_ids: Vec::new(), // No new IDs assigned for updates
         })
     }
     
@@ -3277,10 +3305,8 @@ impl DatabaseManager for ZeroCopyDatabase {
         })?;
         
         if result.is_successful() {
-            // For now, return sequential IDs based on batch ID
-            // In a real implementation, we'd track individual file IDs
-            let base_id = result.batch_id as i64;
-            Ok((0..files.len()).map(|i| base_id + i as i64).collect())
+            // Return the actual assigned IDs from the batch processing result
+            Ok(result.assigned_ids)
         } else {
             // Record batch processing error
             self.error_handler.record_error(

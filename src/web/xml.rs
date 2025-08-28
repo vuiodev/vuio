@@ -176,12 +176,19 @@ pub async fn generate_browse_response_with_totals(
                 debug!("Processing file {}/{}: '{}'", idx, files.len(), file.filename);
             }
             
+            // Skip files without valid IDs - they can't be served
+            let file_id = match file.id {
+                Some(id) if id > 0 => id,
+                _ => {
+                    debug!("Skipping file without valid ID: '{}' ({})", file.filename, file.path.display());
+                    continue;
+                }
+            };
+            
             // Log files with potentially problematic characters
             if file.filename.chars().any(|c| c as u32 > 127) {
                 debug!("Processing file with Unicode characters: '{}' ({})", file.filename, file.path.display());
             }
-            
-            let file_id = file.id.unwrap_or(0);
             let url = format!(
                 "http://{}:{}/media/{}",
                 server_ip,
