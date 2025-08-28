@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::warn;
 
-use crate::database::{DatabaseManager, MediaFile};
+use crate::database::{DatabaseManager, MediaFile, zerocopy::ZeroCopyDatabase};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Media scanner that uses the file system manager and database for efficient scanning
@@ -18,9 +18,15 @@ pub struct MediaScanner {
 impl MediaScanner {
     /// Create a new media scanner with platform-specific file system manager
     pub async fn new() -> anyhow::Result<Self> {
-        // Create a temporary in-memory database for basic scanning
-        let temp_path = std::env::temp_dir().join("temp_scanner.db");
-        let database_manager = Arc::new(crate::database::SqliteDatabase::new(temp_path).await?) as Arc<dyn DatabaseManager>;
+        // Create a temporary ZeroCopy database for basic scanning
+        let temp_path = std::env::temp_dir().join("temp_scanner_zerocopy.db");
+        let zerocopy_db = ZeroCopyDatabase::new_with_auto_detection(temp_path).await?;
+        
+        // Initialize and open the database
+        zerocopy_db.initialize().await?;
+        zerocopy_db.open().await?;
+        
+        let database_manager = Arc::new(zerocopy_db) as Arc<dyn DatabaseManager>;
         
         Ok(Self {
             filesystem_manager: create_platform_filesystem_manager(),
@@ -207,6 +213,7 @@ impl MediaScanner {
     }
     
     /// Perform an incremental update by comparing database state with file system state
+    /// **OPTIMIZED FOR ZEROCOPY DATABASE WITH BULK OPERATIONS**
     async fn perform_incremental_update(
         &self,
         _directory: &Path,
@@ -255,9 +262,12 @@ impl MediaScanner {
         
         let current_paths: HashSet<PathBuf> = current_normalized.keys().cloned().collect();
         
-
+        // **ZEROCOPY BULK OPERATIONS - Collect files for batch processing**
+        let mut files_to_insert = Vec::new();
+        let mut files_to_update = Vec::new();
+        let mut files_to_remove = Vec::new();
         
-        // Process current files - add new ones or update changed ones
+        // Process current files - collect new ones and changed ones for bulk operations
         for (normalized_current_path, current_file) in &current_normalized {
             // Try to find existing file by normalized path first, then by original path
             let existing_file = existing_by_normalized.get(normalized_current_path)
@@ -278,8 +288,7 @@ impl MediaScanner {
                         updated_file.created_at = existing_file.created_at; // Preserve creation time
                         updated_file.updated_at = SystemTime::now();
                         
-                        self.database_manager.update_media_file(&updated_file).await?;
-                        result.updated_files.push(updated_file);
+                        files_to_update.push(updated_file);
                     } else {
                         // Check if the existing file path needs canonical normalization
                         let existing_canonical = match self.filesystem_manager.get_canonical_path(&existing_file.path) {
@@ -297,20 +306,16 @@ impl MediaScanner {
                             normalized_existing.path = existing_canonical;
                             normalized_existing.updated_at = SystemTime::now();
                             
-                            self.database_manager.update_media_file(&normalized_existing).await?;
-                            result.updated_files.push(normalized_existing);
+                            files_to_update.push(normalized_existing);
                         } else {
                             result.unchanged_files.push(existing_file.clone());
                         }
                     }
                 }
                 None => {
-                    // New file, add to database with canonical path format
+                    // New file, add to bulk insert list with canonical path format
                     // The current_file already has the canonical path from normalization above
-                    let id = self.database_manager.store_media_file(current_file).await?;
-                    let mut stored_file = current_file.clone();
-                    stored_file.id = Some(id);
-                    result.new_files.push(stored_file);
+                    files_to_insert.push(current_file.clone());
                 }
             }
         }
@@ -319,14 +324,52 @@ impl MediaScanner {
         // Check both normalized and original paths to handle legacy entries
         for (normalized_existing_path, existing_file) in existing_by_normalized {
             if !current_paths.contains(&normalized_existing_path) {
-                // File was removed from file system, remove from database using original path
-                if self.database_manager.remove_media_file(&existing_file.path).await? {
-                    result.removed_files.push(existing_file);
-                }
+                // File was removed from file system, add to bulk removal list
+                files_to_remove.push(existing_file.path.clone());
+                result.removed_files.push(existing_file);
             }
         }
         
+        // **EXECUTE BULK OPERATIONS WITH ZEROCOPY DATABASE**
+        
+        // Bulk insert new files
+        if !files_to_insert.is_empty() {
+            tracing::info!("Bulk inserting {} new files using ZeroCopy database", files_to_insert.len());
+            let insert_ids = self.database_manager.bulk_store_media_files(&files_to_insert).await?;
+            
+            // Update result with inserted files and their IDs
+            for (i, mut file) in files_to_insert.into_iter().enumerate() {
+                if let Some(id) = insert_ids.get(i) {
+                    file.id = Some(*id);
+                }
+                result.new_files.push(file);
+            }
+        }
+        
+        // Bulk update changed files
+        if !files_to_update.is_empty() {
+            tracing::info!("Bulk updating {} changed files using ZeroCopy database", files_to_update.len());
+            self.database_manager.bulk_update_media_files(&files_to_update).await?;
+            result.updated_files.extend(files_to_update);
+        }
+        
+        // Bulk remove deleted files
+        if !files_to_remove.is_empty() {
+            tracing::info!("Bulk removing {} deleted files using ZeroCopy database", files_to_remove.len());
+            let removed_count = self.database_manager.bulk_remove_media_files(&files_to_remove).await?;
+            tracing::debug!("Successfully removed {} out of {} requested files", removed_count, files_to_remove.len());
+        }
+        
         result.total_scanned = current_paths.len();
+        
+        // Log bulk operation summary
+        tracing::info!(
+            "ZeroCopy bulk operations completed: {} inserted, {} updated, {} removed, {} unchanged",
+            result.new_files.len(),
+            result.updated_files.len(), 
+            result.removed_files.len(),
+            result.unchanged_files.len()
+        );
         
         Ok(result)
     }
@@ -650,7 +693,7 @@ pub fn get_mime_type_legacy(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::SqliteDatabase;
+    use crate::database::zerocopy::ZeroCopyDatabase;
     use crate::platform::filesystem::{BaseFileSystemManager, WindowsPathNormalizer};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -660,9 +703,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         
-        // Create database
-        let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
+        // Create ZeroCopy database
+        let db = Arc::new(ZeroCopyDatabase::new_with_auto_detection(db_path).await.unwrap());
         db.initialize().await.unwrap();
+        db.open().await.unwrap();
         
         // Create scanner with base filesystem manager
         let filesystem_manager = Box::new(BaseFileSystemManager::new(true));
@@ -679,9 +723,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         
-        // Create database
-        let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
+        // Create ZeroCopy database
+        let db = Arc::new(ZeroCopyDatabase::new_with_auto_detection(db_path).await.unwrap());
         db.initialize().await.unwrap();
+        db.open().await.unwrap();
         
         // Create scanner with custom path normalizer for testing
         let path_normalizer = Box::new(WindowsPathNormalizer::new());
@@ -772,9 +817,10 @@ mod tests {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test.db");
         
-        // Create database
-        let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
+        // Create ZeroCopy database
+        let db = Arc::new(ZeroCopyDatabase::new_with_auto_detection(db_path).await.unwrap());
         db.initialize().await.unwrap();
+        db.open().await.unwrap();
         
         // Create scanner with base filesystem manager
         let filesystem_manager = Box::new(BaseFileSystemManager::new(true));

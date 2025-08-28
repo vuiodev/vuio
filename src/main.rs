@@ -1,7 +1,7 @@
 use anyhow::Context;
 use vuio::{
     config::{AppConfig, ConfigManager, MonitoredDirectoryConfig, ValidationMode},
-    database::{self, DatabaseManager, SqliteDatabase},
+    database::{self, DatabaseManager, zerocopy::ZeroCopyDatabase},
     logging, media,
     platform::{self, filesystem::{create_platform_filesystem_manager, create_platform_path_normalizer}, PlatformInfo},
     ssdp,
@@ -519,19 +519,23 @@ async fn initialize_config_manager(
 }
 
 /// Initialize database manager with health checks and recovery
-async fn initialize_database(config: &AppConfig) -> anyhow::Result<SqliteDatabase> {
-    info!("Initializing database...");
+async fn initialize_database(config: &AppConfig) -> anyhow::Result<ZeroCopyDatabase> {
+    info!("Initializing ZeroCopy database...");
     
     let db_path = config.get_database_path();
     info!("Database path: {}", db_path.display());
     
-    // Create database manager
-    let database = SqliteDatabase::new(db_path.clone()).await
-        .context("Failed to create database manager")?;
+    // Create ZeroCopy database manager with auto-detection
+    let database = ZeroCopyDatabase::new_with_auto_detection(db_path.clone()).await
+        .context("Failed to create ZeroCopy database manager")?;
     
     // Initialize database schema
     database.initialize().await
         .context("Failed to initialize database schema")?;
+    
+    // Open the database for operations
+    database.open().await
+        .context("Failed to open database")?;
     
     // Perform health check and repair if needed
     info!("Performing database health check...");
