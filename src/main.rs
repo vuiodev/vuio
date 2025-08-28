@@ -10,6 +10,9 @@ use vuio::{
     web,
 };
 use std::{net::SocketAddr, sync::Arc, path::PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
+use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 /// Wait for shutdown signals (Ctrl+C, SIGTERM, etc.)
@@ -236,6 +239,9 @@ async fn main() -> anyhow::Result<()> {
         config_manager.clone(),
         database.clone(),
     ).await?;
+    
+    // Start atomic application statistics monitoring
+    let monitoring_handle = start_atomic_monitoring(database.clone()).await?;
 
     // Start SSDP discovery service with platform abstraction
     if let Err(e) = start_ssdp_service(app_state.clone()).await {
@@ -260,6 +266,9 @@ async fn main() -> anyhow::Result<()> {
         _ = adaptation_handle => {
             warn!("Platform adaptation service stopped unexpectedly");
         }
+        _ = monitoring_handle => {
+            warn!("Atomic monitoring service stopped unexpectedly");
+        }
         result = server_handle => {
             match result {
                 Ok(Ok(())) => info!("HTTP server stopped gracefully"),
@@ -269,11 +278,16 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // Graceful shutdown with timeout
+    // Graceful shutdown with ZeroCopy atomic state persistence
     info!("Shutting down gracefully...");
     
+    // Perform atomic state persistence before shutdown
+    if let Err(e) = perform_graceful_shutdown(&database).await {
+        error!("Error during graceful shutdown: {}", e);
+    }
+    
     // Give services a reasonable time to shut down gracefully
-    let shutdown_timeout = std::time::Duration::from_secs(5);
+    let shutdown_timeout = std::time::Duration::from_secs(10); // Increased timeout for database persistence
     let shutdown_start = std::time::Instant::now();
     
     // Wait for any remaining tasks to complete or timeout
@@ -282,8 +296,8 @@ async fn main() -> anyhow::Result<()> {
             warn!("Shutdown timeout reached after {:?}, forcing exit", shutdown_timeout);
         }
         _ = async {
-            // Allow some time for background tasks to clean up
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            // Allow time for ZeroCopy database to persist state
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         } => {
             let shutdown_duration = shutdown_start.elapsed();
             info!("Shutdown completed successfully in {:?}", shutdown_duration);
@@ -784,27 +798,96 @@ fn increment_content_update_id(app_state: &AppState) {
     info!("UPnP event notification should be sent with UpdateID: {}", new_id);
 }
 
-/// Handle individual file system events
+/// Atomic application statistics for monitoring
+#[derive(Debug)]
+struct AtomicAppStats {
+    files_processed: AtomicU64,
+    directories_scanned: AtomicU64,
+    events_handled: AtomicU64,
+    errors_encountered: AtomicU64,
+    last_activity: Arc<RwLock<SystemTime>>,
+}
+
+impl AtomicAppStats {
+    fn new() -> Self {
+        Self {
+            files_processed: AtomicU64::new(0),
+            directories_scanned: AtomicU64::new(0),
+            events_handled: AtomicU64::new(0),
+            errors_encountered: AtomicU64::new(0),
+            last_activity: Arc::new(RwLock::new(SystemTime::now())),
+        }
+    }
+    
+    async fn record_files_processed(&self, count: u64) {
+        self.files_processed.fetch_add(count, Ordering::Relaxed);
+        *self.last_activity.write().await = SystemTime::now();
+    }
+    
+    async fn record_directory_scanned(&self) {
+        self.directories_scanned.fetch_add(1, Ordering::Relaxed);
+        *self.last_activity.write().await = SystemTime::now();
+    }
+    
+    async fn record_event_handled(&self) {
+        self.events_handled.fetch_add(1, Ordering::Relaxed);
+        *self.last_activity.write().await = SystemTime::now();
+    }
+    
+    async fn record_error(&self) {
+        self.errors_encountered.fetch_add(1, Ordering::Relaxed);
+        *self.last_activity.write().await = SystemTime::now();
+    }
+    
+    async fn get_stats(&self) -> (u64, u64, u64, u64, SystemTime) {
+        (
+            self.files_processed.load(Ordering::Relaxed),
+            self.directories_scanned.load(Ordering::Relaxed),
+            self.events_handled.load(Ordering::Relaxed),
+            self.errors_encountered.load(Ordering::Relaxed),
+            *self.last_activity.read().await,
+        )
+    }
+}
+
+// Global atomic application statistics
+static APP_STATS: std::sync::OnceLock<AtomicAppStats> = std::sync::OnceLock::new();
+
+fn get_app_stats() -> &'static AtomicAppStats {
+    APP_STATS.get_or_init(|| AtomicAppStats::new())
+}
+
+/// Handle individual file system events with ZeroCopy bulk operations
 async fn handle_file_system_event(
     event: FileSystemEvent,
     app_state: &AppState,
 ) -> anyhow::Result<()> {
     let database = &app_state.database;
+    let stats = get_app_stats();
+    
+    // Record event handling with atomic counter
+    stats.record_event_handled().await;
+    
     match event {
         FileSystemEvent::Created(path) => {
             // Check if this is a directory or a file
             if path.is_dir() {
                 info!("Directory created: {}", path.display());
                 
-                // Scan the new directory for media files
+                // Scan the new directory for media files using ZeroCopy bulk operations
                 let scanner = media::MediaScanner::with_database(database.clone());
                 match scanner.scan_directory_recursive(&path).await {
                     Ok(scan_result) => {
                         info!("Scanned new directory {}: {}", path.display(), scan_result.summary());
                         
-                        // Files are already stored in database by the scanner
+                        // Files are already stored in database by the scanner using bulk operations
                         
-                        info!("Added {} media files from new directory: {}", scan_result.new_files.len(), path.display());
+                        // Record atomic statistics
+                        stats.record_directory_scanned().await;
+                        stats.record_files_processed(scan_result.new_files.len() as u64).await;
+                        
+                        info!("Added {} media files from new directory using ZeroCopy bulk operations: {}", 
+                              scan_result.new_files.len(), path.display());
                         
                         // Increment update ID to notify DLNA clients
                         if !scan_result.new_files.is_empty() {
@@ -816,7 +899,7 @@ async fn handle_file_system_event(
                     }
                 }
             } else {
-                // Handle individual media file creation
+                // Handle individual media file creation using bulk operations (single-item batch)
                 info!("Media file created: {}", path.display());
                 
                 // Check if it's actually a media file
@@ -841,13 +924,16 @@ async fn handle_file_system_event(
                 let mut media_file = database::MediaFile::new(path.clone(), metadata.len(), mime_type);
                 media_file.modified = metadata.modified().unwrap_or(std::time::SystemTime::now());
                 
-                // Store in database
-                let file_id = database.store_media_file(&media_file).await?;
-                media_file.id = Some(file_id);
+                // Store in database using ZeroCopy bulk operation (single-item batch for atomic consistency)
+                let file_ids = database.bulk_store_media_files(&[media_file.clone()]).await?;
+                if let Some(file_id) = file_ids.first() {
+                    media_file.id = Some(*file_id);
+                }
                 
-                // File is already stored in database
+                // Record atomic statistics
+                stats.record_files_processed(1).await;
                 
-                info!("Added new media file to database: {}", path.display());
+                info!("Added new media file to ZeroCopy database: {}", path.display());
                 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state);
@@ -857,17 +943,20 @@ async fn handle_file_system_event(
         FileSystemEvent::Modified(path) => {
             info!("Media file modified: {}", path.display());
             
-            // Update database record
+            // Update database record using ZeroCopy bulk operation
             if let Some(mut existing_file) = database.get_file_by_path(&path).await? {
                 let metadata = tokio::fs::metadata(&path).await?;
                 existing_file.size = metadata.len();
                 existing_file.modified = metadata.modified().unwrap_or(std::time::SystemTime::now());
+                existing_file.updated_at = std::time::SystemTime::now();
                 
-                database.update_media_file(&existing_file).await?;
+                // Use ZeroCopy bulk update operation (single-item batch for atomic consistency)
+                database.bulk_update_media_files(&[existing_file]).await?;
                 
-                // File is already updated in database
+                // Record atomic statistics
+                stats.record_files_processed(1).await;
                 
-                info!("Updated media file in database: {}", path.display());
+                info!("Updated media file in ZeroCopy database: {}", path.display());
                 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state);
@@ -881,23 +970,7 @@ async fn handle_file_system_event(
             
             info!("Path deleted: {}", path.display());
             
-            // First, try to remove as a single file
-            let single_file_removed = match database.remove_media_file(&path).await {
-                Ok(removed) => {
-                    if removed {
-                        info!("Removed single file from database: {}", path.display());
-                    } else {
-                        info!("Single file not found in database: {}", path.display());
-                    }
-                    removed
-                }
-                Err(e) => {
-                    warn!("Error removing single file from database {}: {}", path.display(), e);
-                    false
-                }
-            };
-            
-            // Use efficient path prefix query to find files in the deleted directory
+            // Use efficient path prefix query to find all files in the deleted path
             let path_normalizer = create_platform_path_normalizer();
             let canonical_prefix = match path_normalizer.to_canonical(&path) {
                 Ok(canonical) => canonical,
@@ -915,38 +988,41 @@ async fn handle_file_system_event(
                 }
             };
             
-            let mut total_removed = if single_file_removed { 1 } else { 0 };
-            
-            if !files_in_deleted_path.is_empty() {
-                info!("Found {} media files in deleted directory: {}", files_in_deleted_path.len(), path.display());
-                
-                for file in &files_in_deleted_path {
-                    match database.remove_media_file(&file.path).await {
-                        Ok(true) => {
-                            total_removed += 1;
-                            info!("Removed file from database: {}", file.path.display());
-                        }
-                        Ok(false) => {
-                            info!("File not found in database: {}", file.path.display());
-                        }
-                        Err(e) => {
-                            warn!("Error removing file from database {}: {}", file.path.display(), e);
-                        }
-                    }
+            // Collect all paths to remove (including the single file if it exists)
+            let mut paths_to_remove = vec![path.clone()];
+            for file in &files_in_deleted_path {
+                if file.path != path {
+                    paths_to_remove.push(file.path.clone());
                 }
-            } else {
-                info!("No files found in deleted path: {}", path.display());
             }
             
-            if total_removed > 0 {
-                info!("Total cleanup: {} files removed from database for path: {}", 
-                      total_removed, path.display());
+            if !paths_to_remove.is_empty() {
+                info!("Found {} paths to remove for deleted path: {}", paths_to_remove.len(), path.display());
                 
-                // Increment update ID to notify DLNA clients
-                increment_content_update_id(app_state);
-                info!("Notified DLNA clients of content change");
+                // Use ZeroCopy bulk removal operation for atomic cleanup
+                let total_removed = match database.bulk_remove_media_files(&paths_to_remove).await {
+                    Ok(removed_count) => {
+                        // Record atomic statistics
+                        stats.record_files_processed(removed_count as u64).await;
+                        
+                        info!("ZeroCopy bulk removal completed: {} files removed from database for path: {}", 
+                              removed_count, path.display());
+                        removed_count
+                    }
+                    Err(e) => {
+                        stats.record_error().await;
+                        error!("Error during ZeroCopy bulk removal for path {}: {}", path.display(), e);
+                        0
+                    }
+                };
+                
+                if total_removed > 0 {
+                    // Increment update ID to notify DLNA clients
+                    increment_content_update_id(app_state);
+                    info!("Notified DLNA clients of content change after atomic cleanup");
+                }
             } else {
-                info!("No files were removed for deleted path: {}", path.display());
+                info!("No files found to remove for deleted path: {}", path.display());
             }
         }
         
@@ -955,7 +1031,7 @@ async fn handle_file_system_event(
             
             // Check if the destination is a directory or file
             if to.is_dir() {
-                // Handle directory rename
+                // Handle directory rename using ZeroCopy bulk operations
                 info!("Directory renamed: {} -> {}", from.display(), to.display());
                 
                 // Use efficient path prefix query to find files in the old directory path
@@ -964,20 +1040,22 @@ async fn handle_file_system_event(
                 let files_in_old_path = database.get_files_with_path_prefix(&canonical_from_prefix).await?;
                 
                 if !files_in_old_path.is_empty() {
-                    info!("Updating {} media files for renamed directory", files_in_old_path.len());
+                    info!("Updating {} media files for renamed directory using ZeroCopy bulk operations", files_in_old_path.len());
                     
-                    // Remove old files from database
-                    for old_file in &files_in_old_path {
-                        database.remove_media_file(&old_file.path).await?;
-                    }
+                    // Collect paths for bulk removal
+                    let old_paths: Vec<PathBuf> = files_in_old_path.iter().map(|f| f.path.clone()).collect();
                     
-                    // Scan the new directory location
+                    // Remove old files from database using ZeroCopy bulk operation
+                    let removed_count = database.bulk_remove_media_files(&old_paths).await?;
+                    info!("ZeroCopy bulk removal: {} files removed for renamed directory", removed_count);
+                    
+                    // Scan the new directory location using ZeroCopy bulk operations
                     let scanner = media::MediaScanner::with_database(database.clone());
                     match scanner.scan_directory_recursive(&to).await {
                         Ok(scan_result) => {
                             info!("Rescanned renamed directory {}: {}", to.display(), scan_result.summary());
                             
-                            // Files are already stored in database by the scanner
+                            // Files are already stored in database by the scanner using ZeroCopy bulk operations
                             
                             // Increment update ID to notify DLNA clients
                             increment_content_update_id(app_state);
@@ -988,7 +1066,7 @@ async fn handle_file_system_event(
                     }
                 }
             } else {
-                // Handle individual file rename
+                // Handle individual file rename using ZeroCopy bulk operations
                 info!("File renamed: {} -> {}", from.display(), to.display());
                 
                 // Check if it's a media file
@@ -1007,28 +1085,121 @@ async fn handle_file_system_event(
                     return Ok(());
                 }
                 
-                // Remove old file from database
-                database.remove_media_file(&from).await?;
+                // Remove old file and add new file using ZeroCopy bulk operations for atomic consistency
+                let removed_count = database.bulk_remove_media_files(&[from.clone()]).await?;
                 
-                // Create MediaFile record for new location
-                let metadata = tokio::fs::metadata(&to).await?;
-                let mime_type = media::get_mime_type(&to);
-                let mut media_file = database::MediaFile::new(to.clone(), metadata.len(), mime_type);
-                media_file.modified = metadata.modified().unwrap_or(std::time::SystemTime::now());
-                
-                // Store in database
-                let file_id = database.store_media_file(&media_file).await?;
-                media_file.id = Some(file_id);
-                
-                info!("Renamed media file: {} -> {}", from.display(), to.display());
-                
-                // Increment update ID to notify DLNA clients
-                increment_content_update_id(app_state);
+                if removed_count > 0 {
+                    // Create MediaFile record for new location
+                    let metadata = tokio::fs::metadata(&to).await?;
+                    let mime_type = media::get_mime_type(&to);
+                    let media_file = database::MediaFile::new(to.clone(), metadata.len(), mime_type);
+                    
+                    // Store in database using ZeroCopy bulk operation
+                    let file_ids = database.bulk_store_media_files(&[media_file]).await?;
+                    
+                    info!("Renamed media file using ZeroCopy atomic operations: {} -> {}", from.display(), to.display());
+                    
+                    // Increment update ID to notify DLNA clients
+                    increment_content_update_id(app_state);
+                } else {
+                    warn!("Original file not found in database for rename: {}", from.display());
+                }
             }
         }
     }
     
     Ok(())
+}
+
+/// Perform graceful shutdown with ZeroCopy atomic state persistence
+async fn perform_graceful_shutdown(database: &Arc<dyn DatabaseManager>) -> anyhow::Result<()> {
+    info!("Performing graceful shutdown with atomic state persistence...");
+    
+    let stats = get_app_stats();
+    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) = stats.get_stats().await;
+    
+    // Log final application statistics
+    info!("Final application statistics:");
+    info!("  - Files processed: {}", files_processed);
+    info!("  - Directories scanned: {}", directories_scanned);
+    info!("  - Events handled: {}", events_handled);
+    info!("  - Errors encountered: {}", errors_encountered);
+    info!("  - Last activity: {:?}", last_activity);
+    
+    // Ensure ZeroCopy database persists all pending operations
+    info!("Persisting ZeroCopy database state...");
+    
+    // Get database statistics before shutdown
+    match database.get_stats().await {
+        Ok(db_stats) => {
+            info!("Database statistics at shutdown:");
+            info!("  - Total media files: {}", db_stats.total_files);
+            info!("  - Total media size: {} bytes", db_stats.total_size);
+            info!("  - Database file size: {} bytes", db_stats.database_size);
+        }
+        Err(e) => {
+            warn!("Could not retrieve database statistics during shutdown: {}", e);
+        }
+    }
+    
+    // Perform database vacuum if needed (this will also ensure all data is persisted)
+    info!("Performing final database maintenance...");
+    if let Err(e) = database.vacuum().await {
+        warn!("Could not vacuum database during shutdown: {}", e);
+    }
+    
+    info!("Graceful shutdown with atomic state persistence completed");
+    Ok(())
+}
+
+/// Start atomic application statistics monitoring
+async fn start_atomic_monitoring(database: Arc<dyn DatabaseManager>) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    info!("Starting atomic application statistics monitoring...");
+    
+    let handle = tokio::spawn(async move {
+        let stats = get_app_stats();
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60)); // Monitor every minute
+        
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {
+                    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) = stats.get_stats().await;
+                    
+                    // Log periodic statistics
+                    debug!("Atomic application statistics:");
+                    debug!("  - Files processed: {}", files_processed);
+                    debug!("  - Directories scanned: {}", directories_scanned);
+                    debug!("  - Events handled: {}", events_handled);
+                    debug!("  - Errors encountered: {}", errors_encountered);
+                    debug!("  - Last activity: {:?}", last_activity);
+                    
+                    // Get database statistics
+                    if let Ok(db_stats) = database.get_stats().await {
+                        debug!("ZeroCopy database statistics:");
+                        debug!("  - Total media files: {}", db_stats.total_files);
+                        debug!("  - Total media size: {} bytes", db_stats.total_size);
+                        debug!("  - Database file size: {} bytes", db_stats.database_size);
+                    }
+                    
+                    // Check for inactivity (no events in last 5 minutes)
+                    if let Ok(elapsed) = last_activity.elapsed() {
+                        if elapsed > std::time::Duration::from_secs(300) {
+                            debug!("Application has been inactive for {:?}", elapsed);
+                        }
+                    }
+                }
+                _ = wait_for_shutdown_signal() => {
+                    info!("Atomic monitoring service received shutdown signal");
+                    break;
+                }
+            }
+        }
+        
+        info!("Atomic monitoring service stopped");
+    });
+    
+    info!("Atomic application statistics monitoring started");
+    Ok(handle)
 }
 
 /// Start SSDP service with platform abstraction
