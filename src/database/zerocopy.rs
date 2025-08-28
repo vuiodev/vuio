@@ -1226,6 +1226,11 @@ impl ZeroCopyDatabase {
         Self::new(db_path, Some(config)).await
     }
     
+    /// Create a new zero-copy database instance with custom configuration
+    pub async fn new_with_config(db_path: PathBuf, config: ZeroCopyConfig) -> Result<Self> {
+        Self::new(db_path, Some(config)).await
+    }
+    
     /// Create a new zero-copy database instance with auto-detected performance profile
     pub async fn new_with_auto_detection(db_path: PathBuf) -> Result<Self> {
         let config = ZeroCopyConfig::with_auto_detection();
