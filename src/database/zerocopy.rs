@@ -600,6 +600,32 @@ impl ZeroCopyDatabase {
         index_manager.get_stats()
     }
     
+    /// Get memory-bounded cache statistics
+    pub async fn get_cache_stats(&self) -> super::index_manager::CombinedCacheStats {
+        let index_manager = self.index_manager.read().await;
+        index_manager.cache_manager.get_cache_stats()
+    }
+    
+    /// Check memory pressure across all caches
+    pub async fn check_memory_pressure(&self) -> super::memory_bounded_cache::MemoryPressureStatus {
+        let mut index_manager = self.index_manager.write().await;
+        index_manager.cache_manager.check_and_handle_pressure()
+    }
+    
+    /// Force cache cleanup to free memory
+    pub async fn force_cache_cleanup(&self, memory_reduction_factor: f64) -> Result<()> {
+        let mut index_manager = self.index_manager.write().await;
+        index_manager.cache_manager.force_cleanup_all_caches(memory_reduction_factor);
+        Ok(())
+    }
+    
+    /// Clear all caches
+    pub async fn clear_all_caches(&self) -> Result<()> {
+        let mut index_manager = self.index_manager.write().await;
+        index_manager.cache_manager.clear_all();
+        Ok(())
+    }
+    
     /// Create database header for file format identification
     fn create_database_header<'a>(&self, builder: &mut flatbuffers::FlatBufferBuilder<'a>) -> Result<flatbuffers::WIPOffset<super::flatbuffer::DatabaseHeader<'a>>> {
         use super::flatbuffer::*;
@@ -947,7 +973,7 @@ impl ZeroCopyDatabase {
         
         // Get files in directory
         let file_offsets = {
-            let index_manager = self.index_manager.read().await;
+            let mut index_manager = self.index_manager.write().await;
             self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
             index_manager.find_files_in_directory(&canonical_dir)
         };
@@ -1108,7 +1134,7 @@ impl DatabaseManager for ZeroCopyDatabase {
         
         // Get file offsets from directory index with atomic lookup
         let file_offsets = {
-            let index_manager = self.index_manager.read().await;
+            let mut index_manager = self.index_manager.write().await;
             self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
             index_manager.find_files_in_directory(&canonical_dir)
         };

@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use std::collections::{HashMap, BTreeMap, VecDeque};
+use std::collections::{HashMap, BTreeMap};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
 use super::MediaFile;
+use super::memory_bounded_cache::{MemoryBoundedCache, CacheStats as MemoryCacheStats, MemoryPressureConfig, MemoryPressureStatus};
 
 /// Types of indexes that can be marked as dirty
 #[derive(Debug, Clone, Copy)]
@@ -22,179 +23,223 @@ pub enum IndexType {
     YearIndex = 6,
 }
 
-/// LRU cache entry with access tracking
+/// Memory-bounded cache manager with atomic operations and pressure detection
 #[derive(Debug)]
-struct LRUEntry<T> {
-    value: T,
-    last_accessed: Instant,
-    access_count: AtomicU64,
+pub struct CacheManager {
+    path_cache: MemoryBoundedCache<String, u64>,
+    id_cache: MemoryBoundedCache<u64, u64>,
+    directory_cache: MemoryBoundedCache<String, Vec<u64>>,
+    
+    // Cache configuration
+    pressure_config: MemoryPressureConfig,
+    
+    // Atomic performance tracking
+    total_cache_operations: AtomicU64,
+    cache_pressure_events: AtomicU64,
+    last_pressure_check: AtomicU64,
 }
 
-impl<T> LRUEntry<T> {
-    fn new(value: T) -> Self {
+impl CacheManager {
+    pub fn new(max_entries_per_cache: usize, max_memory_per_cache: usize) -> Self {
+        let pressure_config = MemoryPressureConfig {
+            pressure_threshold: 0.8,  // 80% memory usage triggers pressure
+            critical_threshold: 0.95, // 95% memory usage triggers aggressive eviction
+            eviction_percentage: 0.25, // Evict 25% of entries during pressure
+            min_entries: 100,         // Always keep at least 100 entries
+        };
+        
         Self {
-            value,
-            last_accessed: Instant::now(),
-            access_count: AtomicU64::new(1),
+            path_cache: MemoryBoundedCache::with_pressure_config(
+                max_entries_per_cache, 
+                max_memory_per_cache, 
+                pressure_config.clone()
+            ),
+            id_cache: MemoryBoundedCache::with_pressure_config(
+                max_entries_per_cache, 
+                max_memory_per_cache, 
+                pressure_config.clone()
+            ),
+            directory_cache: MemoryBoundedCache::with_pressure_config(
+                max_entries_per_cache / 4, // Directories are less frequent
+                max_memory_per_cache / 2,  // But can be larger
+                pressure_config.clone()
+            ),
+            pressure_config,
+            total_cache_operations: AtomicU64::new(0),
+            cache_pressure_events: AtomicU64::new(0),
+            last_pressure_check: AtomicU64::new(0),
         }
     }
     
-    fn touch(&mut self) {
-        self.last_accessed = Instant::now();
-        self.access_count.fetch_add(1, Ordering::Relaxed);
+    /// Get value from path cache with atomic tracking
+    pub fn get_path(&mut self, path: &str) -> Option<u64> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.path_cache.get(&path.to_string())
     }
-}
-
-/// Memory-bounded LRU cache with atomic operations
-#[derive(Debug)]
-pub struct MemoryBoundedCache<K, V> 
-where 
-    K: Clone + std::hash::Hash + Eq,
-    V: Clone,
-{
-    cache: HashMap<K, LRUEntry<V>>,
-    access_order: VecDeque<K>,
-    max_entries: usize,
-    max_memory_bytes: usize,
-    current_memory_bytes: AtomicUsize,
-    hit_count: AtomicU64,
-    miss_count: AtomicU64,
-    eviction_count: AtomicU64,
-}
-
-impl<K, V> MemoryBoundedCache<K, V>
-where
-    K: Clone + std::hash::Hash + Eq,
-    V: Clone,
-{
-    pub fn new(max_entries: usize, max_memory_bytes: usize) -> Self {
-        Self {
-            cache: HashMap::with_capacity(max_entries.min(1000)),
-            access_order: VecDeque::with_capacity(max_entries.min(1000)),
-            max_entries,
-            max_memory_bytes,
-            current_memory_bytes: AtomicUsize::new(0),
-            hit_count: AtomicU64::new(0),
-            miss_count: AtomicU64::new(0),
-            eviction_count: AtomicU64::new(0),
+    
+    /// Insert value into path cache with automatic pressure management
+    pub fn insert_path(&mut self, path: String, offset: u64) -> Result<()> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.check_and_handle_pressure();
+        self.path_cache.insert(path, offset)
+    }
+    
+    /// Get value from ID cache with atomic tracking
+    pub fn get_id(&mut self, id: u64) -> Option<u64> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.id_cache.get(&id)
+    }
+    
+    /// Insert value into ID cache with automatic pressure management
+    pub fn insert_id(&mut self, id: u64, offset: u64) -> Result<()> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.check_and_handle_pressure();
+        self.id_cache.insert(id, offset)
+    }
+    
+    /// Get directory files from cache
+    pub fn get_directory(&mut self, dir_path: &str) -> Option<Vec<u64>> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.directory_cache.get(&dir_path.to_string())
+    }
+    
+    /// Insert directory files into cache
+    pub fn insert_directory(&mut self, dir_path: String, files: Vec<u64>) -> Result<()> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.check_and_handle_pressure();
+        self.directory_cache.insert(dir_path, files)
+    }
+    
+    /// Remove entries from all caches
+    pub fn remove_path(&mut self, path: &str) -> Option<u64> {
+        self.total_cache_operations.fetch_add(1, Ordering::Relaxed);
+        self.path_cache.remove(&path.to_string())
+    }
+    
+    /// Check memory pressure across all caches and handle if needed
+    pub fn check_and_handle_pressure(&mut self) -> MemoryPressureStatus {
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        
+        let last_check = self.last_pressure_check.load(Ordering::Relaxed);
+        
+        // Check pressure every 5 seconds to avoid overhead
+        if now - last_check < 5 {
+            return MemoryPressureStatus::Normal;
         }
-    }
-    
-    pub fn get(&mut self, key: &K) -> Option<V> {
-        if let Some(entry) = self.cache.get_mut(key) {
-            entry.touch();
-            self.hit_count.fetch_add(1, Ordering::Relaxed);
+        
+        self.last_pressure_check.store(now, Ordering::Relaxed);
+        
+        // Check pressure on all caches
+        let path_pressure = self.path_cache.check_memory_pressure();
+        let id_pressure = self.id_cache.check_memory_pressure();
+        let dir_pressure = self.directory_cache.check_memory_pressure();
+        
+        // Determine overall pressure status
+        let overall_pressure = match (path_pressure, id_pressure, dir_pressure) {
+            (MemoryPressureStatus::Critical, _, _) |
+            (_, MemoryPressureStatus::Critical, _) |
+            (_, _, MemoryPressureStatus::Critical) => MemoryPressureStatus::Critical,
             
-            // Move to end of access order
-            if let Some(pos) = self.access_order.iter().position(|k| k == key) {
-                let key = self.access_order.remove(pos).unwrap();
-                self.access_order.push_back(key);
-            }
+            (MemoryPressureStatus::Pressure, _, _) |
+            (_, MemoryPressureStatus::Pressure, _) |
+            (_, _, MemoryPressureStatus::Pressure) => MemoryPressureStatus::Pressure,
             
-            Some(entry.value.clone())
-        } else {
-            self.miss_count.fetch_add(1, Ordering::Relaxed);
-            None
-        }
-    }
-    
-    pub fn insert(&mut self, key: K, value: V) {
-        let entry_size = std::mem::size_of::<K>() + std::mem::size_of::<V>() + std::mem::size_of::<LRUEntry<V>>();
+            _ => MemoryPressureStatus::Normal,
+        };
         
-        // Check if we need to evict entries
-        self.evict_if_needed(entry_size);
-        
-        // Insert new entry
-        let entry = LRUEntry::new(value);
-        self.cache.insert(key.clone(), entry);
-        self.access_order.push_back(key);
-        
-        self.current_memory_bytes.fetch_add(entry_size, Ordering::Relaxed);
-    }
-    
-    pub fn remove(&mut self, key: &K) -> Option<V> {
-        if let Some(entry) = self.cache.remove(key) {
-            // Remove from access order
-            if let Some(pos) = self.access_order.iter().position(|k| k == key) {
-                self.access_order.remove(pos);
-            }
+        if overall_pressure != MemoryPressureStatus::Normal {
+            self.cache_pressure_events.fetch_add(1, Ordering::Relaxed);
             
-            let entry_size = std::mem::size_of::<K>() + std::mem::size_of::<V>() + std::mem::size_of::<LRUEntry<V>>();
-            self.current_memory_bytes.fetch_sub(entry_size, Ordering::Relaxed);
-            
-            Some(entry.value)
-        } else {
-            None
-        }
-    }
-    
-    fn evict_if_needed(&mut self, new_entry_size: usize) {
-        let current_memory = self.current_memory_bytes.load(Ordering::Relaxed);
-        let current_entries = self.cache.len();
-        
-        // Check memory limit
-        let needs_memory_eviction = current_memory + new_entry_size > self.max_memory_bytes;
-        
-        // Check entry count limit
-        let needs_count_eviction = current_entries >= self.max_entries;
-        
-        if needs_memory_eviction || needs_count_eviction {
-            let entries_to_evict = if needs_count_eviction {
-                (current_entries - self.max_entries + 1).max(1)
-            } else {
-                // Evict 10% of entries to free memory
-                (current_entries / 10).max(1)
-            };
-            
-            for _ in 0..entries_to_evict {
-                if let Some(oldest_key) = self.access_order.pop_front() {
-                    if let Some(entry) = self.cache.remove(&oldest_key) {
-                        let entry_size = std::mem::size_of::<K>() + std::mem::size_of::<V>() + std::mem::size_of::<LRUEntry<V>>();
-                        self.current_memory_bytes.fetch_sub(entry_size, Ordering::Relaxed);
-                        self.eviction_count.fetch_add(1, Ordering::Relaxed);
-                    }
-                } else {
-                    break;
+            match overall_pressure {
+                MemoryPressureStatus::Critical => {
+                    warn!("Critical memory pressure detected across caches, forcing aggressive cleanup");
+                    self.force_cleanup_all_caches(0.5); // Free 50% of memory
                 }
-            }
-            
-            if needs_memory_eviction {
-                debug!("Evicted {} entries to free memory", entries_to_evict);
-            } else {
-                debug!("Evicted {} entries to maintain count limit", entries_to_evict);
+                MemoryPressureStatus::Pressure => {
+                    info!("Memory pressure detected across caches, performing cleanup");
+                    self.force_cleanup_all_caches(0.25); // Free 25% of memory
+                }
+                _ => {}
             }
         }
-    }
-    
-    pub fn get_stats(&self) -> CacheStats {
-        let hits = self.hit_count.load(Ordering::Relaxed);
-        let misses = self.miss_count.load(Ordering::Relaxed);
-        let total_requests = hits + misses;
         
-        CacheStats {
-            entries: self.cache.len(),
-            max_entries: self.max_entries,
-            memory_bytes: self.current_memory_bytes.load(Ordering::Relaxed),
-            max_memory_bytes: self.max_memory_bytes,
-            hit_count: hits,
-            miss_count: misses,
-            eviction_count: self.eviction_count.load(Ordering::Relaxed),
-            hit_rate: if total_requests > 0 {
-                hits as f64 / total_requests as f64
-            } else {
-                0.0
+        overall_pressure
+    }
+    
+    /// Force cleanup of all caches to free memory
+    pub fn force_cleanup_all_caches(&mut self, memory_reduction_factor: f64) {
+        let path_stats = self.path_cache.get_stats();
+        let id_stats = self.id_cache.get_stats();
+        let dir_stats = self.directory_cache.get_stats();
+        
+        // Calculate target memory for each cache
+        let path_target = (path_stats.memory_bytes as f64 * (1.0 - memory_reduction_factor)) as usize;
+        let id_target = (id_stats.memory_bytes as f64 * (1.0 - memory_reduction_factor)) as usize;
+        let dir_target = (dir_stats.memory_bytes as f64 * (1.0 - memory_reduction_factor)) as usize;
+        
+        // Force eviction on all caches
+        let path_evicted = self.path_cache.force_evict(path_target);
+        let id_evicted = self.id_cache.force_evict(id_target);
+        let dir_evicted = self.directory_cache.force_evict(dir_target);
+        
+        info!(
+            "Cache cleanup completed: evicted {} path entries, {} ID entries, {} directory entries",
+            path_evicted, id_evicted, dir_evicted
+        );
+    }
+    
+    /// Get comprehensive cache statistics
+    pub fn get_cache_stats(&self) -> CombinedCacheStats {
+        let path_stats = self.path_cache.get_stats();
+        let id_stats = self.id_cache.get_stats();
+        let dir_stats = self.directory_cache.get_stats();
+        
+        CombinedCacheStats {
+            path_cache: path_stats.clone(),
+            id_cache: id_stats.clone(),
+            directory_cache: dir_stats.clone(),
+            total_cache_operations: self.total_cache_operations.load(Ordering::Relaxed),
+            cache_pressure_events: self.cache_pressure_events.load(Ordering::Relaxed),
+            combined_hit_rate: {
+                let total_hits = path_stats.hit_count + id_stats.hit_count + dir_stats.hit_count;
+                let total_requests = path_stats.total_requests + id_stats.total_requests + dir_stats.total_requests;
+                if total_requests > 0 {
+                    total_hits as f64 / total_requests as f64
+                } else {
+                    0.0
+                }
             },
+            combined_memory_usage: path_stats.memory_bytes + id_stats.memory_bytes + dir_stats.memory_bytes,
+            combined_max_memory: path_stats.max_memory_bytes + id_stats.max_memory_bytes + dir_stats.max_memory_bytes,
         }
     }
     
-    pub fn clear(&mut self) {
-        self.cache.clear();
-        self.access_order.clear();
-        self.current_memory_bytes.store(0, Ordering::Relaxed);
+    /// Clear all caches
+    pub fn clear_all(&mut self) {
+        self.path_cache.clear();
+        self.id_cache.clear();
+        self.directory_cache.clear();
+        info!("All caches cleared");
     }
 }
 
-/// Cache statistics
+/// Combined statistics for all caches
+#[derive(Debug, Clone)]
+pub struct CombinedCacheStats {
+    pub path_cache: MemoryCacheStats,
+    pub id_cache: MemoryCacheStats,
+    pub directory_cache: MemoryCacheStats,
+    pub total_cache_operations: u64,
+    pub cache_pressure_events: u64,
+    pub combined_hit_rate: f64,
+    pub combined_memory_usage: usize,
+    pub combined_max_memory: usize,
+}
+
+/// Legacy cache statistics for backward compatibility
 #[derive(Debug, Clone)]
 pub struct CacheStats {
     pub entries: usize,
@@ -210,9 +255,8 @@ pub struct CacheStats {
 /// Enhanced IndexManager with atomic operations and memory-bounded caching
 #[derive(Debug)]
 pub struct IndexManager {
-    // Path-based indexes with atomic operations
-    path_to_offset: MemoryBoundedCache<String, u64>,
-    id_to_offset: MemoryBoundedCache<u64, u64>,
+    // Memory-bounded cache manager with pressure detection
+    pub cache_manager: CacheManager,
     
     // Directory-based B-tree index with atomic operations
     directory_index: BTreeMap<String, Vec<u64>>,
@@ -244,11 +288,11 @@ pub struct IndexManager {
 impl IndexManager {
     /// Create a new IndexManager with specified memory limits
     pub fn new(max_entries: usize, max_memory_bytes: usize) -> Self {
-        let cache_memory_per_index = max_memory_bytes / 2; // Split between path and id caches
+        let cache_memory_per_index = max_memory_bytes / 3; // Split between path, id, and directory caches
+        let cache_entries_per_index = max_entries / 3;
         
         Self {
-            path_to_offset: MemoryBoundedCache::new(max_entries / 2, cache_memory_per_index),
-            id_to_offset: MemoryBoundedCache::new(max_entries / 2, cache_memory_per_index),
+            cache_manager: CacheManager::new(cache_entries_per_index, cache_memory_per_index),
             directory_index: BTreeMap::new(),
             artist_index: HashMap::new(),
             album_index: HashMap::new(),
@@ -274,18 +318,31 @@ impl IndexManager {
         
         let path_key = file.path.to_string_lossy().to_string();
         
-        // Update path-to-offset index with atomic cache operations
-        self.path_to_offset.insert(path_key.clone(), offset);
+        // Update path-to-offset index with atomic cache operations and pressure management
+        if let Err(e) = self.cache_manager.insert_path(path_key.clone(), offset) {
+            warn!("Failed to insert path cache entry: {}", e);
+        }
         
         // Update id-to-offset index if ID is available
         if let Some(id) = file.id {
-            self.id_to_offset.insert(id as u64, offset);
+            if let Err(e) = self.cache_manager.insert_id(id as u64, offset) {
+                warn!("Failed to insert ID cache entry: {}", e);
+            }
         }
         
         // Update directory index with atomic operations
         if let Some(parent) = file.path.parent() {
             let parent_key = parent.to_string_lossy().to_string();
-            self.directory_index.entry(parent_key).or_insert_with(Vec::new).push(offset);
+            
+            // Update in-memory directory index
+            self.directory_index.entry(parent_key.clone()).or_insert_with(Vec::new).push(offset);
+            
+            // Update directory cache with current files
+            let dir_files = self.directory_index.get(&parent_key).cloned().unwrap_or_default();
+            if let Err(e) = self.cache_manager.insert_directory(parent_key, dir_files) {
+                warn!("Failed to insert directory cache entry: {}", e);
+            }
+            
             self.mark_index_dirty(IndexType::DirectoryIndex);
         }
         
@@ -331,7 +388,7 @@ impl IndexManager {
     pub fn remove_file_index(&mut self, path: &str) -> Option<u64> {
         let start_time = Instant::now();
         
-        if let Some(offset) = self.path_to_offset.remove(&path.to_string()) {
+        if let Some(offset) = self.cache_manager.remove_path(path) {
             // Remove from directory index (simplified - would need file data for complete removal)
             // In practice, we'd need to track which directory this file belonged to
             
@@ -353,19 +410,35 @@ impl IndexManager {
     /// Find file by path with atomic cache lookup
     pub fn find_by_path(&mut self, path: &str) -> Option<u64> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.path_to_offset.get(&path.to_string())
+        self.cache_manager.get_path(path)
     }
     
     /// Find file by ID with atomic cache lookup
     pub fn find_by_id(&mut self, id: u64) -> Option<u64> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.id_to_offset.get(&id)
+        self.cache_manager.get_id(id)
     }
     
-    /// Find files in directory with atomic B-tree operations
-    pub fn find_files_in_directory(&self, dir_path: &str) -> Vec<u64> {
+    /// Find files in directory with atomic B-tree operations and cache lookup
+    pub fn find_files_in_directory(&mut self, dir_path: &str) -> Vec<u64> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.directory_index.get(dir_path).cloned().unwrap_or_default()
+        
+        // Try cache first
+        if let Some(cached_files) = self.cache_manager.get_directory(dir_path) {
+            return cached_files;
+        }
+        
+        // Fall back to in-memory index
+        let files = self.directory_index.get(dir_path).cloned().unwrap_or_default();
+        
+        // Cache the result for future lookups
+        if !files.is_empty() {
+            if let Err(e) = self.cache_manager.insert_directory(dir_path.to_string(), files.clone()) {
+                warn!("Failed to cache directory lookup result: {}", e);
+            }
+        }
+        
+        files
     }
     
     /// Get all directories that are subdirectories of the given path
@@ -554,12 +627,11 @@ impl IndexManager {
     
     /// Get comprehensive index statistics
     pub fn get_stats(&self) -> IndexStats {
-        let path_cache_stats = self.path_to_offset.get_stats();
-        let id_cache_stats = self.id_to_offset.get_stats();
+        let combined_cache_stats = self.cache_manager.get_cache_stats();
         
         IndexStats {
-            path_entries: path_cache_stats.entries,
-            id_entries: id_cache_stats.entries,
+            path_entries: combined_cache_stats.path_cache.entries,
+            id_entries: combined_cache_stats.id_cache.entries,
             directory_entries: self.directory_index.len(),
             artist_entries: self.artist_index.len(),
             album_entries: self.album_index.len(),
@@ -570,15 +642,15 @@ impl IndexManager {
             is_dirty: self.is_dirty(),
             max_entries: self.max_entries,
             max_memory_bytes: self.max_memory_bytes,
-            current_memory_bytes: path_cache_stats.memory_bytes + id_cache_stats.memory_bytes,
+            current_memory_bytes: combined_cache_stats.combined_memory_usage,
             lookup_count: self.lookup_count.load(Ordering::Relaxed),
             update_count: self.update_count.load(Ordering::Relaxed),
             insert_count: self.insert_count.load(Ordering::Relaxed),
             remove_count: self.remove_count.load(Ordering::Relaxed),
-            path_cache_hit_rate: path_cache_stats.hit_rate,
-            id_cache_hit_rate: id_cache_stats.hit_rate,
-            path_cache_evictions: path_cache_stats.eviction_count,
-            id_cache_evictions: id_cache_stats.eviction_count,
+            path_cache_hit_rate: combined_cache_stats.path_cache.hit_rate,
+            id_cache_hit_rate: combined_cache_stats.id_cache.hit_rate,
+            path_cache_evictions: combined_cache_stats.path_cache.eviction_count,
+            id_cache_evictions: combined_cache_stats.id_cache.eviction_count,
         }
     }
     
@@ -776,8 +848,7 @@ impl IndexManager {
     
     /// Clear all indexes and reset counters
     pub fn clear(&mut self) {
-        self.path_to_offset.clear();
-        self.id_to_offset.clear();
+        self.cache_manager.clear_all();
         self.directory_index.clear();
         self.artist_index.clear();
         self.album_index.clear();
