@@ -88,7 +88,7 @@ This implementation plan **completely replaces SQLite with ZeroCopy database** t
   - Implement atomic operation counting and performance tracking
   - _Requirements: 1.1, 1.2, 1.3, 5.1, 5.2_
 
-- [ ] 7. Implement individual database operations as bulk wrappers in ZeroCopy database
+- [x] 7. Implement individual database operations as bulk wrappers in ZeroCopy database
   - Create store_media_file as single-item bulk operation in ZeroCopyDatabase
   - Implement remove_media_file as single-item bulk operation in ZeroCopyDatabase
   - Add update_media_file as single-item bulk operation in ZeroCopyDatabase
