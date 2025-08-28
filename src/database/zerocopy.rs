@@ -1380,17 +1380,145 @@ impl DatabaseManager for ZeroCopyDatabase {
         Err(anyhow!("Not implemented yet"))
     }
     
-    // Music categorization methods - placeholders
+    // Music categorization methods with atomic operations
     async fn get_artists(&self) -> Result<Vec<MusicCategory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get all unique artists from index with atomic scanning
+        let artists = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.get_all_artists()
+        };
+        
+        // Convert to MusicCategory with atomic counting
+        let mut categories = Vec::with_capacity(artists.len());
+        for (artist, file_offsets) in artists {
+            categories.push(MusicCategory {
+                id: artist.clone(),
+                name: artist,
+                category_type: super::MusicCategoryType::Artist,
+                count: file_offsets.len(),
+            });
+        }
+        
+        // Sort by name for consistent ordering
+        categories.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            categories.len() as u64 * 64, // Estimate 64 bytes per category
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} artists in {:?} with atomic index scanning",
+            categories.len(),
+            processing_time
+        );
+        
+        Ok(categories)
     }
     
-    async fn get_albums(&self, _artist: Option<&str>) -> Result<Vec<MusicCategory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    async fn get_albums(&self, artist: Option<&str>) -> Result<Vec<MusicCategory>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get albums from index with atomic filtering
+        let albums = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            
+            if let Some(artist_filter) = artist {
+                // Get albums for specific artist with atomic filtering
+                index_manager.get_albums_by_artist(artist_filter)
+            } else {
+                // Get all albums with atomic scanning
+                index_manager.get_all_albums()
+            }
+        };
+        
+        // Convert to MusicCategory with atomic counting
+        let mut categories = Vec::with_capacity(albums.len());
+        for (album, file_offsets) in albums {
+            categories.push(MusicCategory {
+                id: album.clone(),
+                name: album,
+                category_type: super::MusicCategoryType::Album,
+                count: file_offsets.len(),
+            });
+        }
+        
+        // Sort by name for consistent ordering
+        categories.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            categories.len() as u64 * 64, // Estimate 64 bytes per category
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} albums{} in {:?} with atomic index filtering",
+            categories.len(),
+            if artist.is_some() { " for artist" } else { "" },
+            processing_time
+        );
+        
+        Ok(categories)
     }
     
     async fn get_genres(&self) -> Result<Vec<MusicCategory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get all unique genres from index with atomic categorization
+        let genres = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.get_all_genres()
+        };
+        
+        // Convert to MusicCategory with atomic counting
+        let mut categories = Vec::with_capacity(genres.len());
+        for (genre, file_offsets) in genres {
+            categories.push(MusicCategory {
+                id: genre.clone(),
+                name: genre,
+                category_type: super::MusicCategoryType::Genre,
+                count: file_offsets.len(),
+            });
+        }
+        
+        // Sort by name for consistent ordering
+        categories.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            categories.len() as u64 * 64, // Estimate 64 bytes per category
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} genres in {:?} with atomic index categorization",
+            categories.len(),
+            processing_time
+        );
+        
+        Ok(categories)
     }
     
     // Bulk operations implementation
@@ -1480,31 +1608,410 @@ impl DatabaseManager for ZeroCopyDatabase {
     }
     
     async fn get_years(&self) -> Result<Vec<MusicCategory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get all unique years from index with atomic year extraction
+        let years = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.get_all_years()
+        };
+        
+        // Convert to MusicCategory with atomic counting
+        let mut categories = Vec::with_capacity(years.len());
+        for (year, file_offsets) in years {
+            categories.push(MusicCategory {
+                id: year.to_string(),
+                name: year.to_string(),
+                category_type: super::MusicCategoryType::Year,
+                count: file_offsets.len(),
+            });
+        }
+        
+        // Sort by year (descending - newest first)
+        categories.sort_by(|a, b| b.name.cmp(&a.name));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            categories.len() as u64 * 64, // Estimate 64 bytes per category
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} years in {:?} with atomic index year extraction",
+            categories.len(),
+            processing_time
+        );
+        
+        Ok(categories)
     }
     
     async fn get_album_artists(&self) -> Result<Vec<MusicCategory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get all unique album artists from index with atomic scanning
+        let album_artists = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.get_all_album_artists()
+        };
+        
+        // Convert to MusicCategory with atomic counting
+        let mut categories = Vec::with_capacity(album_artists.len());
+        for (album_artist, file_offsets) in album_artists {
+            categories.push(MusicCategory {
+                id: album_artist.clone(),
+                name: album_artist,
+                category_type: super::MusicCategoryType::AlbumArtist,
+                count: file_offsets.len(),
+            });
+        }
+        
+        // Sort by name for consistent ordering
+        categories.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            categories.len() as u64 * 64, // Estimate 64 bytes per category
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} album artists in {:?} with atomic index scanning",
+            categories.len(),
+            processing_time
+        );
+        
+        Ok(categories)
     }
     
-    async fn get_music_by_artist(&self, _artist: &str) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get file offsets for artist with atomic lookups
+        let file_offsets = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.find_files_by_artist(artist)
+        };
+        
+        if file_offsets.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No files found for artist: {}", artist);
+            return Ok(Vec::new());
+        }
+        
+        // Read files from memory-mapped storage using zero-copy access
+        let mut files = Vec::with_capacity(file_offsets.len());
+        let data_file = self.data_file.read().await;
+        
+        for offset in file_offsets {
+            match self.read_media_file_at_offset(&data_file, offset).await {
+                Ok(file) => {
+                    files.push(file);
+                    self.performance_tracker.record_cache_access(true);
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for artist {}: {}", offset, artist, e);
+                    self.performance_tracker.record_cache_access(false);
+                    self.performance_tracker.record_failed_operation();
+                }
+            }
+        }
+        
+        // Sort by album, then track number for consistent ordering
+        files.sort_by(|a, b| {
+            a.album.cmp(&b.album)
+                .then_with(|| a.track_number.cmp(&b.track_number))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            files.len() as u64 * 1024, // Estimate 1KB per file record
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} files for artist '{}' in {:?} with atomic lookups",
+            files.len(),
+            artist,
+            processing_time
+        );
+        
+        Ok(files)
     }
     
-    async fn get_music_by_album(&self, _album: &str, _artist: Option<&str>) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    async fn get_music_by_album(&self, album: &str, artist: Option<&str>) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get file offsets for album with atomic filtering
+        let file_offsets = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            
+            if let Some(artist_filter) = artist {
+                // Get files for specific album and artist with atomic filtering
+                index_manager.find_files_by_album_and_artist(album, artist_filter)
+            } else {
+                // Get all files for album with atomic lookups
+                index_manager.find_files_by_album(album)
+            }
+        };
+        
+        if file_offsets.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No files found for album: {} (artist: {:?})", album, artist);
+            return Ok(Vec::new());
+        }
+        
+        // Read files from memory-mapped storage using zero-copy access
+        let mut files = Vec::with_capacity(file_offsets.len());
+        let data_file = self.data_file.read().await;
+        
+        for offset in file_offsets {
+            match self.read_media_file_at_offset(&data_file, offset).await {
+                Ok(file) => {
+                    files.push(file);
+                    self.performance_tracker.record_cache_access(true);
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for album {}: {}", offset, album, e);
+                    self.performance_tracker.record_cache_access(false);
+                    self.performance_tracker.record_failed_operation();
+                }
+            }
+        }
+        
+        // Sort by track number for consistent ordering
+        files.sort_by(|a, b| {
+            a.track_number.cmp(&b.track_number)
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            files.len() as u64 * 1024, // Estimate 1KB per file record
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} files for album '{}'{} in {:?} with atomic filtering",
+            files.len(),
+            album,
+            if artist.is_some() { " by artist" } else { "" },
+            processing_time
+        );
+        
+        Ok(files)
     }
     
-    async fn get_music_by_genre(&self, _genre: &str) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    async fn get_music_by_genre(&self, genre: &str) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get file offsets for genre with atomic lookups
+        let file_offsets = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.find_files_by_genre(genre)
+        };
+        
+        if file_offsets.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No files found for genre: {}", genre);
+            return Ok(Vec::new());
+        }
+        
+        // Read files from memory-mapped storage using zero-copy access
+        let mut files = Vec::with_capacity(file_offsets.len());
+        let data_file = self.data_file.read().await;
+        
+        for offset in file_offsets {
+            match self.read_media_file_at_offset(&data_file, offset).await {
+                Ok(file) => {
+                    files.push(file);
+                    self.performance_tracker.record_cache_access(true);
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for genre {}: {}", offset, genre, e);
+                    self.performance_tracker.record_cache_access(false);
+                    self.performance_tracker.record_failed_operation();
+                }
+            }
+        }
+        
+        // Sort by artist, then album, then track number for consistent ordering
+        files.sort_by(|a, b| {
+            a.artist.cmp(&b.artist)
+                .then_with(|| a.album.cmp(&b.album))
+                .then_with(|| a.track_number.cmp(&b.track_number))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            files.len() as u64 * 1024, // Estimate 1KB per file record
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} files for genre '{}' in {:?} with atomic lookups",
+            files.len(),
+            genre,
+            processing_time
+        );
+        
+        Ok(files)
     }
     
-    async fn get_music_by_year(&self, _year: u32) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    async fn get_music_by_year(&self, year: u32) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get file offsets for year with atomic lookups
+        let file_offsets = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.find_files_by_year(year)
+        };
+        
+        if file_offsets.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No files found for year: {}", year);
+            return Ok(Vec::new());
+        }
+        
+        // Read files from memory-mapped storage using zero-copy access
+        let mut files = Vec::with_capacity(file_offsets.len());
+        let data_file = self.data_file.read().await;
+        
+        for offset in file_offsets {
+            match self.read_media_file_at_offset(&data_file, offset).await {
+                Ok(file) => {
+                    files.push(file);
+                    self.performance_tracker.record_cache_access(true);
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for year {}: {}", offset, year, e);
+                    self.performance_tracker.record_cache_access(false);
+                    self.performance_tracker.record_failed_operation();
+                }
+            }
+        }
+        
+        // Sort by artist, then album, then track number for consistent ordering
+        files.sort_by(|a, b| {
+            a.artist.cmp(&b.artist)
+                .then_with(|| a.album.cmp(&b.album))
+                .then_with(|| a.track_number.cmp(&b.track_number))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            files.len() as u64 * 1024, // Estimate 1KB per file record
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} files for year {} in {:?} with atomic lookups",
+            files.len(),
+            year,
+            processing_time
+        );
+        
+        Ok(files)
     }
     
-    async fn get_music_by_album_artist(&self, _album_artist: &str) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get file offsets for album artist with atomic lookups
+        let file_offsets = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.find_files_by_album_artist(album_artist)
+        };
+        
+        if file_offsets.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No files found for album artist: {}", album_artist);
+            return Ok(Vec::new());
+        }
+        
+        // Read files from memory-mapped storage using zero-copy access
+        let mut files = Vec::with_capacity(file_offsets.len());
+        let data_file = self.data_file.read().await;
+        
+        for offset in file_offsets {
+            match self.read_media_file_at_offset(&data_file, offset).await {
+                Ok(file) => {
+                    files.push(file);
+                    self.performance_tracker.record_cache_access(true);
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for album artist {}: {}", offset, album_artist, e);
+                    self.performance_tracker.record_cache_access(false);
+                    self.performance_tracker.record_failed_operation();
+                }
+            }
+        }
+        
+        // Sort by album, then track number for consistent ordering
+        files.sort_by(|a, b| {
+            a.album.cmp(&b.album)
+                .then_with(|| a.track_number.cmp(&b.track_number))
+                .then_with(|| a.title.cmp(&b.title))
+        });
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            files.len() as u64 * 1024, // Estimate 1KB per file record
+            false, // is_read
+            processing_time,
+        );
+        
+        info!(
+            "Retrieved {} files for album artist '{}' in {:?} with atomic lookups",
+            files.len(),
+            album_artist,
+            processing_time
+        );
+        
+        Ok(files)
     }
     
     // Playlist methods - placeholders
@@ -1828,6 +2335,60 @@ mod tests {
         assert!(subdirs.is_empty()); // Should be empty since no subdirectories are indexed
         
         // Verify performance tracking for directory operations
+        let stats = db.get_performance_stats();
+        assert!(stats.index_lookups > 0); // Should have recorded index lookups
+        
+        db.close().await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_music_categorization_operations() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = ZeroCopyDatabase::new(db_path, None).await.unwrap();
+        
+        db.initialize().await.unwrap();
+        db.open().await.unwrap();
+        
+        // Test music categorization methods with empty database
+        let artists = db.get_artists().await.unwrap();
+        assert!(artists.is_empty()); // Should be empty since no files are indexed
+        
+        let albums = db.get_albums(None).await.unwrap();
+        assert!(albums.is_empty()); // Should be empty since no files are indexed
+        
+        let albums_by_artist = db.get_albums(Some("Test Artist")).await.unwrap();
+        assert!(albums_by_artist.is_empty()); // Should be empty since no files are indexed
+        
+        let genres = db.get_genres().await.unwrap();
+        assert!(genres.is_empty()); // Should be empty since no files are indexed
+        
+        let years = db.get_years().await.unwrap();
+        assert!(years.is_empty()); // Should be empty since no files are indexed
+        
+        let album_artists = db.get_album_artists().await.unwrap();
+        assert!(album_artists.is_empty()); // Should be empty since no files are indexed
+        
+        // Test get_music_by_* methods with empty database
+        let music_by_artist = db.get_music_by_artist("Test Artist").await.unwrap();
+        assert!(music_by_artist.is_empty()); // Should be empty since no files are indexed
+        
+        let music_by_album = db.get_music_by_album("Test Album", None).await.unwrap();
+        assert!(music_by_album.is_empty()); // Should be empty since no files are indexed
+        
+        let music_by_album_and_artist = db.get_music_by_album("Test Album", Some("Test Artist")).await.unwrap();
+        assert!(music_by_album_and_artist.is_empty()); // Should be empty since no files are indexed
+        
+        let music_by_genre = db.get_music_by_genre("Rock").await.unwrap();
+        assert!(music_by_genre.is_empty()); // Should be empty since no files are indexed
+        
+        let music_by_year = db.get_music_by_year(2023).await.unwrap();
+        assert!(music_by_year.is_empty()); // Should be empty since no files are indexed
+        
+        let music_by_album_artist = db.get_music_by_album_artist("Test Album Artist").await.unwrap();
+        assert!(music_by_album_artist.is_empty()); // Should be empty since no files are indexed
+        
+        // Verify performance tracking for music categorization operations
         let stats = db.get_performance_stats();
         assert!(stats.index_lookups > 0); // Should have recorded index lookups
         

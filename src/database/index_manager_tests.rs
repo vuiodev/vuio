@@ -167,8 +167,9 @@ mod tests {
         
         // Test artist categorization
         let artists = index_manager.get_all_artists();
-        assert!(artists.contains(&"Artist A".to_string()));
-        assert!(artists.contains(&"Artist B".to_string()));
+        let artist_names: Vec<String> = artists.iter().map(|(name, _)| name.clone()).collect();
+        assert!(artist_names.contains(&"Artist A".to_string()));
+        assert!(artist_names.contains(&"Artist B".to_string()));
         
         let artist_a_files = index_manager.find_files_by_artist("Artist A");
         assert_eq!(artist_a_files.len(), 2);
@@ -177,8 +178,9 @@ mod tests {
         
         // Test album categorization
         let albums = index_manager.get_all_albums();
-        assert!(albums.contains(&"Album X".to_string()));
-        assert!(albums.contains(&"Album Y".to_string()));
+        let album_names: Vec<String> = albums.iter().map(|(name, _)| name.clone()).collect();
+        assert!(album_names.contains(&"Album X".to_string()));
+        assert!(album_names.contains(&"Album Y".to_string()));
         
         let album_x_files = index_manager.find_files_by_album("Album X");
         assert_eq!(album_x_files.len(), 2);
@@ -187,8 +189,9 @@ mod tests {
         
         // Test genre categorization
         let genres = index_manager.get_all_genres();
-        assert!(genres.contains(&"Rock".to_string()));
-        assert!(genres.contains(&"Pop".to_string()));
+        let genre_names: Vec<String> = genres.iter().map(|(name, _)| name.clone()).collect();
+        assert!(genre_names.contains(&"Rock".to_string()));
+        assert!(genre_names.contains(&"Pop".to_string()));
         
         let rock_files = index_manager.find_files_by_genre("Rock");
         assert_eq!(rock_files.len(), 2);
@@ -197,8 +200,9 @@ mod tests {
         
         // Test year categorization
         let years = index_manager.get_all_years();
-        assert!(years.contains(&2020));
-        assert!(years.contains(&2021));
+        let year_values: Vec<u32> = years.iter().map(|(year, _)| *year).collect();
+        assert!(year_values.contains(&2020));
+        assert!(year_values.contains(&2021));
         
         let year_2020_files = index_manager.find_files_by_year(2020);
         assert_eq!(year_2020_files.len(), 2);

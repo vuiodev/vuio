@@ -222,6 +222,7 @@ pub struct IndexManager {
     album_index: HashMap<String, Vec<u64>>,
     genre_index: HashMap<String, Vec<u64>>,
     year_index: HashMap<u32, Vec<u64>>,
+    album_artist_index: HashMap<String, Vec<u64>>,
     
     // Atomic counters for operations
     lookup_count: AtomicU64,
@@ -253,6 +254,7 @@ impl IndexManager {
             album_index: HashMap::new(),
             genre_index: HashMap::new(),
             year_index: HashMap::new(),
+            album_artist_index: HashMap::new(),
             lookup_count: AtomicU64::new(0),
             update_count: AtomicU64::new(0),
             insert_count: AtomicU64::new(0),
@@ -306,6 +308,12 @@ impl IndexManager {
         if let Some(year) = file.year {
             self.year_index.entry(year).or_insert_with(Vec::new).push(offset);
             self.mark_index_dirty(IndexType::YearIndex);
+        }
+        
+        if let Some(album_artist) = &file.album_artist {
+            self.album_artist_index.entry(album_artist.clone()).or_insert_with(Vec::new).push(offset);
+            // Note: We don't have AlbumArtistIndex in IndexType enum, so we'll use ArtistIndex for now
+            self.mark_index_dirty(IndexType::ArtistIndex);
         }
         
         // Update atomic counters
@@ -417,28 +425,83 @@ impl IndexManager {
         self.year_index.get(&year).cloned().unwrap_or_default()
     }
     
-    /// Get all unique artists
-    pub fn get_all_artists(&self) -> Vec<String> {
+    /// Get all unique artists with file counts for atomic scanning
+    pub fn get_all_artists(&self) -> Vec<(String, Vec<u64>)> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.artist_index.keys().cloned().collect()
+        self.artist_index.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
     
-    /// Get all unique albums
-    pub fn get_all_albums(&self) -> Vec<String> {
+    /// Get all unique albums with file counts for atomic scanning
+    pub fn get_all_albums(&self) -> Vec<(String, Vec<u64>)> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.album_index.keys().cloned().collect()
+        self.album_index.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
     
-    /// Get all unique genres
-    pub fn get_all_genres(&self) -> Vec<String> {
+    /// Get albums by specific artist with atomic filtering
+    pub fn get_albums_by_artist(&self, artist: &str) -> Vec<(String, Vec<u64>)> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.genre_index.keys().cloned().collect()
+        
+        // Get all files by this artist first
+        let artist_files = self.artist_index.get(artist).cloned().unwrap_or_default();
+        if artist_files.is_empty() {
+            return Vec::new();
+        }
+        
+        // Filter albums that contain files by this artist
+        let mut artist_albums = Vec::new();
+        for (album, album_files) in &self.album_index {
+            // Check if any files in this album are by the specified artist
+            let has_artist_files = album_files.iter().any(|offset| artist_files.contains(offset));
+            if has_artist_files {
+                // Only include files that are by this artist
+                let filtered_files: Vec<u64> = album_files.iter()
+                    .filter(|offset| artist_files.contains(offset))
+                    .cloned()
+                    .collect();
+                if !filtered_files.is_empty() {
+                    artist_albums.push((album.clone(), filtered_files));
+                }
+            }
+        }
+        
+        artist_albums
     }
     
-    /// Get all unique years
-    pub fn get_all_years(&self) -> Vec<u32> {
+    /// Get all unique genres with file counts for atomic categorization
+    pub fn get_all_genres(&self) -> Vec<(String, Vec<u64>)> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
-        self.year_index.keys().cloned().collect()
+        self.genre_index.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+    
+    /// Get all unique years with file counts for atomic year extraction
+    pub fn get_all_years(&self) -> Vec<(u32, Vec<u64>)> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        self.year_index.iter().map(|(k, v)| (*k, v.clone())).collect()
+    }
+    
+    /// Get all unique album artists with file counts for atomic scanning
+    pub fn get_all_album_artists(&self) -> Vec<(String, Vec<u64>)> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        self.album_artist_index.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+    }
+    
+    /// Find files by album and artist with atomic filtering
+    pub fn find_files_by_album_and_artist(&self, album: &str, artist: &str) -> Vec<u64> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        
+        let album_files = self.album_index.get(album).cloned().unwrap_or_default();
+        let artist_files = self.artist_index.get(artist).cloned().unwrap_or_default();
+        
+        // Return intersection of album and artist files
+        album_files.into_iter()
+            .filter(|offset| artist_files.contains(offset))
+            .collect()
+    }
+    
+    /// Find files by album artist with atomic lookups
+    pub fn find_files_by_album_artist(&self, album_artist: &str) -> Vec<u64> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        self.album_artist_index.get(album_artist).cloned().unwrap_or_default()
     }
     
     /// Mark specific index type as dirty with atomic operations
@@ -502,6 +565,7 @@ impl IndexManager {
             album_entries: self.album_index.len(),
             genre_entries: self.genre_index.len(),
             year_entries: self.year_index.len(),
+            album_artist_entries: self.album_artist_index.len(),
             generation: self.generation.load(Ordering::Relaxed),
             is_dirty: self.is_dirty(),
             max_entries: self.max_entries,
@@ -719,6 +783,7 @@ impl IndexManager {
         self.album_index.clear();
         self.genre_index.clear();
         self.year_index.clear();
+        self.album_artist_index.clear();
         
         // Reset atomic counters
         self.lookup_count.store(0, Ordering::Relaxed);
@@ -741,6 +806,7 @@ pub struct IndexStats {
     pub album_entries: usize,
     pub genre_entries: usize,
     pub year_entries: usize,
+    pub album_artist_entries: usize,
     pub generation: u64,
     pub is_dirty: bool,
     pub max_entries: usize,
