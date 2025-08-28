@@ -20,7 +20,7 @@ impl MediaScanner {
     pub async fn new() -> anyhow::Result<Self> {
         // Create a temporary ZeroCopy database for basic scanning
         let temp_path = std::env::temp_dir().join("temp_scanner_zerocopy.db");
-        let zerocopy_db = ZeroCopyDatabase::new_with_auto_detection(temp_path).await?;
+        let zerocopy_db = ZeroCopyDatabase::new(temp_path, None).await?;
         
         // Initialize and open the database
         zerocopy_db.initialize().await?;
@@ -704,7 +704,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         
         // Create ZeroCopy database
-        let db = Arc::new(ZeroCopyDatabase::new_with_auto_detection(db_path).await.unwrap());
+        let db = Arc::new(ZeroCopyDatabase::new(db_path, None).await.unwrap());
         db.initialize().await.unwrap();
         db.open().await.unwrap();
         
@@ -724,7 +724,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         
         // Create ZeroCopy database
-        let db = Arc::new(ZeroCopyDatabase::new_with_auto_detection(db_path).await.unwrap());
+        let db = Arc::new(ZeroCopyDatabase::new(db_path, None).await.unwrap());
         db.initialize().await.unwrap();
         db.open().await.unwrap();
         
@@ -820,7 +820,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         
         // Create ZeroCopy database
-        let db = Arc::new(ZeroCopyDatabase::new_with_auto_detection(db_path).await.unwrap());
+        let db = Arc::new(ZeroCopyDatabase::new(db_path, None).await.unwrap());
         db.initialize().await.unwrap();
         db.open().await.unwrap();
         

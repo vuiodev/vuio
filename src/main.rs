@@ -540,8 +540,8 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::zer
     let db_path = config.get_database_path();
     info!("Database path: {}", db_path.display());
     
-    // Create ZeroCopy database manager with auto-detection
-    let database = database::zerocopy::ZeroCopyDatabase::new_with_auto_detection(db_path.clone()).await
+    // Create ZeroCopy database manager with default configuration
+    let database = database::zerocopy::ZeroCopyDatabase::new(db_path.clone(), None).await
         .context("Failed to create ZeroCopy database manager")?;
     
     // Initialize database schema

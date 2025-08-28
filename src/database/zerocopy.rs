@@ -4739,7 +4739,4 @@ impl ZeroCopyDatabase {
     }
 }
 
-// Include configuration tests
-#[cfg(test)]
-#[path = "zerocopy_config_test.rs"]
-mod config_tests;
+// Configuration tests are included inline in this file
