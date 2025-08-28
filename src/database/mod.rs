@@ -16,6 +16,7 @@ pub mod memory_mapped;
 pub mod memory_bounded_cache;
 pub mod index_manager;
 pub mod atomic_performance;
+pub mod error_handling;
 pub mod zerocopy;
 
 /// Represents a subdirectory in the media library.

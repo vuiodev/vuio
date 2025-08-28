@@ -2937,6 +2937,7 @@ dependencies = [
  "crc32fast",
  "crossbeam",
  "dirs",
+ "fastrand",
  "flatbuffers",
  "flatc-rust",
  "futures-util",
