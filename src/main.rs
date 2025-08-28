@@ -221,6 +221,7 @@ async fn main() -> anyhow::Result<()> {
         platform_info: platform_info.clone(),
         filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        web_metrics: Arc::new(vuio::web::handlers::WebHandlerMetrics::new()),
     };
 
     // Start file system monitoring

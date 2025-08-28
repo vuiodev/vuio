@@ -21,5 +21,6 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::any(handlers::content_directory_subscribe),
         )
         .route("/media/{id}", get(handlers::serve_media))
+        .route("/metrics", get(handlers::get_web_metrics))
         .with_state(state)
 }

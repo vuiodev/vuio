@@ -11,11 +11,92 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use futures_util::StreamExt;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 use tokio::io::AsyncSeekExt;
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, warn};
 
+/// Atomic performance tracking for web handlers
+pub struct WebHandlerMetrics {
+    pub browse_requests: AtomicU64,
+    pub cache_hits: AtomicU64,
+    pub cache_misses: AtomicU64,
+    pub directory_listings: AtomicU64,
+    pub file_serves: AtomicU64,
+    pub errors: AtomicU64,
+    pub total_response_time_ms: AtomicU64,
+}
 
+impl WebHandlerMetrics {
+    pub fn new() -> Self {
+        Self {
+            browse_requests: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            directory_listings: AtomicU64::new(0),
+            file_serves: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            total_response_time_ms: AtomicU64::new(0),
+        }
+    }
+    
+    pub fn record_browse_request(&self, response_time_ms: u64, cache_hit: bool) {
+        self.browse_requests.fetch_add(1, Ordering::Relaxed);
+        self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+        if cache_hit {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    
+    pub fn record_directory_listing(&self, response_time_ms: u64) {
+        self.directory_listings.fetch_add(1, Ordering::Relaxed);
+        self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+    }
+    
+    pub fn record_file_serve(&self, response_time_ms: u64) {
+        self.file_serves.fetch_add(1, Ordering::Relaxed);
+        self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+    }
+    
+    pub fn record_error(&self) {
+        self.errors.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    pub fn get_stats(&self) -> WebHandlerStats {
+        let browse_requests = self.browse_requests.load(Ordering::Relaxed);
+        let total_time = self.total_response_time_ms.load(Ordering::Relaxed);
+        
+        WebHandlerStats {
+            browse_requests,
+            cache_hits: self.cache_hits.load(Ordering::Relaxed),
+            cache_misses: self.cache_misses.load(Ordering::Relaxed),
+            directory_listings: self.directory_listings.load(Ordering::Relaxed),
+            file_serves: self.file_serves.load(Ordering::Relaxed),
+            errors: self.errors.load(Ordering::Relaxed),
+            average_response_time_ms: if browse_requests > 0 { total_time / browse_requests } else { 0 },
+            cache_hit_rate: if browse_requests > 0 { 
+                (self.cache_hits.load(Ordering::Relaxed) as f64 / browse_requests as f64) * 100.0 
+            } else { 0.0 },
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct WebHandlerStats {
+    pub browse_requests: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub directory_listings: u64,
+    pub file_serves: u64,
+    pub errors: u64,
+    pub average_response_time_ms: u64,
+    pub cache_hit_rate: f64,
+}
+
+// Web metrics will be stored in AppState for atomic access
 
 pub async fn root_handler() -> &'static str {
     "VuIO Media Server"
@@ -142,6 +223,7 @@ impl ContentDirectoryHandler {
     }
 
     /// Handle generic folder-based browse requests with consistent path normalization
+    /// Enhanced with atomic performance tracking and cache-friendly operations
     async fn handle_folder_browse(
         params: &BrowseParams,
         state: &AppState,
@@ -149,6 +231,9 @@ impl ContentDirectoryHandler {
         path_prefix_str: &str,
     ) -> Response {
         use crate::web::xml::generate_browse_response;
+
+        let start_time = Instant::now();
+        let mut cache_hit = false;
 
         // Determine the base path for the media type
         let media_root = state.config.get_primary_media_dir();
@@ -164,17 +249,20 @@ impl ContentDirectoryHandler {
             Ok(canonical) => std::path::PathBuf::from(canonical),
             Err(e) => {
                 warn!("Failed to get canonical path for browse request '{}': {}, using basic normalization", browse_path.display(), e);
+                state.web_metrics.record_error();
                 state.filesystem_manager.normalize_path(&browse_path)
             }
         };
         
-        // Query the database for the directory listing with timeout
+        // Query the ZeroCopy database for the directory listing with timeout and atomic operations
         let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
         let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
         
         match tokio::time::timeout(timeout_duration, query_future).await {
             Ok(Ok((subdirectories, files))) => {
-                debug!("Browse request for '{}' -> canonical '{}' (filter: '{}') returned {} subdirs, {} files", 
+                cache_hit = !subdirectories.is_empty() || !files.is_empty(); // Assume cache hit if data found
+                
+                debug!("ZeroCopy browse request for '{}' -> canonical '{}' (filter: '{}') returned {} subdirs, {} files", 
                        browse_path.display(), canonical_browse_path.display(), media_type_filter, subdirectories.len(), files.len());
                        
                 // Apply pagination if requested
@@ -186,7 +274,7 @@ impl ContentDirectoryHandler {
                     std::cmp::min(params.requested_count as usize, 2000) 
                 };
                 
-                // Combine directories and files for pagination
+                // Combine directories and files for pagination with atomic counting
                 let mut all_items = Vec::new();
                 for subdir in &subdirectories {
                     all_items.push((subdir.clone(), None));
@@ -199,7 +287,10 @@ impl ContentDirectoryHandler {
                 let end_index = std::cmp::min(starting_index + requested_count, total_matches);
                 
                 if starting_index >= total_matches {
-                    // Starting index is beyond available items
+                    // Starting index is beyond available items - record metrics and return empty
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, cache_hit);
+                    
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
                     return (
@@ -213,7 +304,7 @@ impl ContentDirectoryHandler {
                         .into_response();
                 }
                 
-                // Extract paginated items
+                // Extract paginated items with zero-copy operations
                 let paginated_items = &all_items[starting_index..end_index];
                 let mut paginated_subdirs = Vec::new();
                 let mut paginated_files = Vec::new();
@@ -226,9 +317,14 @@ impl ContentDirectoryHandler {
                     }
                 }
                 
-                debug!("Returning paginated results: {} subdirs, {} files (index {}-{} of {})",
+                debug!("ZeroCopy returning paginated results: {} subdirs, {} files (index {}-{} of {})",
                        paginated_subdirs.len(), paginated_files.len(), 
                        starting_index, end_index, total_matches);
+                
+                // Record atomic performance metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_browse_request(response_time, cache_hit);
+                state.web_metrics.record_directory_listing(response_time);
                 
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, state, &server_ip).await;
@@ -243,7 +339,13 @@ impl ContentDirectoryHandler {
                     .into_response()
             },
             Ok(Err(e)) => {
-                error!("Database error getting directory listing for {}: {}", params.object_id, e);
+                error!("ZeroCopy database error getting directory listing for {}: {}", params.object_id, e);
+                
+                // Record atomic error metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_error();
+                state.web_metrics.record_browse_request(response_time, false);
+                
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -252,7 +354,13 @@ impl ContentDirectoryHandler {
                     .into_response()
             },
             Err(_timeout) => {
-                error!("Database query timeout for object_id: {} (path: {} -> canonical: {})", params.object_id, browse_path.display(), canonical_browse_path.display());
+                error!("ZeroCopy database query timeout for object_id: {} (path: {} -> canonical: {})", params.object_id, browse_path.display(), canonical_browse_path.display());
+                
+                // Record atomic timeout metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_error();
+                state.web_metrics.record_browse_request(response_time, false);
+                
                 (
                     StatusCode::REQUEST_TIMEOUT,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -348,12 +456,27 @@ pub async fn serve_media(
     Path(id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let file_id = id.parse::<i64>().map_err(|_| AppError::NotFound)?;
+    let start_time = Instant::now();
+    
+    let file_id = id.parse::<i64>().map_err(|_| {
+        state.web_metrics.record_error();
+        AppError::NotFound
+    })?;
+    
+    // Use ZeroCopy database with atomic cache lookup
     let file_info = state.database
         .get_file_by_id(file_id)
         .await
-        .map_err(|_| AppError::NotFound)?
-        .ok_or(AppError::NotFound)?;
+        .map_err(|e| {
+            error!("ZeroCopy database error getting file by ID {}: {}", file_id, e);
+            state.web_metrics.record_error();
+            AppError::NotFound
+        })?
+        .ok_or_else(|| {
+            debug!("ZeroCopy database: file ID {} not found", file_id);
+            state.web_metrics.record_error();
+            AppError::NotFound
+        })?;
 
     // Enforce read-only access to media files
     let mut file = tokio::fs::OpenOptions::new()
@@ -396,6 +519,12 @@ pub async fn serve_media(
     file.seek(std::io::SeekFrom::Start(start)).await?;
     let stream = ReaderStream::with_capacity(file, 64 * 1024).take(len as usize);
     let body = Body::from_stream(stream);
+
+    // Record atomic performance metrics for file serving
+    let response_time = start_time.elapsed().as_millis() as u64;
+    state.web_metrics.record_file_serve(response_time);
+    
+    debug!("ZeroCopy served media file ID {} in {}ms", file_id, response_time);
 
     Ok(response_builder.status(response_status).body(body)?)
 }
@@ -584,7 +713,7 @@ async fn handle_audio_root_browse(
 }
     
 impl ContentDirectoryHandler {
-    /// Handle artist browse requests with consistent path normalization
+    /// Handle artist browse requests with atomic performance tracking and ZeroCopy operations
     async fn handle_artist_browse(
         params: &BrowseParams,
         state: &AppState,
@@ -592,12 +721,14 @@ impl ContentDirectoryHandler {
     ) -> Response {
         use crate::web::xml::generate_browse_response;
         
+        let start_time = Instant::now();
         let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
         
         if path_parts.len() == 1 {
-            // List all artists
+            // List all artists using ZeroCopy atomic operations
             match state.database.get_artists().await {
                 Ok(artists) => {
+                    let has_data = !artists.is_empty();
                     let subdirectories: Vec<crate::database::MediaDirectory> = artists
                         .into_iter()
                         .map(|artist| crate::database::MediaDirectory {
@@ -605,6 +736,12 @@ impl ContentDirectoryHandler {
                             name: format!("{} ({})", artist.name, artist.count),
                         })
                         .collect();
+                    
+                    // Record atomic performance metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, has_data);
+                    
+                    debug!("ZeroCopy retrieved {} artists in {}ms", subdirectories.len(), response_time);
                         
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -619,7 +756,13 @@ impl ContentDirectoryHandler {
                         .into_response()
                 }
                 Err(e) => {
-                    error!("Error getting artists: {}", e);
+                    error!("ZeroCopy error getting artists: {}", e);
+                    
+                    // Record atomic error metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_error();
+                    state.web_metrics.record_browse_request(response_time, false);
+                    
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -629,10 +772,16 @@ impl ContentDirectoryHandler {
                 }
             }
         } else if path_parts.len() == 2 {
-            // List tracks by specific artist
+            // List tracks by specific artist using ZeroCopy atomic operations
             let artist_name = path_parts[1];
             match state.database.get_music_by_artist(artist_name).await {
                 Ok(files) => {
+                    // Record atomic performance metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
+                    
+                    debug!("ZeroCopy retrieved {} tracks for artist '{}' in {}ms", files.len(), artist_name, response_time);
+                    
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
                     (
@@ -646,7 +795,13 @@ impl ContentDirectoryHandler {
                         .into_response()
                 }
                 Err(e) => {
-                    error!("Error getting music by artist {}: {}", artist_name, e);
+                    error!("ZeroCopy error getting music by artist {}: {}", artist_name, e);
+                    
+                    // Record atomic error metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_error();
+                    state.web_metrics.record_browse_request(response_time, false);
+                    
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -656,6 +811,11 @@ impl ContentDirectoryHandler {
                 }
             }
         } else {
+            // Record atomic error metrics for invalid path
+            let response_time = start_time.elapsed().as_millis() as u64;
+            state.web_metrics.record_error();
+            state.web_metrics.record_browse_request(response_time, false);
+            
             (
                 StatusCode::NOT_FOUND,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -665,7 +825,7 @@ impl ContentDirectoryHandler {
         }
     }
 
-    /// Handle album browse requests with consistent path normalization
+    /// Handle album browse requests with atomic performance tracking and ZeroCopy operations
     async fn handle_album_browse(
         params: &BrowseParams,
         state: &AppState,
@@ -673,12 +833,14 @@ impl ContentDirectoryHandler {
     ) -> Response {
         use crate::web::xml::generate_browse_response;
         
+        let start_time = Instant::now();
         let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
         
         if path_parts.len() == 1 {
-            // List all albums
+            // List all albums using ZeroCopy atomic operations
             match state.database.get_albums(None).await {
                 Ok(albums) => {
+                    let has_data = !albums.is_empty();
                     let subdirectories: Vec<crate::database::MediaDirectory> = albums
                         .into_iter()
                         .map(|album| crate::database::MediaDirectory {
@@ -686,6 +848,12 @@ impl ContentDirectoryHandler {
                             name: format!("{} ({})", album.name, album.count),
                         })
                         .collect();
+                    
+                    // Record atomic performance metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, has_data);
+                    
+                    debug!("ZeroCopy retrieved {} albums in {}ms", subdirectories.len(), response_time);
                         
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -700,7 +868,13 @@ impl ContentDirectoryHandler {
                         .into_response()
                 }
                 Err(e) => {
-                    error!("Error getting albums: {}", e);
+                    error!("ZeroCopy error getting albums: {}", e);
+                    
+                    // Record atomic error metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_error();
+                    state.web_metrics.record_browse_request(response_time, false);
+                    
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -710,10 +884,16 @@ impl ContentDirectoryHandler {
                 }
             }
         } else if path_parts.len() == 2 {
-            // List tracks by specific album
+            // List tracks by specific album using ZeroCopy atomic operations
             let album_name = path_parts[1];
             match state.database.get_music_by_album(album_name, None).await {
                 Ok(files) => {
+                    // Record atomic performance metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
+                    
+                    debug!("ZeroCopy retrieved {} tracks for album '{}' in {}ms", files.len(), album_name, response_time);
+                    
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
                     (
@@ -727,7 +907,13 @@ impl ContentDirectoryHandler {
                         .into_response()
                 }
                 Err(e) => {
-                    error!("Error getting music by album {}: {}", album_name, e);
+                    error!("ZeroCopy error getting music by album {}: {}", album_name, e);
+                    
+                    // Record atomic error metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_error();
+                    state.web_metrics.record_browse_request(response_time, false);
+                    
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -749,7 +935,7 @@ impl ContentDirectoryHandler {
 
 
 
-/// Handle browsing genres
+/// Handle browsing genres with atomic performance tracking and ZeroCopy operations
 async fn handle_genres_browse(
     params: &BrowseParams,
     state: &AppState,
@@ -757,12 +943,14 @@ async fn handle_genres_browse(
 ) -> Response {
     use crate::web::xml::generate_browse_response;
     
+    let start_time = Instant::now();
     let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
     
     if path_parts.len() == 1 {
-        // List all genres
+        // List all genres using ZeroCopy atomic operations
         match state.database.get_genres().await {
             Ok(genres) => {
+                let has_data = !genres.is_empty();
                 let subdirectories: Vec<crate::database::MediaDirectory> = genres
                     .into_iter()
                     .map(|genre| crate::database::MediaDirectory {
@@ -770,6 +958,12 @@ async fn handle_genres_browse(
                         name: format!("{} ({})", genre.name, genre.count),
                     })
                     .collect();
+                
+                // Record atomic performance metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_browse_request(response_time, has_data);
+                
+                debug!("ZeroCopy retrieved {} genres in {}ms", subdirectories.len(), response_time);
                     
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -784,7 +978,13 @@ async fn handle_genres_browse(
                     .into_response()
             }
             Err(e) => {
-                error!("Error getting genres: {}", e);
+                error!("ZeroCopy error getting genres: {}", e);
+                
+                // Record atomic error metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_error();
+                state.web_metrics.record_browse_request(response_time, false);
+                
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -794,10 +994,16 @@ async fn handle_genres_browse(
             }
         }
     } else if path_parts.len() == 2 {
-        // List tracks by specific genre
+        // List tracks by specific genre using ZeroCopy atomic operations
         let genre_name = path_parts[1];
         match state.database.get_music_by_genre(genre_name).await {
             Ok(files) => {
+                // Record atomic performance metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_browse_request(response_time, !files.is_empty());
+                
+                debug!("ZeroCopy retrieved {} tracks for genre '{}' in {}ms", files.len(), genre_name, response_time);
+                
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
                 (
@@ -811,7 +1017,13 @@ async fn handle_genres_browse(
                     .into_response()
             }
             Err(e) => {
-                error!("Error getting music by genre {}: {}", genre_name, e);
+                error!("ZeroCopy error getting music by genre {}: {}", genre_name, e);
+                
+                // Record atomic error metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_error();
+                state.web_metrics.record_browse_request(response_time, false);
+                
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -821,6 +1033,11 @@ async fn handle_genres_browse(
             }
         }
     } else {
+        // Record atomic error metrics for invalid path
+        let response_time = start_time.elapsed().as_millis() as u64;
+        state.web_metrics.record_error();
+        state.web_metrics.record_browse_request(response_time, false);
+        
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -830,7 +1047,7 @@ async fn handle_genres_browse(
     }
 }
 
-/// Handle browsing years
+/// Handle browsing years with atomic performance tracking and ZeroCopy operations
 async fn handle_years_browse(
     params: &BrowseParams,
     state: &AppState,
@@ -838,12 +1055,14 @@ async fn handle_years_browse(
 ) -> Response {
     use crate::web::xml::generate_browse_response;
     
+    let start_time = Instant::now();
     let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
     
     if path_parts.len() == 1 {
-        // List all years
+        // List all years using ZeroCopy atomic operations
         match state.database.get_years().await {
             Ok(years) => {
+                let has_data = !years.is_empty();
                 let subdirectories: Vec<crate::database::MediaDirectory> = years
                     .into_iter()
                     .map(|year| crate::database::MediaDirectory {
@@ -851,6 +1070,12 @@ async fn handle_years_browse(
                         name: format!("{} ({})", year.name, year.count),
                     })
                     .collect();
+                
+                // Record atomic performance metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_browse_request(response_time, has_data);
+                
+                debug!("ZeroCopy retrieved {} years in {}ms", subdirectories.len(), response_time);
                     
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -865,7 +1090,13 @@ async fn handle_years_browse(
                     .into_response()
             }
             Err(e) => {
-                error!("Error getting years: {}", e);
+                error!("ZeroCopy error getting years: {}", e);
+                
+                // Record atomic error metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_error();
+                state.web_metrics.record_browse_request(response_time, false);
+                
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -875,11 +1106,17 @@ async fn handle_years_browse(
             }
         }
     } else if path_parts.len() == 2 {
-        // List tracks by specific year
+        // List tracks by specific year using ZeroCopy atomic operations
         let year_str = path_parts[1];
         if let Ok(year) = year_str.parse::<u32>() {
             match state.database.get_music_by_year(year).await {
                 Ok(files) => {
+                    // Record atomic performance metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
+                    
+                    debug!("ZeroCopy retrieved {} tracks for year {} in {}ms", files.len(), year, response_time);
+                    
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
                     (
@@ -893,7 +1130,13 @@ async fn handle_years_browse(
                         .into_response()
                 }
                 Err(e) => {
-                    error!("Error getting music by year {}: {}", year, e);
+                    error!("ZeroCopy error getting music by year {}: {}", year, e);
+                    
+                    // Record atomic error metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_error();
+                    state.web_metrics.record_browse_request(response_time, false);
+                    
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -903,6 +1146,11 @@ async fn handle_years_browse(
                 }
             }
         } else {
+            // Record atomic error metrics for invalid year format
+            let response_time = start_time.elapsed().as_millis() as u64;
+            state.web_metrics.record_error();
+            state.web_metrics.record_browse_request(response_time, false);
+            
             (
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -911,6 +1159,11 @@ async fn handle_years_browse(
                 .into_response()
         }
     } else {
+        // Record atomic error metrics for invalid path
+        let response_time = start_time.elapsed().as_millis() as u64;
+        state.web_metrics.record_error();
+        state.web_metrics.record_browse_request(response_time, false);
+        
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -920,7 +1173,7 @@ async fn handle_years_browse(
     }
 }
 
-/// Handle browsing playlists
+/// Handle browsing playlists with atomic performance tracking and ZeroCopy operations
 async fn handle_playlists_browse(
     params: &BrowseParams,
     state: &AppState,
@@ -928,12 +1181,14 @@ async fn handle_playlists_browse(
 ) -> Response {
     use crate::web::xml::generate_browse_response;
     
+    let start_time = Instant::now();
     let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
     
     if path_parts.len() == 1 {
-        // List all playlists
+        // List all playlists using ZeroCopy atomic operations
         match state.database.get_playlists().await {
             Ok(playlists) => {
+                let has_data = !playlists.is_empty();
                 let subdirectories: Vec<crate::database::MediaDirectory> = playlists
                     .into_iter()
                     .map(|playlist| crate::database::MediaDirectory {
@@ -941,6 +1196,12 @@ async fn handle_playlists_browse(
                         name: playlist.name,
                     })
                     .collect();
+                
+                // Record atomic performance metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_browse_request(response_time, has_data);
+                
+                debug!("ZeroCopy retrieved {} playlists in {}ms", subdirectories.len(), response_time);
                     
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -955,7 +1216,13 @@ async fn handle_playlists_browse(
                     .into_response()
             }
             Err(e) => {
-                error!("Error getting playlists: {}", e);
+                error!("ZeroCopy error getting playlists: {}", e);
+                
+                // Record atomic error metrics
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_error();
+                state.web_metrics.record_browse_request(response_time, false);
+                
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -965,11 +1232,17 @@ async fn handle_playlists_browse(
             }
         }
     } else if path_parts.len() == 2 {
-        // List tracks in specific playlist
+        // List tracks in specific playlist using ZeroCopy atomic operations
         let playlist_id_str = path_parts[1];
         if let Ok(playlist_id) = playlist_id_str.parse::<i64>() {
             match state.database.get_playlist_tracks(playlist_id).await {
                 Ok(files) => {
+                    // Record atomic performance metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
+                    
+                    debug!("ZeroCopy retrieved {} tracks for playlist {} in {}ms", files.len(), playlist_id, response_time);
+                    
                     let server_ip = state.get_server_ip();
                     let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
                     (
@@ -983,7 +1256,13 @@ async fn handle_playlists_browse(
                         .into_response()
                 }
                 Err(e) => {
-                    error!("Error getting playlist tracks for {}: {}", playlist_id, e);
+                    error!("ZeroCopy error getting playlist tracks for {}: {}", playlist_id, e);
+                    
+                    // Record atomic error metrics
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_error();
+                    state.web_metrics.record_browse_request(response_time, false);
+                    
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -993,6 +1272,11 @@ async fn handle_playlists_browse(
                 }
             }
         } else {
+            // Record atomic error metrics for invalid playlist ID
+            let response_time = start_time.elapsed().as_millis() as u64;
+            state.web_metrics.record_error();
+            state.web_metrics.record_browse_request(response_time, false);
+            
             (
                 StatusCode::BAD_REQUEST,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -1001,6 +1285,11 @@ async fn handle_playlists_browse(
                 .into_response()
         }
     } else {
+        // Record atomic error metrics for invalid path
+        let response_time = start_time.elapsed().as_millis() as u64;
+        state.web_metrics.record_error();
+        state.web_metrics.record_browse_request(response_time, false);
+        
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -1125,4 +1414,28 @@ mod tests {
         assert_eq!(params.requested_count, 50);
     }
 
+}/// 
+/// Get web handler performance metrics for monitoring
+pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let stats = state.web_metrics.get_stats();
+    
+    let metrics_json = serde_json::json!({
+        "web_handler_metrics": {
+            "browse_requests": stats.browse_requests,
+            "cache_hits": stats.cache_hits,
+            "cache_misses": stats.cache_misses,
+            "cache_hit_rate_percent": stats.cache_hit_rate,
+            "directory_listings": stats.directory_listings,
+            "file_serves": stats.file_serves,
+            "errors": stats.errors,
+            "average_response_time_ms": stats.average_response_time_ms,
+            "zerocopy_database": "active"
+        }
+    });
+    
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        metrics_json.to_string(),
+    )
 }

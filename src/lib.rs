@@ -23,6 +23,7 @@ pub mod state {
         pub platform_info: Arc<PlatformInfo>,
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
+        pub web_metrics: Arc<crate::web::handlers::WebHandlerMetrics>,
     }
 
     impl AppState {
