@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -14,18 +14,146 @@ use super::index_manager::{IndexManager, IndexStats};
 use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory, DatabaseStats, DatabaseHealth};
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 
-/// Configuration for zero-copy database operations
+/// Performance profile for auto-scaling configuration
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerformanceProfile {
+    /// Minimal memory usage (4MB cache, 100K index entries)
+    Minimal,
+    /// Balanced performance and memory (16MB cache, 500K index entries)
+    Balanced,
+    /// High performance (64MB cache, 1M index entries)
+    HighPerformance,
+    /// Maximum performance (256MB cache, 5M index entries)
+    Maximum,
+    /// Custom profile with user-defined settings
+    Custom,
+}
+
+impl PerformanceProfile {
+    /// Get memory budget in MB for this profile
+    pub fn memory_budget_mb(&self) -> usize {
+        match self {
+            PerformanceProfile::Minimal => 6,        // 4MB cache + 2MB overhead
+            PerformanceProfile::Balanced => 20,      // 16MB cache + 4MB overhead
+            PerformanceProfile::HighPerformance => 80, // 64MB cache + 16MB overhead
+            PerformanceProfile::Maximum => 320,     // 256MB cache + 64MB overhead
+            PerformanceProfile::Custom => 0,        // User-defined
+        }
+    }
+    
+    /// Get cache size in MB for this profile
+    pub fn cache_size_mb(&self) -> usize {
+        match self {
+            PerformanceProfile::Minimal => 4,
+            PerformanceProfile::Balanced => 16,
+            PerformanceProfile::HighPerformance => 64,
+            PerformanceProfile::Maximum => 256,
+            PerformanceProfile::Custom => 4, // Default fallback
+        }
+    }
+    
+    /// Get index cache size (number of entries) for this profile
+    pub fn index_cache_size(&self) -> usize {
+        match self {
+            PerformanceProfile::Minimal => 100_000,     // ~100KB for indexes
+            PerformanceProfile::Balanced => 500_000,    // ~500KB for indexes
+            PerformanceProfile::HighPerformance => 1_000_000, // ~1MB for indexes
+            PerformanceProfile::Maximum => 5_000_000,   // ~5MB for indexes
+            PerformanceProfile::Custom => 1_000_000,    // Default fallback
+        }
+    }
+    
+    /// Get batch size for this profile
+    pub fn batch_size(&self) -> usize {
+        match self {
+            PerformanceProfile::Minimal => 10_000,      // Smaller batches for memory efficiency
+            PerformanceProfile::Balanced => 50_000,     // Balanced batch size
+            PerformanceProfile::HighPerformance => 100_000, // Large batches for speed
+            PerformanceProfile::Maximum => 250_000,     // Maximum batch size
+            PerformanceProfile::Custom => 100_000,      // Default fallback
+        }
+    }
+    
+    /// Get expected throughput range for this profile
+    pub fn expected_throughput_range(&self) -> &'static str {
+        match self {
+            PerformanceProfile::Minimal => "50K-100K files/sec",
+            PerformanceProfile::Balanced => "100K-300K files/sec",
+            PerformanceProfile::HighPerformance => "300K-700K files/sec",
+            PerformanceProfile::Maximum => "700K-1M+ files/sec",
+            PerformanceProfile::Custom => "Variable",
+        }
+    }
+    
+    /// Auto-detect performance profile based on available system memory
+    pub fn auto_detect() -> Self {
+        match Self::get_available_memory_mb() {
+            Some(memory_mb) => {
+                if memory_mb >= 2048 {      // 2GB+ RAM
+                    PerformanceProfile::Maximum
+                } else if memory_mb >= 1024 { // 1GB+ RAM
+                    PerformanceProfile::HighPerformance
+                } else if memory_mb >= 512 {  // 512MB+ RAM
+                    PerformanceProfile::Balanced
+                } else {                    // < 512MB RAM
+                    PerformanceProfile::Minimal
+                }
+            }
+            None => {
+                warn!("Could not detect system memory, using balanced profile");
+                PerformanceProfile::Balanced
+            }
+        }
+    }
+    
+    /// Get available system memory in MB
+    fn get_available_memory_mb() -> Option<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::fs;
+            if let Ok(meminfo) = fs::read_to_string("/proc/meminfo") {
+                for line in meminfo.lines() {
+                    if line.starts_with("MemAvailable:") {
+                        if let Some(kb_str) = line.split_whitespace().nth(1) {
+                            if let Ok(kb) = kb_str.parse::<usize>() {
+                                return Some(kb / 1024); // Convert KB to MB
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        #[cfg(target_os = "windows")]
+        {
+            // Windows memory detection would require additional dependencies
+            // For now, return None to use default profile
+        }
+        
+        #[cfg(target_os = "macos")]
+        {
+            // macOS memory detection would require additional dependencies
+            // For now, return None to use default profile
+        }
+        
+        None
+    }
+}
+
+/// Configuration for zero-copy database operations with auto-scaling
 #[derive(Debug, Clone)]
 pub struct ZeroCopyConfig {
+    /// Performance profile for auto-scaling
+    pub performance_profile: PerformanceProfile,
     /// Number of files to process per batch
     pub batch_size: usize,
     /// Initial size of data file in MB
     pub initial_file_size_mb: usize,
     /// Maximum size of data file in GB
     pub max_file_size_gb: usize,
-    /// Memory map size in MB (fixed default: 4MB)
+    /// Memory map size in MB
     pub memory_map_size_mb: usize,
-    /// Index cache size (number of entries, fixed default: 1M entries = ~1MB)
+    /// Index cache size (number of entries)
     pub index_cache_size: usize,
     /// Enable compression (disabled for maximum speed)
     pub enable_compression: bool,
@@ -33,76 +161,525 @@ pub struct ZeroCopyConfig {
     pub sync_frequency: Duration,
     /// Enable Write-Ahead Logging
     pub enable_wal: bool,
-    /// Auto-detect memory (disabled - manual configuration only)
-    pub auto_detect_memory: bool,
+    /// Enable auto-scaling based on system resources
+    pub enable_auto_scaling: bool,
+    /// Memory budget limit in MB (0 = no limit)
+    pub memory_budget_limit_mb: usize,
+    /// Enable runtime configuration updates
+    pub enable_runtime_updates: bool,
+    /// Performance monitoring interval
+    pub performance_monitoring_interval: Duration,
 }
 
 impl Default for ZeroCopyConfig {
     fn default() -> Self {
+        let profile = PerformanceProfile::Balanced;
         Self {
-            batch_size: 100_000,  // Process 100K files per batch
-            initial_file_size_mb: 10,  // Start with 10MB
-            max_file_size_gb: 10,  // Max 10GB
-            memory_map_size_mb: 4,  // Fixed 4MB default (matches original app)
-            index_cache_size: 1_000_000,  // 1M entries (~1MB for indexes)
-            enable_compression: false,  // Disabled for max speed
+            performance_profile: profile,
+            batch_size: profile.batch_size(),
+            initial_file_size_mb: 10,
+            max_file_size_gb: 10,
+            memory_map_size_mb: profile.cache_size_mb(),
+            index_cache_size: profile.index_cache_size(),
+            enable_compression: false,
             sync_frequency: Duration::from_secs(5),
             enable_wal: true,
-            auto_detect_memory: false,  // NO automatic scaling - manual only
+            enable_auto_scaling: true,
+            memory_budget_limit_mb: profile.memory_budget_mb(),
+            enable_runtime_updates: true,
+            performance_monitoring_interval: Duration::from_secs(30),
         }
     }
 }
 
 impl ZeroCopyConfig {
-    /// Load configuration from environment variables (for Docker)
-    pub fn from_env() -> Self {
-        let mut config = Self::default();
+    /// Validate cache size in MB
+    fn validate_cache_size_mb(size: usize) -> bool {
+        size >= 4 && size <= 1024
+    }
+    
+    /// Validate index cache size (number of entries)
+    fn validate_index_cache_size(size: usize) -> bool {
+        size >= 10_000 && size <= 10_000_000
+    }
+    
+    /// Validate batch size
+    fn validate_batch_size(size: usize) -> bool {
+        size >= 1_000 && size <= 1_000_000
+    }
+    
+    /// Validate memory budget in MB
+    fn validate_memory_budget_mb(budget: usize) -> bool {
+        budget == 0 || (budget >= 6 && budget <= 4096)
+    }
+    
+    /// Create a safe configuration with enforced bounds
+    pub fn safe_from_env() -> Self {
+        // Start with default and manually parse environment variables with clamping
+        let mut config = if std::env::var("ZEROCOPY_AUTO_DETECT").unwrap_or_else(|_| "true".to_string()).to_lowercase() == "true" {
+            Self::with_auto_detection()
+        } else {
+            Self::default()
+        };
         
-        // Override with environment variables if present
+        // Override with environment variables if present, but clamp to safe values
+        if let Ok(profile_str) = std::env::var("ZEROCOPY_PERFORMANCE_PROFILE") {
+            let profile = match profile_str.to_lowercase().as_str() {
+                "minimal" => PerformanceProfile::Minimal,
+                "balanced" => PerformanceProfile::Balanced,
+                "high" | "high_performance" => PerformanceProfile::HighPerformance,
+                "maximum" | "max" => PerformanceProfile::Maximum,
+                "custom" => PerformanceProfile::Custom,
+                _ => {
+                    warn!("Unknown performance profile '{}', using balanced", profile_str);
+                    PerformanceProfile::Balanced
+                }
+            };
+            config.apply_performance_profile(profile);
+        }
+        
+        // Parse and clamp individual settings
         if let Ok(cache_mb) = std::env::var("ZEROCOPY_CACHE_MB") {
             if let Ok(size) = cache_mb.parse::<usize>() {
-                config.memory_map_size_mb = size;
-                info!("Using cache size from env: {}MB", size);
+                config.memory_map_size_mb = size.clamp(4, 1024);
+                config.performance_profile = PerformanceProfile::Custom;
+                info!("Using clamped cache size from env: {}MB (requested: {})", config.memory_map_size_mb, size);
             }
         }
         
         if let Ok(index_size) = std::env::var("ZEROCOPY_INDEX_SIZE") {
             if let Ok(size) = index_size.parse::<usize>() {
-                config.index_cache_size = size;
-                info!("Using index cache size from env: {}", size);
+                config.index_cache_size = size.clamp(10_000, 10_000_000);
+                config.performance_profile = PerformanceProfile::Custom;
+                info!("Using clamped index cache size from env: {} (requested: {})", config.index_cache_size, size);
             }
         }
         
         if let Ok(batch_size) = std::env::var("ZEROCOPY_BATCH_SIZE") {
             if let Ok(size) = batch_size.parse::<usize>() {
-                config.batch_size = size;
-                info!("Using batch size from env: {}", size);
+                config.batch_size = size.clamp(1_000, 1_000_000);
+                config.performance_profile = PerformanceProfile::Custom;
+                info!("Using clamped batch size from env: {} (requested: {})", config.batch_size, size);
             }
+        }
+        
+        if let Ok(memory_budget) = std::env::var("ZEROCOPY_MEMORY_BUDGET_MB") {
+            if let Ok(budget) = memory_budget.parse::<usize>() {
+                if budget > 0 {
+                    config.memory_budget_limit_mb = budget.clamp(6, 2048);
+                    info!("Using clamped memory budget from env: {}MB (requested: {})", config.memory_budget_limit_mb, budget);
+                }
+            }
+        }
+        
+        if let Ok(auto_scaling) = std::env::var("ZEROCOPY_ENABLE_AUTO_SCALING") {
+            config.enable_auto_scaling = auto_scaling.to_lowercase() == "true";
+        }
+        
+        if let Ok(runtime_updates) = std::env::var("ZEROCOPY_ENABLE_RUNTIME_UPDATES") {
+            config.enable_runtime_updates = runtime_updates.to_lowercase() == "true";
+        }
+        
+        // Enforce safe bounds even if validation would fail
+        config.memory_map_size_mb = config.memory_map_size_mb.clamp(4, 1024);
+        config.index_cache_size = config.index_cache_size.clamp(10_000, 10_000_000);
+        config.batch_size = config.batch_size.clamp(1_000, 1_000_000);
+        config.initial_file_size_mb = config.initial_file_size_mb.clamp(1, 1024);
+        config.max_file_size_gb = config.max_file_size_gb.clamp(1, 100);
+        
+        if config.memory_budget_limit_mb > 0 {
+            config.memory_budget_limit_mb = config.memory_budget_limit_mb.clamp(6, 2048);
+        }
+        
+        // Ensure sync frequency is reasonable
+        if config.sync_frequency.as_secs() == 0 || config.sync_frequency.as_secs() > 3600 {
+            config.sync_frequency = Duration::from_secs(5);
+        }
+        
+        // Ensure monitoring interval is reasonable
+        if config.performance_monitoring_interval.as_secs() < 5 || config.performance_monitoring_interval.as_secs() > 3600 {
+            config.performance_monitoring_interval = Duration::from_secs(30);
+        }
+        
+        // Validate and fix memory budget consistency
+        let estimated_usage = config.memory_map_size_mb + (config.index_cache_size / 1_000_000);
+        if config.memory_budget_limit_mb > 0 && estimated_usage > config.memory_budget_limit_mb {
+            // Automatically adjust memory budget to accommodate the configuration
+            config.memory_budget_limit_mb = estimated_usage + 10; // Add 10MB buffer
+            warn!("Automatically adjusted memory budget to {}MB to accommodate configuration", config.memory_budget_limit_mb);
         }
         
         config
     }
     
-    /// Validate configuration and warn about performance implications
-    pub fn validate(&self) {
-        if self.memory_map_size_mb == 4 {
-            info!("Using default 4MB cache. For higher performance, increase memory_map_size_mb in config");
+    /// Create configuration with auto-detected performance profile
+    pub fn with_auto_detection() -> Self {
+        let profile = PerformanceProfile::auto_detect();
+        info!("Auto-detected performance profile: {:?} (expected throughput: {})", 
+              profile, profile.expected_throughput_range());
+        
+        let mut config = Self::default();
+        config.apply_performance_profile(profile);
+        config
+    }
+    
+    /// Create configuration with specific performance profile
+    pub fn with_performance_profile(profile: PerformanceProfile) -> Self {
+        let mut config = Self::default();
+        config.apply_performance_profile(profile);
+        config
+    }
+    
+    /// Apply performance profile settings
+    pub fn apply_performance_profile(&mut self, profile: PerformanceProfile) {
+        self.performance_profile = profile;
+        
+        if profile != PerformanceProfile::Custom {
+            self.memory_map_size_mb = profile.cache_size_mb();
+            self.index_cache_size = profile.index_cache_size();
+            self.batch_size = profile.batch_size();
+            self.memory_budget_limit_mb = profile.memory_budget_mb();
         }
         
-        if self.index_cache_size == 1_000_000 {
-            info!("Using default 1M index cache (1MB). For very large libraries, increase index_cache_size in config");
-        }
-        
-        // Warn about performance expectations
-        let expected_throughput = match self.memory_map_size_mb {
-            4 => "100K-200K files/sec",
-            16..=64 => "200K-500K files/sec", 
-            65..=256 => "500K-800K files/sec",
-            _ => "800K+ files/sec",
+        info!("Applied performance profile: {:?}", profile);
+        info!("  - Cache size: {}MB", self.memory_map_size_mb);
+        info!("  - Index cache: {} entries", self.index_cache_size);
+        info!("  - Batch size: {} files", self.batch_size);
+        info!("  - Memory budget: {}MB", self.memory_budget_limit_mb);
+        info!("  - Expected throughput: {}", profile.expected_throughput_range());
+    }
+    
+    /// Load configuration from environment variables (for Docker)
+    pub fn from_env() -> Self {
+        let mut config = if std::env::var("ZEROCOPY_AUTO_DETECT").unwrap_or_else(|_| "true".to_string()).to_lowercase() == "true" {
+            Self::with_auto_detection()
+        } else {
+            Self::default()
         };
         
-        info!("Expected throughput with {}MB cache: {}", self.memory_map_size_mb, expected_throughput);
+        // Override with environment variables if present
+        if let Ok(profile_str) = std::env::var("ZEROCOPY_PERFORMANCE_PROFILE") {
+            let profile = match profile_str.to_lowercase().as_str() {
+                "minimal" => PerformanceProfile::Minimal,
+                "balanced" => PerformanceProfile::Balanced,
+                "high" | "high_performance" => PerformanceProfile::HighPerformance,
+                "maximum" | "max" => PerformanceProfile::Maximum,
+                "custom" => PerformanceProfile::Custom,
+                _ => {
+                    warn!("Unknown performance profile '{}', using balanced", profile_str);
+                    PerformanceProfile::Balanced
+                }
+            };
+            config.apply_performance_profile(profile);
+        }
+        
+        // Individual setting overrides with validation
+        if let Ok(cache_mb) = std::env::var("ZEROCOPY_CACHE_MB") {
+            if let Ok(size) = cache_mb.parse::<usize>() {
+                if size >= 4 && size <= 1024 {
+                    config.memory_map_size_mb = size;
+                    config.performance_profile = PerformanceProfile::Custom;
+                    info!("Using custom cache size from env: {}MB", size);
+                } else {
+                    warn!("Invalid ZEROCOPY_CACHE_MB value: {}. Must be between 4 and 1024 MB. Using default: {}MB", 
+                          size, config.memory_map_size_mb);
+                }
+            } else {
+                warn!("Invalid ZEROCOPY_CACHE_MB format: '{}'. Must be a number. Using default: {}MB", 
+                      cache_mb, config.memory_map_size_mb);
+            }
+        }
+        
+        if let Ok(index_size) = std::env::var("ZEROCOPY_INDEX_SIZE") {
+            if let Ok(size) = index_size.parse::<usize>() {
+                if size >= 10_000 && size <= 10_000_000 {
+                    config.index_cache_size = size;
+                    config.performance_profile = PerformanceProfile::Custom;
+                    info!("Using custom index cache size from env: {}", size);
+                } else {
+                    warn!("Invalid ZEROCOPY_INDEX_SIZE value: {}. Must be between 10,000 and 10,000,000. Using default: {}", 
+                          size, config.index_cache_size);
+                }
+            } else {
+                warn!("Invalid ZEROCOPY_INDEX_SIZE format: '{}'. Must be a number. Using default: {}", 
+                      index_size, config.index_cache_size);
+            }
+        }
+        
+        if let Ok(batch_size) = std::env::var("ZEROCOPY_BATCH_SIZE") {
+            if let Ok(size) = batch_size.parse::<usize>() {
+                if size >= 1_000 && size <= 1_000_000 {
+                    config.batch_size = size;
+                    config.performance_profile = PerformanceProfile::Custom;
+                    info!("Using custom batch size from env: {}", size);
+                } else {
+                    warn!("Invalid ZEROCOPY_BATCH_SIZE value: {}. Must be between 1,000 and 1,000,000. Using default: {}", 
+                          size, config.batch_size);
+                }
+            } else {
+                warn!("Invalid ZEROCOPY_BATCH_SIZE format: '{}'. Must be a number. Using default: {}", 
+                      batch_size, config.batch_size);
+            }
+        }
+        
+        if let Ok(memory_budget) = std::env::var("ZEROCOPY_MEMORY_BUDGET_MB") {
+            if let Ok(budget) = memory_budget.parse::<usize>() {
+                if budget >= 6 && budget <= 2048 {  // Minimum 6MB, maximum 2GB
+                    config.memory_budget_limit_mb = budget;
+                    info!("Using memory budget from env: {}MB", budget);
+                } else {
+                    warn!("Invalid ZEROCOPY_MEMORY_BUDGET_MB value: {}. Must be between 6 and 2048 MB. Using default: {}MB", 
+                          budget, config.memory_budget_limit_mb);
+                }
+            } else {
+                warn!("Invalid ZEROCOPY_MEMORY_BUDGET_MB format: '{}'. Must be a number. Using default: {}MB", 
+                      memory_budget, config.memory_budget_limit_mb);
+            }
+        }
+        
+        if let Ok(auto_scaling) = std::env::var("ZEROCOPY_ENABLE_AUTO_SCALING") {
+            config.enable_auto_scaling = auto_scaling.to_lowercase() == "true";
+            info!("Auto-scaling {}", if config.enable_auto_scaling { "enabled" } else { "disabled" });
+        }
+        
+        if let Ok(runtime_updates) = std::env::var("ZEROCOPY_ENABLE_RUNTIME_UPDATES") {
+            config.enable_runtime_updates = runtime_updates.to_lowercase() == "true";
+            info!("Runtime updates {}", if config.enable_runtime_updates { "enabled" } else { "disabled" });
+        }
+        
+        if let Err(e) = config.validate() {
+            warn!("Configuration validation failed: {}", e);
+            warn!("Falling back to default configuration");
+            Self::default()
+        } else {
+            config
+        }
     }
+    
+    /// Validate configuration and enforce strict bounds
+    pub fn validate(&self) -> Result<()> {
+        // Enforce strict bounds on critical parameters
+        if self.memory_map_size_mb < 4 || self.memory_map_size_mb > 1024 {
+            return Err(anyhow!("Invalid memory_map_size_mb: {}. Must be between 4 and 1024 MB", 
+                              self.memory_map_size_mb));
+        }
+        
+        if self.index_cache_size < 10_000 || self.index_cache_size > 10_000_000 {
+            return Err(anyhow!("Invalid index_cache_size: {}. Must be between 10,000 and 10,000,000 entries", 
+                              self.index_cache_size));
+        }
+        
+        if self.batch_size < 1_000 || self.batch_size > 1_000_000 {
+            return Err(anyhow!("Invalid batch_size: {}. Must be between 1,000 and 1,000,000 files", 
+                              self.batch_size));
+        }
+        
+        if self.memory_budget_limit_mb > 0 && (self.memory_budget_limit_mb < 6 || self.memory_budget_limit_mb > 2048) {
+            return Err(anyhow!("Invalid memory_budget_limit_mb: {}. Must be between 6 and 2048 MB, or 0 for no limit", 
+                              self.memory_budget_limit_mb));
+        }
+        
+        // Check memory budget consistency
+        let estimated_usage = self.memory_map_size_mb + (self.index_cache_size / 1_000_000); // Convert entries to MB
+        if self.memory_budget_limit_mb > 0 && estimated_usage > self.memory_budget_limit_mb {
+            return Err(anyhow!("Estimated memory usage ({}MB) exceeds budget limit ({}MB). Increase budget or reduce cache sizes", 
+                              estimated_usage, self.memory_budget_limit_mb));
+        }
+        
+        // Validate file size limits
+        if self.initial_file_size_mb == 0 || self.initial_file_size_mb > 1024 {
+            return Err(anyhow!("Invalid initial_file_size_mb: {}. Must be between 1 and 1024 MB", 
+                              self.initial_file_size_mb));
+        }
+        
+        if self.max_file_size_gb == 0 || self.max_file_size_gb > 100 {
+            return Err(anyhow!("Invalid max_file_size_gb: {}. Must be between 1 and 100 GB", 
+                              self.max_file_size_gb));
+        }
+        
+        // Validate sync frequency
+        if self.sync_frequency.as_secs() == 0 || self.sync_frequency.as_secs() > 3600 {
+            return Err(anyhow!("Invalid sync_frequency: {:?}. Must be between 1 second and 1 hour", 
+                              self.sync_frequency));
+        }
+        
+        // Validate performance monitoring interval
+        if self.performance_monitoring_interval.as_secs() < 5 || self.performance_monitoring_interval.as_secs() > 3600 {
+            return Err(anyhow!("Invalid performance_monitoring_interval: {:?}. Must be between 5 seconds and 1 hour", 
+                              self.performance_monitoring_interval));
+        }
+        
+        // Warn about performance implications (non-fatal)
+        if self.batch_size > 500_000 {
+            warn!("Large batch size ({}), may cause memory pressure during processing", self.batch_size);
+        }
+        
+        if self.memory_map_size_mb > 512 {
+            warn!("Large cache size ({}MB), ensure sufficient system memory", self.memory_map_size_mb);
+        }
+        
+        if self.index_cache_size > 5_000_000 {
+            warn!("Large index cache ({}), may use significant memory", self.index_cache_size);
+        }
+        
+        // Log configuration summary
+        info!("ZeroCopy database configuration validated:");
+        info!("  - Performance profile: {:?}", self.performance_profile);
+        info!("  - Expected throughput: {}", self.performance_profile.expected_throughput_range());
+        info!("  - Memory map cache: {}MB", self.memory_map_size_mb);
+        info!("  - Index cache: {} entries (~{}MB)", self.index_cache_size, self.index_cache_size / 1_000_000);
+        info!("  - Batch size: {} files", self.batch_size);
+        info!("  - Memory budget: {}MB", self.memory_budget_limit_mb);
+        info!("  - Auto-scaling: {}", if self.enable_auto_scaling { "enabled" } else { "disabled" });
+        info!("  - Runtime updates: {}", if self.enable_runtime_updates { "enabled" } else { "disabled" });
+        
+        Ok(())
+    }
+    
+    /// Check if current configuration exceeds memory budget
+    pub fn check_memory_budget(&self) -> bool {
+        if self.memory_budget_limit_mb == 0 {
+            return true; // No limit
+        }
+        
+        // Estimate memory usage: cache + index overhead (rough estimate: 1 byte per index entry)
+        let estimated_usage = self.memory_map_size_mb + (self.index_cache_size / 1_000_000); // Convert entries to MB
+        estimated_usage <= self.memory_budget_limit_mb
+    }
+    
+    /// Auto-scale configuration based on current memory pressure
+    pub fn auto_scale_for_memory_pressure(&mut self, memory_pressure_factor: f64) -> bool {
+        if !self.enable_auto_scaling {
+            return false;
+        }
+        
+        let original_profile = self.performance_profile;
+        
+        if memory_pressure_factor > 0.8 {
+            // High memory pressure - scale down
+            match self.performance_profile {
+                PerformanceProfile::Maximum => {
+                    self.apply_performance_profile(PerformanceProfile::HighPerformance);
+                }
+                PerformanceProfile::HighPerformance => {
+                    self.apply_performance_profile(PerformanceProfile::Balanced);
+                }
+                PerformanceProfile::Balanced => {
+                    self.apply_performance_profile(PerformanceProfile::Minimal);
+                }
+                PerformanceProfile::Minimal => {
+                    // Already at minimum, reduce batch size
+                    self.batch_size = (self.batch_size / 2).max(1000);
+                }
+                PerformanceProfile::Custom => {
+                    // Scale down custom settings
+                    self.memory_map_size_mb = (self.memory_map_size_mb / 2).max(4);
+                    self.index_cache_size = (self.index_cache_size / 2).max(10_000);
+                    self.batch_size = (self.batch_size / 2).max(1000);
+                }
+            }
+        } else if memory_pressure_factor < 0.3 {
+            // Low memory pressure - scale up if possible
+            match self.performance_profile {
+                PerformanceProfile::Minimal => {
+                    self.apply_performance_profile(PerformanceProfile::Balanced);
+                }
+                PerformanceProfile::Balanced => {
+                    self.apply_performance_profile(PerformanceProfile::HighPerformance);
+                }
+                PerformanceProfile::HighPerformance => {
+                    self.apply_performance_profile(PerformanceProfile::Maximum);
+                }
+                PerformanceProfile::Maximum | PerformanceProfile::Custom => {
+                    // Already at maximum or custom
+                    return false;
+                }
+            }
+        } else {
+            return false; // No scaling needed
+        }
+        
+        let scaled = self.performance_profile != original_profile;
+        if scaled {
+            info!("Auto-scaled from {:?} to {:?} due to memory pressure ({:.1}%)", 
+                  original_profile, self.performance_profile, memory_pressure_factor * 100.0);
+        }
+        
+        scaled
+    }
+    
+    /// Update configuration at runtime with atomic operations
+    pub fn update_runtime_config(&mut self, updates: ZeroCopyConfigUpdate) -> Result<bool> {
+        if !self.enable_runtime_updates {
+            return Err(anyhow!("Runtime configuration updates are disabled"));
+        }
+        
+        let mut changed = false;
+        
+        if let Some(batch_size) = updates.batch_size {
+            if batch_size != self.batch_size {
+                if Self::validate_batch_size(batch_size) {
+                    self.batch_size = batch_size;
+                    self.performance_profile = PerformanceProfile::Custom;
+                    changed = true;
+                    info!("Updated batch size to: {}", batch_size);
+                } else {
+                    return Err(anyhow!("Invalid batch size: {} (must be 1,000-1,000,000)", batch_size));
+                }
+            }
+        }
+        
+        if let Some(cache_size_mb) = updates.memory_map_size_mb {
+            if cache_size_mb != self.memory_map_size_mb {
+                if Self::validate_cache_size_mb(cache_size_mb) {
+                    self.memory_map_size_mb = cache_size_mb;
+                    self.performance_profile = PerformanceProfile::Custom;
+                    changed = true;
+                    info!("Updated cache size to: {}MB", cache_size_mb);
+                } else {
+                    return Err(anyhow!("Invalid cache size: {}MB (must be 4-1024MB)", cache_size_mb));
+                }
+            }
+        }
+        
+        if let Some(index_cache_size) = updates.index_cache_size {
+            if index_cache_size != self.index_cache_size {
+                if Self::validate_index_cache_size(index_cache_size) {
+                    self.index_cache_size = index_cache_size;
+                    self.performance_profile = PerformanceProfile::Custom;
+                    changed = true;
+                    info!("Updated index cache size to: {}", index_cache_size);
+                } else {
+                    return Err(anyhow!("Invalid index cache size: {} (must be 10,000-10,000,000)", index_cache_size));
+                }
+            }
+        }
+        
+        if let Some(profile) = updates.performance_profile {
+            if profile != self.performance_profile {
+                self.apply_performance_profile(profile);
+                changed = true;
+            }
+        }
+        
+        if changed {
+            // Validate the updated configuration
+            if let Err(e) = self.validate() {
+                return Err(anyhow!("Configuration update validation failed: {}", e));
+            }
+        }
+        
+        Ok(changed)
+    }
+}
+
+/// Runtime configuration update structure
+#[derive(Debug, Clone, Default)]
+pub struct ZeroCopyConfigUpdate {
+    pub batch_size: Option<usize>,
+    pub memory_map_size_mb: Option<usize>,
+    pub index_cache_size: Option<usize>,
+    pub performance_profile: Option<PerformanceProfile>,
 }
 
 /// Atomic performance tracking for zero-copy database operations
@@ -382,14 +959,14 @@ impl BatchRemovalResult {
     }
 }
 
-/// Zero-copy database implementation with atomic operations
+/// Zero-copy database implementation with atomic operations and auto-scaling
 pub struct ZeroCopyDatabase {
     // Core storage
     data_file: Arc<RwLock<MemoryMappedFile>>,
     index_manager: Arc<RwLock<IndexManager>>,
     
-    // Configuration
-    config: ZeroCopyConfig,
+    // Configuration with atomic updates
+    config: Arc<RwLock<ZeroCopyConfig>>,
     db_path: PathBuf,
     
     // Performance tracking
@@ -413,13 +990,17 @@ pub struct ZeroCopyDatabase {
     // In-memory playlist storage for fast access
     playlists: Arc<RwLock<std::collections::HashMap<i64, Playlist>>>,
     playlist_entries: Arc<RwLock<std::collections::HashMap<i64, Vec<super::PlaylistEntry>>>>,
+    
+    // Runtime configuration management
+    config_update_channel: Arc<RwLock<Option<tokio::sync::broadcast::Sender<ZeroCopyConfigUpdate>>>>,
+    performance_monitor_handle: Arc<RwLock<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl ZeroCopyDatabase {
-    /// Create a new zero-copy database instance
+    /// Create a new zero-copy database instance with auto-scaling configuration
     pub async fn new(db_path: PathBuf, config: Option<ZeroCopyConfig>) -> Result<Self> {
         let config = config.unwrap_or_else(ZeroCopyConfig::from_env);
-        config.validate();
+        config.validate().context("Invalid ZeroCopy database configuration")?;
         
         // Ensure parent directory exists
         if let Some(parent) = db_path.parent() {
@@ -450,18 +1031,25 @@ impl ZeroCopyDatabase {
         // Create FlatBuffer builder
         let flatbuffer_builder = flatbuffers::FlatBufferBuilder::with_capacity(1024 * 1024); // 1MB initial capacity
         
+        // Create configuration update channel
+        let (config_sender, _) = tokio::sync::broadcast::channel(16);
+        
         info!(
-            "Created zero-copy database at {} with {}MB initial size, {}MB cache, {}K index entries",
+            "Created zero-copy database at {} with performance profile: {:?}",
             db_path.display(),
-            config.initial_file_size_mb,
+            config.performance_profile
+        );
+        info!(
+            "Configuration: {}MB cache, {}K index entries, {} batch size",
             config.memory_map_size_mb,
-            config.index_cache_size / 1000
+            config.index_cache_size / 1000,
+            config.batch_size
         );
         
-        Ok(Self {
+        let database = Self {
             data_file: Arc::new(RwLock::new(data_file)),
             index_manager: Arc::new(RwLock::new(index_manager)),
-            config,
+            config: Arc::new(RwLock::new(config)),
             db_path,
             performance_tracker,
             path_normalizer,
@@ -473,7 +1061,23 @@ impl ZeroCopyDatabase {
             next_playlist_entry_id: AtomicU64::new(1),
             playlists: Arc::new(RwLock::new(std::collections::HashMap::new())),
             playlist_entries: Arc::new(RwLock::new(std::collections::HashMap::new())),
-        })
+            config_update_channel: Arc::new(RwLock::new(Some(config_sender))),
+            performance_monitor_handle: Arc::new(RwLock::new(None)),
+        };
+        
+        Ok(database)
+    }
+    
+    /// Create a new zero-copy database instance with specific performance profile
+    pub async fn new_with_profile(db_path: PathBuf, profile: PerformanceProfile) -> Result<Self> {
+        let config = ZeroCopyConfig::with_performance_profile(profile);
+        Self::new(db_path, Some(config)).await
+    }
+    
+    /// Create a new zero-copy database instance with auto-detected performance profile
+    pub async fn new_with_auto_detection(db_path: PathBuf) -> Result<Self> {
+        let config = ZeroCopyConfig::with_auto_detection();
+        Self::new(db_path, Some(config)).await
     }
     
     /// Initialize the database (create file structure, load indexes)
@@ -528,10 +1132,16 @@ impl ZeroCopyDatabase {
             self.initialize().await?;
         }
         
+        // Start performance monitoring if enabled
+        self.start_performance_monitoring().await?;
+        
         // Mark as open
         self.is_open.store(1, Ordering::Relaxed);
         
-        info!("Zero-copy database opened successfully");
+        let config = self.config.read().await;
+        info!("Zero-copy database opened successfully with profile: {:?}", config.performance_profile);
+        info!("Expected throughput: {}", config.performance_profile.expected_throughput_range());
+        
         Ok(())
     }
     
@@ -544,6 +1154,9 @@ impl ZeroCopyDatabase {
         let start_time = Instant::now();
         
         info!("Closing zero-copy database...");
+        
+        // Stop performance monitoring
+        self.stop_performance_monitoring().await;
         
         // Sync data file to disk
         {
@@ -564,12 +1177,15 @@ impl ZeroCopyDatabase {
         
         // Log final performance statistics
         let stats = self.performance_tracker.get_stats();
+        let config = self.config.read().await;
         info!(
             "Final stats: {} files processed, {:.2} files/sec average, {:.1}% cache hit rate",
             stats.processed_files,
             stats.average_throughput_per_sec,
             stats.cache_hit_rate * 100.0
         );
+        info!("Final configuration: {:?} profile, {}MB cache, {} batch size", 
+              config.performance_profile, config.memory_map_size_mb, config.batch_size);
         
         Ok(())
     }
@@ -584,9 +1200,143 @@ impl ZeroCopyDatabase {
         self.is_open.load(Ordering::Relaxed) == 1
     }
     
-    /// Get database configuration
-    pub fn get_config(&self) -> &ZeroCopyConfig {
-        &self.config
+    /// Get database configuration (async to handle RwLock)
+    pub async fn get_config(&self) -> ZeroCopyConfig {
+        self.config.read().await.clone()
+    }
+    
+    /// Update database configuration at runtime
+    pub async fn update_config(&self, updates: ZeroCopyConfigUpdate) -> Result<bool> {
+        let mut config = self.config.write().await;
+        let changed = config.update_runtime_config(updates)?;
+        
+        if changed {
+            // Notify configuration change listeners
+            if let Some(sender) = self.config_update_channel.read().await.as_ref() {
+                let _ = sender.send(ZeroCopyConfigUpdate::default()); // Notify of change
+            }
+            
+            // Apply configuration changes to components
+            self.apply_config_changes(&*config).await?;
+        }
+        
+        Ok(changed)
+    }
+    
+    /// Apply configuration changes to database components
+    async fn apply_config_changes(&self, config: &ZeroCopyConfig) -> Result<()> {
+        // Update index manager cache size if needed
+        {
+            let mut index_manager = self.index_manager.write().await;
+            let current_cache_size = index_manager.get_stats().max_entries;
+            
+            if current_cache_size != config.index_cache_size {
+                info!("Updating index cache size from {} to {}", current_cache_size, config.index_cache_size);
+                // Note: In a real implementation, you'd need to implement cache resizing
+                // For now, just log the change
+            }
+        }
+        
+        info!("Applied configuration changes: cache={}MB, index={}, batch={}", 
+              config.memory_map_size_mb, config.index_cache_size, config.batch_size);
+        
+        Ok(())
+    }
+    
+    /// Start performance monitoring and auto-scaling
+    pub async fn start_performance_monitoring(&self) -> Result<()> {
+        let config = self.config.read().await;
+        
+        if !config.enable_auto_scaling && !config.enable_runtime_updates {
+            return Ok(()); // No monitoring needed
+        }
+        
+        let monitoring_interval = config.performance_monitoring_interval;
+        let config_arc = self.config.clone();
+        let performance_tracker = self.performance_tracker.clone();
+        let index_manager = self.index_manager.clone();
+        
+        let handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(monitoring_interval);
+            
+            loop {
+                interval.tick().await;
+                
+                // Check memory pressure
+                let memory_pressure = Self::calculate_memory_pressure(&index_manager).await;
+                
+                // Auto-scale if needed
+                {
+                    let mut config = config_arc.write().await;
+                    if config.enable_auto_scaling {
+                        if config.auto_scale_for_memory_pressure(memory_pressure) {
+                            info!("Auto-scaled configuration due to memory pressure: {:.1}%", memory_pressure * 100.0);
+                        }
+                    }
+                }
+                
+                // Log performance statistics
+                let stats = performance_tracker.get_stats();
+                if stats.total_operations > 0 {
+                    debug!("Performance: {:.0} ops/sec, {:.1}% cache hit rate, {} total ops",
+                           stats.average_throughput_per_sec,
+                           stats.cache_hit_rate * 100.0,
+                           stats.total_operations);
+                }
+            }
+        });
+        
+        *self.performance_monitor_handle.write().await = Some(handle);
+        info!("Started performance monitoring with {:.0}s interval", monitoring_interval.as_secs_f64());
+        
+        Ok(())
+    }
+    
+    /// Stop performance monitoring
+    pub async fn stop_performance_monitoring(&self) {
+        if let Some(handle) = self.performance_monitor_handle.write().await.take() {
+            handle.abort();
+            info!("Stopped performance monitoring");
+        }
+    }
+    
+    /// Calculate current memory pressure (0.0 = no pressure, 1.0 = maximum pressure)
+    async fn calculate_memory_pressure(index_manager: &Arc<RwLock<IndexManager>>) -> f64 {
+        let index_manager = index_manager.read().await;
+        let cache_stats = index_manager.cache_manager.get_cache_stats();
+        
+        // Calculate pressure based on cache usage and hit rates
+        let memory_usage_pressure = cache_stats.combined_memory_usage as f64 / cache_stats.combined_max_memory as f64;
+        let cache_miss_pressure = 1.0 - cache_stats.combined_hit_rate;
+        
+        // Combine pressures (weighted average)
+        (memory_usage_pressure * 0.7 + cache_miss_pressure * 0.3).min(1.0)
+    }
+    
+    /// Get current performance profile
+    pub async fn get_performance_profile(&self) -> PerformanceProfile {
+        self.config.read().await.performance_profile
+    }
+    
+    /// Set performance profile
+    pub async fn set_performance_profile(&self, profile: PerformanceProfile) -> Result<()> {
+        let update = ZeroCopyConfigUpdate {
+            performance_profile: Some(profile),
+            ..Default::default()
+        };
+        
+        self.update_config(update).await?;
+        Ok(())
+    }
+    
+    /// Subscribe to configuration changes
+    pub async fn subscribe_to_config_changes(&self) -> Option<tokio::sync::broadcast::Receiver<ZeroCopyConfigUpdate>> {
+        self.config_update_channel.read().await.as_ref().map(|sender| sender.subscribe())
+    }
+    
+    /// Validate current configuration against memory budget
+    pub async fn validate_memory_budget(&self) -> bool {
+        self.config.read().await.check_memory_budget()
     }
     
     /// Get performance statistics
@@ -675,6 +1425,21 @@ impl ZeroCopyDatabase {
             return Ok(BatchProcessingResult::empty());
         }
         
+        // Get current configuration for batch processing
+        let config = self.config.read().await;
+        let batch_size = config.batch_size;
+        drop(config); // Release lock early
+        
+        // If files exceed batch size, process in chunks
+        if files.len() > batch_size {
+            return self.batch_insert_files_chunked(files, batch_size).await;
+        }
+        
+        self.batch_insert_files_internal(files).await
+    }
+    
+    /// Internal batch insert without chunking logic to avoid recursion
+    async fn batch_insert_files_internal(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
         let start_time = Instant::now();
         let batch_id = self.batch_serializer.generate_batch_id();
         
@@ -781,6 +1546,69 @@ impl ZeroCopyDatabase {
         })
     }
     
+    /// Process large batches in chunks to respect memory limits
+    async fn batch_insert_files_chunked(&self, files: &[MediaFile], chunk_size: usize) -> Result<BatchProcessingResult> {
+        let start_time = Instant::now();
+        let total_files = files.len();
+        let mut total_processed = 0;
+        let mut total_errors = Vec::new();
+        let mut total_data_size = 0;
+        let mut total_serialization_time = Duration::from_nanos(0);
+        
+        info!("Processing {} files in chunks of {} (total chunks: {})", 
+              total_files, chunk_size, (total_files + chunk_size - 1) / chunk_size);
+        
+        for (chunk_index, chunk) in files.chunks(chunk_size).enumerate() {
+            let chunk_result = Box::pin(self.batch_insert_files_internal(chunk)).await?;
+            
+            total_processed += chunk_result.files_processed;
+            total_errors.extend(chunk_result.errors);
+            total_data_size += chunk_result.data_size;
+            total_serialization_time += chunk_result.serialization_time;
+            
+            // Log progress every 10 chunks or on last chunk
+            if chunk_index % 10 == 0 || chunk_index == (total_files + chunk_size - 1) / chunk_size - 1 {
+                info!("Processed chunk {}/{}: {} files ({:.1}% complete)", 
+                      chunk_index + 1, 
+                      (total_files + chunk_size - 1) / chunk_size,
+                      chunk_result.files_processed,
+                      (total_processed as f64 / total_files as f64) * 100.0);
+            }
+            
+            // Check for memory pressure and auto-scale if needed
+            let config = self.config.read().await;
+            if config.enable_auto_scaling {
+                let memory_pressure = Self::calculate_memory_pressure(&self.index_manager).await;
+                if memory_pressure > 0.8 {
+                    drop(config);
+                    let update = ZeroCopyConfigUpdate::default();
+                    if let Ok(true) = self.update_config(update).await {
+                        info!("Auto-scaled configuration during batch processing due to memory pressure");
+                    }
+                }
+            }
+        }
+        
+        let total_time = start_time.elapsed();
+        let throughput = total_processed as f64 / total_time.as_secs_f64();
+        
+        info!("Chunked batch processing completed: {} files in {:?} ({:.0} files/sec)", 
+              total_processed, total_time, throughput);
+        
+        Ok(BatchProcessingResult {
+            batch_id: self.batch_serializer.generate_batch_id(),
+            operation_type: BatchOperationType::Insert,
+            files_processed: total_processed,
+            processing_time: total_time,
+            serialization_time: total_serialization_time,
+            write_offset: 0, // Not applicable for chunked processing
+            data_size: total_data_size,
+            throughput,
+            checksum: 0, // Not applicable for chunked processing
+            errors: total_errors,
+        })
+    }
+    
     /// Batch update files using zero-copy FlatBuffer serialization
     pub async fn batch_update_files(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
         if !self.is_open() {
@@ -791,6 +1619,21 @@ impl ZeroCopyDatabase {
             return Ok(BatchProcessingResult::empty());
         }
         
+        // Get current configuration for batch processing
+        let config = self.config.read().await;
+        let batch_size = config.batch_size;
+        drop(config); // Release lock early
+        
+        // If files exceed batch size, process in chunks
+        if files.len() > batch_size {
+            return self.batch_update_files_chunked(files, batch_size).await;
+        }
+        
+        self.batch_update_files_internal(files).await
+    }
+    
+    /// Internal batch update without chunking logic to avoid recursion
+    async fn batch_update_files_internal(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
         let start_time = Instant::now();
         let batch_id = self.batch_serializer.generate_batch_id();
         
@@ -886,6 +1729,56 @@ impl ZeroCopyDatabase {
                 &self.flatbuffer_builder.read().await.finished_data()
             )?.checksum,
             errors: serialization_result.errors,
+        })
+    }
+    
+    /// Process large update batches in chunks to respect memory limits
+    async fn batch_update_files_chunked(&self, files: &[MediaFile], chunk_size: usize) -> Result<BatchProcessingResult> {
+        let start_time = Instant::now();
+        let total_files = files.len();
+        let mut total_processed = 0;
+        let mut total_errors = Vec::new();
+        let mut total_data_size = 0;
+        let mut total_serialization_time = Duration::from_nanos(0);
+        
+        info!("Processing {} file updates in chunks of {} (total chunks: {})", 
+              total_files, chunk_size, (total_files + chunk_size - 1) / chunk_size);
+        
+        for (chunk_index, chunk) in files.chunks(chunk_size).enumerate() {
+            let chunk_result = Box::pin(self.batch_update_files_internal(chunk)).await?;
+            
+            total_processed += chunk_result.files_processed;
+            total_errors.extend(chunk_result.errors);
+            total_data_size += chunk_result.data_size;
+            total_serialization_time += chunk_result.serialization_time;
+            
+            // Log progress every 10 chunks or on last chunk
+            if chunk_index % 10 == 0 || chunk_index == (total_files + chunk_size - 1) / chunk_size - 1 {
+                info!("Updated chunk {}/{}: {} files ({:.1}% complete)", 
+                      chunk_index + 1, 
+                      (total_files + chunk_size - 1) / chunk_size,
+                      chunk_result.files_processed,
+                      (total_processed as f64 / total_files as f64) * 100.0);
+            }
+        }
+        
+        let total_time = start_time.elapsed();
+        let throughput = total_processed as f64 / total_time.as_secs_f64();
+        
+        info!("Chunked batch update completed: {} files in {:?} ({:.0} files/sec)", 
+              total_processed, total_time, throughput);
+        
+        Ok(BatchProcessingResult {
+            batch_id: self.batch_serializer.generate_batch_id(),
+            operation_type: BatchOperationType::Update,
+            files_processed: total_processed,
+            processing_time: total_time,
+            serialization_time: total_serialization_time,
+            write_offset: 0, // Not applicable for chunked processing
+            data_size: total_data_size,
+            throughput,
+            checksum: 0, // Not applicable for chunked processing
+            errors: total_errors,
         })
     }
     
@@ -2704,7 +3597,7 @@ mod tests {
         
         assert!(!db.is_initialized());
         assert!(!db.is_open());
-        assert_eq!(db.get_config().batch_size, 100_000);
+        assert_eq!(db.get_config().await.batch_size, 100_000);
     }
     
     #[tokio::test]
@@ -3030,3 +3923,8 @@ mod tests {
         db.close().await.unwrap();
     }
 }
+
+// Include configuration tests
+#[cfg(test)]
+#[path = "zerocopy_config_test.rs"]
+mod config_tests;
