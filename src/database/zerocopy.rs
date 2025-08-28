@@ -2132,12 +2132,19 @@ impl ZeroCopyDatabase {
             }
             
             let io_start = Instant::now();
-            let offset = data_file.append_data(serialized_data)?;
+            
+            // Create a buffer with length prefix + data
+            let data_len = serialized_data.len() as u32;
+            let mut prefixed_data = Vec::with_capacity(4 + serialized_data.len());
+            prefixed_data.extend_from_slice(&data_len.to_le_bytes());
+            prefixed_data.extend_from_slice(serialized_data);
+            
+            let offset = data_file.append_data(&prefixed_data)?;
             let io_time = io_start.elapsed();
             
             // Record I/O performance
             self.performance_tracker.record_io_operation(
-                serialized_data.len() as u64,
+                prefixed_data.len() as u64,
                 true, // is_write
                 io_time,
             );
@@ -2145,7 +2152,7 @@ impl ZeroCopyDatabase {
             info!(
                 "Wrote batch {} ({} bytes) to offset {} in {:?}",
                 batch_id,
-                serialized_data.len(),
+                prefixed_data.len(),
                 offset,
                 io_time
             );
@@ -2654,8 +2661,32 @@ impl DatabaseManager for ZeroCopyDatabase {
     }
     
     fn stream_all_media_files(&self) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
-        // Placeholder - will be implemented in subsequent tasks
-        Box::pin(futures_util::stream::empty())
+
+        
+        let db = self;
+        Box::pin(async_stream::stream! {
+            // Get all file offsets from the index
+            let file_offsets = {
+                let mut index_manager = db.index_manager.write().await;
+                index_manager.get_all_file_offsets()
+            };
+            
+            // Stream each file
+            let data_file = db.data_file.read().await;
+            for offset in file_offsets {
+                match db.read_media_file_at_offset(&*data_file, offset).await {
+                    Ok(file) => yield Ok(file),
+                    Err(e) => {
+                        // Convert anyhow::Error to sqlx::Error for compatibility
+                        let sqlx_error = sqlx::Error::Io(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            e.to_string()
+                        ));
+                        yield Err(sqlx_error);
+                    }
+                }
+            }
+        })
     }
     
     /// Remove a single media file using atomic bulk operation wrapper
@@ -4633,6 +4664,7 @@ mod tests {
         let db_path = temp_dir.path().join("test.db");
         
         let db = ZeroCopyDatabase::new(db_path.clone(), None).await.unwrap();
+        db.initialize().await.unwrap();
         db.open().await.unwrap();
         
         let test_file = MediaFile {
@@ -4786,7 +4818,7 @@ mod tests {
         let db_path = temp_dir.path().join("test_playlist.db");
         
         let config = ZeroCopyConfig {
-            batch_size: 100,
+            batch_size: 1_000,
             memory_map_size_mb: 4,
             index_cache_size: 10_000,
             ..Default::default()

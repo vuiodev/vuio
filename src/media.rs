@@ -740,6 +740,8 @@ mod tests {
         // Scan the directory
         let result = scanner.scan_directory(temp_dir.path()).await.unwrap();
         
+
+        
         // Verify that files were found and processed
         assert_eq!(result.new_files.len(), 1);
         let scanned_file = &result.new_files[0];

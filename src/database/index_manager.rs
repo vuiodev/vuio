@@ -1058,6 +1058,44 @@ impl IndexManager {
         
         info!("All indexes cleared for repair");
     }
+    
+    /// Get all file offsets for streaming all files
+    pub fn get_all_file_offsets(&mut self) -> Vec<u64> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        
+        // Collect all unique offsets from all indexes
+        let mut all_offsets = std::collections::HashSet::new();
+        
+        // Add offsets from directory index
+        for offsets in self.directory_index.values() {
+            all_offsets.extend(offsets);
+        }
+        
+        // Add offsets from artist index
+        for offsets in self.artist_index.values() {
+            all_offsets.extend(offsets);
+        }
+        
+        // Add offsets from album index
+        for offsets in self.album_index.values() {
+            all_offsets.extend(offsets);
+        }
+        
+        // Add offsets from genre index
+        for offsets in self.genre_index.values() {
+            all_offsets.extend(offsets);
+        }
+        
+        // Add offsets from year index
+        for offsets in self.year_index.values() {
+            all_offsets.extend(offsets);
+        }
+        
+        // Convert to sorted vector for consistent ordering
+        let mut result: Vec<u64> = all_offsets.into_iter().collect();
+        result.sort();
+        result
+    }
 }
 
 /// Result of index optimization operation
