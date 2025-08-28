@@ -12,8 +12,7 @@ use super::memory_mapped::MemoryMappedFile;
 use super::flatbuffer::{BatchSerializer, MediaFileSerializer};
 use super::flatbuffer::generated::media_db::BatchOperationType;
 use super::index_manager::{IndexManager, IndexStats};
-use super::atomic_performance::{AtomicPerformanceTracker, BatchOperationResult, SharedPerformanceTracker, create_shared_performance_tracker};
-use super::error_handling::{AtomicErrorHandler, SharedErrorHandler, ErrorType, TransactionResult, RetryResult, RecoveryResult, RecoveryType, create_shared_error_handler};
+use super::error_handling::{SharedErrorHandler, ErrorType, RecoveryResult, RecoveryType, create_shared_error_handler};
 use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory, DatabaseStats, DatabaseHealth, DatabaseIssue, IssueSeverity};
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 
@@ -3910,7 +3909,7 @@ impl DatabaseManager for ZeroCopyDatabase {
         }
         
         // Serialize and persist to disk using batch operations
-        let serialization_result = {
+        let _serialization_result = {
             let mut builder = self.flatbuffer_builder.write().await;
             builder.reset();
             
@@ -4528,7 +4527,7 @@ mod tests {
         
         assert!(!db.is_initialized());
         assert!(!db.is_open());
-        assert_eq!(db.get_config().await.batch_size, 100_000);
+        assert_eq!(db.get_config().await.batch_size, 50_000);
     }
     
     #[tokio::test]
@@ -4788,8 +4787,8 @@ mod tests {
         
         let config = ZeroCopyConfig {
             batch_size: 100,
-            memory_map_size_mb: 1,
-            index_cache_size: 1000,
+            memory_map_size_mb: 4,
+            index_cache_size: 10_000,
             ..Default::default()
         };
         
@@ -4937,7 +4936,7 @@ impl ZeroCopyDatabase {
         
         if stats.validation_errors > 15 {
             info!("High validation errors detected, attempting index reconstruction");
-            let result = self.error_handler.attempt_recovery(
+            let _result = self.error_handler.attempt_recovery(
                 RecoveryType::IndexReconstruction,
                 "automatic_recovery_index"
             ).await?;

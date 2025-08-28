@@ -531,9 +531,9 @@ Version=2
         );
 
         // Store files in database
-        let file1_id = db.store_media_file(&file1).await.unwrap();
-        let file2_id = db.store_media_file(&file2).await.unwrap();
-        let file3_id = db.store_media_file(&file3).await.unwrap();
+        let _file1_id = db.store_media_file(&file1).await.unwrap();
+        let _file2_id = db.store_media_file(&file2).await.unwrap();
+        let _file3_id = db.store_media_file(&file3).await.unwrap();
 
         // Create a playlist
         let playlist_id = db.create_playlist("Test Batch Playlist", None).await.unwrap();

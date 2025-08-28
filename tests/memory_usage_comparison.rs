@@ -117,11 +117,10 @@ mod memory_comparison_tests {
         let (zerocopy_duration, zerocopy_memory, zerocopy_files, zerocopy_throughput) = 
             benchmark_database_memory(&zerocopy_db, &test_files, "Original ZeroCopy").await;
         
-        // Test Memory-Optimized ZeroCopy
+        // Test Memory-Optimized ZeroCopy (using regular ZeroCopy with Minimal profile)
         let optimized_db_path = temp_dir.path().join("optimized_memory.db");
-        let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_profile(optimized_db_path, PerformanceProfile::Balanced).await.unwrap();
+        let optimized_db = ZeroCopyDatabase::new_with_profile(optimized_db_path, PerformanceProfile::Minimal).await.unwrap();
         optimized_db.initialize().await.unwrap();
-        optimized_db.open().await.unwrap();
         
         let (optimized_duration, optimized_memory, optimized_files, optimized_throughput) = 
             benchmark_database_memory(&optimized_db, &test_files, "Memory-Optimized ZeroCopy").await;
@@ -192,11 +191,10 @@ mod memory_comparison_tests {
             
             let test_files = create_test_media_files(test_size, temp_dir.path());
             
-            // Test Memory-Optimized ZeroCopy
+            // Test Memory-Optimized ZeroCopy (using regular ZeroCopy with Minimal profile)
             let optimized_db_path = temp_dir.path().join(format!("optimized_{}.db", test_size));
-            let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_profile(optimized_db_path, PerformanceProfile::Balanced).await.unwrap();
+            let optimized_db = ZeroCopyDatabase::new_with_profile(optimized_db_path, PerformanceProfile::Minimal).await.unwrap();
             optimized_db.initialize().await.unwrap();
-            optimized_db.open().await.unwrap();
             
             let initial_memory = get_memory_usage_kb();
             
@@ -218,8 +216,8 @@ mod memory_comparison_tests {
             // Get internal cache stats
             let cache_stats = optimized_db.get_cache_stats().await;
             println!("  - Internal memory usage: {} bytes", cache_stats.combined_memory_usage);
-            println!("  - Files in cache: {}", cache_stats.files_count);
-            println!("  - Index entries: {}", cache_stats.index_entries);
+            println!("  - Path cache entries: {}", cache_stats.path_cache.entries);
+            println!("  - ID cache entries: {}", cache_stats.id_cache.entries);
             
             assert_eq!(file_ids.len(), test_size);
             assert!(throughput > 10_000.0, "Should achieve good throughput: {:.0} files/sec", throughput);

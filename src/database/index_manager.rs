@@ -1,8 +1,7 @@
 use anyhow::{anyhow, Result};
 use std::collections::{HashMap, BTreeMap};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -896,7 +895,7 @@ impl IndexManager {
     /// Load indexes from file with atomic operations
     pub async fn load_from_file(&mut self, file_path: &std::path::Path) -> anyhow::Result<usize> {
         use tokio::fs;
-        use std::io::Read;
+        // use std::io::Read;
         
         if !file_path.exists() {
             return Ok(0); // No file to load
@@ -956,7 +955,7 @@ impl IndexManager {
     /// Save indexes to file with atomic operations
     pub async fn save_to_file(&self, file_path: &std::path::Path) -> anyhow::Result<usize> {
         use tokio::fs;
-        use std::io::Write;
+        // use std::io::Write;
         
         // Create parent directory if needed
         if let Some(parent) = file_path.parent() {

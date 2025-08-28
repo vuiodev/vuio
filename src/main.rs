@@ -1095,7 +1095,7 @@ async fn handle_file_system_event(
                     let media_file = database::MediaFile::new(to.clone(), metadata.len(), mime_type);
                     
                     // Store in database using ZeroCopy bulk operation
-                    let file_ids = database.bulk_store_media_files(&[media_file]).await?;
+                    let _file_ids = database.bulk_store_media_files(&[media_file]).await?;
                     
                     info!("Renamed media file using ZeroCopy atomic operations: {} -> {}", from.display(), to.display());
                     

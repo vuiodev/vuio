@@ -726,7 +726,7 @@ impl SqliteDatabase {
             
             // Get the first component (immediate subdirectory)
             let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
-            if let Some(first_component) = components.first() {
+            if let Some(_first_component) = components.first() {
                 // Find the corresponding original directory name
                 
                 // Find a file whose parent path corresponds to this subdirectory
@@ -1146,7 +1146,7 @@ impl DatabaseManager for SqliteDatabase {
             
             // Get the first component (immediate subdirectory)
             let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
-            if let Some(first_component) = components.first() {
+            if let Some(_first_component) = components.first() {
                 // Find the corresponding original directory name
                 
                 // Find a file whose parent path corresponds to this subdirectory

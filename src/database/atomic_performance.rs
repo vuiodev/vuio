@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use std::collections::VecDeque;
@@ -549,7 +549,7 @@ mod tests {
         let tracker = AtomicPerformanceTracker::new(Duration::from_secs(1), false);
         
         // Record multiple operations with timing
-        for i in 0..5 {
+        for _i in 0..5 {
             let result = BatchOperationResult {
                 files_processed: 1000,
                 processing_time: Duration::from_millis(100),
