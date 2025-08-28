@@ -45,3 +45,16 @@ recursive = true
 path = "/config/media.db"  # Will use platform-appropriate default if not specified
 vacuum_on_startup = false
 backup_enabled = true
+
+# ZeroCopy Database Configuration (optional - uses minimal defaults if not set)
+# All values are optional and will use minimal defaults if not specified
+[database.zerocopy]
+# cache_mb = 2                          # Memory cache size in MB (1-1024, default: 1)
+# index_size = 5000                     # Index cache entries (100-10M, default: 1000)
+# batch_size = 500                      # Batch processing size (10-1M, default: 100)
+# initial_file_size_mb = 2              # Initial DB file size in MB (1-1024, default: 1)
+# max_file_size_gb = 2                  # Max DB file size in GB (1-100, default: 1)
+# sync_frequency_secs = 120             # Sync frequency in seconds (1-3600, default: 60)
+# enable_wal = true                     # Enable Write-Ahead Logging (default: false)
+# enable_compression = false            # Enable compression (default: false)
+# monitor_interval_secs = 900           # Performance monitoring interval (30-3600s, default: 600)

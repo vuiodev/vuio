@@ -63,5 +63,16 @@ services:
       - VUIO_DB_VACUUM=false
       - VUIO_DB_BACKUP=true
       
+      # ZeroCopy Database Configuration (optional - uses minimal defaults if not set)
+      # - ZEROCOPY_CACHE_MB=2                    # Memory cache size (1-1024 MB, default: 1)
+      # - ZEROCOPY_INDEX_SIZE=5000               # Index cache entries (100-10M, default: 1000)
+      # - ZEROCOPY_BATCH_SIZE=500                # Batch processing size (10-1M, default: 100)
+      # - ZEROCOPY_INITIAL_FILE_SIZE_MB=2        # Initial DB file size (1-1024 MB, default: 1)
+      # - ZEROCOPY_MAX_FILE_SIZE_GB=2            # Max DB file size (1-100 GB, default: 1)
+      # - ZEROCOPY_SYNC_FREQUENCY_SECS=120       # Sync frequency (1-3600 seconds, default: 60)
+      # - ZEROCOPY_ENABLE_WAL=true               # Enable Write-Ahead Logging (default: false)
+      # - ZEROCOPY_ENABLE_COMPRESSION=false      # Enable compression (default: false)
+      # - ZEROCOPY_MONITOR_INTERVAL_SECS=900     # Performance monitoring interval (30-3600s, default: 600)
+      
       # Enable debug logging
       - RUST_LOG=debug
