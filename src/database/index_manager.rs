@@ -1096,6 +1096,56 @@ impl IndexManager {
         result.sort();
         result
     }
+    
+    /// Find files with a specific path prefix (for efficient directory operations)
+    pub fn find_files_with_path_prefix(&self, canonical_prefix: &str) -> Vec<u64> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        
+        let mut matching_offsets = Vec::new();
+        
+        // Search through all path cache entries for matching prefixes
+        let path_entries = self.cache_manager.get_all_path_entries();
+        for (path, offset) in path_entries {
+            if path.starts_with(canonical_prefix) {
+                matching_offsets.push(offset);
+            }
+        }
+        
+        // Also search through directory index for directories that match the prefix
+        for (dir_path, offsets) in &self.directory_index {
+            if dir_path.starts_with(canonical_prefix) {
+                matching_offsets.extend(offsets);
+            }
+        }
+        
+        // Remove duplicates and sort
+        matching_offsets.sort();
+        matching_offsets.dedup();
+        matching_offsets
+    }
+    
+    /// Get all canonical paths from the index
+    pub fn get_all_canonical_paths(&self) -> Vec<String> {
+        self.lookup_count.fetch_add(1, Ordering::Relaxed);
+        
+        let mut all_paths = Vec::new();
+        
+        // Get all paths from the path cache
+        let path_entries = self.cache_manager.get_all_path_entries();
+        for (path, _) in path_entries {
+            all_paths.push(path);
+        }
+        
+        // Also get paths from directory index
+        for dir_path in self.directory_index.keys() {
+            all_paths.push(dir_path.clone());
+        }
+        
+        // Remove duplicates and sort
+        all_paths.sort();
+        all_paths.dedup();
+        all_paths
+    }
 }
 
 /// Result of index optimization operation

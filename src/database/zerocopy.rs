@@ -17,7 +17,7 @@ use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory,
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 
 /// Performance profile for auto-scaling configuration
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum PerformanceProfile {
     /// Minimal memory usage (4MB cache, 100K index entries)
     Minimal,
@@ -143,7 +143,7 @@ impl PerformanceProfile {
 }
 
 /// Configuration for zero-copy database operations with auto-scaling
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ZeroCopyConfig {
     /// Performance profile for auto-scaling
     pub performance_profile: PerformanceProfile,
@@ -968,7 +968,7 @@ impl ZeroCopyPerformanceTracker {
 }
 
 /// Performance statistics snapshot
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PerformanceStats {
     pub total_files: u64,
     pub processed_files: u64,
@@ -2617,19 +2617,36 @@ impl ZeroCopyDatabase {
         }
         
         // Check if any file matches the media type filter
-        let _data_file = self.data_file.read().await;
-        for _offset in file_offsets.iter().take(10) { // Check only first 10 files for performance
-            // TODO: Implement file reading when FlatBuffer is available
-            // For now, assume directory contains matching files if it has any files
-            if !file_offsets.is_empty() {
-                let check_time = start_time.elapsed();
-                self.performance_tracker.record_io_operation(
-                    1024, // Estimate 1KB per file check
-                    false, // is_read
-                    check_time,
-                );
-                return Ok(true);
+        let data_file = self.data_file.read().await;
+        for offset in file_offsets.iter().take(10) { // Check only first 10 files for performance
+            // Read and check file media type using FlatBuffer deserialization
+            match self.read_media_file_at_offset(&*data_file, *offset).await {
+                Ok(media_file) => {
+                    if media_file.mime_type.starts_with(_media_type_filter) {
+                        let check_time = start_time.elapsed();
+                        self.performance_tracker.record_io_operation(
+                            1024, // Estimate 1KB per file check
+                            false, // is_read
+                            check_time,
+                        );
+                        return Ok(true);
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for media type check: {}", offset, e);
+                }
             }
+        }
+        
+        // If we checked files but none matched, return false
+        if !file_offsets.is_empty() {
+            let check_time = start_time.elapsed();
+            self.performance_tracker.record_io_operation(
+                file_offsets.len() as u64 * 100, // Estimate 100 bytes per file check
+                false, // is_read
+                check_time,
+            );
+            return Ok(false);
         }
         
         let check_time = start_time.elapsed();
@@ -2898,8 +2915,32 @@ impl DatabaseManager for ZeroCopyDatabase {
         Ok((filtered_subdirectories, filtered_files))
     }
     
-    async fn cleanup_missing_files(&self, _existing_paths: &[PathBuf]) -> Result<usize> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    async fn cleanup_missing_files(&self, existing_paths: &[PathBuf]) -> Result<usize> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Convert existing paths to canonical format
+        let existing_canonical_paths: Result<HashSet<String>> = existing_paths
+            .iter()
+            .map(|path| self.path_normalizer.to_canonical(path).map_err(|e| anyhow!("Path normalization failed: {}", e)))
+            .collect();
+        
+        let existing_canonical_paths = existing_canonical_paths?;
+        
+        // Use the batch cleanup method for efficiency
+        let removed_count = self.batch_cleanup_missing_files(&existing_canonical_paths).await?;
+        
+        let processing_time = start_time.elapsed();
+        info!(
+            "Cleaned up {} missing files in {:?}",
+            removed_count,
+            processing_time
+        );
+        
+        Ok(removed_count)
     }
     
     /// Get a single media file by path using atomic cache lookup
@@ -3079,16 +3120,153 @@ impl DatabaseManager for ZeroCopyDatabase {
         Ok(health)
     }
     
-    async fn create_backup(&self, _backup_path: &Path) -> Result<()> {
-        Err(anyhow!("Not implemented yet"))
+    async fn create_backup(&self, backup_path: &Path) -> Result<()> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Ensure backup directory exists
+        if let Some(parent) = backup_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        // Sync data to disk before backup
+        {
+            let data_file = self.data_file.read().await;
+            data_file.sync_to_disk()?;
+        }
+        
+        // Copy data file
+        let data_file_path = self.db_path.with_extension("fb");
+        let backup_data_path = backup_path.with_extension("fb");
+        if data_file_path.exists() {
+            tokio::fs::copy(&data_file_path, &backup_data_path).await?;
+        }
+        
+        // Copy index file
+        let index_file_path = self.db_path.with_extension("idx");
+        let backup_index_path = backup_path.with_extension("idx");
+        if index_file_path.exists() {
+            tokio::fs::copy(&index_file_path, &backup_index_path).await?;
+        }
+        
+        // Create backup metadata
+        let metadata = serde_json::json!({
+            "created_at": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+            "original_path": self.db_path.display().to_string(),
+            "config": self.get_config().await,
+            "stats": self.get_performance_stats()
+        });
+        
+        let metadata_path = backup_path.with_extension("meta");
+        tokio::fs::write(&metadata_path, serde_json::to_string_pretty(&metadata)?).await?;
+        
+        let backup_time = start_time.elapsed();
+        info!(
+            "Created backup at {} in {:?}",
+            backup_path.display(),
+            backup_time
+        );
+        
+        Ok(())
     }
     
-    async fn restore_from_backup(&self, _backup_path: &Path) -> Result<()> {
-        Err(anyhow!("Not implemented yet"))
+    async fn restore_from_backup(&self, backup_path: &Path) -> Result<()> {
+        if self.is_open() {
+            return Err(anyhow!("Database must be closed before restore"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Verify backup files exist
+        let backup_data_path = backup_path.with_extension("fb");
+        let backup_index_path = backup_path.with_extension("idx");
+        let backup_metadata_path = backup_path.with_extension("meta");
+        
+        if !backup_data_path.exists() {
+            return Err(anyhow!("Backup data file not found: {}", backup_data_path.display()));
+        }
+        
+        // Read and validate backup metadata
+        if backup_metadata_path.exists() {
+            let metadata_content = tokio::fs::read_to_string(&backup_metadata_path).await?;
+            let _metadata: serde_json::Value = serde_json::from_str(&metadata_content)?;
+            info!("Backup metadata validated");
+        }
+        
+        // Ensure target directory exists
+        if let Some(parent) = self.db_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        // Restore data file
+        let target_data_path = self.db_path.with_extension("fb");
+        tokio::fs::copy(&backup_data_path, &target_data_path).await?;
+        
+        // Restore index file if it exists
+        let target_index_path = self.db_path.with_extension("idx");
+        if backup_index_path.exists() {
+            tokio::fs::copy(&backup_index_path, &target_index_path).await?;
+        }
+        
+        let restore_time = start_time.elapsed();
+        info!(
+            "Restored database from backup {} in {:?}",
+            backup_path.display(),
+            restore_time
+        );
+        
+        Ok(())
     }
     
     async fn vacuum(&self) -> Result<()> {
-        Err(anyhow!("Not implemented yet"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        info!("Starting database vacuum operation...");
+        
+        // Perform comprehensive cleanup
+        self.cleanup_database().await?;
+        
+        // Optimize indexes
+        {
+            let mut index_manager = self.index_manager.write().await;
+            let optimization_result = index_manager.optimize_indexes();
+            info!("Index optimization: {} operations, {:.2}ms total time", 
+                  optimization_result.operations_performed,
+                  optimization_result.total_time_ms);
+        }
+        
+        // Force cache cleanup to free memory
+        self.force_cache_cleanup(0.5).await?; // Reduce cache by 50%
+        
+        // Compact memory-mapped file if possible
+        {
+            let data_file = self.data_file.read().await;
+            data_file.sync_to_disk()?;
+            info!("Data file synced to disk");
+        }
+        
+        // Save optimized indexes
+        let index_file_path = self.db_path.with_extension("idx");
+        self.save_indexes(&index_file_path).await?;
+        
+        let vacuum_time = start_time.elapsed();
+        let stats = self.get_performance_stats();
+        
+        info!(
+            "Database vacuum completed in {:?}. Stats: {} files, {:.1}% cache hit rate",
+            vacuum_time,
+            stats.processed_files,
+            stats.cache_hit_rate * 100.0
+        );
+        
+        Ok(())
     }
     
     // Music categorization methods with atomic operations
@@ -4346,28 +4524,261 @@ impl DatabaseManager for ZeroCopyDatabase {
         Ok(())
     }
     
-    async fn get_files_with_path_prefix(&self, _canonical_prefix: &str) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get file offsets from index with prefix matching
+        let file_offsets = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.find_files_with_path_prefix(canonical_prefix)
+        };
+        
+        if file_offsets.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No files found with prefix: {}", canonical_prefix);
+            return Ok(Vec::new());
+        }
+        
+        // Read files from memory-mapped storage using zero-copy access
+        let mut files = Vec::with_capacity(file_offsets.len());
+        let data_file = self.data_file.read().await;
+        
+        for offset in file_offsets {
+            match self.read_media_file_at_offset(&data_file, offset).await {
+                Ok(file) => {
+                    files.push(file);
+                    self.performance_tracker.record_cache_access(true);
+                }
+                Err(e) => {
+                    warn!("Failed to read file at offset {} for prefix {}: {}", offset, canonical_prefix, e);
+                    self.performance_tracker.record_cache_access(false);
+                    self.performance_tracker.record_failed_operation();
+                }
+            }
+        }
+        
+        // Sort by path for consistent ordering
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            files.len() as u64 * 1024, // Estimate 1KB per file record
+            false, // is_read
+            processing_time,
+        );
+        
+        debug!(
+            "Retrieved {} files with prefix '{}' in {:?}",
+            files.len(),
+            canonical_prefix,
+            processing_time
+        );
+        
+        Ok(files)
     }
     
-    async fn get_direct_subdirectories(&self, _canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get subdirectories from index with atomic B-tree operations
+        let subdirectory_paths = {
+            let index_manager = self.index_manager.read().await;
+            self.performance_tracker.record_index_operation(IndexOperationType::Lookup);
+            index_manager.find_subdirectories(canonical_parent_path)
+        };
+        
+        if subdirectory_paths.is_empty() {
+            self.performance_tracker.record_cache_access(true); // Cache hit for empty result
+            debug!("No subdirectories found for parent: {}", canonical_parent_path);
+            return Ok(Vec::new());
+        }
+        
+        // Convert paths to MediaDirectory structures
+        let mut directories = Vec::with_capacity(subdirectory_paths.len());
+        for subdir_path in subdirectory_paths {
+            let path_buf = PathBuf::from(&subdir_path);
+            let name = path_buf.file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(&subdir_path)
+                .to_string();
+            
+            directories.push(MediaDirectory {
+                path: path_buf,
+                name,
+            });
+        }
+        
+        // Sort directories by name for consistent ordering
+        directories.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            directories.len() as u64 * 256, // Estimate 256 bytes per directory entry
+            false, // is_read
+            processing_time,
+        );
+        
+        debug!(
+            "Retrieved {} direct subdirectories for {} in {:?}",
+            directories.len(),
+            canonical_parent_path,
+            processing_time
+        );
+        
+        Ok(directories)
     }
     
-    async fn batch_cleanup_missing_files(&self, _existing_canonical_paths: &HashSet<String>) -> Result<usize> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get all indexed files
+        let all_indexed_paths = {
+            let index_manager = self.index_manager.read().await;
+            index_manager.get_all_canonical_paths()
+        };
+        
+        // Find files that are indexed but no longer exist
+        let mut missing_paths = Vec::new();
+        for indexed_path in &all_indexed_paths {
+            if !existing_canonical_paths.contains(indexed_path) {
+                missing_paths.push(indexed_path.clone());
+            }
+        }
+        
+        if missing_paths.is_empty() {
+            debug!("No missing files found during cleanup");
+            return Ok(0);
+        }
+        
+        info!("Found {} missing files to clean up", missing_paths.len());
+        
+        // Remove missing files from indexes in batches
+        let mut removed_count = 0;
+        const BATCH_SIZE: usize = 1000;
+        
+        {
+            let mut index_manager = self.index_manager.write().await;
+            
+            for batch in missing_paths.chunks(BATCH_SIZE) {
+                for missing_path in batch {
+                    if index_manager.remove_file_index(missing_path).is_some() {
+                        removed_count += 1;
+                    }
+                }
+                
+                // Log progress for large cleanups
+                if missing_paths.len() > BATCH_SIZE {
+                    let progress = (removed_count as f64 / missing_paths.len() as f64) * 100.0;
+                    debug!("Cleanup progress: {:.1}% ({}/{})", progress, removed_count, missing_paths.len());
+                }
+            }
+        }
+        
+        // Record performance metrics
+        let processing_time = start_time.elapsed();
+        let throughput = removed_count as f64 / processing_time.as_secs_f64();
+        
+        self.performance_tracker.record_batch_operation(true, removed_count, processing_time);
+        
+        info!(
+            "Batch cleanup completed: {} files removed in {:?} ({:.0} files/sec)",
+            removed_count,
+            processing_time,
+            throughput
+        );
+        
+        Ok(removed_count)
     }
     
-    async fn database_native_cleanup(&self, _existing_canonical_paths: &[String]) -> Result<usize> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Convert to HashSet for efficient lookup
+        let existing_set: HashSet<String> = existing_canonical_paths.iter().cloned().collect();
+        
+        // Use the batch cleanup method which is already optimized
+        let removed_count = self.batch_cleanup_missing_files(&existing_set).await?;
+        
+        let processing_time = start_time.elapsed();
+        info!(
+            "Database-native cleanup completed: {} files removed in {:?}",
+            removed_count,
+            processing_time
+        );
+        
+        Ok(removed_count)
     }
     
     async fn get_filtered_direct_subdirectories(
         &self,
-        _canonical_parent_path: &str,
-        _mime_filter: &str,
+        canonical_parent_path: &str,
+        mime_filter: &str,
     ) -> Result<Vec<MediaDirectory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get all direct subdirectories first
+        let all_subdirectories = self.get_direct_subdirectories(canonical_parent_path).await?;
+        
+        if mime_filter.is_empty() {
+            return Ok(all_subdirectories);
+        }
+        
+        // Filter subdirectories that contain files matching the mime type filter
+        let mut filtered_directories = Vec::new();
+        
+        for subdir in all_subdirectories {
+            // Check if this subdirectory contains files of the specified media type
+            let _subdir_canonical = self.path_normalizer.to_canonical(&subdir.path)
+                .map_err(|e| anyhow!("Path normalization failed: {}", e))?;
+            
+            // Get files in this subdirectory and check if any match the mime filter
+            let files_in_subdir = self.get_files_in_directory(&subdir.path).await?;
+            let has_matching_files = files_in_subdir.iter().any(|file| {
+                file.mime_type.starts_with(mime_filter)
+            });
+            
+            if has_matching_files {
+                filtered_directories.push(subdir);
+            }
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_io_operation(
+            filtered_directories.len() as u64 * 256, // Estimate 256 bytes per directory entry
+            false, // is_read
+            processing_time,
+        );
+        
+        debug!(
+            "Retrieved {} filtered subdirectories for {} (filter: {}) in {:?}",
+            filtered_directories.len(),
+            canonical_parent_path,
+            mime_filter,
+            processing_time
+        );
+        
+        Ok(filtered_directories)
     }
 }
 
@@ -4497,8 +4908,9 @@ impl ZeroCopyDatabase {
         Ok(())
     }
     
-    async fn get_files_with_path_prefix(&self, _canonical_prefix: &str) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
+        // Delegate to the main implementation in the DatabaseManager trait
+        <Self as DatabaseManager>::get_files_with_path_prefix(self, canonical_prefix).await
     }
     
     async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
@@ -4556,16 +4968,19 @@ impl ZeroCopyDatabase {
         Ok(directories)
     }
     
-    async fn batch_cleanup_missing_files(&self, _existing_canonical_paths: &HashSet<String>) -> Result<usize> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        // Delegate to the main implementation in the DatabaseManager trait
+        <Self as DatabaseManager>::batch_cleanup_missing_files(self, existing_canonical_paths).await
     }
     
-    async fn database_native_cleanup(&self, _existing_canonical_paths: &[String]) -> Result<usize> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize> {
+        // Delegate to the main implementation in the DatabaseManager trait
+        <Self as DatabaseManager>::database_native_cleanup(self, existing_canonical_paths).await
     }
     
-    async fn get_filtered_direct_subdirectories(&self, _canonical_parent_path: &str, _mime_filter: &str) -> Result<Vec<MediaDirectory>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    async fn get_filtered_direct_subdirectories(&self, canonical_parent_path: &str, mime_filter: &str) -> Result<Vec<MediaDirectory>> {
+        // Delegate to the main implementation in the DatabaseManager trait
+        <Self as DatabaseManager>::get_filtered_direct_subdirectories(self, canonical_parent_path, mime_filter).await
     }
 }
 
