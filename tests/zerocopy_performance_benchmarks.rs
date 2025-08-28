@@ -19,7 +19,8 @@ use tokio::time::timeout;
 
 use vuio::database::{
     DatabaseManager, MediaFile, SqliteDatabase,
-    zerocopy::{ZeroCopyDatabase, PerformanceProfile, ZeroCopyConfig}
+    zerocopy::{ZeroCopyDatabase, PerformanceProfile, ZeroCopyConfig},
+    memory_optimized_zerocopy::MemoryOptimizedZeroCopyDatabase
 };
 
 /// Performance benchmark configuration

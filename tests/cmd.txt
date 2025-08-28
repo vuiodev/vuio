@@ -1,0 +1,1 @@
+cargo test test_memory_optimized_million_files --release --ignored -- --no

@@ -18,6 +18,7 @@ pub mod index_manager;
 pub mod atomic_performance;
 pub mod error_handling;
 pub mod zerocopy;
+pub mod memory_optimized_zerocopy;
 
 /// Represents a subdirectory in the media library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
