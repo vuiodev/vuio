@@ -139,6 +139,38 @@ pub mod media_d_b {
         pub timestamp: u64,
         pub operation_type: BatchOperationType,
     }
+    
+    // Stub DatabaseHeader table
+    pub struct DatabaseHeader<'a> {
+        _tab: flatbuffers::Table<'a>,
+    }
+    
+    impl<'a> DatabaseHeader<'a> {
+        pub fn magic(&self) -> Option<&str> { None }
+        pub fn version(&self) -> u32 { 0 }
+        pub fn file_size(&self) -> u64 { 0 }
+        pub fn index_offset(&self) -> u64 { 0 }
+        pub fn batch_count(&self) -> u64 { 0 }
+        pub fn created_at(&self) -> u64 { 0 }
+        pub fn last_modified(&self) -> u64 { 0 }
+        
+        pub fn create<'b>(
+            _builder: &mut FlatBufferBuilder<'b>,
+            _args: &DatabaseHeaderArgs<'b>,
+        ) -> flatbuffers::WIPOffset<DatabaseHeader<'b>> {
+            flatbuffers::WIPOffset::new(0)
+        }
+    }
+    
+    pub struct DatabaseHeaderArgs<'a> {
+        pub magic: Option<flatbuffers::WIPOffset<&'a str>>,
+        pub version: u32,
+        pub file_size: u64,
+        pub index_offset: u64,
+        pub batch_count: u64,
+        pub created_at: u64,
+        pub last_modified: u64,
+    }
 }
 "#;
     

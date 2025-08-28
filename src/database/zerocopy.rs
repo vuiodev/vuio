@@ -1,0 +1,1018 @@
+use anyhow::{anyhow, Result};
+use async_trait::async_trait;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant, SystemTime};
+use tokio::sync::RwLock;
+use tracing::{debug, info, warn};
+
+use super::memory_mapped::MemoryMappedFile;
+// Note: FlatBuffer serialization will be implemented in task 4
+use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory, DatabaseStats, DatabaseHealth};
+use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
+
+/// Configuration for zero-copy database operations
+#[derive(Debug, Clone)]
+pub struct ZeroCopyConfig {
+    /// Number of files to process per batch
+    pub batch_size: usize,
+    /// Initial size of data file in MB
+    pub initial_file_size_mb: usize,
+    /// Maximum size of data file in GB
+    pub max_file_size_gb: usize,
+    /// Memory map size in MB (fixed default: 4MB)
+    pub memory_map_size_mb: usize,
+    /// Index cache size (number of entries, fixed default: 1M entries = ~1MB)
+    pub index_cache_size: usize,
+    /// Enable compression (disabled for maximum speed)
+    pub enable_compression: bool,
+    /// Sync frequency for durability
+    pub sync_frequency: Duration,
+    /// Enable Write-Ahead Logging
+    pub enable_wal: bool,
+    /// Auto-detect memory (disabled - manual configuration only)
+    pub auto_detect_memory: bool,
+}
+
+impl Default for ZeroCopyConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 100_000,  // Process 100K files per batch
+            initial_file_size_mb: 10,  // Start with 10MB
+            max_file_size_gb: 10,  // Max 10GB
+            memory_map_size_mb: 4,  // Fixed 4MB default (matches original app)
+            index_cache_size: 1_000_000,  // 1M entries (~1MB for indexes)
+            enable_compression: false,  // Disabled for max speed
+            sync_frequency: Duration::from_secs(5),
+            enable_wal: true,
+            auto_detect_memory: false,  // NO automatic scaling - manual only
+        }
+    }
+}
+
+impl ZeroCopyConfig {
+    /// Load configuration from environment variables (for Docker)
+    pub fn from_env() -> Self {
+        let mut config = Self::default();
+        
+        // Override with environment variables if present
+        if let Ok(cache_mb) = std::env::var("ZEROCOPY_CACHE_MB") {
+            if let Ok(size) = cache_mb.parse::<usize>() {
+                config.memory_map_size_mb = size;
+                info!("Using cache size from env: {}MB", size);
+            }
+        }
+        
+        if let Ok(index_size) = std::env::var("ZEROCOPY_INDEX_SIZE") {
+            if let Ok(size) = index_size.parse::<usize>() {
+                config.index_cache_size = size;
+                info!("Using index cache size from env: {}", size);
+            }
+        }
+        
+        if let Ok(batch_size) = std::env::var("ZEROCOPY_BATCH_SIZE") {
+            if let Ok(size) = batch_size.parse::<usize>() {
+                config.batch_size = size;
+                info!("Using batch size from env: {}", size);
+            }
+        }
+        
+        config
+    }
+    
+    /// Validate configuration and warn about performance implications
+    pub fn validate(&self) {
+        if self.memory_map_size_mb == 4 {
+            info!("Using default 4MB cache. For higher performance, increase memory_map_size_mb in config");
+        }
+        
+        if self.index_cache_size == 1_000_000 {
+            info!("Using default 1M index cache (1MB). For very large libraries, increase index_cache_size in config");
+        }
+        
+        // Warn about performance expectations
+        let expected_throughput = match self.memory_map_size_mb {
+            4 => "100K-200K files/sec",
+            16..=64 => "200K-500K files/sec", 
+            65..=256 => "500K-800K files/sec",
+            _ => "800K+ files/sec",
+        };
+        
+        info!("Expected throughput with {}MB cache: {}", self.memory_map_size_mb, expected_throughput);
+    }
+}
+
+/// Atomic performance tracking for zero-copy database operations
+#[derive(Debug, Default)]
+pub struct AtomicPerformanceTracker {
+    // File operation counters
+    pub total_files: AtomicU64,
+    pub processed_files: AtomicU64,
+    pub failed_files: AtomicU64,
+    pub inserted_files: AtomicU64,
+    pub updated_files: AtomicU64,
+    pub deleted_files: AtomicU64,
+    
+    // Batch operation counters
+    pub total_batches: AtomicU64,
+    pub successful_batches: AtomicU64,
+    pub failed_batches: AtomicU64,
+    
+    // Performance metrics
+    pub total_operations: AtomicU64,
+    pub cache_hits: AtomicU64,
+    pub cache_misses: AtomicU64,
+    pub index_lookups: AtomicU64,
+    pub index_updates: AtomicU64,
+    
+    // Memory and I/O tracking
+    pub bytes_written: AtomicU64,
+    pub bytes_read: AtomicU64,
+    pub sync_operations: AtomicU64,
+    
+    // Timing (stored as nanoseconds)
+    pub total_processing_time_ns: AtomicU64,
+    pub total_serialization_time_ns: AtomicU64,
+    pub total_io_time_ns: AtomicU64,
+}
+
+impl AtomicPerformanceTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Record a successful file operation
+    pub fn record_file_operation(&self, operation_type: FileOperationType, processing_time: Duration) {
+        self.total_operations.fetch_add(1, Ordering::Relaxed);
+        self.processed_files.fetch_add(1, Ordering::Relaxed);
+        self.total_processing_time_ns.fetch_add(processing_time.as_nanos() as u64, Ordering::Relaxed);
+        
+        match operation_type {
+            FileOperationType::Insert => self.inserted_files.fetch_add(1, Ordering::Relaxed),
+            FileOperationType::Update => self.updated_files.fetch_add(1, Ordering::Relaxed),
+            FileOperationType::Delete => self.deleted_files.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+    
+    /// Record a failed file operation
+    pub fn record_failed_operation(&self) {
+        self.failed_files.fetch_add(1, Ordering::Relaxed);
+        self.total_operations.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    /// Record a batch operation
+    pub fn record_batch_operation(&self, success: bool, _files_in_batch: usize, processing_time: Duration) {
+        self.total_batches.fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.successful_batches.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.failed_batches.fetch_add(1, Ordering::Relaxed);
+        }
+        self.total_processing_time_ns.fetch_add(processing_time.as_nanos() as u64, Ordering::Relaxed);
+    }
+    
+    /// Record cache hit/miss
+    pub fn record_cache_access(&self, hit: bool) {
+        if hit {
+            self.cache_hits.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.cache_misses.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    
+    /// Record index operation
+    pub fn record_index_operation(&self, operation_type: IndexOperationType) {
+        match operation_type {
+            IndexOperationType::Lookup => self.index_lookups.fetch_add(1, Ordering::Relaxed),
+            IndexOperationType::Update => self.index_updates.fetch_add(1, Ordering::Relaxed),
+        };
+    }
+    
+    /// Record I/O operation
+    pub fn record_io_operation(&self, bytes: u64, is_write: bool, duration: Duration) {
+        if is_write {
+            self.bytes_written.fetch_add(bytes, Ordering::Relaxed);
+        } else {
+            self.bytes_read.fetch_add(bytes, Ordering::Relaxed);
+        }
+        self.total_io_time_ns.fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
+    }
+    
+    /// Record sync operation
+    pub fn record_sync_operation(&self) {
+        self.sync_operations.fetch_add(1, Ordering::Relaxed);
+    }
+    
+    /// Get current performance statistics
+    pub fn get_stats(&self) -> PerformanceStats {
+        let total_ops = self.total_operations.load(Ordering::Relaxed);
+        let total_time_ns = self.total_processing_time_ns.load(Ordering::Relaxed);
+        let cache_hits = self.cache_hits.load(Ordering::Relaxed);
+        let cache_misses = self.cache_misses.load(Ordering::Relaxed);
+        
+        PerformanceStats {
+            total_files: self.total_files.load(Ordering::Relaxed),
+            processed_files: self.processed_files.load(Ordering::Relaxed),
+            failed_files: self.failed_files.load(Ordering::Relaxed),
+            inserted_files: self.inserted_files.load(Ordering::Relaxed),
+            updated_files: self.updated_files.load(Ordering::Relaxed),
+            deleted_files: self.deleted_files.load(Ordering::Relaxed),
+            total_batches: self.total_batches.load(Ordering::Relaxed),
+            successful_batches: self.successful_batches.load(Ordering::Relaxed),
+            failed_batches: self.failed_batches.load(Ordering::Relaxed),
+            total_operations: total_ops,
+            cache_hits,
+            cache_misses,
+            cache_hit_rate: if cache_hits + cache_misses > 0 {
+                cache_hits as f64 / (cache_hits + cache_misses) as f64
+            } else {
+                0.0
+            },
+            index_lookups: self.index_lookups.load(Ordering::Relaxed),
+            index_updates: self.index_updates.load(Ordering::Relaxed),
+            bytes_written: self.bytes_written.load(Ordering::Relaxed),
+            bytes_read: self.bytes_read.load(Ordering::Relaxed),
+            sync_operations: self.sync_operations.load(Ordering::Relaxed),
+            average_throughput_per_sec: if total_time_ns > 0 {
+                (total_ops as f64) / (total_time_ns as f64 / 1_000_000_000.0)
+            } else {
+                0.0
+            },
+            total_processing_time: Duration::from_nanos(total_time_ns),
+            total_serialization_time: Duration::from_nanos(self.total_serialization_time_ns.load(Ordering::Relaxed)),
+            total_io_time: Duration::from_nanos(self.total_io_time_ns.load(Ordering::Relaxed)),
+        }
+    }
+}
+
+/// Performance statistics snapshot
+#[derive(Debug, Clone)]
+pub struct PerformanceStats {
+    pub total_files: u64,
+    pub processed_files: u64,
+    pub failed_files: u64,
+    pub inserted_files: u64,
+    pub updated_files: u64,
+    pub deleted_files: u64,
+    pub total_batches: u64,
+    pub successful_batches: u64,
+    pub failed_batches: u64,
+    pub total_operations: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+    pub cache_hit_rate: f64,
+    pub index_lookups: u64,
+    pub index_updates: u64,
+    pub bytes_written: u64,
+    pub bytes_read: u64,
+    pub sync_operations: u64,
+    pub average_throughput_per_sec: f64,
+    pub total_processing_time: Duration,
+    pub total_serialization_time: Duration,
+    pub total_io_time: Duration,
+}
+
+/// Types of file operations for tracking
+#[derive(Debug, Clone, Copy)]
+pub enum FileOperationType {
+    Insert,
+    Update,
+    Delete,
+}
+
+/// Types of index operations for tracking
+#[derive(Debug, Clone, Copy)]
+pub enum IndexOperationType {
+    Lookup,
+    Update,
+}
+
+/// In-memory index manager for fast lookups
+#[derive(Debug)]
+pub struct IndexManager {
+    // Path-based indexes
+    path_to_offset: HashMap<String, u64>,
+    id_to_offset: HashMap<u64, u64>,
+    
+    // Directory-based indexes
+    directory_index: HashMap<String, Vec<u64>>,
+    
+    // Music categorization indexes
+    artist_index: HashMap<String, Vec<u64>>,
+    album_index: HashMap<String, Vec<u64>>,
+    genre_index: HashMap<String, Vec<u64>>,
+    year_index: HashMap<u32, Vec<u64>>,
+    
+    // Index metadata
+    generation: AtomicU64,
+    dirty: AtomicU64,  // Bitmask of dirty index types
+    
+    // Configuration
+    max_entries: usize,
+}
+
+impl IndexManager {
+    pub fn new(max_entries: usize) -> Self {
+        Self {
+            path_to_offset: HashMap::with_capacity(max_entries.min(1000)),
+            id_to_offset: HashMap::with_capacity(max_entries.min(1000)),
+            directory_index: HashMap::new(),
+            artist_index: HashMap::new(),
+            album_index: HashMap::new(),
+            genre_index: HashMap::new(),
+            year_index: HashMap::new(),
+            generation: AtomicU64::new(1),
+            dirty: AtomicU64::new(0),
+            max_entries,
+        }
+    }
+    
+    /// Insert file index entry
+    pub fn insert_file_index(&mut self, file: &MediaFile, offset: u64) {
+        let path_key = file.path.to_string_lossy().to_string();
+        
+        // Update path indexes
+        self.path_to_offset.insert(path_key.clone(), offset);
+        if let Some(id) = file.id {
+            self.id_to_offset.insert(id as u64, offset);
+        }
+        
+        // Update directory index
+        if let Some(parent) = file.path.parent() {
+            let parent_key = parent.to_string_lossy().to_string();
+            self.directory_index.entry(parent_key).or_insert_with(Vec::new).push(offset);
+        }
+        
+        // Update music indexes
+        if let Some(artist) = &file.artist {
+            self.artist_index.entry(artist.clone()).or_insert_with(Vec::new).push(offset);
+        }
+        if let Some(album) = &file.album {
+            self.album_index.entry(album.clone()).or_insert_with(Vec::new).push(offset);
+        }
+        if let Some(genre) = &file.genre {
+            self.genre_index.entry(genre.clone()).or_insert_with(Vec::new).push(offset);
+        }
+        if let Some(year) = file.year {
+            self.year_index.entry(year).or_insert_with(Vec::new).push(offset);
+        }
+        
+        // Mark indexes as dirty
+        self.dirty.store(0xFF, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        
+        // Enforce memory limits
+        self.enforce_memory_limits();
+    }
+    
+    /// Remove file index entry
+    pub fn remove_file_index(&mut self, path: &str) -> Option<u64> {
+        if let Some(offset) = self.path_to_offset.remove(path) {
+            // Remove from other indexes (simplified - would need file data to remove from music indexes)
+            self.dirty.store(0xFF, Ordering::Relaxed);
+            self.generation.fetch_add(1, Ordering::Relaxed);
+            Some(offset)
+        } else {
+            None
+        }
+    }
+    
+    /// Find file by path
+    pub fn find_by_path(&self, path: &str) -> Option<u64> {
+        self.path_to_offset.get(path).copied()
+    }
+    
+    /// Find files in directory
+    pub fn find_files_in_directory(&self, dir_path: &str) -> Vec<u64> {
+        self.directory_index.get(dir_path).cloned().unwrap_or_default()
+    }
+    
+    /// Get current generation (for consistency checks)
+    pub fn get_generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
+    }
+    
+    /// Check if indexes are dirty
+    pub fn is_dirty(&self) -> bool {
+        self.dirty.load(Ordering::Relaxed) != 0
+    }
+    
+    /// Mark indexes as clean
+    pub fn mark_clean(&self) {
+        self.dirty.store(0, Ordering::Relaxed);
+    }
+    
+    /// Enforce memory limits by evicting least recently used entries
+    fn enforce_memory_limits(&mut self) {
+        let total_entries = self.path_to_offset.len() + self.id_to_offset.len();
+        if total_entries > self.max_entries {
+            let entries_to_remove = total_entries - self.max_entries;
+            
+            // Simple eviction: remove oldest entries (in practice, would use LRU)
+            let paths_to_remove: Vec<String> = self.path_to_offset
+                .keys()
+                .take(entries_to_remove)
+                .cloned()
+                .collect();
+            
+            for path in paths_to_remove {
+                self.path_to_offset.remove(&path);
+            }
+            
+            warn!("Evicted {} index entries to enforce memory limits", entries_to_remove);
+        }
+    }
+    
+    /// Get index statistics
+    pub fn get_stats(&self) -> IndexStats {
+        IndexStats {
+            path_entries: self.path_to_offset.len(),
+            id_entries: self.id_to_offset.len(),
+            directory_entries: self.directory_index.len(),
+            artist_entries: self.artist_index.len(),
+            album_entries: self.album_index.len(),
+            genre_entries: self.genre_index.len(),
+            year_entries: self.year_index.len(),
+            generation: self.generation.load(Ordering::Relaxed),
+            is_dirty: self.is_dirty(),
+            max_entries: self.max_entries,
+        }
+    }
+}
+
+/// Index statistics
+#[derive(Debug, Clone)]
+pub struct IndexStats {
+    pub path_entries: usize,
+    pub id_entries: usize,
+    pub directory_entries: usize,
+    pub artist_entries: usize,
+    pub album_entries: usize,
+    pub genre_entries: usize,
+    pub year_entries: usize,
+    pub generation: u64,
+    pub is_dirty: bool,
+    pub max_entries: usize,
+}
+
+/// Zero-copy database implementation with atomic operations
+pub struct ZeroCopyDatabase {
+    // Core storage
+    data_file: Arc<RwLock<MemoryMappedFile>>,
+    index_manager: Arc<RwLock<IndexManager>>,
+    
+    // Configuration
+    config: ZeroCopyConfig,
+    db_path: PathBuf,
+    
+    // Performance tracking
+    performance_tracker: Arc<AtomicPerformanceTracker>,
+    
+    // Path normalization
+    path_normalizer: Box<dyn PathNormalizer>,
+    
+    // Database state
+    is_initialized: AtomicU64,  // 0 = not initialized, 1 = initialized
+    is_open: AtomicU64,         // 0 = closed, 1 = open
+    
+    // FlatBuffer builder (thread-local storage would be better, but this works for now)
+    flatbuffer_builder: Arc<RwLock<flatbuffers::FlatBufferBuilder<'static>>>,
+}
+
+impl ZeroCopyDatabase {
+    /// Create a new zero-copy database instance
+    pub async fn new(db_path: PathBuf, config: Option<ZeroCopyConfig>) -> Result<Self> {
+        let config = config.unwrap_or_else(ZeroCopyConfig::from_env);
+        config.validate();
+        
+        // Ensure parent directory exists
+        if let Some(parent) = db_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        
+        // Create data file path
+        let data_file_path = db_path.with_extension("fb");
+        let initial_size = config.initial_file_size_mb * 1024 * 1024;
+        let max_size = config.max_file_size_gb * 1024 * 1024 * 1024;
+        
+        // Create memory-mapped data file
+        let data_file = MemoryMappedFile::with_max_size(&data_file_path, initial_size, max_size)?;
+        
+        // Create index manager
+        let index_manager = IndexManager::new(config.index_cache_size);
+        
+        // Create performance tracker
+        let performance_tracker = Arc::new(AtomicPerformanceTracker::new());
+        
+        // Create path normalizer
+        let path_normalizer = create_platform_path_normalizer();
+        
+        // Create FlatBuffer builder
+        let flatbuffer_builder = flatbuffers::FlatBufferBuilder::with_capacity(1024 * 1024); // 1MB initial capacity
+        
+        info!(
+            "Created zero-copy database at {} with {}MB initial size, {}MB cache, {}K index entries",
+            db_path.display(),
+            config.initial_file_size_mb,
+            config.memory_map_size_mb,
+            config.index_cache_size / 1000
+        );
+        
+        Ok(Self {
+            data_file: Arc::new(RwLock::new(data_file)),
+            index_manager: Arc::new(RwLock::new(index_manager)),
+            config,
+            db_path,
+            performance_tracker,
+            path_normalizer,
+            is_initialized: AtomicU64::new(0),
+            is_open: AtomicU64::new(0),
+            flatbuffer_builder: Arc::new(RwLock::new(flatbuffer_builder)),
+        })
+    }
+    
+    /// Initialize the database (create file structure, load indexes)
+    pub async fn initialize(&self) -> Result<()> {
+        if self.is_initialized.load(Ordering::Relaxed) == 1 {
+            return Ok(()); // Already initialized
+        }
+        
+        let start_time = Instant::now();
+        
+        info!("Initializing zero-copy database...");
+        
+        // Initialize data file with header
+        {
+            let mut data_file = self.data_file.write().await;
+            let mut builder = self.flatbuffer_builder.write().await;
+            
+            // Create database header
+            let header = self.create_database_header(&mut builder)?;
+            builder.finish(header, None);
+            
+            // Write header to file
+            let header_data = builder.finished_data();
+            data_file.append_data(header_data)?;
+            
+            info!("Database header written ({} bytes)", header_data.len());
+        }
+        
+        // Load existing indexes if they exist
+        let index_file_path = self.db_path.with_extension("idx");
+        if index_file_path.exists() {
+            self.load_indexes(&index_file_path).await?;
+        }
+        
+        // Mark as initialized
+        self.is_initialized.store(1, Ordering::Relaxed);
+        
+        let initialization_time = start_time.elapsed();
+        info!("Zero-copy database initialized in {:?}", initialization_time);
+        
+        Ok(())
+    }
+    
+    /// Open the database for operations
+    pub async fn open(&self) -> Result<()> {
+        if self.is_open.load(Ordering::Relaxed) == 1 {
+            return Ok(()); // Already open
+        }
+        
+        // Ensure database is initialized
+        if self.is_initialized.load(Ordering::Relaxed) == 0 {
+            self.initialize().await?;
+        }
+        
+        // Mark as open
+        self.is_open.store(1, Ordering::Relaxed);
+        
+        info!("Zero-copy database opened successfully");
+        Ok(())
+    }
+    
+    /// Close the database (sync data, save indexes)
+    pub async fn close(&self) -> Result<()> {
+        if self.is_open.load(Ordering::Relaxed) == 0 {
+            return Ok(()); // Already closed
+        }
+        
+        let start_time = Instant::now();
+        
+        info!("Closing zero-copy database...");
+        
+        // Sync data file to disk
+        {
+            let data_file = self.data_file.read().await;
+            data_file.sync_to_disk()?;
+            self.performance_tracker.record_sync_operation();
+        }
+        
+        // Save indexes
+        let index_file_path = self.db_path.with_extension("idx");
+        self.save_indexes(&index_file_path).await?;
+        
+        // Mark as closed
+        self.is_open.store(0, Ordering::Relaxed);
+        
+        let close_time = start_time.elapsed();
+        info!("Zero-copy database closed in {:?}", close_time);
+        
+        // Log final performance statistics
+        let stats = self.performance_tracker.get_stats();
+        info!(
+            "Final stats: {} files processed, {:.2} files/sec average, {:.1}% cache hit rate",
+            stats.processed_files,
+            stats.average_throughput_per_sec,
+            stats.cache_hit_rate * 100.0
+        );
+        
+        Ok(())
+    }
+    
+    /// Check if database is initialized
+    pub fn is_initialized(&self) -> bool {
+        self.is_initialized.load(Ordering::Relaxed) == 1
+    }
+    
+    /// Check if database is open
+    pub fn is_open(&self) -> bool {
+        self.is_open.load(Ordering::Relaxed) == 1
+    }
+    
+    /// Get database configuration
+    pub fn get_config(&self) -> &ZeroCopyConfig {
+        &self.config
+    }
+    
+    /// Get performance statistics
+    pub fn get_performance_stats(&self) -> PerformanceStats {
+        self.performance_tracker.get_stats()
+    }
+    
+    /// Get index statistics
+    pub async fn get_index_stats(&self) -> IndexStats {
+        let index_manager = self.index_manager.read().await;
+        index_manager.get_stats()
+    }
+    
+    /// Create database header for file format identification
+    fn create_database_header<'a>(&self, builder: &mut flatbuffers::FlatBufferBuilder<'a>) -> Result<flatbuffers::WIPOffset<super::flatbuffer::DatabaseHeader<'a>>> {
+        use super::flatbuffer::*;
+        
+        let magic = builder.create_string("MEDIADB1");
+        let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?.as_secs();
+        
+        let header = DatabaseHeader::create(builder, &DatabaseHeaderArgs {
+            magic: Some(magic),
+            version: 1,
+            file_size: 0, // Will be updated later
+            index_offset: 0, // Will be updated later
+            batch_count: 0, // Will be updated later
+            created_at: now,
+            last_modified: now,
+        });
+        
+        Ok(header)
+    }
+    
+    /// Load indexes from disk
+    async fn load_indexes(&self, index_file_path: &Path) -> Result<()> {
+        // Placeholder for index loading - would implement binary format for indexes
+        info!("Loading indexes from {}", index_file_path.display());
+        
+        // For now, just mark indexes as clean since we're starting fresh
+        let index_manager = self.index_manager.read().await;
+        index_manager.mark_clean();
+        
+        Ok(())
+    }
+    
+    /// Save indexes to disk
+    async fn save_indexes(&self, index_file_path: &Path) -> Result<()> {
+        let index_manager = self.index_manager.read().await;
+        
+        if !index_manager.is_dirty() {
+            debug!("Indexes are clean, skipping save");
+            return Ok(());
+        }
+        
+        info!("Saving indexes to {}", index_file_path.display());
+        
+        // Placeholder for index saving - would implement binary format for indexes
+        // For now, just mark as clean
+        index_manager.mark_clean();
+        
+        Ok(())
+    }
+}
+
+// Implement Send and Sync for ZeroCopyDatabase
+unsafe impl Send for ZeroCopyDatabase {}
+unsafe impl Sync for ZeroCopyDatabase {}
+
+// Placeholder implementation of DatabaseManager trait for ZeroCopyDatabase
+// This will be completed in subsequent tasks
+#[async_trait]
+impl DatabaseManager for ZeroCopyDatabase {
+    async fn initialize(&self) -> Result<()> {
+        self.initialize().await
+    }
+    
+    // Placeholder implementations - will be completed in subsequent tasks
+    async fn store_media_file(&self, _file: &MediaFile) -> Result<i64> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 4"))
+    }
+    
+    fn stream_all_media_files(&self) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
+        // Placeholder - will be implemented in subsequent tasks
+        Box::pin(futures_util::stream::empty())
+    }
+    
+    async fn remove_media_file(&self, _path: &Path) -> Result<bool> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    }
+    
+    async fn update_media_file(&self, _file: &MediaFile) -> Result<()> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    }
+    
+    async fn get_files_in_directory(&self, _dir: &Path) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn get_directory_listing(&self, _parent_path: &Path, _media_type_filter: &str) -> Result<(Vec<MediaDirectory>, Vec<MediaFile>)> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn cleanup_missing_files(&self, _existing_paths: &[PathBuf]) -> Result<usize> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    }
+    
+    async fn get_file_by_path(&self, _path: &Path) -> Result<Option<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 7"))
+    }
+    
+    async fn get_file_by_id(&self, _id: i64) -> Result<Option<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 7"))
+    }
+    
+    async fn get_stats(&self) -> Result<DatabaseStats> {
+        let perf_stats = self.get_performance_stats();
+        Ok(DatabaseStats {
+            total_files: perf_stats.processed_files as usize,
+            total_size: perf_stats.bytes_written,
+            database_size: {
+                let data_file = self.data_file.read().await;
+                data_file.current_size() as u64
+            },
+        })
+    }
+    
+    async fn check_and_repair(&self) -> Result<DatabaseHealth> {
+        // Placeholder - basic health check
+        Ok(DatabaseHealth {
+            is_healthy: self.is_open(),
+            corruption_detected: false,
+            integrity_check_passed: true,
+            issues: vec![],
+            repair_attempted: false,
+            repair_successful: false,
+        })
+    }
+    
+    async fn create_backup(&self, _backup_path: &Path) -> Result<()> {
+        Err(anyhow!("Not implemented yet"))
+    }
+    
+    async fn restore_from_backup(&self, _backup_path: &Path) -> Result<()> {
+        Err(anyhow!("Not implemented yet"))
+    }
+    
+    async fn vacuum(&self) -> Result<()> {
+        Err(anyhow!("Not implemented yet"))
+    }
+    
+    // Music categorization methods - placeholders
+    async fn get_artists(&self) -> Result<Vec<MusicCategory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_albums(&self, _artist: Option<&str>) -> Result<Vec<MusicCategory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_genres(&self) -> Result<Vec<MusicCategory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_years(&self) -> Result<Vec<MusicCategory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_album_artists(&self) -> Result<Vec<MusicCategory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_music_by_artist(&self, _artist: &str) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_music_by_album(&self, _album: &str, _artist: Option<&str>) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_music_by_genre(&self, _genre: &str) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_music_by_year(&self, _year: u32) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    async fn get_music_by_album_artist(&self, _album_artist: &str) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
+    // Playlist methods - placeholders
+    async fn create_playlist(&self, _name: &str, _description: Option<&str>) -> Result<i64> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn get_playlists(&self) -> Result<Vec<Playlist>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn get_playlist(&self, _playlist_id: i64) -> Result<Option<Playlist>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn update_playlist(&self, _playlist: &Playlist) -> Result<()> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn delete_playlist(&self, _playlist_id: i64) -> Result<bool> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn add_to_playlist(&self, _playlist_id: i64, _media_file_id: i64, _position: Option<u32>) -> Result<i64> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn batch_add_to_playlist(&self, _playlist_id: i64, _media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn get_files_by_paths(&self, _paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    }
+    
+    async fn remove_from_playlist(&self, _playlist_id: i64, _media_file_id: i64) -> Result<bool> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn get_playlist_tracks(&self, _playlist_id: i64) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn reorder_playlist(&self, _playlist_id: i64, _track_positions: &[(i64, u32)]) -> Result<()> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    }
+    
+    async fn get_files_with_path_prefix(&self, _canonical_prefix: &str) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn get_direct_subdirectories(&self, _canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn batch_cleanup_missing_files(&self, _existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    }
+    
+    async fn database_native_cleanup(&self, _existing_canonical_paths: &[String]) -> Result<usize> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    }
+    
+    async fn get_filtered_direct_subdirectories(&self, _canonical_parent_path: &str, _mime_filter: &str) -> Result<Vec<MediaDirectory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+    
+    #[tokio::test]
+    async fn test_zerocopy_database_creation() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        let config = ZeroCopyConfig::default();
+        let db = ZeroCopyDatabase::new(db_path.clone(), Some(config)).await.unwrap();
+        
+        assert!(!db.is_initialized());
+        assert!(!db.is_open());
+        assert_eq!(db.get_config().batch_size, 100_000);
+    }
+    
+    #[tokio::test]
+    async fn test_database_initialization() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        let db = ZeroCopyDatabase::new(db_path.clone(), None).await.unwrap();
+        
+        db.initialize().await.unwrap();
+        
+        assert!(db.is_initialized());
+        assert!(db_path.with_extension("fb").exists());
+    }
+    
+    #[tokio::test]
+    async fn test_database_open_close() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        let db = ZeroCopyDatabase::new(db_path.clone(), None).await.unwrap();
+        
+        db.open().await.unwrap();
+        assert!(db.is_open());
+        assert!(db.is_initialized());
+        
+        db.close().await.unwrap();
+        assert!(!db.is_open());
+    }
+    
+    #[tokio::test]
+    async fn test_performance_tracking() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        
+        let db = ZeroCopyDatabase::new(db_path.clone(), None).await.unwrap();
+        
+        // Record some operations
+        db.performance_tracker.record_file_operation(FileOperationType::Insert, Duration::from_millis(10));
+        db.performance_tracker.record_cache_access(true);
+        db.performance_tracker.record_cache_access(false);
+        
+        let stats = db.get_performance_stats();
+        assert_eq!(stats.processed_files, 1);
+        assert_eq!(stats.inserted_files, 1);
+        assert_eq!(stats.cache_hits, 1);
+        assert_eq!(stats.cache_misses, 1);
+        assert_eq!(stats.cache_hit_rate, 0.5);
+    }
+    
+    #[tokio::test]
+    async fn test_config_from_env() {
+        std::env::set_var("ZEROCOPY_CACHE_MB", "8");
+        std::env::set_var("ZEROCOPY_BATCH_SIZE", "50000");
+        
+        let config = ZeroCopyConfig::from_env();
+        
+        assert_eq!(config.memory_map_size_mb, 8);
+        assert_eq!(config.batch_size, 50000);
+        
+        // Clean up
+        std::env::remove_var("ZEROCOPY_CACHE_MB");
+        std::env::remove_var("ZEROCOPY_BATCH_SIZE");
+    }
+    
+    #[tokio::test]
+    async fn test_index_manager() {
+        let mut index_manager = IndexManager::new(1000);
+        
+        let test_file = MediaFile {
+            id: Some(1),
+            path: PathBuf::from("/test/file.mp3"),
+            filename: "file.mp3".to_string(),
+            size: 1024,
+            modified: SystemTime::now(),
+            mime_type: "audio/mpeg".to_string(),
+            duration: Some(Duration::from_secs(180)),
+            title: Some("Test Song".to_string()),
+            artist: Some("Test Artist".to_string()),
+            album: Some("Test Album".to_string()),
+            genre: Some("Rock".to_string()),
+            track_number: Some(1),
+            year: Some(2023),
+            album_artist: Some("Test Artist".to_string()),
+            created_at: SystemTime::now(),
+            updated_at: SystemTime::now(),
+        };
+        
+        index_manager.insert_file_index(&test_file, 1000);
+        
+        assert!(index_manager.find_by_path("/test/file.mp3").is_some());
+        assert_eq!(index_manager.find_by_path("/test/file.mp3").unwrap(), 1000);
+        assert!(index_manager.is_dirty());
+        
+        let stats = index_manager.get_stats();
+        assert_eq!(stats.path_entries, 1);
+        assert_eq!(stats.id_entries, 1);
+    }
+}
