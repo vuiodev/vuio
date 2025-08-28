@@ -43,57 +43,76 @@ impl ZeroCopyProfile {
         }
     }
     
-    /// Small configuration (128MB cache)
+    /// Small configuration (4MB RAM usage - optimized for index and batch)
     pub fn small() -> Self {
         Self {
-            name: "Small (128MB cache, 50K index, 2K batch)".to_string(),
+            name: "Small (4MB RAM: 2M index, 100K batch)".to_string(),
             config: ZeroCopyConfig {
-                memory_map_size_mb: 128,
-                index_cache_size: 50_000,
-                batch_size: 2_000,
-                initial_file_size_mb: 10,
-                max_file_size_gb: 5,
-                sync_frequency: Duration::from_secs(30),
-                enable_wal: true,
-                performance_monitoring_interval: Duration::from_secs(300),
-                ..Default::default()
-            },
-        }
-    }
-    
-    /// Medium configuration (256MB cache)
-    pub fn medium() -> Self {
-        Self {
-            name: "Medium (256MB cache, 100K index, 5K batch)".to_string(),
-            config: ZeroCopyConfig {
-                memory_map_size_mb: 256,
-                index_cache_size: 100_000,
-                batch_size: 5_000,
-                initial_file_size_mb: 50,
-                max_file_size_gb: 10,
-                sync_frequency: Duration::from_secs(15),
-                enable_wal: true,
-                enable_compression: false, // Keep disabled for speed
+                memory_map_size_mb: 4,                              // Small cache
+                index_cache_size: 2_000_000,                        // 2M entries for better performance
+                batch_size: 100_000,                                // Large batches for efficiency
+                initial_file_size_mb: 100,                          // Larger initial file
+                max_file_size_gb: 20,                               // Allow growth
+                sync_frequency: Duration::from_secs(30),            // More frequent sync
+                enable_wal: true,                                   // Enable WAL for performance
                 performance_monitoring_interval: Duration::from_secs(180),
                 ..Default::default()
             },
         }
     }
     
-    /// Large configuration (1GB cache)
+    /// Medium configuration (128MB RAM usage - aggressive index and batch)
+    pub fn medium() -> Self {
+        Self {
+            name: "Medium (128MB RAM: 6M index, 300K batch)".to_string(),
+            config: ZeroCopyConfig {
+                memory_map_size_mb: 32,                             // Moderate cache
+                index_cache_size: 6_000_000,                        // 6M entries for high performance
+                batch_size: 300_000,                                // Very large batches
+                initial_file_size_mb: 200,                          // Large initial file
+                max_file_size_gb: 50,                               // Allow significant growth
+                sync_frequency: Duration::from_secs(15),            // Frequent sync
+                enable_wal: true,                                   // Enable WAL
+                enable_compression: false,                          // Keep disabled for speed
+                performance_monitoring_interval: Duration::from_secs(120),
+                ..Default::default()
+            },
+        }
+    }
+    
+    /// Large configuration (256MB RAM usage - maximum index and batch)
     pub fn large() -> Self {
         Self {
-            name: "Large (1GB cache, 500K index, 10K batch)".to_string(),
+            name: "Large (256MB RAM: 8M index, 500K batch)".to_string(),
             config: ZeroCopyConfig {
-                memory_map_size_mb: 1024,
-                index_cache_size: 500_000,
-                batch_size: 10_000,
-                initial_file_size_mb: 100,
-                max_file_size_gb: 50,
-                sync_frequency: Duration::from_secs(10),
-                enable_wal: true,
-                enable_compression: false, // Keep disabled for maximum speed
-                performance_monitoring_interval: Duration::from_secs(120),
+                memory_map_size_mb: 64,                             // Large cache
+                index_cache_size: 8_000_000,                        // 8M entries for excellent performance
+                batch_size: 500_000,                                // Massive batches
+                initial_file_size_mb: 300,                          // Large initial file
+                max_file_size_gb: 75,                               // Large growth capacity
+                sync_frequency: Duration::from_secs(10),            // Very frequent sync
+                enable_wal: true,                                   // Enable WAL
+                enable_compression: false,                          // Disabled for maximum speed
+                performance_monitoring_interval: Duration::from_secs(60),
+                ..Default::default()
+            },
+        }
+    }
+    
+    /// Extreme configuration (1GB RAM usage - absolute maximum)
+    pub fn extreme() -> Self {
+        Self {
+            name: "Extreme (1GB RAM: 10M index, 1M batch)".to_string(),
+            config: ZeroCopyConfig {
+                memory_map_size_mb: 512,                            // Maximum cache for memory mapping
+                index_cache_size: 10_000_000,                       // Maximum index entries
+                batch_size: 1_000_000,                              // Maximum batch size
+                initial_file_size_mb: 1000,                         // Very large initial file (1GB)
+                max_file_size_gb: 100,                              // Maximum growth
+                sync_frequency: Duration::from_secs(5),             // Extremely frequent sync
+                enable_wal: true,                                   // Enable WAL
+                enable_compression: false,                          // Disabled for absolute speed
+                performance_monitoring_interval: Duration::from_secs(30),
                 ..Default::default()
             },
         }
@@ -450,6 +469,7 @@ impl DatabasePerformanceComparison {
             ZeroCopyProfile::small(),
             ZeroCopyProfile::medium(),
             ZeroCopyProfile::large(),
+            ZeroCopyProfile::extreme(),
         ];
         
         let mut all_results = Vec::new();
@@ -514,36 +534,47 @@ impl DatabasePerformanceComparison {
         println!("      ZEROCOPY_BATCH_SIZE=100");
         println!();
         
-        println!("🖥️  SMALL (128MB cache, 50K index, 2K batch):");
+        println!("🖥️  SMALL (4MB cache, 2M index, 100K batch):");
         println!("   ✅ Best for: Small servers, Raspberry Pi 4, containers with 1-2GB RAM");
-        println!("   ✅ Use when: Medium media libraries (10K-50K files), moderate performance needs");
+        println!("   ✅ Use when: Medium media libraries (10K-100K files), good performance");
         println!("   ⚙️  Environment variables:");
-        println!("      ZEROCOPY_CACHE_MB=128");
-        println!("      ZEROCOPY_INDEX_SIZE=50000");
-        println!("      ZEROCOPY_BATCH_SIZE=2000");
+        println!("      ZEROCOPY_CACHE_MB=4");
+        println!("      ZEROCOPY_INDEX_SIZE=2000000");
+        println!("      ZEROCOPY_BATCH_SIZE=100000");
         println!("      ZEROCOPY_ENABLE_WAL=true");
         println!();
         
-        println!("🖥️  MEDIUM (256MB cache, 100K index, 5K batch):");
+        println!("🖥️  MEDIUM (32MB cache, 6M index, 300K batch):");
         println!("   ✅ Best for: Desktop systems, small NAS, containers with 4-8GB RAM");
-        println!("   ✅ Use when: Large media libraries (50K-200K files), good performance needs");
+        println!("   ✅ Use when: Large media libraries (100K-500K files), high performance");
         println!("   ⚙️  Environment variables:");
-        println!("      ZEROCOPY_CACHE_MB=256");
-        println!("      ZEROCOPY_INDEX_SIZE=100000");
-        println!("      ZEROCOPY_BATCH_SIZE=5000");
+        println!("      ZEROCOPY_CACHE_MB=32");
+        println!("      ZEROCOPY_INDEX_SIZE=6000000");
+        println!("      ZEROCOPY_BATCH_SIZE=300000");
         println!("      ZEROCOPY_ENABLE_WAL=true");
         println!("      ZEROCOPY_SYNC_FREQUENCY_SECS=15");
         println!();
         
-        println!("🚀 LARGE (1GB cache, 500K index, 10K batch):");
-        println!("   ✅ Best for: High-end servers, dedicated media servers, 16GB+ RAM");
-        println!("   ✅ Use when: Massive media libraries (200K+ files), maximum performance");
+        println!("🚀 LARGE (64MB cache, 8M index, 500K batch):");
+        println!("   ✅ Best for: High-end servers, dedicated media servers, 8-16GB RAM");
+        println!("   ✅ Use when: Massive media libraries (500K-1M files), maximum performance");
         println!("   ⚙️  Environment variables:");
-        println!("      ZEROCOPY_CACHE_MB=1024");
-        println!("      ZEROCOPY_INDEX_SIZE=500000");
-        println!("      ZEROCOPY_BATCH_SIZE=10000");
+        println!("      ZEROCOPY_CACHE_MB=64");
+        println!("      ZEROCOPY_INDEX_SIZE=8000000");
+        println!("      ZEROCOPY_BATCH_SIZE=500000");
         println!("      ZEROCOPY_ENABLE_WAL=true");
         println!("      ZEROCOPY_SYNC_FREQUENCY_SECS=10");
+        println!();
+        
+        println!("⚡ EXTREME (512MB cache, 10M index, 1M batch):");
+        println!("   ✅ Best for: Enterprise servers, cloud instances, 32GB+ RAM");
+        println!("   ✅ Use when: Enormous media libraries (1M+ files), absolute maximum performance");
+        println!("   ⚙️  Environment variables:");
+        println!("      ZEROCOPY_CACHE_MB=512");
+        println!("      ZEROCOPY_INDEX_SIZE=10000000");
+        println!("      ZEROCOPY_BATCH_SIZE=1000000");
+        println!("      ZEROCOPY_ENABLE_WAL=true");
+        println!("      ZEROCOPY_SYNC_FREQUENCY_SECS=5");
         println!();
         
         println!("⚡ PERFORMANCE TIPS:");
