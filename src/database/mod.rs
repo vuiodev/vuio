@@ -13,6 +13,7 @@ use crate::platform::DatabaseError;
 pub mod playlist_formats;
 pub mod flatbuffer;
 pub mod memory_mapped;
+pub mod index_manager;
 pub mod zerocopy;
 
 /// Represents a subdirectory in the media library.

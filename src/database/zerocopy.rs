@@ -10,6 +10,7 @@ use tracing::{debug, info, warn};
 
 use super::memory_mapped::MemoryMappedFile;
 use super::flatbuffer::{BatchSerializer, MediaFileSerializer, BatchOperationType};
+use super::index_manager::{IndexManager, IndexStats, IndexType};
 use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory, DatabaseStats, DatabaseHealth};
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 
@@ -289,173 +290,7 @@ pub enum IndexOperationType {
     Update,
 }
 
-/// In-memory index manager for fast lookups
-#[derive(Debug)]
-pub struct IndexManager {
-    // Path-based indexes
-    path_to_offset: HashMap<String, u64>,
-    id_to_offset: HashMap<u64, u64>,
-    
-    // Directory-based indexes
-    directory_index: HashMap<String, Vec<u64>>,
-    
-    // Music categorization indexes
-    artist_index: HashMap<String, Vec<u64>>,
-    album_index: HashMap<String, Vec<u64>>,
-    genre_index: HashMap<String, Vec<u64>>,
-    year_index: HashMap<u32, Vec<u64>>,
-    
-    // Index metadata
-    generation: AtomicU64,
-    dirty: AtomicU64,  // Bitmask of dirty index types
-    
-    // Configuration
-    max_entries: usize,
-}
 
-impl IndexManager {
-    pub fn new(max_entries: usize) -> Self {
-        Self {
-            path_to_offset: HashMap::with_capacity(max_entries.min(1000)),
-            id_to_offset: HashMap::with_capacity(max_entries.min(1000)),
-            directory_index: HashMap::new(),
-            artist_index: HashMap::new(),
-            album_index: HashMap::new(),
-            genre_index: HashMap::new(),
-            year_index: HashMap::new(),
-            generation: AtomicU64::new(1),
-            dirty: AtomicU64::new(0),
-            max_entries,
-        }
-    }
-    
-    /// Insert file index entry
-    pub fn insert_file_index(&mut self, file: &MediaFile, offset: u64) {
-        let path_key = file.path.to_string_lossy().to_string();
-        
-        // Update path indexes
-        self.path_to_offset.insert(path_key.clone(), offset);
-        if let Some(id) = file.id {
-            self.id_to_offset.insert(id as u64, offset);
-        }
-        
-        // Update directory index
-        if let Some(parent) = file.path.parent() {
-            let parent_key = parent.to_string_lossy().to_string();
-            self.directory_index.entry(parent_key).or_insert_with(Vec::new).push(offset);
-        }
-        
-        // Update music indexes
-        if let Some(artist) = &file.artist {
-            self.artist_index.entry(artist.clone()).or_insert_with(Vec::new).push(offset);
-        }
-        if let Some(album) = &file.album {
-            self.album_index.entry(album.clone()).or_insert_with(Vec::new).push(offset);
-        }
-        if let Some(genre) = &file.genre {
-            self.genre_index.entry(genre.clone()).or_insert_with(Vec::new).push(offset);
-        }
-        if let Some(year) = file.year {
-            self.year_index.entry(year).or_insert_with(Vec::new).push(offset);
-        }
-        
-        // Mark indexes as dirty
-        self.dirty.store(0xFF, Ordering::Relaxed);
-        self.generation.fetch_add(1, Ordering::Relaxed);
-        
-        // Enforce memory limits
-        self.enforce_memory_limits();
-    }
-    
-    /// Remove file index entry
-    pub fn remove_file_index(&mut self, path: &str) -> Option<u64> {
-        if let Some(offset) = self.path_to_offset.remove(path) {
-            // Remove from other indexes (simplified - would need file data to remove from music indexes)
-            self.dirty.store(0xFF, Ordering::Relaxed);
-            self.generation.fetch_add(1, Ordering::Relaxed);
-            Some(offset)
-        } else {
-            None
-        }
-    }
-    
-    /// Find file by path
-    pub fn find_by_path(&self, path: &str) -> Option<u64> {
-        self.path_to_offset.get(path).copied()
-    }
-    
-    /// Find files in directory
-    pub fn find_files_in_directory(&self, dir_path: &str) -> Vec<u64> {
-        self.directory_index.get(dir_path).cloned().unwrap_or_default()
-    }
-    
-    /// Get current generation (for consistency checks)
-    pub fn get_generation(&self) -> u64 {
-        self.generation.load(Ordering::Relaxed)
-    }
-    
-    /// Check if indexes are dirty
-    pub fn is_dirty(&self) -> bool {
-        self.dirty.load(Ordering::Relaxed) != 0
-    }
-    
-    /// Mark indexes as clean
-    pub fn mark_clean(&self) {
-        self.dirty.store(0, Ordering::Relaxed);
-    }
-    
-    /// Enforce memory limits by evicting least recently used entries
-    fn enforce_memory_limits(&mut self) {
-        let total_entries = self.path_to_offset.len() + self.id_to_offset.len();
-        if total_entries > self.max_entries {
-            let entries_to_remove = total_entries - self.max_entries;
-            
-            // Simple eviction: remove oldest entries (in practice, would use LRU)
-            let paths_to_remove: Vec<String> = self.path_to_offset
-                .keys()
-                .take(entries_to_remove)
-                .cloned()
-                .collect();
-            
-            for path in paths_to_remove {
-                self.path_to_offset.remove(&path);
-            }
-            
-            warn!("Evicted {} index entries to enforce memory limits", entries_to_remove);
-        }
-    }
-    
-    /// Get index statistics
-    pub fn get_stats(&self) -> IndexStats {
-        IndexStats {
-            path_entries: self.path_to_offset.len(),
-            id_entries: self.id_to_offset.len(),
-            directory_entries: self.directory_index.len(),
-            artist_entries: self.artist_index.len(),
-            album_entries: self.album_index.len(),
-            genre_entries: self.genre_index.len(),
-            year_entries: self.year_index.len(),
-            generation: self.generation.load(Ordering::Relaxed),
-            is_dirty: self.is_dirty(),
-            max_entries: self.max_entries,
-        }
-    }
-}
-
-/// Index statistics
-#[derive(Debug, Clone)]
-pub struct IndexStats {
-    pub path_entries: usize,
-    pub id_entries: usize,
-    pub directory_entries: usize,
-    pub artist_entries: usize,
-    pub album_entries: usize,
-    pub genre_entries: usize,
-    pub year_entries: usize,
-    pub generation: u64,
-    pub is_dirty: bool,
-    pub max_entries: usize,
-}
 
 /// Result of batch processing operation
 #[derive(Debug, Clone)]
@@ -591,8 +426,9 @@ impl ZeroCopyDatabase {
         // Create memory-mapped data file
         let data_file = MemoryMappedFile::with_max_size(&data_file_path, initial_size, max_size)?;
         
-        // Create index manager
-        let index_manager = IndexManager::new(config.index_cache_size);
+        // Create index manager with memory limits
+        let index_memory_bytes = config.memory_map_size_mb * 1024 * 1024 / 4; // 25% of total memory for indexes
+        let index_manager = IndexManager::new(config.index_cache_size, index_memory_bytes);
         
         // Create performance tracker
         let performance_tracker = Arc::new(AtomicPerformanceTracker::new());
@@ -774,32 +610,14 @@ impl ZeroCopyDatabase {
     
     /// Load indexes from disk
     async fn load_indexes(&self, index_file_path: &Path) -> Result<()> {
-        // Placeholder for index loading - would implement binary format for indexes
-        info!("Loading indexes from {}", index_file_path.display());
-        
-        // For now, just mark indexes as clean since we're starting fresh
-        let index_manager = self.index_manager.read().await;
-        index_manager.mark_clean();
-        
-        Ok(())
+        let mut index_manager = self.index_manager.write().await;
+        index_manager.load_indexes(index_file_path).await
     }
     
     /// Save indexes to disk
     async fn save_indexes(&self, index_file_path: &Path) -> Result<()> {
         let index_manager = self.index_manager.read().await;
-        
-        if !index_manager.is_dirty() {
-            debug!("Indexes are clean, skipping save");
-            return Ok(());
-        }
-        
-        info!("Saving indexes to {}", index_file_path.display());
-        
-        // Placeholder for index saving - would implement binary format for indexes
-        // For now, just mark as clean
-        index_manager.mark_clean();
-        
-        Ok(())
+        index_manager.persist_indexes(index_file_path).await
     }
     
     /// Batch insert files using zero-copy FlatBuffer serialization
@@ -1406,7 +1224,7 @@ mod tests {
     
     #[tokio::test]
     async fn test_index_manager() {
-        let mut index_manager = IndexManager::new(1000);
+        let mut index_manager = IndexManager::new(1000, 1024 * 1024);
         
         let test_file = MediaFile {
             id: Some(1),
