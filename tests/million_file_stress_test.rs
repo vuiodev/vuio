@@ -185,11 +185,12 @@ mod million_file_tests {
         // Generate test files
         let test_files = create_million_test_files(test_size, temp_dir.path());
         
-        // Test Memory-Optimized ZeroCopy
+        // Test Memory-Optimized ZeroCopy with pre-allocated capacity
         let optimized_db_path = temp_dir.path().join("optimized_million.db");
-        let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_profile(
+        let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_capacity(
             optimized_db_path, 
-            PerformanceProfile::Maximum
+            PerformanceProfile::Maximum,
+            test_size  // Pre-allocate for exact number of files
         ).await.unwrap();
         
         optimized_db.initialize().await.unwrap();
@@ -264,12 +265,13 @@ mod million_file_tests {
         let (zerocopy_duration, zerocopy_memory, zerocopy_files, zerocopy_throughput) = 
             benchmark_million_files(&zerocopy_db, &test_files, "Original ZeroCopy").await;
         
-        // Test Memory-Optimized ZeroCopy
+        // Test Memory-Optimized ZeroCopy with pre-allocated capacity
         println!("\n--- Testing Memory-Optimized ZeroCopy ---");
         let optimized_db_path = temp_dir.path().join("optimized_million.db");
-        let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_profile(
+        let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_capacity(
             optimized_db_path, 
-            PerformanceProfile::Maximum
+            PerformanceProfile::Maximum,
+            test_size  // Pre-allocate for exact number of files
         ).await.unwrap();
         
         optimized_db.initialize().await.unwrap();
@@ -342,9 +344,10 @@ mod million_file_tests {
             let test_files = create_million_test_files(test_size, temp_dir.path());
             
             let optimized_db_path = temp_dir.path().join(format!("projection_{}.db", test_size));
-            let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_profile(
+            let optimized_db = MemoryOptimizedZeroCopyDatabase::new_with_capacity(
                 optimized_db_path, 
-                PerformanceProfile::Maximum
+                PerformanceProfile::Maximum,
+                test_size  // Pre-allocate for exact capacity
             ).await.unwrap();
             
             optimized_db.initialize().await.unwrap();

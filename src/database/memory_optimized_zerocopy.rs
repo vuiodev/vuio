@@ -43,14 +43,16 @@ impl MemoryOptimizedZeroCopyDatabase {
         Self::new_with_config(db_path, config).await
     }
     
-    /// Create with custom configuration
-    pub async fn new_with_config(db_path: PathBuf, config: ZeroCopyConfig) -> Result<Self> {
-        info!("Creating memory-optimized ZeroCopy database at {}", db_path.display());
-        info!("Configuration: {:?} profile", config.performance_profile);
+    /// Create with pre-allocated capacity for maximum performance
+    pub async fn new_with_capacity(db_path: PathBuf, profile: PerformanceProfile, expected_files: usize) -> Result<Self> {
+        let config = ZeroCopyConfig::with_performance_profile(profile);
         
+        info!("Creating memory-optimized ZeroCopy database with pre-allocated capacity for {} files", expected_files);
+        
+        // Pre-allocate with exact capacity to eliminate all resize overhead
         Ok(Self {
-            files: Arc::new(RwLock::new(HashMap::new())),
-            path_index: Arc::new(RwLock::new(HashMap::new())),
+            files: Arc::new(RwLock::new(HashMap::with_capacity(expected_files))),
+            path_index: Arc::new(RwLock::new(HashMap::with_capacity(expected_files))),
             next_id: AtomicU64::new(1),
             config,
             path_normalizer: create_platform_path_normalizer(),
@@ -58,6 +60,38 @@ impl MemoryOptimizedZeroCopyDatabase {
             is_initialized: std::sync::atomic::AtomicBool::new(false),
             is_open: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+    
+    /// Create with custom configuration
+    pub async fn new_with_config(db_path: PathBuf, config: ZeroCopyConfig) -> Result<Self> {
+        info!("Creating memory-optimized ZeroCopy database at {}", db_path.display());
+        info!("Configuration: {:?} profile", config.performance_profile);
+        
+        // Pre-allocate HashMaps based on expected capacity for maximum performance
+        let expected_capacity = Self::estimate_capacity_from_profile(&config.performance_profile);
+        info!("Pre-allocating capacity for {} files", expected_capacity);
+        
+        Ok(Self {
+            files: Arc::new(RwLock::new(HashMap::with_capacity(expected_capacity))),
+            path_index: Arc::new(RwLock::new(HashMap::with_capacity(expected_capacity))),
+            next_id: AtomicU64::new(1),
+            config,
+            path_normalizer: create_platform_path_normalizer(),
+            db_path,
+            is_initialized: std::sync::atomic::AtomicBool::new(false),
+            is_open: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+    
+    /// Estimate capacity based on performance profile
+    fn estimate_capacity_from_profile(profile: &PerformanceProfile) -> usize {
+        match profile {
+            PerformanceProfile::Minimal => 100_000,      // 100K files
+            PerformanceProfile::Balanced => 500_000,     // 500K files  
+            PerformanceProfile::HighPerformance => 1_000_000, // 1M files
+            PerformanceProfile::Maximum => 2_000_000,    // 2M files
+            PerformanceProfile::Custom => 1_000_000,     // Default to 1M
+        }
     }
     
     /// Initialize the database
@@ -171,11 +205,15 @@ impl DatabaseManager for MemoryOptimizedZeroCopyDatabase {
             return Ok(Vec::new());
         }
         
+        // Pre-allocate all collections with exact capacity to eliminate resize overhead
         let mut file_ids = Vec::with_capacity(files.len());
         let mut files_map = HashMap::with_capacity(files.len());
         let mut path_map = HashMap::with_capacity(files.len());
         
-        // Process all files first (minimize lock time)
+        // Reserve space in the file_ids vector to avoid any reallocations
+        file_ids.reserve_exact(files.len());
+        
+        // Process all files first (minimize lock time and eliminate allocations)
         for file in files {
             let canonical_path = self.path_normalizer.to_canonical(&file.path)?;
             let file_id = self.next_file_id();
@@ -188,7 +226,7 @@ impl DatabaseManager for MemoryOptimizedZeroCopyDatabase {
             path_map.insert(canonical_path, file_id);
         }
         
-        // Bulk insert with minimal lock time
+        // Bulk insert with minimal lock time - use extend for maximum performance
         {
             let mut files_storage = self.files.write().await;
             files_storage.extend(files_map);
