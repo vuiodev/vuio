@@ -109,6 +109,61 @@ pub trait DatabaseManager: Send + Sync {
     async fn get_direct_subdirectories(&self, parent_path: &str) -> Result<Vec<MediaDirectory>>;
     async fn batch_cleanup_missing_files(&self, existing_paths: &HashSet<String>) -> Result<usize>;
     async fn stream_all_media_files(&self) -> Result<Pin<Box<dyn Stream<Item = Result<MediaFile>>>>>;
+    
+    // Critical performance optimizations
+    async fn database_native_cleanup(&self, existing_paths: &[String]) -> Result<usize>;
+    async fn get_immediate_subdirectories_sql(&self, parent_path: &str) -> Result<Vec<String>>;
+    async fn batch_import_playlist(&self, playlist_id: i64, file_paths: &[String]) -> Result<()>;
+}
+```
+
+**Critical Performance Solutions**:
+
+1. **Database-Native File Cleanup**:
+```sql
+-- Create temporary table with existing paths
+CREATE TEMP TABLE existing_paths (path TEXT PRIMARY KEY);
+INSERT INTO existing_paths VALUES (?), (?), ...;
+
+-- Delete files not in existing paths
+DELETE FROM media_files 
+WHERE canonical_path NOT IN (SELECT path FROM existing_paths);
+
+DROP TABLE existing_paths;
+```
+
+2. **Pure SQL Subdirectory Queries**:
+```sql
+-- Find immediate subdirectories using string manipulation
+SELECT DISTINCT 
+    SUBSTR(canonical_path, 1, 
+           INSTR(SUBSTR(canonical_path, LENGTH(?) + 2), '/') + LENGTH(?) + 1
+    ) as subdirectory_path
+FROM media_files 
+WHERE canonical_path LIKE ? || '/%'
+  AND LENGTH(canonical_path) > LENGTH(?)
+  AND INSTR(SUBSTR(canonical_path, LENGTH(?) + 2), '/') > 0;
+```
+
+3. **Batch Playlist Import**:
+```rust
+async fn batch_import_playlist(&self, playlist_id: i64, file_paths: &[String]) -> Result<()> {
+    let mut tx = self.begin_transaction().await?;
+    
+    // Single query to get all MediaFile IDs for the paths
+    let media_files = self.get_media_files_by_paths(&file_paths).await?;
+    
+    // Batch insert all playlist entries in single transaction
+    let mut stmt = tx.prepare(
+        "INSERT INTO playlist_entries (playlist_id, media_file_id, position) VALUES (?, ?, ?)"
+    ).await?;
+    
+    for (position, media_file) in media_files.iter().enumerate() {
+        stmt.execute((playlist_id, media_file.id, position)).await?;
+    }
+    
+    tx.commit().await?;
+    Ok(())
 }
 ```
 
@@ -117,6 +172,8 @@ pub trait DatabaseManager: Send + Sync {
 - Use batch operations for file cleanup
 - Implement streaming for large result sets
 - Add database indexes for path-based queries
+- Push filtering and aggregation operations into the database engine
+- Use temporary tables for complex operations involving large datasets
 
 ### 3. Unified SSDP Service
 
@@ -203,6 +260,33 @@ pub enum ValidationMode {
     Strict,  // Fail if path doesn't exist
     Warn,    // Log warning but continue
     Skip,    // Ignore unavailable paths
+}
+```
+
+**Robust Configuration Generation**:
+```rust
+use toml_edit::{Document, value};
+
+pub struct ConfigGenerator {
+    template_doc: Document,
+}
+
+impl ConfigGenerator {
+    pub fn new() -> Result<Self> {
+        // Load template TOML with all comments preserved
+        let template_content = include_str!("config_template.toml");
+        let template_doc = template_content.parse::<Document>()?;
+        Ok(Self { template_doc })
+    }
+    
+    pub fn generate_config(&mut self, config: &AppConfig) -> Result<String> {
+        // Modify values while preserving comments and structure
+        self.template_doc["server"]["port"] = value(config.server.port);
+        self.template_doc["server"]["host"] = value(&config.server.host);
+        
+        // Return formatted TOML with comments intact
+        Ok(self.template_doc.to_string())
+    }
 }
 ```
 
@@ -376,12 +460,18 @@ async fn test_unified_ssdp_service() {
 - `get_directory_listing` uses `LIKE '%pattern%'` fetching all descendants
 - File cleanup loads entire database into memory
 - No indexes on path columns
+- `batch_cleanup_missing_files` fetches all paths into HashSet in Rust
+- `get_direct_subdirectories` fetches all descendants with LIKE queries
+- Playlist import performs N+1 queries (one per track)
 
 **After**:
 - Direct parent-child queries with `canonical_parent_path = ?`
 - Batch processing for file cleanup operations
 - Optimized indexes for path-based queries
 - Streaming interface for large result sets
+- Database-native cleanup using temporary tables or large IN clauses
+- Pure SQL subdirectory queries using string manipulation functions
+- Batch playlist import with single transaction and bulk operations
 
 ### Memory Usage
 

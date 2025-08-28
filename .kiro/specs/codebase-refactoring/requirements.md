@@ -86,3 +86,26 @@ This feature addresses critical architectural and performance issues identified 
 2. WHEN ObjectID processing occurs THEN path normalization SHALL be consistently applied before database queries
 3. WHEN different browse types are requested THEN each SHALL have its own dedicated handler function
 4. WHEN server IP information is needed THEN it SHALL be retrieved from application state, not re-detected
+
+### Requirement 8: Critical Database Performance Optimization
+
+**User Story:** As a user with a large media library (100,000+ files), I want database operations to be performed efficiently within the database engine so that file cleanup and directory browsing remain fast and don't consume excessive memory.
+
+#### Acceptance Criteria
+
+1. WHEN batch_cleanup_missing_files is executed THEN the system SHALL perform cleanup entirely within the database using temporary tables or IN clauses instead of loading all paths into Rust memory
+2. WHEN get_direct_subdirectories or get_filtered_direct_subdirectories is called THEN the system SHALL use pure SQL with string manipulation functions (SUBSTR, INSTR) to find immediate children instead of fetching all descendants with LIKE queries
+3. WHEN playlist import operations are performed THEN the system SHALL use batch queries and transactions to avoid N+1 query problems instead of individual database calls per playlist entry
+4. WHEN large directory structures are processed THEN memory usage SHALL remain bounded regardless of the number of files
+5. WHEN database operations are performed on libraries with 100,000+ files THEN response times SHALL remain under 1 second for typical operations
+
+### Requirement 9: Configuration Robustness
+
+**User Story:** As a system administrator, I want configuration file generation to be robust and maintainable so that future library updates don't break comment injection or formatting.
+
+#### Acceptance Criteria
+
+1. WHEN configuration files are generated with comments THEN the system SHALL use a library that preserves comments and formatting (like toml_edit) instead of manual string manipulation
+2. WHEN TOML serialization order changes in future library versions THEN configuration generation SHALL continue to work correctly
+3. WHEN configuration templates are used THEN comments SHALL be preserved through a template-based approach rather than post-processing injection
+4. WHEN configuration files are saved THEN the format SHALL be consistent and maintainable across library updates

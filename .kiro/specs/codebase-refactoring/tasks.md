@@ -186,3 +186,35 @@
   - Modify path parameter normalization to query against canonical_path column instead of path column
   - Add path canonicalization to all database query methods that accept Path parameters
   - _Requirements: 5.6, 1.1_
+
+## Phase 6: Critical Database Performance Fixes
+
+- [ ] 30. Implement database-native file cleanup
+  - Replace batch_cleanup_missing_files HashSet approach with temporary table or large IN clause approach
+  - Create database method that accepts existing paths and performs cleanup entirely in SQL
+  - Add transaction support to ensure atomic cleanup operations
+  - _Requirements: 8.1, 8.4_
+
+- [ ] 31. Optimize directory listing with pure SQL
+  - Rewrite get_direct_subdirectories to use SUBSTR and INSTR functions instead of LIKE queries
+  - Implement SQL-based immediate children detection using string manipulation
+  - Remove Rust-based filtering of descendants to find direct children
+  - _Requirements: 8.2, 8.4_
+
+- [ ] 32. Fix playlist import N+1 query problem
+  - Refactor import_m3u and import_pls to use batch operations
+  - Implement single query to fetch all MediaFile objects by path list
+  - Use database transactions for atomic playlist entry insertion
+  - _Requirements: 8.3, 8.4_
+
+- [ ] 33. Replace fragile TOML comment injection
+  - Replace to_toml_with_platform_comments with toml_edit library approach
+  - Create configuration template file with preserved comments
+  - Implement robust config generation that modifies values while preserving structure
+  - _Requirements: 9.1, 9.2, 9.3, 9.4_
+
+- [ ] 34. Add performance benchmarks for large datasets
+  - Create benchmark tests with 100,000+ media files
+  - Measure performance before and after database optimizations
+  - Verify memory usage remains bounded during large operations
+  - _Requirements: 8.4, 8.5_
