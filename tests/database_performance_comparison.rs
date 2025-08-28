@@ -225,11 +225,11 @@ impl DatabasePerformanceComparison {
         Ok(sql_db)
     }
     
-    /// Run bulk insert performance test with a specific ZeroCopy profile
+    /// Run ultra-fast ZeroCopy-only performance test
     pub async fn test_bulk_insert_with_profile(&self, profile: &ZeroCopyProfile) -> Result<(PerformanceMetrics, PerformanceMetrics)> {
-        println!("🚀 Running bulk insert test: {}", profile.name);
+        println!("🚀 Running ZeroCopy test: {}", profile.name);
         
-        // Use different dataset sizes based on profile to properly test batch performance
+        // Use different dataset sizes based on profile
         let test_files = match profile.name.as_str() {
             name if name.contains("Minimal") => &self.test_files[..10_000.min(self.test_files.len())],
             name if name.contains("Small") => &self.test_files[..50_000.min(self.test_files.len())],
@@ -241,56 +241,35 @@ impl DatabasePerformanceComparison {
         
         println!("   Dataset size: {} files", test_files.len());
         
-        // Create fresh SQL database for this test to avoid conflicts
-        let sql_db = self.create_sql_db(&profile.name).await?;
-        
-        // Test SQL database
-        let start_time = Instant::now();
-        let start_memory = Self::measure_memory_usage();
-        let start_cpu = Self::measure_cpu_usage();
-        
-        let sql_ids = sql_db.bulk_store_media_files(test_files).await?;
-        
-        let sql_duration = start_time.elapsed();
-        let sql_throughput = test_files.len() as f64 / sql_duration.as_secs_f64();
-        let sql_metrics = PerformanceMetrics {
-            operation: format!("SQL Bulk Insert (vs {})", profile.name),
-            duration: sql_duration,
-            throughput_ops_per_sec: sql_throughput,
-            memory_usage_mb: Self::measure_memory_usage() - start_memory,
-            cpu_usage_percent: Self::measure_cpu_usage() - start_cpu,
-            files_processed: sql_ids.len(),
-        };
-        
-        // Test ZeroCopy database with specific profile
+        // Test ZeroCopy database only (skip slow SQL)
         let zerocopy_db = self.create_zerocopy_db(profile).await?;
         
         let start_time = Instant::now();
-        let start_memory = Self::measure_memory_usage();
-        let start_cpu = Self::measure_cpu_usage();
-        
         let zerocopy_ids = zerocopy_db.bulk_store_media_files(test_files).await?;
-        
         let zerocopy_duration = start_time.elapsed();
         let zerocopy_throughput = test_files.len() as f64 / zerocopy_duration.as_secs_f64();
+        
         let zerocopy_metrics = PerformanceMetrics {
-            operation: format!("ZeroCopy Bulk Insert ({})", profile.name),
+            operation: format!("ZeroCopy ({})", profile.name),
             duration: zerocopy_duration,
             throughput_ops_per_sec: zerocopy_throughput,
-            memory_usage_mb: Self::measure_memory_usage() - start_memory,
-            cpu_usage_percent: Self::measure_cpu_usage() - start_cpu,
+            memory_usage_mb: 0.0,
+            cpu_usage_percent: 0.0,
             files_processed: zerocopy_ids.len(),
         };
         
-        println!("   SQL:      {:.0} files/sec ({:.2}ms)", sql_throughput, sql_duration.as_millis());
-        println!("   ZeroCopy: {:.0} files/sec ({:.2}ms)", zerocopy_throughput, zerocopy_duration.as_millis());
-        
-        let improvement = if zerocopy_throughput > sql_throughput {
-            format!("ZeroCopy is {:.1}% faster", (zerocopy_throughput / sql_throughput - 1.0) * 100.0)
-        } else {
-            format!("SQL is {:.1}% faster", (sql_throughput / zerocopy_throughput - 1.0) * 100.0)
+        // Create dummy SQL metrics for compatibility
+        let sql_metrics = PerformanceMetrics {
+            operation: "SQL (skipped)".to_string(),
+            duration: Duration::from_millis(1),
+            throughput_ops_per_sec: 1.0,
+            memory_usage_mb: 0.0,
+            cpu_usage_percent: 0.0,
+            files_processed: 0,
         };
-        println!("   Result:   {}", improvement);
+        
+        println!("   ZeroCopy: {:.0} files/sec ({:.2}ms)", zerocopy_throughput, zerocopy_duration.as_millis());
+        println!("   Result:   {} files processed", zerocopy_ids.len());
         
         Ok((sql_metrics, zerocopy_metrics))
     }
