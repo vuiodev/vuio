@@ -289,6 +289,12 @@ pub trait DatabaseManager: Send + Sync {
     /// Add a track to a playlist
     async fn add_to_playlist(&self, playlist_id: i64, media_file_id: i64, position: Option<u32>) -> Result<i64>;
 
+    /// Add multiple tracks to a playlist in a single transaction (batch operation)
+    async fn batch_add_to_playlist(&self, playlist_id: i64, media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>>;
+
+    /// Get multiple files by their paths in a single query
+    async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
+
     /// Remove a track from a playlist
     async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool>;
 
@@ -1873,6 +1879,87 @@ impl DatabaseManager for SqliteDatabase {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn batch_add_to_playlist(&self, playlist_id: i64, media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>> {
+        if media_file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let pool = self.pool.read().await;
+        let mut tx = pool.begin().await?;
+        let mut inserted_ids = Vec::with_capacity(media_file_ids.len());
+
+        let now = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        // Insert all entries in the same transaction
+        for (media_file_id, position) in media_file_ids {
+            let result = sqlx::query(
+                "INSERT INTO playlist_entries (playlist_id, media_file_id, position, created_at) VALUES (?, ?, ?, ?)"
+            )
+            .bind(playlist_id)
+            .bind(*media_file_id)
+            .bind(*position as i64)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            
+            inserted_ids.push(result.last_insert_rowid());
+        }
+
+        tx.commit().await?;
+        Ok(inserted_ids)
+    }
+
+    async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
+        if paths.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Convert paths to canonical format for querying
+        let mut canonical_paths = Vec::with_capacity(paths.len());
+        for path in paths {
+            let canonical_path = self.path_normalizer.to_canonical(path)
+                .unwrap_or_else(|_| path.to_string_lossy().to_string());
+            canonical_paths.push(canonical_path);
+        }
+
+        // Build query with IN clause for batch retrieval
+        const BATCH_SIZE: usize = 500; // SQLite parameter limit safety
+        let mut all_files = Vec::new();
+
+        for batch in canonical_paths.chunks(BATCH_SIZE) {
+            if batch.is_empty() {
+                continue;
+            }
+
+            let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+            let query = format!(
+                r#"
+                SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
+                FROM media_files 
+                WHERE canonical_path IN ({})
+                ORDER BY canonical_path
+                "#,
+                placeholders
+            );
+
+            let mut query_builder = sqlx::query(&query);
+            for canonical_path in batch {
+                query_builder = query_builder.bind(canonical_path);
+            }
+
+            let rows = query_builder.fetch_all(&*self.pool.read().await).await?;
+
+            for row in rows {
+                all_files.push(MediaFile::from_row(&row)?);
+            }
+        }
+
+        Ok(all_files)
+    }
+
     async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>> {
         let rows = sqlx::query(
             r#"
@@ -3079,5 +3166,73 @@ mod tests {
 
         // Verify streaming collected all files correctly
         assert_eq!(streamed_files.len(), 3, "Should have streamed all 3 files");
+    }
+
+    #[tokio::test]
+    async fn test_batch_add_to_playlist_and_get_files_by_paths() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create test media files
+        let file1 = MediaFile::new(
+            PathBuf::from("/test/song1.mp3"),
+            1000,
+            "audio/mpeg".to_string(),
+        );
+        let file2 = MediaFile::new(
+            PathBuf::from("/test/song2.mp3"),
+            2000,
+            "audio/mpeg".to_string(),
+        );
+        let file3 = MediaFile::new(
+            PathBuf::from("/test/song3.mp3"),
+            3000,
+            "audio/mpeg".to_string(),
+        );
+
+        // Store files in database
+        let file1_id = db.store_media_file(&file1).await.unwrap();
+        let file2_id = db.store_media_file(&file2).await.unwrap();
+        let file3_id = db.store_media_file(&file3).await.unwrap();
+
+        // Test get_files_by_paths
+        let paths = vec![
+            PathBuf::from("/test/song1.mp3"),
+            PathBuf::from("/test/song2.mp3"),
+            PathBuf::from("/test/song3.mp3"),
+        ];
+        let retrieved_files = db.get_files_by_paths(&paths).await.unwrap();
+        assert_eq!(retrieved_files.len(), 3);
+
+        // Create a playlist
+        let playlist_id = db.create_playlist("Test Batch Playlist", None).await.unwrap();
+
+        // Test batch_add_to_playlist
+        let media_file_entries = vec![
+            (file1_id, 0),
+            (file2_id, 1),
+            (file3_id, 2),
+        ];
+
+        let inserted_ids = db.batch_add_to_playlist(playlist_id, &media_file_entries).await.unwrap();
+        assert_eq!(inserted_ids.len(), 3);
+
+        // Verify tracks were added to playlist in correct order
+        let playlist_tracks = db.get_playlist_tracks(playlist_id).await.unwrap();
+        assert_eq!(playlist_tracks.len(), 3);
+        assert_eq!(playlist_tracks[0].path, PathBuf::from("/test/song1.mp3"));
+        assert_eq!(playlist_tracks[1].path, PathBuf::from("/test/song2.mp3"));
+        assert_eq!(playlist_tracks[2].path, PathBuf::from("/test/song3.mp3"));
+
+        // Test empty batch operations
+        let empty_paths: Vec<PathBuf> = vec![];
+        let empty_files = db.get_files_by_paths(&empty_paths).await.unwrap();
+        assert_eq!(empty_files.len(), 0);
+
+        let empty_entries: Vec<(i64, u32)> = vec![];
+        let empty_ids = db.batch_add_to_playlist(playlist_id, &empty_entries).await.unwrap();
+        assert_eq!(empty_ids.len(), 0);
     }
 }

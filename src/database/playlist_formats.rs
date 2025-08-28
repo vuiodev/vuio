@@ -91,7 +91,8 @@ impl PlaylistFileManager {
         // Create the playlist
         let playlist_id = database.create_playlist(playlist_name, None).await?;
 
-        let mut position = 0u32;
+        // Collect all track paths first
+        let mut track_paths = Vec::new();
         let lines: Vec<&str> = content.lines().collect();
         let mut i = 0;
 
@@ -110,32 +111,31 @@ impl PlaylistFileManager {
                 i += 1;
                 if i < lines.len() {
                     let file_path_str = lines[i].trim();
-                    if let Err(e) = Self::add_track_to_playlist(
-                        database,
-                        playlist_id,
-                        file_path_str,
-                        position,
-                    )
-                    .await
-                    {
-                        warn!("Failed to add track to playlist: {}", e);
-                    } else {
-                        position += 1;
-                    }
+                    track_paths.push(file_path_str.to_string());
                 }
             } else if !line.starts_with('#') {
                 // Simple M3U format - just file paths
-                if let Err(e) = Self::add_track_to_playlist(database, playlist_id, line, position).await {
-                    warn!("Failed to add track to playlist: {}", e);
-                } else {
-                    position += 1;
-                }
+                track_paths.push(line.to_string());
             }
 
             i += 1;
         }
 
-        debug!("Imported {} tracks to playlist '{}'", position, playlist_name);
+        // Create list of (path, position) pairs
+        let file_paths_with_positions: Vec<(String, u32)> = track_paths
+            .into_iter()
+            .enumerate()
+            .map(|(index, path)| (path, index as u32))
+            .collect();
+
+        // Add all tracks to playlist in batch operation
+        let added_count = Self::batch_add_tracks_to_playlist(
+            database,
+            playlist_id,
+            &file_paths_with_positions,
+        ).await?;
+
+        debug!("Imported {} tracks to playlist '{}'", added_count, playlist_name);
         Ok(playlist_id)
     }
 
@@ -170,14 +170,21 @@ impl PlaylistFileManager {
         // Sort tracks by number to maintain order
         tracks.sort_by_key(|(num, _)| *num);
 
-        // Add tracks to playlist
-        for (i, (_, file_path)) in tracks.into_iter().enumerate() {
-            if let Err(e) = Self::add_track_to_playlist(database, playlist_id, &file_path, i as u32).await {
-                warn!("Failed to add track to playlist: {}", e);
-            }
-        }
+        // Create list of (path, position) pairs for batch operation
+        let file_paths_with_positions: Vec<(String, u32)> = tracks
+            .into_iter()
+            .enumerate()
+            .map(|(index, (_, file_path))| (file_path, index as u32))
+            .collect();
 
-        debug!("Imported playlist '{}'", playlist_name);
+        // Add all tracks to playlist in batch operation
+        let added_count = Self::batch_add_tracks_to_playlist(
+            database,
+            playlist_id,
+            &file_paths_with_positions,
+        ).await?;
+
+        debug!("Imported {} tracks to playlist '{}'", added_count, playlist_name);
         Ok(playlist_id)
     }
 
@@ -259,31 +266,67 @@ impl PlaylistFileManager {
         Ok(())
     }
 
-    /// Add a track to playlist by file path
+    /// Add tracks to playlist by file paths using batch operations
+    async fn batch_add_tracks_to_playlist<D: DatabaseManager + ?Sized>(
+        database: &D,
+        playlist_id: i64,
+        file_paths_with_positions: &[(String, u32)],
+    ) -> Result<usize> {
+        if file_paths_with_positions.is_empty() {
+            return Ok(0);
+        }
+
+        // Extract paths for batch query
+        let paths: Vec<PathBuf> = file_paths_with_positions
+            .iter()
+            .map(|(path_str, _)| PathBuf::from(path_str))
+            .collect();
+
+        // Get all media files in a single query
+        let media_files = database.get_files_by_paths(&paths).await?;
+
+        // Create a map from path to media file for quick lookup
+        let mut path_to_file = std::collections::HashMap::new();
+        for media_file in media_files {
+            if let Some(file_id) = media_file.id {
+                path_to_file.insert(media_file.path.clone(), file_id);
+            }
+        }
+
+        // Build list of (media_file_id, position) pairs for files that exist in database
+        let mut media_file_entries = Vec::new();
+        let mut added_count = 0;
+
+        for (file_path_str, position) in file_paths_with_positions {
+            let file_path = PathBuf::from(file_path_str);
+            
+            if let Some(&file_id) = path_to_file.get(&file_path) {
+                media_file_entries.push((file_id, *position));
+                added_count += 1;
+            } else {
+                warn!("File not found in media database: {}", file_path.display());
+            }
+        }
+
+        // Add all found tracks to playlist in a single transaction
+        if !media_file_entries.is_empty() {
+            database.batch_add_to_playlist(playlist_id, &media_file_entries).await?;
+            debug!("Added {} tracks to playlist in batch operation", media_file_entries.len());
+        }
+
+        Ok(added_count)
+    }
+
+    /// Add a track to playlist by file path (legacy method for compatibility)
     async fn add_track_to_playlist<D: DatabaseManager + ?Sized>(
         database: &D,
         playlist_id: i64,
         file_path_str: &str,
         position: u32,
     ) -> Result<()> {
-        let file_path = PathBuf::from(file_path_str);
-        
-        // Try to find the file in the database
-        match database.get_file_by_path(&file_path).await? {
-            Some(media_file) => {
-                if let Some(file_id) = media_file.id {
-                    database.add_to_playlist(playlist_id, file_id, Some(position)).await?;
-                    debug!("Added track to playlist: {}", file_path.display());
-                } else {
-                    warn!("Media file found but has no ID: {}", file_path.display());
-                }
-            }
-            None => {
-                warn!("File not found in media database: {}", file_path.display());
-                // Optionally, we could add the file to the database here if it exists on disk
-            }
-        }
-        
+        // Use batch method for single track
+        let file_paths_with_positions = vec![(file_path_str.to_string(), position)];
+        Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions).await?;
         Ok(())
     }
 
@@ -457,5 +500,66 @@ Version=2
         assert!(content.contains("#EXTM3U"));
         assert!(content.contains("#EXTINF:180,Test Artist - Test Song 1"));
         assert!(content.contains("/test/song1.mp3"));
+    }
+
+    #[tokio::test]
+    async fn test_batch_add_tracks_to_playlist() {
+        use crate::database::{SqliteDatabase, DatabaseManager};
+        use tempfile::tempdir;
+
+        // Create temporary database
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create test media files
+        let file1 = crate::database::MediaFile::new(
+            PathBuf::from("/test/song1.mp3"),
+            1000,
+            "audio/mpeg".to_string(),
+        );
+        let file2 = crate::database::MediaFile::new(
+            PathBuf::from("/test/song2.mp3"),
+            2000,
+            "audio/mpeg".to_string(),
+        );
+        let file3 = crate::database::MediaFile::new(
+            PathBuf::from("/test/song3.mp3"),
+            3000,
+            "audio/mpeg".to_string(),
+        );
+
+        // Store files in database
+        let file1_id = db.store_media_file(&file1).await.unwrap();
+        let file2_id = db.store_media_file(&file2).await.unwrap();
+        let file3_id = db.store_media_file(&file3).await.unwrap();
+
+        // Create a playlist
+        let playlist_id = db.create_playlist("Test Batch Playlist", None).await.unwrap();
+
+        // Test batch add tracks
+        let file_paths_with_positions = vec![
+            ("/test/song1.mp3".to_string(), 0),
+            ("/test/song2.mp3".to_string(), 1),
+            ("/test/song3.mp3".to_string(), 2),
+        ];
+
+        let added_count = PlaylistFileManager::batch_add_tracks_to_playlist(
+            &db,
+            playlist_id,
+            &file_paths_with_positions,
+        ).await.unwrap();
+
+        assert_eq!(added_count, 3);
+
+        // Verify tracks were added to playlist
+        let playlist_tracks = db.get_playlist_tracks(playlist_id).await.unwrap();
+        assert_eq!(playlist_tracks.len(), 3);
+        
+        // Verify order is maintained
+        assert_eq!(playlist_tracks[0].path, PathBuf::from("/test/song1.mp3"));
+        assert_eq!(playlist_tracks[1].path, PathBuf::from("/test/song2.mp3"));
+        assert_eq!(playlist_tracks[2].path, PathBuf::from("/test/song3.mp3"));
     }
 }

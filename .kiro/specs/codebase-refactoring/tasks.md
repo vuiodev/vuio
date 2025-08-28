@@ -201,18 +201,14 @@
   - Remove Rust-based filtering of descendants to find direct children
   - _Requirements: 8.2, 8.4_
 
-- [ ] 32. Fix playlist import N+1 query problem
+- [x] 32. Fix playlist import N+1 query problem
+
   - Refactor import_m3u and import_pls to use batch operations
   - Implement single query to fetch all MediaFile objects by path list
   - Use database transactions for atomic playlist entry insertion
   - _Requirements: 8.3, 8.4_
 
 - [x] 33. Replace fragile TOML comment injection
-
-
-
-
-
   - Replace to_toml_with_platform_comments with toml_edit library approach
   - Create configuration template file with preserved comments
   - Implement robust config generation that modifies values while preserving structure
