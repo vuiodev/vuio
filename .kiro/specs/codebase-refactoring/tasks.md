@@ -195,7 +195,7 @@
   - Add transaction support to ensure atomic cleanup operations
   - _Requirements: 8.1, 8.4_
 
-- [ ] 31. Optimize directory listing with pure SQL
+- [x] 31. Optimize directory listing with pure SQL
   - Rewrite get_direct_subdirectories to use SUBSTR and INSTR functions instead of LIKE queries
   - Implement SQL-based immediate children detection using string manipulation
   - Remove Rust-based filtering of descendants to find direct children

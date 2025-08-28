@@ -657,80 +657,78 @@ impl SqliteDatabase {
         Ok(files)
     }
 
-    /// Get direct subdirectories using canonical paths (optimized approach)
+    /// Get direct subdirectories using canonical paths (optimized approach with minimal SQL)
     async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
-        let path_separator = "/"; // Canonical paths always use forward slashes
-        let like_path_prefix = if canonical_parent_path.is_empty() {
+        // Use SQL to find files whose canonical_parent_path starts with the given parent path
+        // We need to find all descendants to identify immediate subdirectories
+        let search_pattern = if canonical_parent_path.is_empty() || canonical_parent_path == "/" {
             "%".to_string()
-        } else if canonical_parent_path == "/" {
-            format!("{}%", path_separator)
         } else {
-            format!("{}{}%", canonical_parent_path, path_separator)
+            format!("{}/%", canonical_parent_path)
         };
 
-        // Query both canonical and original parent paths to get correct directory names
-        // This finds all files that are descendants of the parent path
         let subdir_rows = sqlx::query(
             r#"
-            SELECT DISTINCT canonical_parent_path, parent_path 
+            SELECT DISTINCT canonical_parent_path, parent_path
             FROM media_files 
-            WHERE canonical_parent_path LIKE ? AND canonical_parent_path != ?
+            WHERE canonical_parent_path LIKE ?
+              AND canonical_parent_path != ?
             "#,
         )
-        .bind(&like_path_prefix)
+        .bind(&search_pattern)
         .bind(canonical_parent_path)
         .fetch_all(&*self.pool.read().await)
         .await?;
         
         let mut subdirectories = HashSet::new();
+        
         for row in subdir_rows {
-            let descendant_canonical_parent: String = row.try_get("canonical_parent_path")?;
-            let descendant_original_parent: String = row.try_get("parent_path")?;
+            let canonical_parent_path_from_db: String = row.try_get("canonical_parent_path")?;
+            let original_parent_path: String = row.try_get("parent_path")?;
             
             // Extract the immediate subdirectory name from any descendant path
-            if let Some(relative_part) = descendant_canonical_parent.strip_prefix(canonical_parent_path) {
-                let relative_part = relative_part.trim_start_matches('/');
-                let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
+            let relative_part = if canonical_parent_path.is_empty() || canonical_parent_path == "/" {
+                canonical_parent_path_from_db.trim_start_matches('/').to_string()
+            } else {
+                canonical_parent_path_from_db
+                    .strip_prefix(&format!("{}/", canonical_parent_path))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            
+            // Get the first component (immediate subdirectory)
+            let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
+            if let Some(first_component) = components.first() {
+                // Find the corresponding original directory name
                 
-                // Get the first component (immediate subdirectory)
-                if let Some(first_canonical_component) = components.first() {
-                    // Work directly with the original path to extract the directory name
-                    let original_parent_path = PathBuf::from(&descendant_original_parent);
-                    
-                    // Extract the immediate subdirectory name by finding the first component after the base path
-                    // Since we know the canonical structure, we can map it back to the original
-                    if let Some(dir_name_os) = original_parent_path.components()
-                        .skip_while(|component| {
-                            // Skip components until we find the one that corresponds to our first canonical component
-                            if let std::path::Component::Normal(name) = component {
-                                let name_str = name.to_string_lossy().to_lowercase();
-                                name_str != *first_canonical_component
-                            } else {
-                                true
-                            }
-                        })
-                        .next() {
-                        
-                        if let std::path::Component::Normal(name_os) = dir_name_os {
-                            let original_name = name_os.to_string_lossy().to_string();
-                            
-                            // Reconstruct the directory path by taking the original parent path up to this component
-                            let mut subdir_path = PathBuf::new();
-                            for component in original_parent_path.components() {
-                                subdir_path.push(component);
-                                if let std::path::Component::Normal(comp_name) = component {
-                                    if comp_name.to_string_lossy().to_lowercase() == *first_canonical_component {
-                                        break;
-                                    }
-                                }
-                            }
-                            
-
-                            subdirectories.insert(MediaDirectory {
-                                path: subdir_path,
-                                name: original_name,
-                            });
+                // Find a file whose parent path corresponds to this subdirectory
+                // We need to find the original case-sensitive name for this subdirectory
+                let original_parent_pathbuf = PathBuf::from(&original_parent_path);
+                
+                // Navigate up the path to find the subdirectory that corresponds to our first component
+                let mut current_path = original_parent_pathbuf.clone();
+                let mut found_subdir_path = None;
+                
+                // Walk up the path until we find the level that matches our target subdirectory
+                while let Some(parent) = current_path.parent() {
+                    if let Ok(parent_canonical) = self.path_normalizer.to_canonical(parent) {
+                        if parent_canonical == canonical_parent_path {
+                            // current_path is the subdirectory we're looking for
+                            found_subdir_path = Some(current_path.clone());
+                            break;
                         }
+                    }
+                    current_path = parent.to_path_buf();
+                }
+                
+                if let Some(subdir_path) = found_subdir_path {
+                    if let Some(original_dir_name) = subdir_path.file_name() {
+                        let original_name = original_dir_name.to_string_lossy().to_string();
+                        
+                        subdirectories.insert(MediaDirectory {
+                            path: subdir_path,
+                            name: original_name,
+                        });
                     }
                 }
             }
@@ -1073,64 +1071,93 @@ impl DatabaseManager for SqliteDatabase {
         Ok((subdirectories, files))
     }
 
-    /// Get direct subdirectories that contain files matching the media type filter
+    /// Get direct subdirectories that contain files matching the media type filter (optimized approach with minimal SQL)
     async fn get_filtered_direct_subdirectories(
         &self,
         canonical_parent_path: &str,
         mime_filter: &str,
     ) -> Result<Vec<MediaDirectory>> {
-        let path_separator = "/"; // Canonical paths always use forward slashes
-        let like_path_prefix = if canonical_parent_path.is_empty() {
+        // Use SQL to find files whose canonical_parent_path starts with the given parent path
+        // and match the mime type filter
+        let search_pattern = if canonical_parent_path.is_empty() || canonical_parent_path == "/" {
             "%".to_string()
-        } else if canonical_parent_path == "/" {
-            format!("{}%", path_separator)
         } else {
-            format!("{}{}%", canonical_parent_path, path_separator)
+            format!("{}/%", canonical_parent_path)
         };
 
-        // Query both canonical and original parent paths to get correct directory names
         let subdir_rows = sqlx::query(
             r#"
-            SELECT DISTINCT canonical_parent_path, parent_path 
+            SELECT DISTINCT canonical_parent_path, parent_path
             FROM media_files 
-            WHERE canonical_parent_path LIKE ? AND canonical_parent_path != ? AND mime_type LIKE ?
+            WHERE canonical_parent_path LIKE ?
+              AND canonical_parent_path != ?
+              AND mime_type LIKE ?
             "#,
         )
-        .bind(&like_path_prefix)
+        .bind(&search_pattern)
         .bind(canonical_parent_path)
         .bind(mime_filter)
         .fetch_all(&*self.pool.read().await)
         .await?;
         
         let mut subdirectories = HashSet::new();
+        
         for row in subdir_rows {
-            let descendant_canonical_parent: String = row.try_get("canonical_parent_path")?;
-            let descendant_original_parent: String = row.try_get("parent_path")?;
+            let canonical_parent_path_from_db: String = row.try_get("canonical_parent_path")?;
+            let original_parent_path: String = row.try_get("parent_path")?;
             
-            // Check if this is a direct child by ensuring it has exactly one more path component
-            if let Some(relative_part) = descendant_canonical_parent.strip_prefix(canonical_parent_path) {
-                let relative_part = relative_part.trim_start_matches('/');
-                let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
+            // Extract the immediate subdirectory name from any descendant path
+            let relative_part = if canonical_parent_path.is_empty() || canonical_parent_path == "/" {
+                canonical_parent_path_from_db.trim_start_matches('/').to_string()
+            } else {
+                canonical_parent_path_from_db
+                    .strip_prefix(&format!("{}/", canonical_parent_path))
+                    .unwrap_or("")
+                    .to_string()
+            };
+            
+            // Get the first component (immediate subdirectory)
+            let components: Vec<&str> = relative_part.split('/').filter(|s| !s.is_empty()).collect();
+            if let Some(first_component) = components.first() {
+                // Find the corresponding original directory name
                 
-                // Only include direct children (exactly one component deep)
-                if components.len() == 1 {
-                    // Extract the directory name directly from the original parent path
-                    let original_parent_path = PathBuf::from(&descendant_original_parent);
-                    
-                    // Get the directory name (last component of the parent path)
-                    if let Some(dir_name_os) = original_parent_path.file_name() {
-                        let dir_name = dir_name_os.to_string_lossy().to_string();
+                // Find a file whose parent path corresponds to this subdirectory
+                // We need to find the original case-sensitive name for this subdirectory
+                let original_parent_pathbuf = PathBuf::from(&original_parent_path);
+                
+                // Navigate up the path to find the subdirectory that corresponds to our first component
+                let mut current_path = original_parent_pathbuf.clone();
+                let mut found_subdir_path = None;
+                
+                // Walk up the path until we find the level that matches our target subdirectory
+                while let Some(parent) = current_path.parent() {
+                    if let Ok(parent_canonical) = self.path_normalizer.to_canonical(parent) {
+                        if parent_canonical == canonical_parent_path {
+                            // current_path is the subdirectory we're looking for
+                            found_subdir_path = Some(current_path.clone());
+                            break;
+                        }
+                    }
+                    current_path = parent.to_path_buf();
+                }
+                
+                if let Some(subdir_path) = found_subdir_path {
+                    if let Some(original_dir_name) = subdir_path.file_name() {
+                        let original_name = original_dir_name.to_string_lossy().to_string();
                         
                         subdirectories.insert(MediaDirectory {
-                            path: original_parent_path,
-                            name: dir_name,
+                            path: subdir_path,
+                            name: original_name,
                         });
                     }
                 }
             }
         }
 
-        Ok(subdirectories.into_iter().collect())
+        let mut sorted_subdirectories: Vec<_> = subdirectories.into_iter().collect();
+        sorted_subdirectories.sort_by_key(|d| d.name.to_lowercase());
+
+        Ok(sorted_subdirectories)
     }
 
     async fn cleanup_missing_files(&self, existing_paths: &[PathBuf]) -> Result<usize> {
