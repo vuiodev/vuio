@@ -9,9 +9,11 @@ use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 pub mod validation;
+pub mod generator;
 
 use crate::platform::config::PlatformConfig;
 use validation::ConfigValidator;
+use generator::ConfigGenerator;
 
 fn default_cleanup_deleted_files() -> bool {
     true
@@ -268,9 +270,11 @@ impl AppConfig {
                 .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
         }
         
-        // Generate TOML content with platform-specific template
-        let content = self.to_toml_with_platform_comments()
-            .context("Failed to serialize configuration to TOML")?;
+        // Generate TOML content with platform-specific template using robust generator
+        let mut generator = ConfigGenerator::new()
+            .context("Failed to create configuration generator")?;
+        let content = generator.generate_config(self)
+            .context("Failed to generate configuration TOML")?;
         
         std::fs::write(config_path, content)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
@@ -278,102 +282,7 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Generate TOML content with platform-specific comments and examples
-    fn to_toml_with_platform_comments(&self) -> Result<String> {
-        let platform_config = PlatformConfig::for_current_platform();
-        
-        // First generate the standard TOML
-        let base_toml = toml::to_string_pretty(self)
-            .context("Failed to serialize configuration to TOML")?;
-        
-        // Add platform-specific header comments
-        let mut content = format!(
-            "# VuIO Server Configuration\n# Platform: {}\n# Auto-generated configuration with platform-specific defaults\n\n",
-            match platform_config.os_type {
-                crate::platform::OsType::Windows => "Windows",
-                crate::platform::OsType::MacOS => "macOS", 
-                crate::platform::OsType::Linux => "Linux",
-                crate::platform::OsType::Bsd => "BSD",
-            }
-        );
-        
-        // Add platform-specific comments before each section
-        let lines: Vec<&str> = base_toml.lines().collect();
-        
-        for line in lines {
-            if line.starts_with("[server]") {
-                content.push_str("# Server configuration\n");
-                content.push_str(&format!("# Recommended ports for this platform: {:?}\n", platform_config.preferred_ports));
-            } else if line.starts_with("[network]") {
-                content.push_str("\n# Network configuration\n");
-                content.push_str("# SSDP is used for DLNA device discovery\n");
-            } else if line.starts_with("[media]") {
-                content.push_str("\n# Media configuration\n");
-                content.push_str(&format!("# Default media directories for this platform: {:?}\n", 
-                    platform_config.get_default_media_directories().iter()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .collect::<Vec<_>>()));
-            } else if line.starts_with("[database]") {
-                content.push_str("\n# Database configuration\n");
-                content.push_str(&format!("# Platform default database location: {}\n", 
-                    platform_config.get_database_path().display()));
-            } else if line.starts_with("[[media.directories]]") {
-                content.push_str("\n# Monitored media directories\n");
-                content.push_str(&format!("# Platform-specific exclude patterns: {:?}\n", 
-                    platform_config.get_default_exclude_patterns()));
-            }
-            
-            content.push_str(line);
-            content.push('\n');
-        }
-        
-        // Add additional platform-specific guidance at the end
-        content.push_str("\n# Platform-specific notes:\n");
-        match platform_config.os_type {
-            crate::platform::OsType::Windows => {
-                content.push_str("# - Ports below 1024 may require administrator privileges\n");
-                content.push_str("# - Windows Firewall may block network access\n");
-                content.push_str("# - UNC paths (\\\\server\\share) are supported\n");
-                content.push_str("# - Consider excluding 'Thumbs.db' and 'desktop.ini' files\n");
-                content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
-                content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
-                content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
-                content.push_str("# - All directories are relative to executable location\n");
-            }
-            crate::platform::OsType::MacOS => {
-                content.push_str("# - System may prompt for network access permissions\n");
-                content.push_str("# - Ports below 1024 require administrator privileges\n");
-                content.push_str("# - Network mounted volumes are supported\n");
-                content.push_str("# - Consider excluding '.DS_Store' and '.AppleDouble' files\n");
-                content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
-                content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
-                content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
-                content.push_str("# - All directories are relative to executable location\n");
-            }
-            crate::platform::OsType::Linux => {
-                content.push_str("# - Ports below 1024 require root privileges\n");
-                content.push_str("# - SELinux/AppArmor policies may affect file access\n");
-                content.push_str("# - Mounted filesystems under /media and /mnt are supported\n");
-                content.push_str("# - Consider excluding 'lost+found' and '.Trash-*' directories\n");
-                content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
-                content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
-                content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
-                content.push_str("# - All directories are relative to executable location\n");
-            }
-            crate::platform::OsType::Bsd => {
-                content.push_str("# - Ports below 1024 require root privileges\n");
-                content.push_str("# - pf firewall rules may affect network access\n");
-                content.push_str("# - Mounted filesystems under /mnt are supported\n");
-                content.push_str("# - Consider excluding 'lost+found' directories\n");
-                content.push_str(&format!("# - Configuration directory: {}\n", platform_config.config_dir.display()));
-                content.push_str(&format!("# - Database directory: {}\n", platform_config.database_dir.display()));
-                content.push_str(&format!("# - Log directory: {}\n", platform_config.log_dir.display()));
-                content.push_str("# - All directories are relative to executable location\n");
-            }
-        }
-        
-        Ok(content)
-    }
+
 
     /// Create default configuration for the current platform
     pub fn default_for_platform() -> Self {

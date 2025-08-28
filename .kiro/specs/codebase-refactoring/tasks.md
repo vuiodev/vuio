@@ -207,14 +207,19 @@
   - Use database transactions for atomic playlist entry insertion
   - _Requirements: 8.3, 8.4_
 
-- [ ] 33. Replace fragile TOML comment injection
+- [x] 33. Replace fragile TOML comment injection
+
+
+
+
+
   - Replace to_toml_with_platform_comments with toml_edit library approach
   - Create configuration template file with preserved comments
   - Implement robust config generation that modifies values while preserving structure
   - _Requirements: 9.1, 9.2, 9.3, 9.4_
 
 - [ ] 34. Add performance benchmarks for large datasets
-  - Create benchmark tests with 100,000+ media files
+  - Create benchmark tests with 1,000,000+ media files
   - Measure performance before and after database optimizations
   - Verify memory usage remains bounded during large operations
   - _Requirements: 8.4, 8.5_

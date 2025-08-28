@@ -1,0 +1,49 @@
+# VuIO Server Configuration
+# Platform: PLACEHOLDER_PLATFORM
+# Auto-generated configuration with platform-specific defaults
+
+# Server configuration
+# Recommended ports for this platform: PLACEHOLDER_PREFERRED_PORTS
+[server]
+port = 8080
+interface = "0.0.0.0"
+name = "VuIO Server"
+uuid = "00000000-0000-0000-0000-000000000000"
+ip = ""
+
+# Network configuration
+# SSDP is used for DLNA device discovery
+[network]
+interface_selection = "Auto"
+multicast_ttl = 4
+announce_interval_seconds = 30
+
+# Media configuration
+# Default media directories for this platform: PLACEHOLDER_DEFAULT_MEDIA_DIRECTORIES
+[media]
+scan_on_startup = true
+watch_for_changes = true
+cleanup_deleted_files = true
+autoplay_enabled = true
+supported_extensions = [
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp",
+    "mp3", "flac", "wav", "aac", "ogg", "wma",
+    "jpg", "jpeg", "png", "gif", "bmp", "webp"
+]
+
+# Monitored media directories
+# Platform-specific exclude patterns: PLACEHOLDER_DEFAULT_EXCLUDE_PATTERNS
+[[media.directories]]
+path = "PLACEHOLDER_DEFAULT_MEDIA_PATH"
+recursive = true
+validation_mode = "Warn"
+
+# Database configuration
+# Platform default database location: PLACEHOLDER_DEFAULT_DATABASE_PATH
+[database]
+path = "PLACEHOLDER_DATABASE_PATH"
+vacuum_on_startup = false
+backup_enabled = true
+
+# Platform-specific notes:
+# PLACEHOLDER_PLATFORM_NOTES
