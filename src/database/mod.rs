@@ -325,6 +325,11 @@ pub trait DatabaseManager: Send + Sync {
     /// Batch cleanup missing files using canonical paths and HashSet difference logic
     async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize>;
 
+    /// Database-native file cleanup that performs cleanup entirely in SQL
+    /// This method accepts existing paths and performs cleanup using temporary tables
+    /// for better performance and memory efficiency with large datasets
+    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize>;
+
     /// Get direct subdirectories that contain files matching the media type filter (internal helper)
     async fn get_filtered_direct_subdirectories(
         &self,
@@ -737,57 +742,70 @@ impl SqliteDatabase {
         Ok(sorted_subdirectories)
     }
 
-    /// Batch cleanup missing files using HashSet difference logic with transaction support
-    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
-        // Note: Don't return early if existing_canonical_paths is empty - this means delete all files
-
+    /// Database-native file cleanup that performs cleanup entirely in SQL
+    /// This method uses temporary tables for better performance and memory efficiency
+    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize> {
         let pool = self.pool.read().await;
         let mut tx = pool.begin().await?;
 
-        // Get all canonical paths from database within transaction
-        let rows = sqlx::query("SELECT canonical_path FROM media_files WHERE canonical_path IS NOT NULL")
-            .fetch_all(&mut *tx)
-            .await?;
+        // Create temporary table to hold existing paths
+        sqlx::query(
+            r#"
+            CREATE TEMP TABLE existing_paths (
+                canonical_path TEXT PRIMARY KEY
+            )
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
 
-        let mut db_canonical_paths = HashSet::new();
-        for row in rows {
-            if let Ok(canonical_path) = row.try_get::<String, _>("canonical_path") {
-                db_canonical_paths.insert(canonical_path);
-            }
-        }
-
-        // Find paths to delete (in database but not in existing files)
-        let paths_to_delete: Vec<_> = db_canonical_paths
-            .difference(existing_canonical_paths)
-            .collect();
-
-
-
-        if paths_to_delete.is_empty() {
-            tx.commit().await?;
-            return Ok(0);
-        }
-
-        // Process deletions in batches to avoid SQL parameter limits
+        // Insert existing paths into temporary table in batches
         const BATCH_SIZE: usize = 500;
-        let mut total_deleted = 0;
+        for batch in existing_canonical_paths.chunks(BATCH_SIZE) {
+            if batch.is_empty() {
+                continue;
+            }
 
-        for batch in paths_to_delete.chunks(BATCH_SIZE) {
-            let placeholders = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let query = format!("DELETE FROM media_files WHERE canonical_path IN ({})", placeholders);
+            let placeholders = batch.iter().map(|_| "(?)").collect::<Vec<_>>().join(",");
+            let query = format!("INSERT OR IGNORE INTO existing_paths (canonical_path) VALUES {}", placeholders);
 
             let mut query_builder = sqlx::query(&query);
             for path in batch {
                 query_builder = query_builder.bind(path);
             }
 
-            let result = query_builder.execute(&mut *tx).await?;
-            total_deleted += result.rows_affected() as usize;
+            query_builder.execute(&mut *tx).await?;
         }
+
+        // Delete files not in existing paths using pure SQL
+        let result = sqlx::query(
+            r#"
+            DELETE FROM media_files 
+            WHERE canonical_path IS NOT NULL 
+            AND canonical_path NOT IN (SELECT canonical_path FROM existing_paths)
+            "#,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        let deleted_count = result.rows_affected() as usize;
+
+        // Drop temporary table (optional, will be dropped automatically when transaction ends)
+        sqlx::query("DROP TABLE existing_paths")
+            .execute(&mut *tx)
+            .await?;
 
         // Commit the transaction atomically
         tx.commit().await?;
-        Ok(total_deleted)
+        Ok(deleted_count)
+    }
+
+    /// Batch cleanup missing files using HashSet difference logic with transaction support
+    /// DEPRECATED: Use database_native_cleanup for better performance with large datasets
+    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        // Convert HashSet to Vec and delegate to database-native implementation
+        let existing_paths: Vec<String> = existing_canonical_paths.iter().cloned().collect();
+        self.database_native_cleanup(&existing_paths).await
     }
 
     /// Convert SystemTime to Unix timestamp
@@ -1882,6 +1900,10 @@ impl DatabaseManager for SqliteDatabase {
     async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
         self.batch_cleanup_missing_files(existing_canonical_paths).await
     }
+
+    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize> {
+        self.database_native_cleanup(existing_canonical_paths).await
+    }
 }
 
 impl SqliteDatabase {
@@ -2253,6 +2275,155 @@ mod tests {
         // Verify all files are gone
         let remaining_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(remaining_files.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_database_native_cleanup() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create test files
+        let file1 = MediaFile::new(PathBuf::from("/test/file1.mp4"), 1000, "video/mp4".to_string());
+        let file2 = MediaFile::new(PathBuf::from("/test/file2.mp4"), 2000, "video/mp4".to_string());
+        let file3 = MediaFile::new(PathBuf::from("/test/file3.mp4"), 3000, "video/mp4".to_string());
+
+        db.store_media_file(&file1).await.unwrap();
+        db.store_media_file(&file2).await.unwrap();
+        db.store_media_file(&file3).await.unwrap();
+
+        // Create vector of existing canonical paths (only file1 and file2 exist)
+        let existing_paths = vec![
+            "/test/file1.mp4".to_string(),
+            "/test/file2.mp4".to_string(),
+        ];
+
+        // Run database-native cleanup
+        let deleted_count = db.database_native_cleanup(&existing_paths).await.unwrap();
+        assert_eq!(deleted_count, 1); // Should delete file3
+
+        // Verify remaining files
+        let remaining_files = db.collect_all_media_files().await.unwrap();
+        assert_eq!(remaining_files.len(), 2);
+        
+        let remaining_paths: HashSet<_> = remaining_files
+            .iter()
+            .map(|f| f.path.to_string_lossy().to_string())
+            .collect();
+        
+        assert!(remaining_paths.contains("/test/file1.mp4"));
+        assert!(remaining_paths.contains("/test/file2.mp4"));
+        assert!(!remaining_paths.contains("/test/file3.mp4"));
+
+        // Test edge case: cleanup with empty existing paths should delete all files
+        // First add a new file back (the other two should still be there)
+        let file4 = MediaFile::new(PathBuf::from("/test/file4.mp4"), 4000, "video/mp4".to_string());
+        db.store_media_file(&file4).await.unwrap();
+
+        // Test with empty existing paths (should delete all files atomically)
+        let empty_existing_paths: Vec<String> = vec![];
+        let deleted_count = db.database_native_cleanup(&empty_existing_paths).await.unwrap();
+        assert_eq!(deleted_count, 3); // Should delete all three files (file1, file2, file4)
+
+        // Verify all files are deleted
+        let remaining_files = db.collect_all_media_files().await.unwrap();
+        assert_eq!(remaining_files.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_database_native_cleanup_large_dataset() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create a large number of test files to test batch processing
+        let mut existing_paths = Vec::new();
+        for i in 0..1000 {
+            let file = MediaFile::new(
+                PathBuf::from(format!("/test/file{}.mp4", i)), 
+                1000, 
+                "video/mp4".to_string()
+            );
+            db.store_media_file(&file).await.unwrap();
+            
+            // Only keep half of the files as "existing"
+            if i < 500 {
+                existing_paths.push(format!("/test/file{}.mp4", i));
+            }
+        }
+
+        // Run database-native cleanup
+        let deleted_count = db.database_native_cleanup(&existing_paths).await.unwrap();
+        assert_eq!(deleted_count, 500); // Should delete half the files
+
+        // Verify remaining files count
+        let remaining_files = db.collect_all_media_files().await.unwrap();
+        assert_eq!(remaining_files.len(), 500);
+    }
+
+    #[tokio::test]
+    async fn test_database_native_cleanup_performance_comparison() {
+        use std::time::Instant;
+        
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test.db");
+        let db = SqliteDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Create test files
+        let file_count = 2000;
+        let mut existing_paths_vec = Vec::new();
+        let mut existing_paths_set = HashSet::new();
+        
+        for i in 0..file_count {
+            let file = MediaFile::new(
+                PathBuf::from(format!("/test/file{}.mp4", i)), 
+                1000, 
+                "video/mp4".to_string()
+            );
+            db.store_media_file(&file).await.unwrap();
+            
+            // Only keep half of the files as "existing"
+            if i < file_count / 2 {
+                let path = format!("/test/file{}.mp4", i);
+                existing_paths_vec.push(path.clone());
+                existing_paths_set.insert(path);
+            }
+        }
+
+        // Test database-native cleanup performance
+        let start_time = Instant::now();
+        let deleted_count_native = db.database_native_cleanup(&existing_paths_vec).await.unwrap();
+        let native_duration = start_time.elapsed();
+
+        // Restore the deleted files for the second test
+        for i in file_count / 2..file_count {
+            let file = MediaFile::new(
+                PathBuf::from(format!("/test/file{}.mp4", i)), 
+                1000, 
+                "video/mp4".to_string()
+            );
+            db.store_media_file(&file).await.unwrap();
+        }
+
+        // Test old HashSet-based cleanup performance (which now delegates to database-native)
+        let start_time = Instant::now();
+        let deleted_count_hashset = db.batch_cleanup_missing_files(&existing_paths_set).await.unwrap();
+        let hashset_duration = start_time.elapsed();
+
+        // Both should delete the same number of files
+        assert_eq!(deleted_count_native, file_count / 2);
+        assert_eq!(deleted_count_hashset, file_count / 2);
+
+        // Print performance comparison (for manual verification)
+        println!("Database-native cleanup: {:?}", native_duration);
+        println!("HashSet-based cleanup (delegated): {:?}", hashset_duration);
+        
+        // Both should be reasonably fast (under 5 seconds for 2000 files)
+        assert!(native_duration.as_secs() < 5);
+        assert!(hashset_duration.as_secs() < 5);
     }
 
     #[tokio::test]

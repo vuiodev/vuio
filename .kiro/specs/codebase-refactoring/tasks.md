@@ -189,7 +189,7 @@
 
 ## Phase 6: Critical Database Performance Fixes
 
-- [ ] 30. Implement database-native file cleanup
+- [x] 30. Implement database-native file cleanup
   - Replace batch_cleanup_missing_files HashSet approach with temporary table or large IN clause approach
   - Create database method that accepts existing paths and performs cleanup entirely in SQL
   - Add transaction support to ensure atomic cleanup operations
