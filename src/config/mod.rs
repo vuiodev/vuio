@@ -1168,23 +1168,25 @@ impl ConfigManager {
         config: Arc<RwLock<AppConfig>>,
         sender: broadcast::Sender<ConfigChangeEvent>,
     ) -> Result<notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::FileIdMap>> {
-        use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer, FileIdMap};
+        use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
         use tokio::sync::mpsc;
         
         let (tx, mut rx) = mpsc::channel(100);
         
         // Create debounced watcher with 500ms debounce duration
-        let mut debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap> = new_debouncer(
+        let mut debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap> = new_debouncer_opt(
             Duration::from_millis(500),
             None,
             move |result: DebounceEventResult| {
                 let _ = tx.try_send(result);
             },
+            FileIdMap::new(),
+            notify::Config::default(),
         )?;
         
         // Watch the config file's parent directory
         if let Some(parent) = config_path.parent() {
-            debouncer.watch(parent, notify::RecursiveMode::NonRecursive)?;
+            debouncer.watch(parent, notify::RecursiveMode::Recursive)?;
         }
         
         // Spawn task to handle debounced file events

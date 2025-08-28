@@ -19,7 +19,6 @@ impl WindowsFileSystemManager {
             path_normalizer,
         }
     }
-}
     
     /// Check if a path is a UNC path (\\server\share\path)
     fn is_unc_path(&self, path: &Path) -> bool {
@@ -298,6 +297,7 @@ impl WindowsFileSystemManager {
             details.push("Valid colon usage examples:".to_string());
             details.push("  - Drive letters: C:\\Users\\Documents, D:\\Media".to_string());
             details.push("  - UNC paths: \\\\server\\share, \\\\192.168.1.100:8080\\media".to_string());
+            details.push("  - Relative paths: Do not use colons in relative paths".to_string());
         }
         
         details.join("\n")
