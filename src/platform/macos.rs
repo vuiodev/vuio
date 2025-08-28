@@ -64,43 +64,7 @@ pub fn gather_macos_metadata() -> PlatformResult<HashMap<String, String>> {
     Ok(metadata)
 }
 
-/// Check macOS firewall status
-#[allow(dead_code)]
-pub fn get_firewall_status() -> PlatformResult<bool> {
-    // Check if the application firewall is enabled
-    match std::process::Command::new("defaults")
-        .args(["read", "/Library/Preferences/com.apple.alf", "globalstate"])
-        .output()
-    {
-        Ok(output) if output.status.success() => {
-            let output_str = String::from_utf8_lossy(&output.stdout);
-            let state = output_str.trim();
-            // 0 = disabled, 1 = enabled for specific services, 2 = enabled for essential services
-            Ok(state != "0")
-        }
-        _ => {
-            // Assume firewall is enabled if we can't determine status
-            Ok(true)
-        }
-    }
-}
 
-/// Check if running with sudo privileges
-#[allow(dead_code)]
-pub fn is_elevated() -> bool {
-    std::env::var("USER")
-        .map(|user| user == "root")
-        .unwrap_or(false) ||
-    std::env::var("SUDO_USER").is_ok()
-}
-
-/// Get the preferred network interface for multicast on macOS
-#[allow(dead_code)]
-pub fn get_preferred_multicast_interface() -> Option<String> {
-    // On macOS, en0 is typically the primary Ethernet interface
-    // and en1 is typically WiFi
-    Some("en0".to_string())
-}
 
 #[cfg(test)]
 mod tests {
@@ -133,12 +97,5 @@ mod tests {
         let meta = metadata.unwrap();
         assert!(meta.contains_key("platform"));
         assert_eq!(meta.get("platform").unwrap(), "macOS");
-    }
-    
-    #[test]
-    fn test_preferred_interface() {
-        let interface = get_preferred_multicast_interface();
-        assert!(interface.is_some());
-        assert_eq!(interface.unwrap(), "en0");
     }
 }

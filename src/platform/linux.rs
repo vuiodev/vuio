@@ -90,60 +90,7 @@ pub fn gather_linux_metadata() -> PlatformResult<HashMap<String, String>> {
     Ok(metadata)
 }
 
-/// Check if running as root
-pub fn _is_elevated() -> bool {
-    std::env::var("USER")
-        .map(|user| user == "root")
-        .unwrap_or(false) ||
-    unsafe { libc::geteuid() == 0 }
-}
 
-/// Check Linux firewall status (simplified)
-pub fn _get_firewall_status() -> PlatformResult<bool> {
-    // Check for common firewall tools
-    let has_iptables = std::process::Command::new("which")
-        .arg("iptables")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    
-    let has_ufw = std::process::Command::new("which")
-        .arg("ufw")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    
-    let has_firewalld = std::process::Command::new("which")
-        .arg("firewall-cmd")
-        .output()
-        .map(|output| output.status.success())
-        .unwrap_or(false);
-    
-    // If any firewall tool is present, assume firewall might be active
-    Ok(has_iptables || has_ufw || has_firewalld)
-}
-
-/// Check if a port requires special privileges on Linux
-pub fn _requires_elevation(port: u16) -> bool {
-    // Ports below 1024 require root privileges or CAP_NET_BIND_SERVICE capability
-    port < 1024
-}
-
-/// Get available network namespaces
-pub fn _get_network_namespaces() -> PlatformResult<Vec<String>> {
-    let mut namespaces = Vec::new();
-    
-    // Read from /proc/net/netns if available
-    if let Ok(entries) = std::fs::read_dir("/var/run/netns") {
-        for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                namespaces.push(name.to_string());
-            }
-        }
-    }
-    
-    Ok(namespaces)
-}
 
 #[cfg(test)]
 mod tests {
@@ -177,19 +124,5 @@ mod tests {
         assert_eq!(meta.get("platform").unwrap(), "Linux");
     }
     
-    #[test]
-    fn test_elevation_check() {
-        let requires_root = _requires_elevation(80);
-        assert!(requires_root);
-        
-        let no_root_needed = _requires_elevation(8080);
-        assert!(!no_root_needed);
-    }
-    
-    #[test]
-    fn test_network_namespaces() {
-        let namespaces = _get_network_namespaces();
-        assert!(namespaces.is_ok());
-        // Namespaces list can be empty, that's fine
-    }
+
 }

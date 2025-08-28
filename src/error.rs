@@ -249,47 +249,7 @@ impl AppError {
     }
 }
 
-/// Trait for implementing automatic error recovery
-pub trait ErrorRecovery {
-    type Output;
-    type Error;
-    
-    /// Attempt to recover from an error and retry the operation
-    fn recover_and_retry(&self, error: &Self::Error, max_attempts: u32) -> impl std::future::Future<Output = std::result::Result<Self::Output, Self::Error>> + Send;
-}
 
-/// Helper function to retry operations with exponential backoff
-pub async fn retry_with_backoff<F, T, E>(
-    mut operation: F,
-    max_attempts: u32,
-    initial_delay_ms: u64,
-) -> std::result::Result<T, E>
-where
-    F: FnMut() -> std::result::Result<T, E>,
-    E: std::fmt::Debug,
-{
-    let mut delay_ms = initial_delay_ms;
-    
-    for attempt in 1..=max_attempts {
-        match operation() {
-            Ok(result) => return Ok(result),
-            Err(error) => {
-                if attempt == max_attempts {
-                    tracing::error!("Operation failed after {} attempts: {:?}", max_attempts, error);
-                    return Err(error);
-                }
-                
-                tracing::warn!("Operation failed on attempt {}/{}: {:?}. Retrying in {}ms", 
-                    attempt, max_attempts, error, delay_ms);
-                
-                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                delay_ms = (delay_ms * 2).min(30000); // Cap at 30 seconds
-            }
-        }
-    }
-    
-    unreachable!()
-}
 
 #[cfg(test)]
 mod tests {
@@ -340,23 +300,5 @@ mod tests {
         assert!(actions.iter().any(|action| action.contains("default configuration")));
     }
     
-    #[tokio::test]
-    async fn test_retry_with_backoff() {
-        let mut attempt_count = 0;
-        let result = retry_with_backoff(
-            || {
-                attempt_count += 1;
-                if attempt_count < 3 {
-                    Err("temporary failure")
-                } else {
-                    Ok("success")
-                }
-            },
-            5,
-            10, // 10ms initial delay for fast test
-        ).await;
-        
-        assert_eq!(result, Ok("success"));
-        assert_eq!(attempt_count, 3);
-    }
+
 }

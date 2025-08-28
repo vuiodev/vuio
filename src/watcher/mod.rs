@@ -10,8 +10,6 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::Result;
 
-pub mod integration;
-
 /// Events that can occur in the file system for media files
 #[derive(Debug, Clone)]
 pub enum FileSystemEvent {

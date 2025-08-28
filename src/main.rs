@@ -461,42 +461,6 @@ async fn handle_configuration_changes(
     Ok(())
 }
 
-/// Implement graceful degradation when platform features are unavailable
-#[allow(dead_code)]
-async fn handle_platform_feature_unavailable(feature: &str, error: &anyhow::Error) -> anyhow::Result<()> {
-    match feature {
-        "multicast" => {
-            warn!("Multicast networking unavailable: {}", error);
-            warn!("DLNA discovery will be limited - clients may need manual configuration");
-            info!("Consider using unicast discovery or manual IP configuration");
-        }
-        "privileged_ports" => {
-            warn!("Privileged port access unavailable: {}", error);
-            info!("Using alternative ports for DLNA services");
-            info!("SSDP will use port 8080 instead of 1900");
-        }
-        "file_watching" => {
-            warn!("File system watching unavailable: {}", error);
-            warn!("Media library changes will not be detected automatically");
-            info!("Consider periodic manual rescans or application restart after adding media");
-        }
-        "database" => {
-            error!("Database functionality unavailable: {}", error);
-            error!("Media library persistence will not work");
-            warn!("Falling back to in-memory media scanning on each startup");
-        }
-        "network_interfaces" => {
-            error!("No network interfaces available: {}", error);
-            error!("DLNA functionality will be severely limited");
-            warn!("Check network configuration and try again");
-        }
-        _ => {
-            warn!("Platform feature '{}' unavailable: {}", feature, error);
-        }
-    }
-    
-    Ok(())
-}
 
 /// Detect platform information with comprehensive diagnostics and error reporting
 /// This function should only be called once at startup to avoid repeated interface detection

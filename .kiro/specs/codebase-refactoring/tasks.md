@@ -60,7 +60,7 @@
 
 ## Phase 3: Code Consolidation and Cleanup
 
-- [ ] 10. Remove unused watcher integration code
+- [x] 10. Remove unused watcher integration code
   - Delete src/watcher/integration.rs file entirely
   - Remove WatcherDatabaseIntegration module declaration from src/watcher/mod.rs
   - Clean up any imports or references to the deleted integration code
@@ -84,7 +84,7 @@
   - Ensure single source of truth for server IP in platform_info
   - _Requirements: 3.2_
 
-- [ ] 14. Clean up unused error handling and platform code
+- [x] 14. Clean up unused error handling and platform code
   - Remove ErrorRecovery trait and retry_with_backoff function from error.rs
   - Delete unused underscore-prefixed functions from platform modules (linux.rs, macos.rs, bsd.rs)
   - Remove handle_platform_feature_unavailable function from main.rs
