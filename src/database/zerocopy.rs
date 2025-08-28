@@ -11,6 +11,7 @@ use tracing::{debug, info, warn};
 use super::memory_mapped::MemoryMappedFile;
 use super::flatbuffer::{BatchSerializer, MediaFileSerializer, BatchOperationType};
 use super::index_manager::{IndexManager, IndexStats};
+use super::atomic_performance::{AtomicPerformanceTracker, BatchOperationResult, SharedPerformanceTracker, create_shared_performance_tracker};
 use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory, DatabaseStats, DatabaseHealth};
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 
@@ -682,10 +683,14 @@ pub struct ZeroCopyConfigUpdate {
     pub performance_profile: Option<PerformanceProfile>,
 }
 
-/// Atomic performance tracking for zero-copy database operations
-#[derive(Debug, Default)]
-pub struct AtomicPerformanceTracker {
-    // File operation counters
+/// Atomic performance tracking for zero-copy database operations (legacy compatibility)
+/// This is a compatibility wrapper around the comprehensive AtomicPerformanceTracker
+#[derive(Debug)]
+pub struct ZeroCopyPerformanceTracker {
+    // Comprehensive performance tracker
+    inner: Arc<super::atomic_performance::AtomicPerformanceTracker>,
+    
+    // Legacy counters for backward compatibility
     pub total_files: AtomicU64,
     pub processed_files: AtomicU64,
     pub failed_files: AtomicU64,
@@ -716,13 +721,44 @@ pub struct AtomicPerformanceTracker {
     pub total_io_time_ns: AtomicU64,
 }
 
-impl AtomicPerformanceTracker {
-    pub fn new() -> Self {
-        Self::default()
+impl ZeroCopyPerformanceTracker {
+    pub fn new(monitoring_interval: Duration, enable_detailed_logging: bool) -> Self {
+        Self {
+            inner: Arc::new(super::atomic_performance::AtomicPerformanceTracker::new(
+                monitoring_interval,
+                enable_detailed_logging,
+            )),
+            total_files: AtomicU64::new(0),
+            processed_files: AtomicU64::new(0),
+            failed_files: AtomicU64::new(0),
+            inserted_files: AtomicU64::new(0),
+            updated_files: AtomicU64::new(0),
+            deleted_files: AtomicU64::new(0),
+            total_batches: AtomicU64::new(0),
+            successful_batches: AtomicU64::new(0),
+            failed_batches: AtomicU64::new(0),
+            total_operations: AtomicU64::new(0),
+            cache_hits: AtomicU64::new(0),
+            cache_misses: AtomicU64::new(0),
+            index_lookups: AtomicU64::new(0),
+            index_updates: AtomicU64::new(0),
+            bytes_written: AtomicU64::new(0),
+            bytes_read: AtomicU64::new(0),
+            sync_operations: AtomicU64::new(0),
+            total_processing_time_ns: AtomicU64::new(0),
+            total_serialization_time_ns: AtomicU64::new(0),
+            total_io_time_ns: AtomicU64::new(0),
+        }
     }
     
-    /// Record a successful file operation
+    /// Get the comprehensive performance tracker
+    pub fn get_comprehensive_tracker(&self) -> Arc<super::atomic_performance::AtomicPerformanceTracker> {
+        self.inner.clone()
+    }
+    
+    /// Record a successful file operation (legacy compatibility)
     pub fn record_file_operation(&self, operation_type: FileOperationType, processing_time: Duration) {
+        // Update legacy counters
         self.total_operations.fetch_add(1, Ordering::Relaxed);
         self.processed_files.fetch_add(1, Ordering::Relaxed);
         self.total_processing_time_ns.fetch_add(processing_time.as_nanos() as u64, Ordering::Relaxed);
@@ -732,16 +768,58 @@ impl AtomicPerformanceTracker {
             FileOperationType::Update => self.updated_files.fetch_add(1, Ordering::Relaxed),
             FileOperationType::Delete => self.deleted_files.fetch_add(1, Ordering::Relaxed),
         };
+        
+        // Also record in comprehensive tracker
+        let result = super::atomic_performance::BatchOperationResult {
+            files_processed: 1,
+            processing_time,
+            success: true,
+            memory_used_bytes: 0, // Unknown for individual operations
+            cache_hits: 0,
+            cache_misses: 0,
+            retry_count: 0,
+        };
+        
+        // Use tokio spawn to handle async call
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            inner.record_batch_operation(result).await;
+        });
     }
     
-    /// Record a failed file operation
+    /// Record a failed file operation (legacy compatibility)
     pub fn record_failed_operation(&self) {
         self.failed_files.fetch_add(1, Ordering::Relaxed);
         self.total_operations.fetch_add(1, Ordering::Relaxed);
+        
+        // Also record in comprehensive tracker
+        let result = super::atomic_performance::BatchOperationResult {
+            files_processed: 0,
+            processing_time: Duration::from_nanos(0),
+            success: false,
+            memory_used_bytes: 0,
+            cache_hits: 0,
+            cache_misses: 0,
+            retry_count: 0,
+        };
+        
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            inner.record_batch_operation(result).await;
+        });
     }
     
-    /// Record a batch operation
-    pub fn record_batch_operation(&self, success: bool, _files_in_batch: usize, processing_time: Duration) {
+    /// Record a batch operation (enhanced with comprehensive tracking)
+    pub async fn record_batch_operation_comprehensive(&self, 
+        success: bool, 
+        files_in_batch: usize, 
+        processing_time: Duration,
+        memory_used_bytes: u64,
+        cache_hits: u64,
+        cache_misses: u64,
+        retry_count: u32,
+    ) {
+        // Update legacy counters
         self.total_batches.fetch_add(1, Ordering::Relaxed);
         if success {
             self.successful_batches.fetch_add(1, Ordering::Relaxed);
@@ -749,18 +827,61 @@ impl AtomicPerformanceTracker {
             self.failed_batches.fetch_add(1, Ordering::Relaxed);
         }
         self.total_processing_time_ns.fetch_add(processing_time.as_nanos() as u64, Ordering::Relaxed);
+        
+        // Record in comprehensive tracker
+        let result = super::atomic_performance::BatchOperationResult {
+            files_processed: files_in_batch,
+            processing_time,
+            success,
+            memory_used_bytes,
+            cache_hits,
+            cache_misses,
+            retry_count,
+        };
+        
+        self.inner.record_batch_operation(result).await;
     }
     
-    /// Record cache hit/miss
+    /// Record a batch operation (legacy compatibility)
+    pub fn record_batch_operation(&self, success: bool, files_in_batch: usize, processing_time: Duration) {
+        // Update legacy counters
+        self.total_batches.fetch_add(1, Ordering::Relaxed);
+        if success {
+            self.successful_batches.fetch_add(1, Ordering::Relaxed);
+        } else {
+            self.failed_batches.fetch_add(1, Ordering::Relaxed);
+        }
+        self.total_processing_time_ns.fetch_add(processing_time.as_nanos() as u64, Ordering::Relaxed);
+        
+        // Also record in comprehensive tracker
+        let result = super::atomic_performance::BatchOperationResult {
+            files_processed: files_in_batch,
+            processing_time,
+            success,
+            memory_used_bytes: 0, // Unknown for legacy calls
+            cache_hits: 0,
+            cache_misses: 0,
+            retry_count: 0,
+        };
+        
+        let inner = self.inner.clone();
+        tokio::spawn(async move {
+            inner.record_batch_operation(result).await;
+        });
+    }
+    
+    /// Record cache hit/miss (legacy compatibility)
     pub fn record_cache_access(&self, hit: bool) {
         if hit {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
         } else {
             self.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
+        
+        // No need to record in comprehensive tracker as it's handled by batch operations
     }
     
-    /// Record index operation
+    /// Record index operation (legacy compatibility)
     pub fn record_index_operation(&self, operation_type: IndexOperationType) {
         match operation_type {
             IndexOperationType::Lookup => self.index_lookups.fetch_add(1, Ordering::Relaxed),
@@ -768,7 +889,7 @@ impl AtomicPerformanceTracker {
         };
     }
     
-    /// Record I/O operation
+    /// Record I/O operation (legacy compatibility)
     pub fn record_io_operation(&self, bytes: u64, is_write: bool, duration: Duration) {
         if is_write {
             self.bytes_written.fetch_add(bytes, Ordering::Relaxed);
@@ -778,12 +899,12 @@ impl AtomicPerformanceTracker {
         self.total_io_time_ns.fetch_add(duration.as_nanos() as u64, Ordering::Relaxed);
     }
     
-    /// Record sync operation
+    /// Record sync operation (legacy compatibility)
     pub fn record_sync_operation(&self) {
         self.sync_operations.fetch_add(1, Ordering::Relaxed);
     }
     
-    /// Get current performance statistics
+    /// Get current performance statistics (legacy compatibility)
     pub fn get_stats(&self) -> PerformanceStats {
         let total_ops = self.total_operations.load(Ordering::Relaxed);
         let total_time_ns = self.total_processing_time_ns.load(Ordering::Relaxed);
@@ -822,6 +943,26 @@ impl AtomicPerformanceTracker {
             total_serialization_time: Duration::from_nanos(self.total_serialization_time_ns.load(Ordering::Relaxed)),
             total_io_time: Duration::from_nanos(self.total_io_time_ns.load(Ordering::Relaxed)),
         }
+    }
+    
+    /// Get comprehensive performance metrics
+    pub async fn get_comprehensive_metrics(&self) -> super::atomic_performance::PerformanceMetrics {
+        self.inner.get_metrics().await
+    }
+    
+    /// Log comprehensive performance summary
+    pub async fn log_comprehensive_performance_summary(&self) {
+        self.inner.log_performance_summary().await;
+    }
+    
+    /// Export comprehensive metrics as JSON
+    pub async fn export_comprehensive_metrics_json(&self) -> Result<String, serde_json::Error> {
+        self.inner.export_metrics_json().await
+    }
+    
+    /// Check if performance targets are being met
+    pub async fn check_performance_targets(&self, target_throughput_files_per_sec: f64) -> super::atomic_performance::PerformanceStatus {
+        self.inner.check_performance_targets(target_throughput_files_per_sec).await
     }
 }
 
@@ -970,7 +1111,7 @@ pub struct ZeroCopyDatabase {
     db_path: PathBuf,
     
     // Performance tracking
-    performance_tracker: Arc<AtomicPerformanceTracker>,
+    performance_tracker: Arc<ZeroCopyPerformanceTracker>,
     
     // Path normalization
     path_normalizer: Box<dyn PathNormalizer>,
@@ -1019,8 +1160,11 @@ impl ZeroCopyDatabase {
         let index_memory_bytes = config.memory_map_size_mb * 1024 * 1024 / 4; // 25% of total memory for indexes
         let index_manager = IndexManager::new(config.index_cache_size, index_memory_bytes);
         
-        // Create performance tracker
-        let performance_tracker = Arc::new(AtomicPerformanceTracker::new());
+        // Create performance tracker with comprehensive monitoring
+        let performance_tracker = Arc::new(ZeroCopyPerformanceTracker::new(
+            config.performance_monitoring_interval,
+            true, // Enable detailed logging for comprehensive monitoring
+        ));
         
         // Create path normalizer
         let path_normalizer = create_platform_path_normalizer();
@@ -1339,9 +1483,87 @@ impl ZeroCopyDatabase {
         self.config.read().await.check_memory_budget()
     }
     
-    /// Get performance statistics
+    /// Get performance statistics (legacy compatibility)
     pub fn get_performance_stats(&self) -> PerformanceStats {
         self.performance_tracker.get_stats()
+    }
+    
+    /// Get comprehensive performance metrics
+    pub async fn get_comprehensive_performance_metrics(&self) -> super::atomic_performance::PerformanceMetrics {
+        self.performance_tracker.get_comprehensive_metrics().await
+    }
+    
+
+    
+    /// Export comprehensive performance metrics as JSON
+    pub async fn export_performance_metrics_json(&self) -> Result<String, serde_json::Error> {
+        self.performance_tracker.export_comprehensive_metrics_json().await
+    }
+    
+    /// Check if performance targets are being met
+    pub async fn check_performance_targets(&self, target_throughput_files_per_sec: f64) -> super::atomic_performance::PerformanceStatus {
+        self.performance_tracker.check_performance_targets(target_throughput_files_per_sec).await
+    }
+    
+    /// Demonstrate comprehensive performance monitoring with a sample workload
+    pub async fn demonstrate_performance_monitoring(&self) -> Result<()> {
+        info!("=== Starting Performance Monitoring Demonstration ===");
+        
+        // Start performance monitoring
+        self.start_performance_monitoring().await?;
+        
+        // Create some sample media files for testing
+        let sample_files: Vec<MediaFile> = (0..1000).map(|i| {
+            MediaFile::new(
+                PathBuf::from(format!("/test/sample_{}.mp3", i)),
+                1024 * 1024, // 1MB file size
+                "audio/mpeg".to_string(),
+            )
+        }).collect();
+        
+        info!("Created {} sample files for performance testing", sample_files.len());
+        
+        // Perform batch insert to demonstrate performance tracking
+        let insert_start = Instant::now();
+        let _insert_result = self.bulk_store_media_files(&sample_files).await?;
+        let insert_time = insert_start.elapsed();
+        
+        info!("Batch insert completed in {:?}", insert_time);
+        
+        // Get comprehensive performance metrics
+        let metrics = self.get_comprehensive_performance_metrics().await;
+        info!("=== Comprehensive Performance Metrics ===");
+        info!("Total operations: {}", metrics.total_operations);
+        info!("Files processed: {}", metrics.total_files_processed);
+        info!("Current throughput: {:.0} files/sec", metrics.current_throughput_files_per_sec);
+        info!("Average throughput: {:.0} files/sec", metrics.average_throughput_files_per_sec);
+        info!("Memory usage: {:.1}MB current, {:.1}MB peak", 
+              metrics.current_memory_usage_mb, metrics.peak_memory_usage_mb);
+        info!("Cache hit rate: {:.1}%", metrics.cache_hit_rate * 100.0);
+        info!("Success rate: {:.1}%", metrics.success_rate * 100.0);
+        
+        // Check performance targets
+        let target_throughput = 100_000.0; // 100K files/sec target
+        let status = self.check_performance_targets(target_throughput).await;
+        
+        info!("=== Performance Target Check ===");
+        info!("Target throughput: {:.0} files/sec", target_throughput);
+        info!("Current throughput: {:.0} files/sec", status.current_throughput);
+        info!("Overall healthy: {}", status.overall_healthy);
+        info!("Throughput OK: {}", status.throughput_ok);
+        info!("Error rate OK: {}", status.error_rate_ok);
+        info!("Memory OK: {}", status.memory_ok);
+        info!("Cache OK: {}", status.cache_ok);
+        
+        // Export metrics as JSON
+        let json_metrics = self.export_performance_metrics_json().await?;
+        info!("Exported comprehensive metrics as JSON ({} bytes)", json_metrics.len());
+        
+        // Stop performance monitoring
+        self.stop_performance_monitoring().await;
+        
+        info!("=== Performance Monitoring Demonstration Complete ===");
+        Ok(())
     }
     
     /// Get index statistics
@@ -1513,8 +1735,24 @@ impl ZeroCopyDatabase {
             }
         }
         
-        // Record performance metrics
+        // Record comprehensive performance metrics
         let total_time = start_time.elapsed();
+        let memory_used = serialization_result.serialized_size as u64; // Estimate memory usage from serialized data size
+        let cache_hits = 0; // No cache hits for insert operations
+        let cache_misses = files.len() as u64; // All files are new, so all are cache misses
+        
+        // Record comprehensive batch operation
+        self.performance_tracker.record_batch_operation_comprehensive(
+            true,
+            files.len(),
+            total_time,
+            memory_used,
+            cache_hits,
+            cache_misses,
+            0, // No retries for successful operation
+        ).await;
+        
+        // Also record legacy metrics for backward compatibility
         self.performance_tracker.record_batch_operation(true, files.len(), total_time);
         
         for _ in files {
@@ -1699,8 +1937,24 @@ impl ZeroCopyDatabase {
             }
         }
         
-        // Record performance metrics
+        // Record comprehensive performance metrics
         let total_time = start_time.elapsed();
+        let memory_used = serialization_result.serialized_size as u64; // Estimate memory usage from serialized data size
+        let cache_hits = files.len() as u64; // Updates typically involve cache hits for existing files
+        let cache_misses = 0; // Minimal cache misses for update operations
+        
+        // Record comprehensive batch operation
+        self.performance_tracker.record_batch_operation_comprehensive(
+            true,
+            files.len(),
+            total_time,
+            memory_used,
+            cache_hits,
+            cache_misses,
+            0, // No retries for successful operation
+        ).await;
+        
+        // Also record legacy metrics for backward compatibility
         self.performance_tracker.record_batch_operation(true, files.len(), total_time);
         
         for _ in files {
@@ -1816,8 +2070,24 @@ impl ZeroCopyDatabase {
             }
         }
         
-        // Record performance metrics
+        // Record comprehensive performance metrics
         let total_time = start_time.elapsed();
+        let memory_used = removed_count as u64 * 64; // Estimate memory usage for removal operations (64 bytes per file)
+        let cache_hits = removed_count as u64; // Removals typically involve cache hits for existing files
+        let cache_misses = 0; // Minimal cache misses for removal operations
+        
+        // Record comprehensive batch operation
+        self.performance_tracker.record_batch_operation_comprehensive(
+            true,
+            removed_count,
+            total_time,
+            memory_used,
+            cache_hits,
+            cache_misses,
+            0, // No retries for successful operation
+        ).await;
+        
+        // Also record legacy metrics for backward compatibility
         self.performance_tracker.record_batch_operation(true, removed_count, total_time);
         
         for _ in 0..removed_count {
