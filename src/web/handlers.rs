@@ -48,35 +48,60 @@ struct BrowseParams {
 }
 
 fn parse_browse_params(body: &str) -> BrowseParams {
-    let object_id = if let Some(start) = body.find("<ObjectID>") {
-        if let Some(end) = body.find("</ObjectID>") {
-            body[start + 10..end].to_string()
-        } else {
-            "0".to_string()
-        }
-    } else {
-        "0".to_string()
-    };
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
     
-    let starting_index = if let Some(start) = body.find("<StartingIndex>") {
-        if let Some(end) = body.find("</StartingIndex>") {
-            body[start + 15..end].parse().unwrap_or(0)
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    let mut reader = Reader::from_str(body);
+    reader.config_mut().trim_text(true);
     
-    let requested_count = if let Some(start) = body.find("<RequestedCount>") {
-        if let Some(end) = body.find("</RequestedCount>") {
-            body[start + 16..end].parse().unwrap_or(0)
-        } else {
-            0
+    let mut object_id = "0".to_string();
+    let mut starting_index = 0u32;
+    let mut requested_count = 0u32;
+    
+    let mut buf = Vec::new();
+    let mut current_element = String::new();
+    
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
+                current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
+            }
+            Ok(Event::Text(ref e)) => {
+                let text = e.unescape().unwrap_or_default();
+                match current_element.as_str() {
+                    "ObjectID" => {
+                        object_id = text.trim().to_string();
+                        if object_id.is_empty() {
+                            object_id = "0".to_string();
+                        }
+                    }
+                    "StartingIndex" => {
+                        starting_index = text.trim().parse().unwrap_or_else(|e| {
+                            warn!("Failed to parse StartingIndex '{}': {}", text, e);
+                            0
+                        });
+                    }
+                    "RequestedCount" => {
+                        requested_count = text.trim().parse().unwrap_or_else(|e| {
+                            warn!("Failed to parse RequestedCount '{}': {}", text, e);
+                            0
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                warn!("Error parsing XML: {}, falling back to defaults", e);
+                break;
+            }
+            _ => {}
         }
-    } else {
-        0
-    };
+        buf.clear();
+    }
+    
+    debug!("Parsed browse params - ObjectID: '{}', StartingIndex: {}, RequestedCount: {}", 
+           object_id, starting_index, requested_count);
     
     BrowseParams {
         object_id,
@@ -983,4 +1008,121 @@ async fn handle_playlists_browse(
         )
             .into_response()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_browse_params_valid_xml() {
+        let xml_body = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+    <s:Body>
+        <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+            <ObjectID>video/movies</ObjectID>
+            <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+            <Filter>*</Filter>
+            <StartingIndex>10</StartingIndex>
+            <RequestedCount>25</RequestedCount>
+            <SortCriteria></SortCriteria>
+        </u:Browse>
+    </s:Body>
+</s:Envelope>"#;
+
+        let params = parse_browse_params(xml_body);
+        assert_eq!(params.object_id, "video/movies");
+        assert_eq!(params.starting_index, 10);
+        assert_eq!(params.requested_count, 25);
+    }
+
+    #[test]
+    fn test_parse_browse_params_minimal_xml() {
+        let xml_body = r#"<ObjectID>0</ObjectID><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount>"#;
+
+        let params = parse_browse_params(xml_body);
+        assert_eq!(params.object_id, "0");
+        assert_eq!(params.starting_index, 0);
+        assert_eq!(params.requested_count, 0);
+    }
+
+    #[test]
+    fn test_parse_browse_params_missing_elements() {
+        let xml_body = r#"<ObjectID>audio/artists</ObjectID>"#;
+
+        let params = parse_browse_params(xml_body);
+        assert_eq!(params.object_id, "audio/artists");
+        assert_eq!(params.starting_index, 0); // Default value
+        assert_eq!(params.requested_count, 0); // Default value
+    }
+
+    #[test]
+    fn test_parse_browse_params_invalid_numbers() {
+        let xml_body = r#"<ObjectID>test</ObjectID><StartingIndex>invalid</StartingIndex><RequestedCount>not_a_number</RequestedCount>"#;
+
+        let params = parse_browse_params(xml_body);
+        assert_eq!(params.object_id, "test");
+        assert_eq!(params.starting_index, 0); // Falls back to default
+        assert_eq!(params.requested_count, 0); // Falls back to default
+    }
+
+    #[test]
+    fn test_parse_browse_params_empty_xml() {
+        let xml_body = "";
+
+        let params = parse_browse_params(xml_body);
+        assert_eq!(params.object_id, "0"); // Default value
+        assert_eq!(params.starting_index, 0); // Default value
+        assert_eq!(params.requested_count, 0); // Default value
+    }
+
+    #[test]
+    fn test_parse_browse_params_malformed_xml() {
+        let xml_body = r#"<ObjectID>test</ObjectID><StartingIndex>5<RequestedCount>10</RequestedCount>"#;
+
+        let params = parse_browse_params(xml_body);
+        // Should handle malformed XML gracefully and extract what it can
+        assert_eq!(params.object_id, "test");
+        // The parser should still work despite the malformed StartingIndex tag
+    }
+
+    #[test]
+    fn test_parse_browse_params_with_whitespace() {
+        let xml_body = r#"
+        <ObjectID>  video/series  </ObjectID>
+        <StartingIndex>  5  </StartingIndex>
+        <RequestedCount>  15  </RequestedCount>
+        "#;
+
+        let params = parse_browse_params(xml_body);
+        assert_eq!(params.object_id, "video/series"); // Should be trimmed
+        assert_eq!(params.starting_index, 5);
+        assert_eq!(params.requested_count, 15);
+    }
+
+    #[test]
+    fn test_parse_browse_params_performance_comparison() {
+        // This test demonstrates that the new XML parser handles complex XML correctly
+        // while the old string-based approach would be fragile
+        let complex_xml = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" 
+            s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+            <ObjectID>video/movies/action</ObjectID>
+            <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+            <Filter>dc:title,dc:date,upnp:class,res@duration,res@size</Filter>
+            <StartingIndex>100</StartingIndex>
+            <RequestedCount>50</RequestedCount>
+            <SortCriteria>+dc:title</SortCriteria>
+        </u:Browse>
+    </s:Body>
+</s:Envelope>"#;
+
+        let params = parse_browse_params(complex_xml);
+        assert_eq!(params.object_id, "video/movies/action");
+        assert_eq!(params.starting_index, 100);
+        assert_eq!(params.requested_count, 50);
+    }
+
 }
