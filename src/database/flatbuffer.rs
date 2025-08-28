@@ -4,7 +4,7 @@ use anyhow::Result;
 
 // Include the generated FlatBuffer code
 #[allow(dead_code, unused_imports, non_snake_case, clippy::all)]
-mod generated {
+pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/media_generated.rs"));
 }
 
@@ -89,6 +89,8 @@ pub struct PlaylistBatchSerializationResult {
     pub serialized_size: usize,
     pub errors: Vec<BatchSerializationError>,
 }
+
+
 
 /// Serialization helper for Playlist to FlatBuffer with batch support
 pub struct PlaylistSerializer;

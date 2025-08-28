@@ -224,6 +224,33 @@ impl CacheManager {
         self.directory_cache.clear();
         info!("All caches cleared");
     }
+    
+    /// Get all path cache entries for persistence
+    pub fn get_all_path_entries(&self) -> Vec<(String, u64)> {
+        self.path_cache.get_all_entries()
+    }
+    
+    /// Cleanup expired entries from all caches
+    pub fn cleanup_expired_entries(&mut self) -> CleanupResult {
+        let total_removed = 0;
+        let total_memory_freed = 0;
+        
+        // For now, just trigger pressure handling which will clean up entries
+        let _pressure_status = self.check_and_handle_pressure();
+        
+        // Return basic cleanup result
+        CleanupResult {
+            entries_removed: total_removed,
+            memory_freed: total_memory_freed,
+        }
+    }
+}
+
+/// Result of cleanup operation
+#[derive(Debug)]
+pub struct CleanupResult {
+    pub entries_removed: usize,
+    pub memory_freed: usize,
 }
 
 /// Combined statistics for all caches
@@ -865,6 +892,181 @@ impl IndexManager {
         self.dirty_flags.store(0, Ordering::Relaxed);
         self.last_persistence.store(0, Ordering::Relaxed);
     }
+    
+    /// Load indexes from file with atomic operations
+    pub async fn load_from_file(&mut self, file_path: &std::path::Path) -> anyhow::Result<usize> {
+        use tokio::fs;
+        use std::io::Read;
+        
+        if !file_path.exists() {
+            return Ok(0); // No file to load
+        }
+        
+        let data = fs::read(file_path).await?;
+        if data.is_empty() {
+            return Ok(0);
+        }
+        
+        // Simple binary format: [entry_count][entries...]
+        // Each entry: [key_len][key][offset]
+        let mut cursor = std::io::Cursor::new(data);
+        let mut buffer = [0u8; 8];
+        
+        // Read entry count
+        std::io::Read::read_exact(&mut cursor, &mut buffer)?;
+        let entry_count = u64::from_le_bytes(buffer) as usize;
+        
+        let mut loaded_entries = 0;
+        
+        // Load path-to-offset entries
+        for _ in 0..entry_count {
+            // Read key length
+            let mut key_len_buf = [0u8; 4];
+            if std::io::Read::read_exact(&mut cursor, &mut key_len_buf).is_err() {
+                break;
+            }
+            let key_len = u32::from_le_bytes(key_len_buf) as usize;
+            
+            // Read key
+            let mut key_buf = vec![0u8; key_len];
+            if std::io::Read::read_exact(&mut cursor, &mut key_buf).is_err() {
+                break;
+            }
+            let key = String::from_utf8_lossy(&key_buf).to_string();
+            
+            // Read offset
+            let mut offset_buf = [0u8; 8];
+            if std::io::Read::read_exact(&mut cursor, &mut offset_buf).is_err() {
+                break;
+            }
+            let offset = u64::from_le_bytes(offset_buf);
+            
+            // Insert into cache
+            if self.cache_manager.insert_path(key, offset).is_ok() {
+                loaded_entries += 1;
+            }
+        }
+        
+        // Update generation counter
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        
+        Ok(loaded_entries)
+    }
+    
+    /// Save indexes to file with atomic operations
+    pub async fn save_to_file(&self, file_path: &std::path::Path) -> anyhow::Result<usize> {
+        use tokio::fs;
+        use std::io::Write;
+        
+        // Create parent directory if needed
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        
+        let mut buffer = Vec::new();
+        let mut saved_entries = 0;
+        
+        // Get all path cache entries
+        let path_entries = self.cache_manager.get_all_path_entries();
+        
+        // Write entry count
+        std::io::Write::write_all(&mut buffer, &(path_entries.len() as u64).to_le_bytes())?;
+        
+        // Write entries
+        for (key, offset) in path_entries {
+            // Write key length
+            std::io::Write::write_all(&mut buffer, &(key.len() as u32).to_le_bytes())?;
+            
+            // Write key
+            std::io::Write::write_all(&mut buffer, key.as_bytes())?;
+            
+            // Write offset
+            std::io::Write::write_all(&mut buffer, &offset.to_le_bytes())?;
+            
+            saved_entries += 1;
+        }
+        
+        // Write to file atomically
+        let temp_path = file_path.with_extension("tmp");
+        fs::write(&temp_path, &buffer).await?;
+        fs::rename(&temp_path, file_path).await?;
+        
+        Ok(saved_entries)
+    }
+    
+    /// Optimize indexes for better performance
+    pub fn optimize_indexes(&mut self) -> IndexOptimizationResult {
+        let start_time = std::time::Instant::now();
+        let mut operations_performed = 0;
+        
+        // Trigger cache cleanup and optimization
+        let cleanup_result = self.cache_manager.cleanup_expired_entries();
+        operations_performed += cleanup_result.entries_removed;
+        
+        // Compact directory indexes (remove empty entries)
+        let original_dir_count = self.directory_index.len();
+        self.directory_index.retain(|_, files| !files.is_empty());
+        let removed_dirs = original_dir_count - self.directory_index.len();
+        operations_performed += removed_dirs;
+        
+        // Compact music indexes
+        let original_artist_count = self.artist_index.len();
+        self.artist_index.retain(|_, files| !files.is_empty());
+        operations_performed += original_artist_count - self.artist_index.len();
+        
+        let original_album_count = self.album_index.len();
+        self.album_index.retain(|_, files| !files.is_empty());
+        operations_performed += original_album_count - self.album_index.len();
+        
+        let original_genre_count = self.genre_index.len();
+        self.genre_index.retain(|_, files| !files.is_empty());
+        operations_performed += original_genre_count - self.genre_index.len();
+        
+        let original_year_count = self.year_index.len();
+        self.year_index.retain(|_, files| !files.is_empty());
+        operations_performed += original_year_count - self.year_index.len();
+        
+        // Update generation counter
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        
+        IndexOptimizationResult {
+            operations_performed,
+            total_time_ms: start_time.elapsed().as_millis() as f64,
+            memory_freed: cleanup_result.memory_freed,
+        }
+    }
+    
+    /// Clear all indexes for repair operations
+    pub fn clear_all_indexes(&mut self) {
+        // Clear all in-memory indexes
+        self.directory_index.clear();
+        self.artist_index.clear();
+        self.album_index.clear();
+        self.genre_index.clear();
+        self.year_index.clear();
+        self.album_artist_index.clear();
+        
+        // Clear all caches
+        self.cache_manager.clear_all();
+        
+        // Reset atomic counters
+        self.lookup_count.store(0, Ordering::Relaxed);
+        self.update_count.store(0, Ordering::Relaxed);
+        self.insert_count.store(0, Ordering::Relaxed);
+        self.remove_count.store(0, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+        self.dirty_flags.store(0, Ordering::Relaxed);
+        
+        info!("All indexes cleared for repair");
+    }
+}
+
+/// Result of index optimization operation
+#[derive(Debug)]
+pub struct IndexOptimizationResult {
+    pub operations_performed: usize,
+    pub total_time_ms: f64,
+    pub memory_freed: usize,
 }
 
 /// Comprehensive index statistics

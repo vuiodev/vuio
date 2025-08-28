@@ -496,6 +496,13 @@ where
         // This is a simplified estimation - in practice you might want more accurate sizing
         base_size
     }
+    
+    /// Get all entries for persistence (returns key-value pairs)
+    pub fn get_all_entries(&self) -> Vec<(K, V)> {
+        self.cache.iter()
+            .map(|(k, entry)| (k.clone(), entry.value.clone()))
+            .collect()
+    }
 }
 
 /// Memory pressure status
