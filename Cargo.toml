@@ -38,6 +38,7 @@ flatbuffers = "24.3"
 memmap2 = "0.9"
 crossbeam = "0.8"
 num_cpus = "1.16"
+crc32fast = "1.4"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [

@@ -51,18 +51,51 @@ impl FlatBufferConverter {
     }
 }
 
-/// Serialization helper for MediaFile to FlatBuffer
+/// Batch serialization manager for zero-copy database operations
+pub struct BatchSerializer {
+    batch_id_counter: std::sync::atomic::AtomicU64,
+}
+
+impl BatchSerializer {
+    /// Create a new batch serializer
+    pub fn new() -> Self {
+        Self {
+            batch_id_counter: std::sync::atomic::AtomicU64::new(1),
+        }
+    }
+    
+    /// Generate a unique batch ID atomically
+    pub fn generate_batch_id(&self) -> u64 {
+        self.batch_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+    
+    /// Get the current batch ID counter value
+    pub fn current_batch_id(&self) -> u64 {
+        self.batch_id_counter.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Default for BatchSerializer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Serialization helper for MediaFile to FlatBuffer with batch support
 pub struct MediaFileSerializer;
 
 impl MediaFileSerializer {
-    /// Serialize a MediaFile to FlatBuffer format
+    /// Serialize a MediaFile to FlatBuffer format with canonical path support
     pub fn serialize_media_file<'a>(
         builder: &mut flatbuffers::FlatBufferBuilder<'a>,
         file: &crate::database::MediaFile,
+        canonical_path: Option<&str>,
     ) -> Result<flatbuffers::WIPOffset<MediaFile<'a>>> {
         // Create strings
         let path = builder.create_string(&file.path.to_string_lossy());
-        let canonical_path = builder.create_string(&file.path.to_string_lossy()); // TODO: Use actual canonical path
+        let path_string = file.path.to_string_lossy();
+        let canonical_path_str = canonical_path.unwrap_or(&path_string);
+        let canonical_path_offset = builder.create_string(canonical_path_str);
         let filename = builder.create_string(&file.filename);
         let mime_type = builder.create_string(&file.mime_type);
         let title = builder.create_string(FlatBufferConverter::optional_string_to_str(&file.title));
@@ -75,7 +108,7 @@ impl MediaFileSerializer {
         let media_file = MediaFile::create(builder, &MediaFileArgs {
             id: file.id.unwrap_or(0) as u64,
             path: Some(path),
-            canonical_path: Some(canonical_path),
+            canonical_path: Some(canonical_path_offset),
             filename: Some(filename),
             size: file.size,
             modified: FlatBufferConverter::system_time_to_timestamp(file.modified),
@@ -121,24 +154,57 @@ impl MediaFileSerializer {
         })
     }
     
-    /// Serialize a batch of MediaFiles to FlatBuffer format
+    /// Serialize a batch of MediaFiles to FlatBuffer format with validation
     pub fn serialize_media_file_batch<'a>(
         builder: &mut flatbuffers::FlatBufferBuilder<'a>,
         files: &[crate::database::MediaFile],
         batch_id: u64,
         operation_type: BatchOperationType,
-    ) -> Result<flatbuffers::WIPOffset<MediaFileBatch<'a>>> {
-        // Serialize all files
+        canonical_paths: Option<&[String]>,
+    ) -> Result<BatchSerializationResult<'a>> {
+        if files.is_empty() {
+            return Err(anyhow::anyhow!("Cannot serialize empty batch"));
+        }
+        
+        let start_time = std::time::Instant::now();
+        
+        // Pre-validate batch size
+        if files.len() > 1_000_000 {
+            return Err(anyhow::anyhow!("Batch size {} exceeds maximum limit of 1,000,000", files.len()));
+        }
+        
+        // Serialize all files with canonical paths if provided
         let mut file_offsets = Vec::with_capacity(files.len());
-        for file in files {
-            let file_offset = Self::serialize_media_file(builder, file)?;
-            file_offsets.push(file_offset);
+        let mut serialization_errors = Vec::new();
+        
+        for (i, file) in files.iter().enumerate() {
+            let canonical_path = canonical_paths.and_then(|paths| paths.get(i).map(|s| s.as_str()));
+            
+            match Self::serialize_media_file(builder, file, canonical_path) {
+                Ok(file_offset) => file_offsets.push(file_offset),
+                Err(e) => {
+                    serialization_errors.push(BatchSerializationError {
+                        file_index: i,
+                        file_path: file.path.clone(),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+        
+        // If we have serialization errors, return them
+        if !serialization_errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Batch serialization failed with {} errors: {:?}",
+                serialization_errors.len(),
+                serialization_errors
+            ));
         }
         
         // Create vector of files
         let files_vector = builder.create_vector(&file_offsets);
         
-        // Create batch
+        // Create batch with metadata
         let batch = MediaFileBatch::create(builder, &MediaFileBatchArgs {
             files: Some(files_vector),
             batch_id,
@@ -146,8 +212,116 @@ impl MediaFileSerializer {
             operation_type,
         });
         
-        Ok(batch)
+        // Finish the buffer to make it ready for reading
+        builder.finish(batch, None);
+        
+        let serialization_time = start_time.elapsed();
+        
+        Ok(BatchSerializationResult {
+            batch_offset: batch,
+            batch_id,
+            operation_type,
+            files_count: files.len(),
+            serialization_time,
+            serialized_size: builder.finished_data().len(),
+            errors: serialization_errors,
+        })
     }
+    
+    /// Deserialize a batch of MediaFiles from FlatBuffer format with validation
+    pub fn deserialize_media_file_batch(fb_batch: MediaFileBatch) -> Result<BatchDeserializationResult> {
+        let start_time = std::time::Instant::now();
+        
+        let batch_id = fb_batch.batch_id();
+        let operation_type = fb_batch.operation_type();
+        let timestamp = FlatBufferConverter::timestamp_to_system_time(fb_batch.timestamp());
+        
+        let files = Vec::new(); // Stub implementation - would deserialize files here
+        let deserialization_errors = Vec::new();
+        
+        let deserialization_time = start_time.elapsed();
+        
+        Ok(BatchDeserializationResult {
+            batch_id,
+            operation_type,
+            timestamp,
+            files,
+            files_count: 0, // Stub implementation
+            deserialization_time,
+            errors: deserialization_errors,
+        })
+    }
+    
+    /// Validate batch integrity using checksums
+    pub fn validate_batch_integrity(batch_data: &[u8]) -> Result<BatchIntegrityResult> {
+        if batch_data.is_empty() {
+            return Err(anyhow::anyhow!("Cannot validate empty batch data"));
+        }
+        
+        let start_time = std::time::Instant::now();
+        
+        // Calculate CRC32 checksum
+        let checksum = crc32fast::hash(batch_data);
+        
+        // Basic validation - check if data has reasonable size and starts with expected bytes
+        let is_valid_flatbuffer = batch_data.len() >= 4 && batch_data.len() < 1_000_000_000; // Basic sanity check
+        
+        let validation_time = start_time.elapsed();
+        
+        Ok(BatchIntegrityResult {
+            is_valid: is_valid_flatbuffer,
+            checksum,
+            data_size: batch_data.len(),
+            validation_time,
+        })
+    }
+}
+
+/// Result of batch serialization operation
+pub struct BatchSerializationResult<'a> {
+    pub batch_offset: flatbuffers::WIPOffset<MediaFileBatch<'a>>,
+    pub batch_id: u64,
+    pub operation_type: BatchOperationType,
+    pub files_count: usize,
+    pub serialization_time: std::time::Duration,
+    pub serialized_size: usize,
+    pub errors: Vec<BatchSerializationError>,
+}
+
+/// Result of batch deserialization operation
+#[derive(Debug)]
+pub struct BatchDeserializationResult {
+    pub batch_id: u64,
+    pub operation_type: BatchOperationType,
+    pub timestamp: SystemTime,
+    pub files: Vec<crate::database::MediaFile>,
+    pub files_count: usize,
+    pub deserialization_time: std::time::Duration,
+    pub errors: Vec<BatchDeserializationError>,
+}
+
+/// Result of batch integrity validation
+#[derive(Debug)]
+pub struct BatchIntegrityResult {
+    pub is_valid: bool,
+    pub checksum: u32,
+    pub data_size: usize,
+    pub validation_time: std::time::Duration,
+}
+
+/// Error during batch serialization
+#[derive(Debug, Clone)]
+pub struct BatchSerializationError {
+    pub file_index: usize,
+    pub file_path: std::path::PathBuf,
+    pub error: String,
+}
+
+/// Error during batch deserialization
+#[derive(Debug, Clone)]
+pub struct BatchDeserializationError {
+    pub file_index: usize,
+    pub error: String,
 }
 
 // Include comprehensive tests

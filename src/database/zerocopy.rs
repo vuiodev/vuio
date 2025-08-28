@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use super::memory_mapped::MemoryMappedFile;
-// Note: FlatBuffer serialization will be implemented in task 4
+use super::flatbuffer::{BatchSerializer, MediaFileSerializer, BatchOperationType};
 use super::{DatabaseManager, MediaFile, MediaDirectory, Playlist, MusicCategory, DatabaseStats, DatabaseHealth};
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
 
@@ -457,6 +457,96 @@ pub struct IndexStats {
     pub max_entries: usize,
 }
 
+/// Result of batch processing operation
+#[derive(Debug, Clone)]
+pub struct BatchProcessingResult {
+    pub batch_id: u64,
+    pub operation_type: BatchOperationType,
+    pub files_processed: usize,
+    pub processing_time: Duration,
+    pub serialization_time: Duration,
+    pub write_offset: u64,
+    pub data_size: usize,
+    pub throughput: f64, // files per second
+    pub checksum: u32,
+    pub errors: Vec<super::flatbuffer::BatchSerializationError>,
+}
+
+impl BatchProcessingResult {
+    /// Create an empty result for zero files
+    pub fn empty() -> Self {
+        Self {
+            batch_id: 0,
+            operation_type: BatchOperationType::Insert,
+            files_processed: 0,
+            processing_time: Duration::from_nanos(0),
+            serialization_time: Duration::from_nanos(0),
+            write_offset: 0,
+            data_size: 0,
+            throughput: 0.0,
+            checksum: 0,
+            errors: Vec::new(),
+        }
+    }
+    
+    /// Check if the batch processing was successful
+    pub fn is_successful(&self) -> bool {
+        self.errors.is_empty() && self.files_processed > 0
+    }
+    
+    /// Get summary string
+    pub fn summary(&self) -> String {
+        format!(
+            "Batch {}: {} files in {:?} ({:.0} files/sec, {} bytes)",
+            self.batch_id,
+            self.files_processed,
+            self.processing_time,
+            self.throughput,
+            self.data_size
+        )
+    }
+}
+
+/// Result of batch removal operation
+#[derive(Debug, Clone)]
+pub struct BatchRemovalResult {
+    pub batch_id: u64,
+    pub files_requested: usize,
+    pub files_removed: usize,
+    pub processing_time: Duration,
+    pub throughput: f64, // files per second
+}
+
+impl BatchRemovalResult {
+    /// Create an empty result for zero files
+    pub fn empty() -> Self {
+        Self {
+            batch_id: 0,
+            files_requested: 0,
+            files_removed: 0,
+            processing_time: Duration::from_nanos(0),
+            throughput: 0.0,
+        }
+    }
+    
+    /// Check if all requested files were removed
+    pub fn is_complete(&self) -> bool {
+        self.files_removed == self.files_requested
+    }
+    
+    /// Get summary string
+    pub fn summary(&self) -> String {
+        format!(
+            "Batch {}: {}/{} files removed in {:?} ({:.0} files/sec)",
+            self.batch_id,
+            self.files_removed,
+            self.files_requested,
+            self.processing_time,
+            self.throughput
+        )
+    }
+}
+
 /// Zero-copy database implementation with atomic operations
 pub struct ZeroCopyDatabase {
     // Core storage
@@ -477,7 +567,8 @@ pub struct ZeroCopyDatabase {
     is_initialized: AtomicU64,  // 0 = not initialized, 1 = initialized
     is_open: AtomicU64,         // 0 = closed, 1 = open
     
-    // FlatBuffer builder (thread-local storage would be better, but this works for now)
+    // FlatBuffer serialization
+    batch_serializer: Arc<BatchSerializer>,
     flatbuffer_builder: Arc<RwLock<flatbuffers::FlatBufferBuilder<'static>>>,
 }
 
@@ -509,6 +600,9 @@ impl ZeroCopyDatabase {
         // Create path normalizer
         let path_normalizer = create_platform_path_normalizer();
         
+        // Create batch serializer
+        let batch_serializer = Arc::new(BatchSerializer::new());
+        
         // Create FlatBuffer builder
         let flatbuffer_builder = flatbuffers::FlatBufferBuilder::with_capacity(1024 * 1024); // 1MB initial capacity
         
@@ -529,6 +623,7 @@ impl ZeroCopyDatabase {
             path_normalizer,
             is_initialized: AtomicU64::new(0),
             is_open: AtomicU64::new(0),
+            batch_serializer,
             flatbuffer_builder: Arc::new(RwLock::new(flatbuffer_builder)),
         })
     }
@@ -706,6 +801,295 @@ impl ZeroCopyDatabase {
         
         Ok(())
     }
+    
+    /// Batch insert files using zero-copy FlatBuffer serialization
+    pub async fn batch_insert_files(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        if files.is_empty() {
+            return Ok(BatchProcessingResult::empty());
+        }
+        
+        let start_time = Instant::now();
+        let batch_id = self.batch_serializer.generate_batch_id();
+        
+        info!("Starting batch insert of {} files (batch ID: {})", files.len(), batch_id);
+        
+        // Generate canonical paths for all files
+        let canonical_paths: Result<Vec<String>> = files
+            .iter()
+            .map(|file| self.path_normalizer.to_canonical(&file.path).map_err(|e| anyhow!("Path normalization failed: {}", e)))
+            .collect();
+        
+        let canonical_paths = canonical_paths?;
+        
+        // Serialize batch to FlatBuffer
+        let serialization_result = {
+            let mut builder = self.flatbuffer_builder.write().await;
+            builder.reset(); // Clear previous data
+            
+            MediaFileSerializer::serialize_media_file_batch(
+                &mut builder,
+                files,
+                batch_id,
+                BatchOperationType::Insert,
+                Some(&canonical_paths),
+            )?
+        };
+        
+        // Write serialized data to memory-mapped file
+        let write_offset = {
+            let mut data_file = self.data_file.write().await;
+            let builder = self.flatbuffer_builder.read().await;
+            let serialized_data = builder.finished_data();
+            
+            // Validate batch integrity before writing
+            let integrity_result = MediaFileSerializer::validate_batch_integrity(serialized_data)?;
+            if !integrity_result.is_valid {
+                return Err(anyhow!("Batch integrity validation failed"));
+            }
+            
+            let io_start = Instant::now();
+            let offset = data_file.append_data(serialized_data)?;
+            let io_time = io_start.elapsed();
+            
+            // Record I/O performance
+            self.performance_tracker.record_io_operation(
+                serialized_data.len() as u64,
+                true, // is_write
+                io_time,
+            );
+            
+            info!(
+                "Wrote batch {} ({} bytes) to offset {} in {:?}",
+                batch_id,
+                serialized_data.len(),
+                offset,
+                io_time
+            );
+            
+            offset
+        };
+        
+        // Update indexes
+        {
+            let mut index_manager = self.index_manager.write().await;
+            for (i, file) in files.iter().enumerate() {
+                let canonical_path = &canonical_paths[i];
+                let mut file_with_canonical = file.clone();
+                file_with_canonical.path = PathBuf::from(canonical_path);
+                
+                index_manager.insert_file_index(&file_with_canonical, write_offset);
+            }
+        }
+        
+        // Record performance metrics
+        let total_time = start_time.elapsed();
+        self.performance_tracker.record_batch_operation(true, files.len(), total_time);
+        
+        for _ in files {
+            self.performance_tracker.record_file_operation(FileOperationType::Insert, total_time / files.len() as u32);
+        }
+        
+        let throughput = files.len() as f64 / total_time.as_secs_f64();
+        
+        info!(
+            "Batch insert completed: {} files in {:?} ({:.0} files/sec)",
+            files.len(),
+            total_time,
+            throughput
+        );
+        
+        Ok(BatchProcessingResult {
+            batch_id,
+            operation_type: BatchOperationType::Insert,
+            files_processed: files.len(),
+            processing_time: total_time,
+            serialization_time: serialization_result.serialization_time,
+            write_offset,
+            data_size: serialization_result.serialized_size,
+            throughput,
+            checksum: MediaFileSerializer::validate_batch_integrity(
+                &self.flatbuffer_builder.read().await.finished_data()
+            )?.checksum,
+            errors: serialization_result.errors,
+        })
+    }
+    
+    /// Batch update files using zero-copy FlatBuffer serialization
+    pub async fn batch_update_files(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        if files.is_empty() {
+            return Ok(BatchProcessingResult::empty());
+        }
+        
+        let start_time = Instant::now();
+        let batch_id = self.batch_serializer.generate_batch_id();
+        
+        info!("Starting batch update of {} files (batch ID: {})", files.len(), batch_id);
+        
+        // Generate canonical paths for all files
+        let canonical_paths: Result<Vec<String>> = files
+            .iter()
+            .map(|file| self.path_normalizer.to_canonical(&file.path).map_err(|e| anyhow!("Path normalization failed: {}", e)))
+            .collect();
+        
+        let canonical_paths = canonical_paths?;
+        
+        // Serialize batch to FlatBuffer
+        let serialization_result = {
+            let mut builder = self.flatbuffer_builder.write().await;
+            builder.reset(); // Clear previous data
+            
+            MediaFileSerializer::serialize_media_file_batch(
+                &mut builder,
+                files,
+                batch_id,
+                BatchOperationType::Update,
+                Some(&canonical_paths),
+            )?
+        };
+        
+        // Write serialized data to memory-mapped file
+        let write_offset = {
+            let mut data_file = self.data_file.write().await;
+            let builder = self.flatbuffer_builder.read().await;
+            let serialized_data = builder.finished_data();
+            
+            // Validate batch integrity before writing
+            let integrity_result = MediaFileSerializer::validate_batch_integrity(serialized_data)?;
+            if !integrity_result.is_valid {
+                return Err(anyhow!("Batch integrity validation failed"));
+            }
+            
+            let io_start = Instant::now();
+            let offset = data_file.append_data(serialized_data)?;
+            let io_time = io_start.elapsed();
+            
+            // Record I/O performance
+            self.performance_tracker.record_io_operation(
+                serialized_data.len() as u64,
+                true, // is_write
+                io_time,
+            );
+            
+            offset
+        };
+        
+        // Update indexes
+        {
+            let mut index_manager = self.index_manager.write().await;
+            for (i, file) in files.iter().enumerate() {
+                let canonical_path = &canonical_paths[i];
+                let mut file_with_canonical = file.clone();
+                file_with_canonical.path = PathBuf::from(canonical_path);
+                
+                index_manager.insert_file_index(&file_with_canonical, write_offset);
+            }
+        }
+        
+        // Record performance metrics
+        let total_time = start_time.elapsed();
+        self.performance_tracker.record_batch_operation(true, files.len(), total_time);
+        
+        for _ in files {
+            self.performance_tracker.record_file_operation(FileOperationType::Update, total_time / files.len() as u32);
+        }
+        
+        let throughput = files.len() as f64 / total_time.as_secs_f64();
+        
+        info!(
+            "Batch update completed: {} files in {:?} ({:.0} files/sec)",
+            files.len(),
+            total_time,
+            throughput
+        );
+        
+        Ok(BatchProcessingResult {
+            batch_id,
+            operation_type: BatchOperationType::Update,
+            files_processed: files.len(),
+            processing_time: total_time,
+            serialization_time: serialization_result.serialization_time,
+            write_offset,
+            data_size: serialization_result.serialized_size,
+            throughput,
+            checksum: MediaFileSerializer::validate_batch_integrity(
+                &self.flatbuffer_builder.read().await.finished_data()
+            )?.checksum,
+            errors: serialization_result.errors,
+        })
+    }
+    
+    /// Batch remove files by paths
+    pub async fn batch_remove_files(&self, paths: &[PathBuf]) -> Result<BatchRemovalResult> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        if paths.is_empty() {
+            return Ok(BatchRemovalResult::empty());
+        }
+        
+        let start_time = Instant::now();
+        let batch_id = self.batch_serializer.generate_batch_id();
+        
+        info!("Starting batch removal of {} files (batch ID: {})", paths.len(), batch_id);
+        
+        // Generate canonical paths for all files
+        let canonical_paths: Result<Vec<String>> = paths
+            .iter()
+            .map(|path| self.path_normalizer.to_canonical(path).map_err(|e| anyhow!("Path normalization failed: {}", e)))
+            .collect();
+        
+        let canonical_paths = canonical_paths?;
+        
+        // Remove from indexes
+        let mut removed_count = 0;
+        {
+            let mut index_manager = self.index_manager.write().await;
+            for canonical_path in &canonical_paths {
+                if index_manager.remove_file_index(canonical_path).is_some() {
+                    removed_count += 1;
+                }
+            }
+        }
+        
+        // Record performance metrics
+        let total_time = start_time.elapsed();
+        self.performance_tracker.record_batch_operation(true, removed_count, total_time);
+        
+        for _ in 0..removed_count {
+            self.performance_tracker.record_file_operation(FileOperationType::Delete, total_time / removed_count.max(1) as u32);
+        }
+        
+        let throughput = removed_count as f64 / total_time.as_secs_f64();
+        
+        info!(
+            "Batch removal completed: {} files removed in {:?} ({:.0} files/sec)",
+            removed_count,
+            total_time,
+            throughput
+        );
+        
+        Ok(BatchRemovalResult {
+            batch_id,
+            files_requested: paths.len(),
+            files_removed: removed_count,
+            processing_time: total_time,
+            throughput,
+        })
+    }
+    
+    /// Get current batch ID counter
+    pub fn get_current_batch_id(&self) -> u64 {
+        self.batch_serializer.current_batch_id()
+    }
 }
 
 // Implement Send and Sync for ZeroCopyDatabase
@@ -720,9 +1104,14 @@ impl DatabaseManager for ZeroCopyDatabase {
         self.initialize().await
     }
     
-    // Placeholder implementations - will be completed in subsequent tasks
-    async fn store_media_file(&self, _file: &MediaFile) -> Result<i64> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 4"))
+    // Individual operations implemented as single-item bulk operations
+    async fn store_media_file(&self, file: &MediaFile) -> Result<i64> {
+        let result = self.batch_insert_files(&[file.clone()]).await?;
+        if result.is_successful() {
+            Ok(result.batch_id as i64) // Return batch ID as file ID for now
+        } else {
+            Err(anyhow!("Failed to store media file: {:?}", result.errors))
+        }
     }
     
     fn stream_all_media_files(&self) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
@@ -730,12 +1119,18 @@ impl DatabaseManager for ZeroCopyDatabase {
         Box::pin(futures_util::stream::empty())
     }
     
-    async fn remove_media_file(&self, _path: &Path) -> Result<bool> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    async fn remove_media_file(&self, path: &Path) -> Result<bool> {
+        let result = self.batch_remove_files(&[path.to_path_buf()]).await?;
+        Ok(result.files_removed > 0)
     }
     
-    async fn update_media_file(&self, _file: &MediaFile) -> Result<()> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
+    async fn update_media_file(&self, file: &MediaFile) -> Result<()> {
+        let result = self.batch_update_files(&[file.clone()]).await?;
+        if result.is_successful() {
+            Ok(())
+        } else {
+            Err(anyhow!("Failed to update media file: {:?}", result.errors))
+        }
     }
     
     async fn get_files_in_directory(&self, _dir: &Path) -> Result<Vec<MediaFile>> {
@@ -807,6 +1202,37 @@ impl DatabaseManager for ZeroCopyDatabase {
         Err(anyhow!("Not implemented yet - will be implemented in task 9"))
     }
     
+    // Bulk operations implementation
+    async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>> {
+        let result = self.batch_insert_files(files).await?;
+        if result.is_successful() {
+            // For now, return sequential IDs based on batch ID
+            // In a real implementation, we'd track individual file IDs
+            let base_id = result.batch_id as i64;
+            Ok((0..files.len()).map(|i| base_id + i as i64).collect())
+        } else {
+            Err(anyhow!("Bulk store failed: {:?}", result.errors))
+        }
+    }
+    
+    async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()> {
+        let result = self.batch_update_files(files).await?;
+        if result.is_successful() {
+            Ok(())
+        } else {
+            Err(anyhow!("Bulk update failed: {:?}", result.errors))
+        }
+    }
+    
+    async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize> {
+        let result = self.batch_remove_files(paths).await?;
+        Ok(result.files_removed)
+    }
+    
+    async fn get_files_by_paths(&self, _paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 9"))
+    }
+    
     async fn get_years(&self) -> Result<Vec<MusicCategory>> {
         Err(anyhow!("Not implemented yet - will be implemented in task 9"))
     }
@@ -862,10 +1288,6 @@ impl DatabaseManager for ZeroCopyDatabase {
     
     async fn batch_add_to_playlist(&self, _playlist_id: i64, _media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>> {
         Err(anyhow!("Not implemented yet - will be implemented in task 10"))
-    }
-    
-    async fn get_files_by_paths(&self, _paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 6"))
     }
     
     async fn remove_from_playlist(&self, _playlist_id: i64, _media_file_id: i64) -> Result<bool> {

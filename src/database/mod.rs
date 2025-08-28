@@ -298,6 +298,21 @@ pub trait DatabaseManager: Send + Sync {
     /// Get multiple files by their paths in a single query
     async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
 
+    // Bulk operations for high-performance batch processing
+    /// Store multiple media files in a single batch operation
+    async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>>;
+
+    /// Update multiple media files in a single batch operation
+    async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()>;
+
+    /// Remove multiple media files by paths in a single batch operation
+    async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
+
+    /// Get multiple files by their paths in a single batch query (alias for get_files_by_paths)
+    async fn bulk_get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
+        self.get_files_by_paths(paths).await
+    }
+
     /// Remove a track from a playlist
     async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool>;
 
@@ -2020,6 +2035,33 @@ impl DatabaseManager for SqliteDatabase {
 
     async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize> {
         self.database_native_cleanup(existing_canonical_paths).await
+    }
+
+    // Bulk operations implementation for SQLite (placeholder - will be optimized later)
+    async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>> {
+        let mut ids = Vec::with_capacity(files.len());
+        for file in files {
+            let id = self.store_media_file(file).await?;
+            ids.push(id);
+        }
+        Ok(ids)
+    }
+
+    async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()> {
+        for file in files {
+            self.update_media_file(file).await?;
+        }
+        Ok(())
+    }
+
+    async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize> {
+        let mut removed_count = 0;
+        for path in paths {
+            if self.remove_media_file(path).await? {
+                removed_count += 1;
+            }
+        }
+        Ok(removed_count)
     }
 }
 
