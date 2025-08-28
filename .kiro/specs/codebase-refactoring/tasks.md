@@ -143,17 +143,12 @@
 ## Integration and Testing Tasks
 
 - [x] 23. Create comprehensive path normalization tests
-
-
-
-
-
   - Write integration tests for Windows path variations (C:\, c:/, \\?\C:\)
   - Test symbolic links and junction point resolution
   - Verify Unicode character handling in paths
   - _Requirements: 1.1, 1.2, 1.5_
 
-- [ ] 24. Add database performance tests
+- [x] 24. Add database performance tests
   - Create test database with 10,000+ media files
   - Benchmark directory listing performance before and after optimization
   - Verify memory usage remains bounded during large operations
@@ -165,7 +160,7 @@
   - Test various ObjectID formats and path constructions
   - _Requirements: 1.2, 1.3, 7.2_
 
-- [ ] 26. Add regression tests for critical scenarios
+- [x] 26. Add regression tests for critical scenarios
   - Test mixed case paths on Windows
   - Test network paths and UNC formats
   - Test very long path names and special characters

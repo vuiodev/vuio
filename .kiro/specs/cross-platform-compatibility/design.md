@@ -152,7 +152,8 @@ pub enum NetworkInterfaceConfig {
 pub trait DatabaseManager {
     async fn initialize(&self) -> Result<()>;
     async fn store_media_file(&self, file: &MediaFile) -> Result<()>;
-    async fn get_all_media_files(&self) -> Result<Vec<MediaFile>>;
+    fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>>;
+    async fn collect_all_media_files(&self) -> Result<Vec<MediaFile>>;
     async fn remove_media_file(&self, path: &Path) -> Result<()>;
     async fn update_media_file(&self, file: &MediaFile) -> Result<()>;
     async fn get_files_in_directory(&self, dir: &Path) -> Result<Vec<MediaFile>>;

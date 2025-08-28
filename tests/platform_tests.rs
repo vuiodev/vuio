@@ -809,7 +809,7 @@ mod database_tests {
         }
         
         // Retrieve all files
-        let all_files = db.get_all_media_files().await.unwrap();
+        let all_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(all_files.len(), test_paths.len());
         
         // Verify paths are stored correctly
@@ -841,7 +841,7 @@ mod database_tests {
         
         // Verify backup integrity
         let backup_db = SqliteDatabase::new(backup_path.clone()).await.unwrap();
-        let backup_files = backup_db.get_all_media_files().await.unwrap();
+        let backup_files = backup_db.collect_all_media_files().await.unwrap();
         assert_eq!(backup_files.len(), 1);
         assert_eq!(backup_files[0].filename, "video.mp4");
     }
@@ -907,7 +907,7 @@ mod database_tests {
                 db.store_media_file(&media_file).await.unwrap();
                 
                 // Read back all files
-                let files = db.get_all_media_files().await.unwrap();
+                let files = db.collect_all_media_files().await.unwrap();
                 files.len()
             });
             
@@ -958,7 +958,7 @@ mod database_tests {
         assert_eq!(removed_count, 2); // Should remove 2 missing files
         
         // Verify only existing files remain
-        let remaining_files = db.get_all_media_files().await.unwrap();
+        let remaining_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(remaining_files.len(), 2);
         
         for file in &remaining_files {

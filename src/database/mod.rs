@@ -8,6 +8,7 @@ use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalizer};
+use crate::platform::DatabaseError;
 
 pub mod playlist_formats;
 
@@ -151,11 +152,7 @@ pub trait DatabaseManager: Send + Sync {
 
     /// Get all media files from the database
     /// 
-    /// # Deprecated
-    /// This method loads all files into memory and should be avoided for large libraries.
-    /// Use `stream_all_media_files()` for memory-efficient processing of large datasets.
-    #[deprecated(since = "0.0.16", note = "Use stream_all_media_files() for memory-efficient processing")]
-    async fn get_all_media_files(&self) -> Result<Vec<MediaFile>>;
+
 
     /// Stream all media files from the database (memory efficient)
     /// 
@@ -181,6 +178,26 @@ pub trait DatabaseManager: Send + Sync {
     /// }
     /// ```
     fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>>;
+
+    /// Collect all media files from the stream (helper for tests)
+    /// 
+    /// This is a convenience method that collects all files from the stream into a Vec.
+    /// Use this only for testing or when you need all files at once.
+    async fn collect_all_media_files(&self) -> Result<Vec<MediaFile>> {
+        use futures_util::StreamExt;
+        
+        let mut stream = self.stream_all_media_files();
+        let mut files = Vec::new();
+        
+        while let Some(result) = stream.next().await {
+            files.push(result.map_err(|e| DatabaseError::QueryFailed { 
+                query: "collect_all_media_files".to_string(), 
+                reason: e.to_string() 
+            })?);
+        }
+        
+        Ok(files)
+    }
 
     /// Remove a media file record by path
     async fn remove_media_file(&self, path: &Path) -> Result<bool>;
@@ -858,20 +875,7 @@ impl DatabaseManager for SqliteDatabase {
         Ok(result.last_insert_rowid())
     }
 
-    async fn get_all_media_files(&self) -> Result<Vec<MediaFile>> {
-        let rows = sqlx::query(
-            "SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at FROM media_files ORDER BY filename"
-        )
-        .fetch_all(&*self.pool.read().await)
-        .await?;
 
-        let mut files = Vec::with_capacity(rows.len()); // Pre-allocate capacity
-        for row in rows {
-            files.push(MediaFile::from_row(&row)?);
-        }
-
-        Ok(files)
-    }
 
     fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
         let pool = self.pool.clone();
@@ -897,6 +901,22 @@ impl DatabaseManager for SqliteDatabase {
                 }
             }
         })
+    }
+
+    async fn collect_all_media_files(&self) -> Result<Vec<MediaFile>> {
+        use futures_util::StreamExt;
+        
+        let mut stream = self.stream_all_media_files();
+        let mut files = Vec::new();
+        
+        while let Some(result) = stream.next().await {
+            files.push(result.map_err(|e| DatabaseError::QueryFailed { 
+                query: "collect_all_media_files".to_string(), 
+                reason: e.to_string() 
+            })?);
+        }
+        
+        Ok(files)
     }
 
     async fn remove_media_file(&self, path: &Path) -> Result<bool> {
@@ -2088,7 +2108,7 @@ mod tests {
 
         // Verify backup contains data
         let backup_db = SqliteDatabase::new(backup_path.clone()).await.unwrap();
-        let files = backup_db.get_all_media_files().await.unwrap();
+        let files = backup_db.collect_all_media_files().await.unwrap();
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename, "video.mp4");
     }
@@ -2196,7 +2216,7 @@ mod tests {
         assert_eq!(deleted_count, 1); // Should delete file3
 
         // Verify only 2 files remain
-        let remaining_files = db.get_all_media_files().await.unwrap();
+        let remaining_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(remaining_files.len(), 2);
     }
 
@@ -2223,7 +2243,7 @@ mod tests {
         assert_eq!(deleted_count, 3); // Should delete all three files
 
         // Verify all files are gone
-        let remaining_files = db.get_all_media_files().await.unwrap();
+        let remaining_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(remaining_files.len(), 0);
     }
 
@@ -2252,7 +2272,7 @@ mod tests {
             .unwrap();
 
         // Verify we have 3 records (1 valid, 2 invalid)
-        let all_files = db.get_all_media_files().await.unwrap();
+        let all_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(all_files.len(), 3);
 
         // Clean up invalid records
@@ -2260,7 +2280,7 @@ mod tests {
         assert_eq!(cleaned, 2);
 
         // Verify only valid record remains
-        let remaining_files = db.get_all_media_files().await.unwrap();
+        let remaining_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(remaining_files.len(), 1);
         assert_eq!(remaining_files[0].filename, "video.mp4");
     }
@@ -2851,14 +2871,7 @@ mod tests {
         assert_eq!(streamed_files[1].filename, "video1.mp4");
         assert_eq!(streamed_files[2].filename, "video2.mp4");
 
-        // Compare with deprecated get_all_media_files to ensure same results
-        #[allow(deprecated)]
-        let all_files = db.get_all_media_files().await.unwrap();
-        assert_eq!(streamed_files.len(), all_files.len(), "Streaming and get_all should return same count");
-        
-        for (streamed, all) in streamed_files.iter().zip(all_files.iter()) {
-            assert_eq!(streamed.path, all.path, "Files should be in same order");
-            assert_eq!(streamed.filename, all.filename, "Filenames should match");
-        }
+        // Verify streaming collected all files correctly
+        assert_eq!(streamed_files.len(), 3, "Should have streamed all 3 files");
     }
 }

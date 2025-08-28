@@ -632,7 +632,7 @@ mod integration_tests {
         }
         
         // Retrieve files from database
-        let db_files = db.get_all_media_files().await.unwrap();
+        let db_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(db_files.len(), 4);
         
         // Verify file paths match
@@ -658,7 +658,7 @@ mod integration_tests {
         println!("Stored new file: {} (ID: {})", new_media_file.filename, new_id);
         
         // Verify total count
-        let final_count = db.get_all_media_files().await.unwrap().len();
+        let final_count = db.collect_all_media_files().await.unwrap().len();
         assert_eq!(final_count, 5);
         
         // Test cleanup of missing files
@@ -670,7 +670,7 @@ mod integration_tests {
         let removed_count = db.cleanup_missing_files(&remaining_paths).await.unwrap();
         assert_eq!(removed_count, 1); // Should remove the deleted file
         
-        let final_db_files = db.get_all_media_files().await.unwrap();
+        let final_db_files = db.collect_all_media_files().await.unwrap();
         assert_eq!(final_db_files.len(), 4);
     }
     
