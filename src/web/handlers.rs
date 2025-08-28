@@ -2,7 +2,7 @@ use crate::{
     database::MediaDirectory,
     error::AppError,
     state::AppState,
-    web::xml::{generate_browse_response, generate_description_xml, generate_scpd_xml},
+    web::xml::{generate_description_xml, generate_scpd_xml},
 };
 use axum::{
     body::Body,
@@ -85,69 +85,47 @@ fn parse_browse_params(body: &str) -> BrowseParams {
     }
 }
 
-pub async fn content_directory_control(
-    State(state): State<AppState>,
-    body: String,
-) -> Response {
-    if body.contains("<u:Browse") {
-        let params = parse_browse_params(&body);
-        info!("Browse request - ObjectID: {}, StartingIndex: {}, RequestedCount: {}", 
-              params.object_id, params.starting_index, params.requested_count);
+/// Content Directory Handler struct to encapsulate specialized browse handlers
+pub struct ContentDirectoryHandler;
 
-        // Handle root browse request (ObjectID "0")
-        if params.object_id == "0" {
-            // For the root, we typically return the top-level containers (Video, Audio, Image).
-            // The generate_browse_response function should be smart enough to create these
-            // when given an object_id of "0" and empty lists of subdirectories and files.
-            let server_ip = state.get_server_ip();
-            let response = generate_browse_response("0", &[], &[], &state, &server_ip).await;
-            return (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                    (header::HeaderName::from_static("ext"), ""),
-                ],
-                response,
-            )
-                .into_response();
-        }
+impl ContentDirectoryHandler {
+    /// Handle video browse requests
+    async fn handle_video_browse(
+        params: &BrowseParams,
+        state: &AppState,
+        path_prefix_str: &str,
+    ) -> Response {
+        Self::handle_folder_browse(params, state, "video/", path_prefix_str).await
+    }
 
-        // Determine media type filter and path prefix from ObjectID
-        let (media_type_filter, path_prefix_str) = if params.object_id.starts_with("video") {
-            ("video/", params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/'))
-        } else if params.object_id.starts_with("audio") {
-            // Handle music categorization within audio section
-            let audio_path = params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/');
-            
-            // Check for music categorization paths
-            if audio_path.is_empty() {
-                // Root audio container - return categorization containers
-                return handle_audio_root_browse(&params, &state).await;
-            } else if audio_path.starts_with("artists") {
-                return handle_artists_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("albums") {
-                return handle_albums_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("genres") {
-                return handle_genres_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("years") {
-                return handle_years_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("playlists") {
-                return handle_playlists_browse(&params, &state, audio_path).await;
-            } else {
-                // Traditional folder browsing within audio
-                ("audio/", audio_path)
-            }
-        } else if params.object_id.starts_with("image") {
-            ("image/", params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/'))
-        } else {
-            // This case might happen for deeper browsing or custom object IDs.
-            // Assume no specific type filter for the database query, and the object_id itself
-            // represents the path relative to the media root.
-            ("", params.object_id.as_str())
-        };
+    /// Handle music browse requests (folder-based, not categorized)
+    async fn handle_music_browse(
+        params: &BrowseParams,
+        state: &AppState,
+        path_prefix_str: &str,
+    ) -> Response {
+        Self::handle_folder_browse(params, state, "audio/", path_prefix_str).await
+    }
 
-        // Determine the base path for the media type.
-        // For now, we assume all media is under one primary root.
+    /// Handle image browse requests
+    async fn handle_image_browse(
+        params: &BrowseParams,
+        state: &AppState,
+        path_prefix_str: &str,
+    ) -> Response {
+        Self::handle_folder_browse(params, state, "image/", path_prefix_str).await
+    }
+
+    /// Handle generic folder-based browse requests with consistent path normalization
+    async fn handle_folder_browse(
+        params: &BrowseParams,
+        state: &AppState,
+        media_type_filter: &str,
+        path_prefix_str: &str,
+    ) -> Response {
+        use crate::web::xml::generate_browse_response;
+
+        // Determine the base path for the media type
         let media_root = state.config.get_primary_media_dir();
         let browse_path = if path_prefix_str.is_empty() {
             media_root.clone()
@@ -198,7 +176,7 @@ pub async fn content_directory_control(
                 if starting_index >= total_matches {
                     // Starting index is beyond available items
                     let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &[], &[], &state, &server_ip).await;
+                    let response = generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
                     return (
                         StatusCode::OK,
                         [
@@ -228,7 +206,7 @@ pub async fn content_directory_control(
                        starting_index, end_index, total_matches);
                 
                 let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, &state, &server_ip).await;
+                let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, state, &server_ip).await;
                 (
                     StatusCode::OK,
                     [
@@ -257,6 +235,78 @@ pub async fn content_directory_control(
                 )
                     .into_response()
             }
+        }
+    }
+
+    /// Handle root browse request (ObjectID "0")
+    async fn handle_root_browse(_params: &BrowseParams, state: &AppState) -> Response {
+        use crate::web::xml::generate_browse_response;
+        
+        // For the root, we typically return the top-level containers (Video, Audio, Image).
+        // The generate_browse_response function should be smart enough to create these
+        // when given an object_id of "0" and empty lists of subdirectories and files.
+        let server_ip = state.get_server_ip();
+        let response = generate_browse_response("0", &[], &[], state, &server_ip).await;
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                (header::HeaderName::from_static("ext"), ""),
+            ],
+            response,
+        )
+            .into_response()
+    }
+}
+
+pub async fn content_directory_control(
+    State(state): State<AppState>,
+    body: String,
+) -> Response {
+    if body.contains("<u:Browse") {
+        let params = parse_browse_params(&body);
+        info!("Browse request - ObjectID: {}, StartingIndex: {}, RequestedCount: {}", 
+              params.object_id, params.starting_index, params.requested_count);
+
+        // Handle root browse request (ObjectID "0")
+        if params.object_id == "0" {
+            return ContentDirectoryHandler::handle_root_browse(&params, &state).await;
+        }
+
+        // Determine media type and delegate to specialized handlers
+        if params.object_id.starts_with("video") {
+            let path_prefix_str = params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/');
+            return ContentDirectoryHandler::handle_video_browse(&params, &state, path_prefix_str).await;
+        } else if params.object_id.starts_with("audio") {
+            // Handle music categorization within audio section
+            let audio_path = params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/');
+            
+            // Check for music categorization paths
+            if audio_path.is_empty() {
+                // Root audio container - return categorization containers
+                return handle_audio_root_browse(&params, &state).await;
+            } else if audio_path.starts_with("artists") {
+                return ContentDirectoryHandler::handle_artist_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("albums") {
+                return ContentDirectoryHandler::handle_album_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("genres") {
+                return handle_genres_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("years") {
+                return handle_years_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("playlists") {
+                return handle_playlists_browse(&params, &state, audio_path).await;
+            } else {
+                // Traditional folder browsing within audio
+                return ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await;
+            }
+        } else if params.object_id.starts_with("image") {
+            let path_prefix_str = params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/');
+            return ContentDirectoryHandler::handle_image_browse(&params, &state, path_prefix_str).await;
+        } else {
+            // This case might happen for deeper browsing or custom object IDs.
+            // Assume no specific type filter for the database query, and the object_id itself
+            // represents the path relative to the media root.
+            return ContentDirectoryHandler::handle_folder_browse(&params, &state, "", params.object_id.as_str()).await;
         }
     } else {
         (
@@ -508,167 +558,171 @@ async fn handle_audio_root_browse(
         .into_response()
 }
     
-/// Handle browsing artists
-async fn handle_artists_browse(
-    params: &BrowseParams,
-    state: &AppState, 
-    audio_path: &str,
-) -> Response {
-    use crate::web::xml::generate_browse_response;
-    
-    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
-    
-    if path_parts.len() == 1 {
-        // List all artists
-        match state.database.get_artists().await {
-            Ok(artists) => {
-                let subdirectories: Vec<crate::database::MediaDirectory> = artists
-                    .into_iter()
-                    .map(|artist| crate::database::MediaDirectory {
-                        path: std::path::PathBuf::from(format!("audio/artists/{}", artist.name)),
-                        name: format!("{} ({})", artist.name, artist.count),
-                    })
-                    .collect();
-                    
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
+impl ContentDirectoryHandler {
+    /// Handle artist browse requests with consistent path normalization
+    async fn handle_artist_browse(
+        params: &BrowseParams,
+        state: &AppState,
+        audio_path: &str,
+    ) -> Response {
+        use crate::web::xml::generate_browse_response;
+        
+        let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+        
+        if path_parts.len() == 1 {
+            // List all artists
+            match state.database.get_artists().await {
+                Ok(artists) => {
+                    let subdirectories: Vec<crate::database::MediaDirectory> = artists
+                        .into_iter()
+                        .map(|artist| crate::database::MediaDirectory {
+                            path: std::path::PathBuf::from(format!("audio/artists/{}", artist.name)),
+                            name: format!("{} ({})", artist.name, artist.count),
+                        })
+                        .collect();
+                        
+                    let server_ip = state.get_server_ip();
+                    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    error!("Error getting artists: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing artists".to_string(),
+                    )
+                        .into_response()
+                }
             }
-            Err(e) => {
-                error!("Error getting artists: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing artists".to_string(),
-                )
-                    .into_response()
+        } else if path_parts.len() == 2 {
+            // List tracks by specific artist
+            let artist_name = path_parts[1];
+            match state.database.get_music_by_artist(artist_name).await {
+                Ok(files) => {
+                    let server_ip = state.get_server_ip();
+                    let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    error!("Error getting music by artist {}: {}", artist_name, e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing artist tracks".to_string(),
+                    )
+                        .into_response()
+                }
             }
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "Invalid artist path".to_string(),
+            )
+                .into_response()
         }
-    } else if path_parts.len() == 2 {
-        // List tracks by specific artist
-        let artist_name = path_parts[1];
-        match state.database.get_music_by_artist(artist_name).await {
-            Ok(files) => {
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
+    }
+
+    /// Handle album browse requests with consistent path normalization
+    async fn handle_album_browse(
+        params: &BrowseParams,
+        state: &AppState,
+        audio_path: &str,
+    ) -> Response {
+        use crate::web::xml::generate_browse_response;
+        
+        let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+        
+        if path_parts.len() == 1 {
+            // List all albums
+            match state.database.get_albums(None).await {
+                Ok(albums) => {
+                    let subdirectories: Vec<crate::database::MediaDirectory> = albums
+                        .into_iter()
+                        .map(|album| crate::database::MediaDirectory {
+                            path: std::path::PathBuf::from(format!("audio/albums/{}", album.name)),
+                            name: format!("{} ({})", album.name, album.count),
+                        })
+                        .collect();
+                        
+                    let server_ip = state.get_server_ip();
+                    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    error!("Error getting albums: {}", e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing albums".to_string(),
+                    )
+                        .into_response()
+                }
             }
-            Err(e) => {
-                error!("Error getting music by artist {}: {}", artist_name, e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing artist tracks".to_string(),
-                )
-                    .into_response()
+        } else if path_parts.len() == 2 {
+            // List tracks by specific album
+            let album_name = path_parts[1];
+            match state.database.get_music_by_album(album_name, None).await {
+                Ok(files) => {
+                    let server_ip = state.get_server_ip();
+                    let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
+                    (
+                        StatusCode::OK,
+                        [
+                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                            (header::HeaderName::from_static("ext"), ""),
+                        ],
+                        response,
+                    )
+                        .into_response()
+                }
+                Err(e) => {
+                    error!("Error getting music by album {}: {}", album_name, e);
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing album tracks".to_string(),
+                    )
+                        .into_response()
+                }
             }
+        } else {
+            (
+                StatusCode::NOT_FOUND,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "Invalid album path".to_string(),
+            )
+                .into_response()
         }
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Invalid artist path".to_string(),
-        )
-            .into_response()
     }
 }
 
-/// Handle browsing albums
-async fn handle_albums_browse(
-    params: &BrowseParams,
-    state: &AppState,
-    audio_path: &str,
-) -> Response {
-    use crate::web::xml::generate_browse_response;
-    
-    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
-    
-    if path_parts.len() == 1 {
-        // List all albums
-        match state.database.get_albums(None).await {
-            Ok(albums) => {
-                let subdirectories: Vec<crate::database::MediaDirectory> = albums
-                    .into_iter()
-                    .map(|album| crate::database::MediaDirectory {
-                        path: std::path::PathBuf::from(format!("audio/albums/{}", album.name)),
-                        name: format!("{} ({})", album.name, album.count),
-                    })
-                    .collect();
-                    
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                error!("Error getting albums: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing albums".to_string(),
-                )
-                    .into_response()
-            }
-        }
-    } else if path_parts.len() == 2 {
-        // List tracks by specific album
-        let album_name = path_parts[1];
-        match state.database.get_music_by_album(album_name, None).await {
-            Ok(files) => {
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                error!("Error getting music by album {}: {}", album_name, e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing album tracks".to_string(),
-                )
-                    .into_response()
-            }
-        }
-    } else {
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Invalid album path".to_string(),
-        )
-            .into_response()
-    }
-}
+
 
 /// Handle browsing genres
 async fn handle_genres_browse(

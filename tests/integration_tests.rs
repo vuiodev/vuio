@@ -930,6 +930,7 @@ mod command_line_tests {
                     recursive: true,
                     extensions: None,
                     exclude_patterns: None,
+                    validation_mode: vuio::config::ValidationMode::Warn,
                 }
             ];
             
@@ -947,18 +948,21 @@ mod command_line_tests {
                     recursive: true,
                     extensions: None,
                     exclude_patterns: None,
+                    validation_mode: vuio::config::ValidationMode::Warn,
                 },
                 MonitoredDirectoryConfig {
                     path: dir2_path.clone(),
                     recursive: true,
                     extensions: None,
                     exclude_patterns: None,
+                    validation_mode: vuio::config::ValidationMode::Warn,
                 },
                 MonitoredDirectoryConfig {
                     path: dir3_path.clone(),
                     recursive: true,
                     extensions: None,
                     exclude_patterns: None,
+                    validation_mode: vuio::config::ValidationMode::Warn,
                 }
             ];
             
@@ -983,6 +987,7 @@ mod command_line_tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: vuio::config::ValidationMode::Warn,
             };
             
             let path = PathBuf::from(&config.path);
@@ -997,6 +1002,7 @@ mod command_line_tests {
                 recursive: true,
                 extensions: None,
                 exclude_patterns: None,
+                validation_mode: vuio::config::ValidationMode::Warn,
             };
             
             let path = PathBuf::from(&config.path);
@@ -1020,12 +1026,14 @@ mod command_line_tests {
                 recursive: true,
                 extensions: Some(vec!["mp4".to_string(), "mkv".to_string()]),
                 exclude_patterns: Some(vec!["*.tmp".to_string()]),
+                validation_mode: vuio::config::ValidationMode::Warn,
             },
             MonitoredDirectoryConfig {
                 path: dir2_path.clone(),
                 recursive: false,
                 extensions: Some(vec!["mp3".to_string(), "flac".to_string()]),
                 exclude_patterns: None,
+                validation_mode: vuio::config::ValidationMode::Warn,
             }
         ];
         
@@ -1132,6 +1140,7 @@ mod command_line_tests {
                 recursive: true,
                 extensions: None, // Use global extensions
                 exclude_patterns: None, // Use platform defaults
+                validation_mode: vuio::config::ValidationMode::Warn,
             }
         ];
         
