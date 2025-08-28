@@ -171,6 +171,114 @@ pub mod media_d_b {
         pub created_at: u64,
         pub last_modified: u64,
     }
+    
+    // Stub Playlist table
+    pub struct Playlist<'a> {
+        _tab: flatbuffers::Table<'a>,
+    }
+    
+    impl<'a> Playlist<'a> {
+        pub fn id(&self) -> u64 { 0 }
+        pub fn name(&self) -> Option<&str> { None }
+        pub fn description(&self) -> Option<&str> { None }
+        pub fn created_at(&self) -> u64 { 0 }
+        pub fn updated_at(&self) -> u64 { 0 }
+        
+        pub fn create<'b>(
+            _builder: &mut FlatBufferBuilder<'b>,
+            _args: &PlaylistArgs<'b>,
+        ) -> flatbuffers::WIPOffset<Playlist<'b>> {
+            flatbuffers::WIPOffset::new(0)
+        }
+    }
+    
+    pub struct PlaylistArgs<'a> {
+        pub id: u64,
+        pub name: Option<flatbuffers::WIPOffset<&'a str>>,
+        pub description: Option<flatbuffers::WIPOffset<&'a str>>,
+        pub created_at: u64,
+        pub updated_at: u64,
+    }
+    
+    // Stub PlaylistEntry table
+    pub struct PlaylistEntry<'a> {
+        _tab: flatbuffers::Table<'a>,
+    }
+    
+    impl<'a> PlaylistEntry<'a> {
+        pub fn id(&self) -> u64 { 0 }
+        pub fn playlist_id(&self) -> u64 { 0 }
+        pub fn media_file_id(&self) -> u64 { 0 }
+        pub fn position(&self) -> u32 { 0 }
+        pub fn created_at(&self) -> u64 { 0 }
+        
+        pub fn create<'b>(
+            _builder: &mut FlatBufferBuilder<'b>,
+            _args: &PlaylistEntryArgs,
+        ) -> flatbuffers::WIPOffset<PlaylistEntry<'b>> {
+            flatbuffers::WIPOffset::new(0)
+        }
+    }
+    
+    pub struct PlaylistEntryArgs {
+        pub id: u64,
+        pub playlist_id: u64,
+        pub media_file_id: u64,
+        pub position: u32,
+        pub created_at: u64,
+    }
+    
+    // Stub PlaylistBatch table
+    pub struct PlaylistBatch<'a> {
+        _tab: flatbuffers::Table<'a>,
+    }
+    
+    impl<'a> PlaylistBatch<'a> {
+        pub fn playlists(&self) -> Option<flatbuffers::Vector<flatbuffers::ForwardsUOffset<Playlist>>> { None }
+        pub fn batch_id(&self) -> u64 { 0 }
+        pub fn timestamp(&self) -> u64 { 0 }
+        pub fn operation_type(&self) -> BatchOperationType { BatchOperationType::Insert }
+        
+        pub fn create<'b>(
+            _builder: &mut FlatBufferBuilder<'b>,
+            _args: &PlaylistBatchArgs<'b>,
+        ) -> flatbuffers::WIPOffset<PlaylistBatch<'b>> {
+            flatbuffers::WIPOffset::new(0)
+        }
+    }
+    
+    pub struct PlaylistBatchArgs<'a> {
+        pub playlists: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<Playlist<'a>>>>>,
+        pub batch_id: u64,
+        pub timestamp: u64,
+        pub operation_type: BatchOperationType,
+    }
+    
+    // Stub PlaylistEntryBatch table
+    pub struct PlaylistEntryBatch<'a> {
+        _tab: flatbuffers::Table<'a>,
+    }
+    
+    impl<'a> PlaylistEntryBatch<'a> {
+        pub fn entries(&self) -> Option<flatbuffers::Vector<flatbuffers::ForwardsUOffset<PlaylistEntry>>> { None }
+        pub fn batch_id(&self) -> u64 { 0 }
+        pub fn timestamp(&self) -> u64 { 0 }
+        pub fn operation_type(&self) -> BatchOperationType { BatchOperationType::Insert }
+        
+        pub fn create<'b>(
+            _builder: &mut FlatBufferBuilder<'b>,
+            _args: &PlaylistEntryBatchArgs<'b>,
+        ) -> flatbuffers::WIPOffset<PlaylistEntryBatch<'b>> {
+            flatbuffers::WIPOffset::new(0)
+        }
+    }
+    
+    pub struct PlaylistEntryBatchArgs<'a> {
+        pub entries: Option<flatbuffers::WIPOffset<flatbuffers::Vector<'a, flatbuffers::ForwardsUOffset<PlaylistEntry<'a>>>>>,
+        pub batch_id: u64,
+        pub timestamp: u64,
+        pub operation_type: BatchOperationType,
+    }
 }
 "#;
     

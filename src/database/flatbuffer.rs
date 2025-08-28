@@ -81,6 +81,215 @@ impl Default for BatchSerializer {
     }
 }
 
+/// Result of playlist batch serialization operation
+#[derive(Debug)]
+pub struct PlaylistBatchSerializationResult {
+    pub batch_id: u64,
+    pub serialization_time: std::time::Duration,
+    pub serialized_size: usize,
+    pub errors: Vec<BatchSerializationError>,
+}
+
+/// Serialization helper for Playlist to FlatBuffer with batch support
+pub struct PlaylistSerializer;
+
+impl PlaylistSerializer {
+    /// Serialize a Playlist to FlatBuffer format
+    pub fn serialize_playlist<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        playlist: &crate::database::Playlist,
+    ) -> Result<flatbuffers::WIPOffset<Playlist<'a>>> {
+        // Create strings
+        let name = builder.create_string(&playlist.name);
+        let description = builder.create_string(
+            playlist.description.as_deref().unwrap_or("")
+        );
+        
+        // Create Playlist
+        let playlist_fb = Playlist::create(builder, &PlaylistArgs {
+            id: playlist.id.unwrap_or(0) as u64,
+            name: Some(name),
+            description: Some(description),
+            created_at: FlatBufferConverter::system_time_to_timestamp(playlist.created_at),
+            updated_at: FlatBufferConverter::system_time_to_timestamp(playlist.updated_at),
+        });
+        
+        Ok(playlist_fb)
+    }
+    
+    /// Deserialize a FlatBuffer Playlist to Rust Playlist
+    pub fn deserialize_playlist(fb_playlist: Playlist) -> Result<crate::database::Playlist> {
+        let name = fb_playlist.name().unwrap_or("").to_string();
+        let description = FlatBufferConverter::str_to_optional_string(fb_playlist.description());
+        
+        Ok(crate::database::Playlist {
+            id: if fb_playlist.id() == 0 { None } else { Some(fb_playlist.id() as i64) },
+            name,
+            description,
+            created_at: FlatBufferConverter::timestamp_to_system_time(fb_playlist.created_at()),
+            updated_at: FlatBufferConverter::timestamp_to_system_time(fb_playlist.updated_at()),
+        })
+    }
+    
+    /// Serialize a PlaylistEntry to FlatBuffer format
+    pub fn serialize_playlist_entry<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        entry: &crate::database::PlaylistEntry,
+    ) -> Result<flatbuffers::WIPOffset<PlaylistEntry<'a>>> {
+        // Create PlaylistEntry
+        let entry_fb = PlaylistEntry::create(builder, &PlaylistEntryArgs {
+            id: entry.id.unwrap_or(0) as u64,
+            playlist_id: entry.playlist_id as u64,
+            media_file_id: entry.media_file_id as u64,
+            position: entry.position,
+            created_at: FlatBufferConverter::system_time_to_timestamp(entry.created_at),
+        });
+        
+        Ok(entry_fb)
+    }
+    
+    /// Deserialize a FlatBuffer PlaylistEntry to Rust PlaylistEntry
+    pub fn deserialize_playlist_entry(fb_entry: PlaylistEntry) -> Result<crate::database::PlaylistEntry> {
+        Ok(crate::database::PlaylistEntry {
+            id: if fb_entry.id() == 0 { None } else { Some(fb_entry.id() as i64) },
+            playlist_id: fb_entry.playlist_id() as i64,
+            media_file_id: fb_entry.media_file_id() as i64,
+            position: fb_entry.position(),
+            created_at: FlatBufferConverter::timestamp_to_system_time(fb_entry.created_at()),
+        })
+    }
+    
+    /// Serialize a batch of Playlists to FlatBuffer format
+    pub fn serialize_playlist_batch<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        playlists: &[crate::database::Playlist],
+        batch_id: u64,
+        operation_type: BatchOperationType,
+    ) -> Result<PlaylistBatchSerializationResult> {
+        if playlists.is_empty() {
+            return Err(anyhow::anyhow!("Cannot serialize empty playlist batch"));
+        }
+        
+        let start_time = std::time::Instant::now();
+        
+        // Serialize all playlists
+        let mut playlist_offsets = Vec::with_capacity(playlists.len());
+        let mut serialization_errors = Vec::new();
+        
+        for (i, playlist) in playlists.iter().enumerate() {
+            match Self::serialize_playlist(builder, playlist) {
+                Ok(playlist_offset) => playlist_offsets.push(playlist_offset),
+                Err(e) => {
+                    serialization_errors.push(BatchSerializationError {
+                        file_index: i,
+                        file_path: std::path::PathBuf::from(format!("playlist_{}", playlist.name)),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+        
+        // If we have serialization errors, return them
+        if !serialization_errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Playlist batch serialization failed with {} errors: {:?}",
+                serialization_errors.len(),
+                serialization_errors
+            ));
+        }
+        
+        // Create playlist vector
+        let playlists_vector = builder.create_vector(&playlist_offsets);
+        
+        // Create batch container
+        let batch = PlaylistBatch::create(builder, &PlaylistBatchArgs {
+            playlists: Some(playlists_vector),
+            batch_id,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+            operation_type,
+        });
+        
+        builder.finish(batch, None);
+        
+        let serialization_time = start_time.elapsed();
+        let serialized_data = builder.finished_data();
+        
+        Ok(PlaylistBatchSerializationResult {
+            batch_id,
+            serialization_time,
+            serialized_size: serialized_data.len(),
+            errors: serialization_errors,
+        })
+    }
+    
+    /// Serialize a batch of PlaylistEntries to FlatBuffer format
+    pub fn serialize_playlist_entry_batch<'a>(
+        builder: &mut flatbuffers::FlatBufferBuilder<'a>,
+        entries: &[crate::database::PlaylistEntry],
+        batch_id: u64,
+        operation_type: BatchOperationType,
+    ) -> Result<PlaylistBatchSerializationResult> {
+        if entries.is_empty() {
+            return Err(anyhow::anyhow!("Cannot serialize empty playlist entry batch"));
+        }
+        
+        let start_time = std::time::Instant::now();
+        
+        // Serialize all entries
+        let mut entry_offsets = Vec::with_capacity(entries.len());
+        let mut serialization_errors = Vec::new();
+        
+        for (i, entry) in entries.iter().enumerate() {
+            match Self::serialize_playlist_entry(builder, entry) {
+                Ok(entry_offset) => entry_offsets.push(entry_offset),
+                Err(e) => {
+                    serialization_errors.push(BatchSerializationError {
+                        file_index: i,
+                        file_path: std::path::PathBuf::from(format!("playlist_entry_{}", entry.id.unwrap_or(0))),
+                        error: e.to_string(),
+                    });
+                }
+            }
+        }
+        
+        // If we have serialization errors, return them
+        if !serialization_errors.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Playlist entry batch serialization failed with {} errors: {:?}",
+                serialization_errors.len(),
+                serialization_errors
+            ));
+        }
+        
+        // Create entries vector
+        let entries_vector = builder.create_vector(&entry_offsets);
+        
+        // Create batch container
+        let batch = PlaylistEntryBatch::create(builder, &PlaylistEntryBatchArgs {
+            entries: Some(entries_vector),
+            batch_id,
+            timestamp: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)?
+                .as_secs(),
+            operation_type,
+        });
+        
+        builder.finish(batch, None);
+        
+        let serialization_time = start_time.elapsed();
+        let serialized_data = builder.finished_data();
+        
+        Ok(PlaylistBatchSerializationResult {
+            batch_id,
+            serialization_time,
+            serialized_size: serialized_data.len(),
+            errors: serialization_errors,
+        })
+    }
+}
+
 /// Serialization helper for MediaFile to FlatBuffer with batch support
 pub struct MediaFileSerializer;
 

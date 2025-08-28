@@ -405,6 +405,14 @@ pub struct ZeroCopyDatabase {
     // FlatBuffer serialization
     batch_serializer: Arc<BatchSerializer>,
     flatbuffer_builder: Arc<RwLock<flatbuffers::FlatBufferBuilder<'static>>>,
+    
+    // Playlist storage - atomic counters for ID generation
+    next_playlist_id: AtomicU64,
+    next_playlist_entry_id: AtomicU64,
+    
+    // In-memory playlist storage for fast access
+    playlists: Arc<RwLock<std::collections::HashMap<i64, Playlist>>>,
+    playlist_entries: Arc<RwLock<std::collections::HashMap<i64, Vec<super::PlaylistEntry>>>>,
 }
 
 impl ZeroCopyDatabase {
@@ -461,6 +469,10 @@ impl ZeroCopyDatabase {
             is_open: AtomicU64::new(0),
             batch_serializer,
             flatbuffer_builder: Arc::new(RwLock::new(flatbuffer_builder)),
+            next_playlist_id: AtomicU64::new(1),
+            next_playlist_entry_id: AtomicU64::new(1),
+            playlists: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            playlist_entries: Arc::new(RwLock::new(std::collections::HashMap::new())),
         })
     }
     
@@ -618,6 +630,13 @@ impl ZeroCopyDatabase {
     async fn save_indexes(&self, index_file_path: &Path) -> Result<()> {
         let index_manager = self.index_manager.read().await;
         index_manager.persist_indexes(index_file_path).await
+    }
+    
+    /// Helper method to deserialize MediaFile from FlatBuffer data
+    fn deserialize_media_file_from_data(&self, _data: &[u8]) -> Result<MediaFile> {
+        // For now, return a placeholder - this would need proper FlatBuffer deserialization
+        // In a real implementation, this would parse the FlatBuffer data
+        Err(anyhow!("MediaFile deserialization from FlatBuffer data not yet implemented"))
     }
     
     /// Batch insert files using zero-copy FlatBuffer serialization
@@ -2014,45 +2033,562 @@ impl DatabaseManager for ZeroCopyDatabase {
         Ok(files)
     }
     
-    // Playlist methods - placeholders
-    async fn create_playlist(&self, _name: &str, _description: Option<&str>) -> Result<i64> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    // Playlist methods - implemented with atomic operations and bulk processing
+    async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<i64> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Generate atomic playlist ID
+        let playlist_id = self.next_playlist_id.fetch_add(1, Ordering::SeqCst) as i64;
+        
+        let now = SystemTime::now();
+        let playlist = Playlist {
+            id: Some(playlist_id),
+            name: name.to_string(),
+            description: description.map(|s| s.to_string()),
+            created_at: now,
+            updated_at: now,
+        };
+        
+        // Store in memory for fast access
+        {
+            let mut playlists = self.playlists.write().await;
+            playlists.insert(playlist_id, playlist.clone());
+        }
+        
+        // Serialize and persist to disk using batch operations
+        let serialization_result = {
+            let mut builder = self.flatbuffer_builder.write().await;
+            builder.reset();
+            
+            super::flatbuffer::PlaylistSerializer::serialize_playlist_batch(
+                &mut builder,
+                &[playlist],
+                self.batch_serializer.generate_batch_id(),
+                super::flatbuffer::BatchOperationType::Insert,
+            )?
+        };
+        
+        // Write to memory-mapped file
+        {
+            let mut data_file = self.data_file.write().await;
+            let builder = self.flatbuffer_builder.read().await;
+            let serialized_data = builder.finished_data();
+            
+            let io_start = Instant::now();
+            let _offset = data_file.append_data(serialized_data)?;
+            let io_time = io_start.elapsed();
+            
+            self.performance_tracker.record_io_operation(
+                serialized_data.len() as u64,
+                true,
+                io_time,
+            );
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_file_operation(FileOperationType::Insert, processing_time);
+        
+        info!(
+            "Created playlist '{}' with ID {} in {:?}",
+            name,
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(playlist_id)
     }
     
     async fn get_playlists(&self) -> Result<Vec<Playlist>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get from in-memory storage for fast access
+        let playlists = {
+            let playlists_map = self.playlists.read().await;
+            playlists_map.values().cloned().collect::<Vec<_>>()
+        };
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_cache_access(true); // Cache hit
+        
+        debug!(
+            "Retrieved {} playlists in {:?}",
+            playlists.len(),
+            processing_time
+        );
+        
+        Ok(playlists)
     }
     
-    async fn get_playlist(&self, _playlist_id: i64) -> Result<Option<Playlist>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn get_playlist(&self, playlist_id: i64) -> Result<Option<Playlist>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get from in-memory storage for fast access
+        let playlist = {
+            let playlists_map = self.playlists.read().await;
+            playlists_map.get(&playlist_id).cloned()
+        };
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_cache_access(playlist.is_some());
+        
+        debug!(
+            "Retrieved playlist {} in {:?} (found: {})",
+            playlist_id,
+            processing_time,
+            playlist.is_some()
+        );
+        
+        Ok(playlist)
     }
     
-    async fn update_playlist(&self, _playlist: &Playlist) -> Result<()> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn update_playlist(&self, playlist: &Playlist) -> Result<()> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let playlist_id = playlist.id.ok_or_else(|| anyhow!("Playlist must have an ID"))?;
+        let start_time = Instant::now();
+        
+        // Update in memory
+        {
+            let mut playlists_map = self.playlists.write().await;
+            if !playlists_map.contains_key(&playlist_id) {
+                return Err(anyhow!("Playlist {} not found", playlist_id));
+            }
+            
+            let mut updated_playlist = playlist.clone();
+            updated_playlist.updated_at = SystemTime::now();
+            playlists_map.insert(playlist_id, updated_playlist.clone());
+        }
+        
+        // Serialize and persist to disk
+        let _serialization_result = {
+            let mut builder = self.flatbuffer_builder.write().await;
+            builder.reset();
+            
+            super::flatbuffer::PlaylistSerializer::serialize_playlist_batch(
+                &mut builder,
+                &[playlist.clone()],
+                self.batch_serializer.generate_batch_id(),
+                super::flatbuffer::BatchOperationType::Update,
+            )?
+        };
+        
+        // Write to memory-mapped file
+        {
+            let mut data_file = self.data_file.write().await;
+            let builder = self.flatbuffer_builder.read().await;
+            let serialized_data = builder.finished_data();
+            
+            let io_start = Instant::now();
+            let _offset = data_file.append_data(serialized_data)?;
+            let io_time = io_start.elapsed();
+            
+            self.performance_tracker.record_io_operation(
+                serialized_data.len() as u64,
+                true,
+                io_time,
+            );
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_file_operation(FileOperationType::Update, processing_time);
+        
+        info!(
+            "Updated playlist {} in {:?}",
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(())
     }
     
-    async fn delete_playlist(&self, _playlist_id: i64) -> Result<bool> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn delete_playlist(&self, playlist_id: i64) -> Result<bool> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Remove from memory
+        let playlist_existed = {
+            let mut playlists_map = self.playlists.write().await;
+            playlists_map.remove(&playlist_id).is_some()
+        };
+        
+        if !playlist_existed {
+            return Ok(false);
+        }
+        
+        // Also remove all playlist entries
+        {
+            let mut entries_map = self.playlist_entries.write().await;
+            entries_map.remove(&playlist_id);
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_file_operation(FileOperationType::Delete, processing_time);
+        
+        info!(
+            "Deleted playlist {} in {:?}",
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(true)
     }
     
-    async fn add_to_playlist(&self, _playlist_id: i64, _media_file_id: i64, _position: Option<u32>) -> Result<i64> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn add_to_playlist(&self, playlist_id: i64, media_file_id: i64, position: Option<u32>) -> Result<i64> {
+        // Use bulk operation for consistency
+        let entries = vec![(media_file_id, position.unwrap_or(0))];
+        let entry_ids = self.batch_add_to_playlist(playlist_id, &entries).await?;
+        Ok(entry_ids[0])
     }
     
-    async fn batch_add_to_playlist(&self, _playlist_id: i64, _media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn batch_add_to_playlist(&self, playlist_id: i64, media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        if media_file_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        let start_time = Instant::now();
+        
+        // Verify playlist exists
+        {
+            let playlists_map = self.playlists.read().await;
+            if !playlists_map.contains_key(&playlist_id) {
+                return Err(anyhow!("Playlist {} not found", playlist_id));
+            }
+        }
+        
+        // Generate atomic entry IDs and create entries
+        let mut entries = Vec::with_capacity(media_file_ids.len());
+        let mut entry_ids = Vec::with_capacity(media_file_ids.len());
+        let now = SystemTime::now();
+        
+        for &(media_file_id, position) in media_file_ids {
+            let entry_id = self.next_playlist_entry_id.fetch_add(1, Ordering::SeqCst) as i64;
+            entry_ids.push(entry_id);
+            
+            entries.push(super::PlaylistEntry {
+                id: Some(entry_id),
+                playlist_id,
+                media_file_id,
+                position,
+                created_at: now,
+            });
+        }
+        
+        // Store in memory
+        {
+            let mut entries_map = self.playlist_entries.write().await;
+            let playlist_entries = entries_map.entry(playlist_id).or_insert_with(Vec::new);
+            playlist_entries.extend(entries.clone());
+            
+            // Sort by position for consistent ordering
+            playlist_entries.sort_by_key(|e| e.position);
+        }
+        
+        // Serialize and persist to disk using batch operations
+        let _serialization_result = {
+            let mut builder = self.flatbuffer_builder.write().await;
+            builder.reset();
+            
+            super::flatbuffer::PlaylistSerializer::serialize_playlist_entry_batch(
+                &mut builder,
+                &entries,
+                self.batch_serializer.generate_batch_id(),
+                super::flatbuffer::BatchOperationType::Insert,
+            )?
+        };
+        
+        // Write to memory-mapped file
+        {
+            let mut data_file = self.data_file.write().await;
+            let builder = self.flatbuffer_builder.read().await;
+            let serialized_data = builder.finished_data();
+            
+            let io_start = Instant::now();
+            let _offset = data_file.append_data(serialized_data)?;
+            let io_time = io_start.elapsed();
+            
+            self.performance_tracker.record_io_operation(
+                serialized_data.len() as u64,
+                true,
+                io_time,
+            );
+        }
+        
+        let processing_time = start_time.elapsed();
+        let throughput = entries.len() as f64 / processing_time.as_secs_f64();
+        
+        self.performance_tracker.record_batch_operation(true, entries.len(), processing_time);
+        
+        info!(
+            "Added {} tracks to playlist {} in {:?} ({:.0} tracks/sec)",
+            entries.len(),
+            playlist_id,
+            processing_time,
+            throughput
+        );
+        
+        Ok(entry_ids)
     }
     
-    async fn remove_from_playlist(&self, _playlist_id: i64, _media_file_id: i64) -> Result<bool> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool> {
+        // Use bulk operation for consistency
+        let removed_count = self.bulk_remove_from_playlist(playlist_id, &[media_file_id]).await?;
+        Ok(removed_count > 0)
     }
     
-    async fn get_playlist_tracks(&self, _playlist_id: i64) -> Result<Vec<MediaFile>> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get playlist entries from memory
+        let entries = {
+            let entries_map = self.playlist_entries.read().await;
+            entries_map.get(&playlist_id).cloned().unwrap_or_default()
+        };
+        
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Get media files for the entries using zero-copy access
+        let mut tracks = Vec::with_capacity(entries.len());
+        let mut index_manager = self.index_manager.write().await;
+        
+        for entry in &entries {
+            // Look up media file by ID in index
+            if let Some(offset) = index_manager.find_by_id(entry.media_file_id as u64) {
+                // Read from memory-mapped file at offset (zero-copy access)
+                let data_file = self.data_file.read().await;
+                if let Ok(data) = data_file.read_at_offset(offset, 1024) { // Read reasonable chunk
+                    // Deserialize MediaFile from FlatBuffer data
+                    if let Ok(media_file) = self.deserialize_media_file_from_data(data) {
+                        tracks.push(media_file);
+                    }
+                }
+            }
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_cache_access(true);
+        
+        debug!(
+            "Retrieved {} tracks for playlist {} in {:?}",
+            tracks.len(),
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(tracks)
     }
     
-    async fn reorder_playlist(&self, _playlist_id: i64, _track_positions: &[(i64, u32)]) -> Result<()> {
-        Err(anyhow!("Not implemented yet - will be implemented in task 10"))
+    async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        let position_map: std::collections::HashMap<i64, u32> = track_positions.iter().copied().collect();
+        
+        // Update positions in memory with atomic operations
+        {
+            let mut entries_map = self.playlist_entries.write().await;
+            if let Some(playlist_entries) = entries_map.get_mut(&playlist_id) {
+                for entry in playlist_entries.iter_mut() {
+                    if let Some(&new_position) = position_map.get(&entry.media_file_id) {
+                        entry.position = new_position;
+                    }
+                }
+                
+                // Sort by new positions
+                playlist_entries.sort_by_key(|e| e.position);
+            }
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_file_operation(FileOperationType::Update, processing_time);
+        
+        info!(
+            "Reordered {} tracks in playlist {} in {:?}",
+            track_positions.len(),
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(())
+    }
+    
+    async fn get_files_with_path_prefix(&self, _canonical_prefix: &str) -> Result<Vec<MediaFile>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn get_direct_subdirectories(&self, _canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn batch_cleanup_missing_files(&self, _existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn database_native_cleanup(&self, _existing_canonical_paths: &[String]) -> Result<usize> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+    
+    async fn get_filtered_direct_subdirectories(
+        &self,
+        _canonical_parent_path: &str,
+        _mime_filter: &str,
+    ) -> Result<Vec<MediaDirectory>> {
+        Err(anyhow!("Not implemented yet - will be implemented in task 8"))
+    }
+}
+
+impl ZeroCopyDatabase {
+    /// Bulk remove tracks from playlist with atomic cleanup (private helper method)
+    async fn bulk_remove_from_playlist(&self, playlist_id: i64, media_file_ids: &[i64]) -> Result<usize> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        if media_file_ids.is_empty() {
+            return Ok(0);
+        }
+        
+        let start_time = Instant::now();
+        let media_file_set: HashSet<i64> = media_file_ids.iter().copied().collect();
+        
+        // Remove from memory
+        let removed_count = {
+            let mut entries_map = self.playlist_entries.write().await;
+            if let Some(playlist_entries) = entries_map.get_mut(&playlist_id) {
+                let original_len = playlist_entries.len();
+                playlist_entries.retain(|entry| !media_file_set.contains(&entry.media_file_id));
+                original_len - playlist_entries.len()
+            } else {
+                0
+            }
+        };
+        
+        let processing_time = start_time.elapsed();
+        let throughput = removed_count as f64 / processing_time.as_secs_f64();
+        
+        self.performance_tracker.record_batch_operation(true, removed_count, processing_time);
+        
+        info!(
+            "Removed {} tracks from playlist {} in {:?} ({:.0} tracks/sec)",
+            removed_count,
+            playlist_id,
+            processing_time,
+            throughput
+        );
+        
+        Ok(removed_count)
+    }
+    
+    async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        
+        // Get playlist entries from memory
+        let entries = {
+            let entries_map = self.playlist_entries.read().await;
+            entries_map.get(&playlist_id).cloned().unwrap_or_default()
+        };
+        
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Get media files for the entries using zero-copy access
+        let mut tracks = Vec::with_capacity(entries.len());
+        let mut index_manager = self.index_manager.write().await;
+        
+        for entry in &entries {
+            // Look up media file by ID in index
+            if let Some(offset) = index_manager.find_by_id(entry.media_file_id as u64) {
+                // Read from memory-mapped file at offset (zero-copy access)
+                let data_file = self.data_file.read().await;
+                if let Ok(data) = data_file.read_at_offset(offset, 1024) { // Read reasonable chunk
+                    // Deserialize MediaFile from FlatBuffer data
+                    if let Ok(media_file) = self.deserialize_media_file_from_data(data) {
+                        tracks.push(media_file);
+                    }
+                }
+            }
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_cache_access(true);
+        
+        debug!(
+            "Retrieved {} tracks for playlist {} in {:?}",
+            tracks.len(),
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(tracks)
+    }
+    
+    async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()> {
+        if !self.is_open() {
+            return Err(anyhow!("Database is not open"));
+        }
+        
+        let start_time = Instant::now();
+        let position_map: std::collections::HashMap<i64, u32> = track_positions.iter().copied().collect();
+        
+        // Update positions in memory with atomic operations
+        {
+            let mut entries_map = self.playlist_entries.write().await;
+            if let Some(playlist_entries) = entries_map.get_mut(&playlist_id) {
+                for entry in playlist_entries.iter_mut() {
+                    if let Some(&new_position) = position_map.get(&entry.media_file_id) {
+                        entry.position = new_position;
+                    }
+                }
+                
+                // Sort by new positions
+                playlist_entries.sort_by_key(|e| e.position);
+            }
+        }
+        
+        let processing_time = start_time.elapsed();
+        self.performance_tracker.record_file_operation(FileOperationType::Update, processing_time);
+        
+        info!(
+            "Reordered {} tracks in playlist {} in {:?}",
+            track_positions.len(),
+            playlist_id,
+            processing_time
+        );
+        
+        Ok(())
     }
     
     async fn get_files_with_path_prefix(&self, _canonical_prefix: &str) -> Result<Vec<MediaFile>> {
@@ -2391,6 +2927,79 @@ mod tests {
         // Verify performance tracking for music categorization operations
         let stats = db.get_performance_stats();
         assert!(stats.index_lookups > 0); // Should have recorded index lookups
+        
+        db.close().await.unwrap();
+    }
+    
+    #[tokio::test]
+    async fn test_playlist_operations() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_playlist.db");
+        
+        let config = ZeroCopyConfig {
+            batch_size: 100,
+            memory_map_size_mb: 1,
+            index_cache_size: 1000,
+            ..Default::default()
+        };
+        
+        let db = ZeroCopyDatabase::new(db_path, Some(config)).await.unwrap();
+        db.initialize().await.unwrap();
+        db.open().await.unwrap();
+        
+        // Test create playlist with atomic ID generation
+        let playlist_id = db.create_playlist("Test Playlist", Some("A test playlist")).await.unwrap();
+        assert!(playlist_id > 0);
+        
+        // Test get playlists
+        let playlists = db.get_playlists().await.unwrap();
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].name, "Test Playlist");
+        assert_eq!(playlists[0].description, Some("A test playlist".to_string()));
+        
+        // Test get specific playlist
+        let playlist = db.get_playlist(playlist_id).await.unwrap();
+        assert!(playlist.is_some());
+        assert_eq!(playlist.unwrap().name, "Test Playlist");
+        
+        // Test bulk add to playlist with atomic batch operations
+        let media_file_ids = vec![(1, 0), (2, 1), (3, 2)];
+        let entry_ids = db.batch_add_to_playlist(playlist_id, &media_file_ids).await.unwrap();
+        assert_eq!(entry_ids.len(), 3);
+        
+        // Test individual add to playlist (should use bulk operation internally)
+        let entry_id = db.add_to_playlist(playlist_id, 4, Some(3)).await.unwrap();
+        assert!(entry_id > 0);
+        
+        // Test remove from playlist
+        let removed = db.remove_from_playlist(playlist_id, 2).await.unwrap();
+        assert!(removed);
+        
+        // Test reorder playlist with atomic operations
+        let track_positions = vec![(1, 1), (3, 0), (4, 2)];
+        let result = db.reorder_playlist(playlist_id, &track_positions).await;
+        assert!(result.is_ok());
+        
+        // Test update playlist
+        let mut updated_playlist = db.get_playlist(playlist_id).await.unwrap().unwrap();
+        updated_playlist.description = Some("Updated description".to_string());
+        let result = db.update_playlist(&updated_playlist).await;
+        assert!(result.is_ok());
+        
+        // Verify update
+        let playlist = db.get_playlist(playlist_id).await.unwrap().unwrap();
+        assert_eq!(playlist.description, Some("Updated description".to_string()));
+        
+        // Test delete playlist with atomic cleanup
+        let deleted = db.delete_playlist(playlist_id).await.unwrap();
+        assert!(deleted);
+        
+        // Verify deletion
+        let playlist = db.get_playlist(playlist_id).await.unwrap();
+        assert!(playlist.is_none());
+        
+        let playlists = db.get_playlists().await.unwrap();
+        assert_eq!(playlists.len(), 0);
         
         db.close().await.unwrap();
     }

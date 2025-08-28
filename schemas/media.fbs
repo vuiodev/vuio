@@ -80,6 +80,40 @@ enum WALOperation: byte {
     Checkpoint = 4
 }
 
+// Playlist record for zero-copy operations
+table Playlist {
+    id: uint64;
+    name: string;
+    description: string;
+    created_at: uint64;  // Unix timestamp
+    updated_at: uint64;  // Unix timestamp
+}
+
+// Playlist entry (track in a playlist)
+table PlaylistEntry {
+    id: uint64;
+    playlist_id: uint64;
+    media_file_id: uint64;
+    position: uint32;
+    created_at: uint64;  // Unix timestamp
+}
+
+// Batch container for multiple playlists
+table PlaylistBatch {
+    playlists: [Playlist];
+    batch_id: uint64;
+    timestamp: uint64;  // Unix timestamp when batch was created
+    operation_type: BatchOperationType;
+}
+
+// Batch container for multiple playlist entries
+table PlaylistEntryBatch {
+    entries: [PlaylistEntry];
+    batch_id: uint64;
+    timestamp: uint64;  // Unix timestamp when batch was created
+    operation_type: BatchOperationType;
+}
+
 // Database header for file format identification
 table DatabaseHeader {
     magic: string;  // "MEDIADB1"
