@@ -9,7 +9,8 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 
 use super::memory_mapped::MemoryMappedFile;
-use super::flatbuffer::{BatchSerializer, MediaFileSerializer, BatchOperationType};
+use super::flatbuffer::{BatchSerializer, MediaFileSerializer};
+use super::flatbuffer::generated::media_db::BatchOperationType;
 use super::index_manager::{IndexManager, IndexStats};
 use super::atomic_performance::{AtomicPerformanceTracker, BatchOperationResult, SharedPerformanceTracker, create_shared_performance_tracker};
 use super::error_handling::{AtomicErrorHandler, SharedErrorHandler, ErrorType, TransactionResult, RetryResult, RecoveryResult, RecoveryType, create_shared_error_handler};
@@ -1515,7 +1516,7 @@ impl ZeroCopyDatabase {
     
     /// Create database header with atomic setup
     fn create_database_header<'a>(&self, builder: &mut flatbuffers::FlatBufferBuilder<'a>) -> Result<flatbuffers::WIPOffset<super::flatbuffer::DatabaseHeader<'a>>> {
-        use super::flatbuffer::*;
+        use super::flatbuffer::generated::media_db::*;
         
         // Create header with magic number and version
         let magic = builder.create_string("ZEROCOPY_DB_V1");
@@ -2046,10 +2047,25 @@ impl ZeroCopyDatabase {
 
     
     /// Helper method to deserialize MediaFile from FlatBuffer data
-    fn deserialize_media_file_from_data(&self, _data: &[u8]) -> Result<MediaFile> {
-        // For now, return a placeholder - this would need proper FlatBuffer deserialization
-        // In a real implementation, this would parse the FlatBuffer data
-        Err(anyhow!("MediaFile deserialization from FlatBuffer data not yet implemented"))
+    fn deserialize_media_file_from_data(&self, data: &[u8]) -> Result<MediaFile> {
+        use super::flatbuffer::MediaFileSerializer;
+        
+        // Parse the FlatBuffer data
+        let fb_batch = flatbuffers::root::<super::flatbuffer::generated::media_db::MediaFileBatch>(data)
+            .map_err(|e| anyhow!("Failed to parse FlatBuffer data: {}", e))?;
+        
+        // Get the first file from the batch (assuming single file storage)
+        let files = fb_batch.files()
+            .ok_or_else(|| anyhow!("No files found in FlatBuffer batch"))?;
+        
+        if files.len() == 0 {
+            return Err(anyhow!("Empty files array in FlatBuffer batch"));
+        }
+        
+        let fb_file = files.get(0);
+        
+        // Deserialize using the MediaFileSerializer
+        MediaFileSerializer::deserialize_media_file(fb_file)
     }
     
     /// Batch insert files using zero-copy FlatBuffer serialization
@@ -2534,10 +2550,16 @@ impl ZeroCopyDatabase {
     
     /// Read a media file from memory-mapped storage at the specified offset
     /// Uses zero-copy FlatBuffer deserialization for maximum performance
-    async fn read_media_file_at_offset(&self, _data_file: &MemoryMappedFile, _offset: u64) -> Result<MediaFile> {
-        // TODO: This is a stub implementation until FlatBuffer compiler is available
-        // For now, return a placeholder MediaFile to allow compilation
-        Err(anyhow!("FlatBuffer deserialization not available - stub implementation"))
+    async fn read_media_file_at_offset(&self, data_file: &MemoryMappedFile, offset: u64) -> Result<MediaFile> {
+        // Read the record length first (4 bytes)
+        let length_data = data_file.read_at_offset(offset, 4)?;
+        let record_length = u32::from_le_bytes([length_data[0], length_data[1], length_data[2], length_data[3]]) as usize;
+        
+        // Read the actual FlatBuffer data
+        let fb_data = data_file.read_at_offset(offset + 4, record_length)?;
+        
+        // Deserialize the FlatBuffer data
+        self.deserialize_media_file_from_data(fb_data)
     }
     
     /// Check if a directory contains files of the specified media type
@@ -2851,28 +2873,13 @@ impl DatabaseManager for ZeroCopyDatabase {
             // Read the file data from the memory-mapped file at the given offset
             let data_file = self.data_file.read().await;
             
-            // For now, create a placeholder MediaFile since we need FlatBuffer deserialization
-            // In a full implementation, we'd deserialize from FlatBuffer data at the offset
-            let media_file = MediaFile {
-                id: Some(offset as i64), // Use offset as temporary ID
-                path: path.to_path_buf(),
-                filename: path.file_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string(),
-                size: 1000, // Placeholder - would be read from FlatBuffer
-                modified: SystemTime::now(), // Placeholder - would be read from FlatBuffer
-                mime_type: "audio/mpeg".to_string(), // Placeholder - would be read from FlatBuffer
-                duration: Some(Duration::from_secs(180)), // Placeholder
-                title: Some("Unknown".to_string()), // Placeholder
-                artist: Some("Unknown".to_string()), // Placeholder
-                album: Some("Unknown".to_string()), // Placeholder
-                genre: Some("Unknown".to_string()), // Placeholder
-                track_number: Some(1), // Placeholder
-                year: Some(2023), // Placeholder
-                album_artist: Some("Unknown".to_string()), // Placeholder
-                created_at: SystemTime::now(),
-                updated_at: SystemTime::now(),
+            // Read and deserialize the actual MediaFile from FlatBuffer data
+            let media_file = match self.read_media_file_at_offset(&*data_file, offset).await {
+                Ok(file) => file,
+                Err(e) => {
+                    warn!("Failed to deserialize MediaFile at offset {}: {}", offset, e);
+                    return Ok(None);
+                }
             };
             
             Some(media_file)
@@ -2920,28 +2927,14 @@ impl DatabaseManager for ZeroCopyDatabase {
             // Cache hit - record atomic statistics
             self.performance_tracker.record_cache_access(true);
             
-            // Read the file data from the memory-mapped file at the given offset
-            let _data_file = self.data_file.read().await;
-            
-            // For now, create a placeholder MediaFile since we need FlatBuffer deserialization
-            // In a full implementation, we'd deserialize from FlatBuffer data at the offset
-            let media_file = MediaFile {
-                id: Some(id),
-                path: PathBuf::from(format!("/placeholder/file_{}.mp3", id)),
-                filename: format!("file_{}.mp3", id),
-                size: 1000, // Placeholder - would be read from FlatBuffer
-                modified: SystemTime::now(), // Placeholder - would be read from FlatBuffer
-                mime_type: "audio/mpeg".to_string(), // Placeholder - would be read from FlatBuffer
-                duration: Some(Duration::from_secs(180)), // Placeholder
-                title: Some("Unknown".to_string()), // Placeholder
-                artist: Some("Unknown".to_string()), // Placeholder
-                album: Some("Unknown".to_string()), // Placeholder
-                genre: Some("Unknown".to_string()), // Placeholder
-                track_number: Some(1), // Placeholder
-                year: Some(2023), // Placeholder
-                album_artist: Some("Unknown".to_string()), // Placeholder
-                created_at: SystemTime::now(),
-                updated_at: SystemTime::now(),
+            // Read and deserialize the actual MediaFile from FlatBuffer data
+            let data_file = self.data_file.read().await;
+            let media_file = match self.read_media_file_at_offset(&*data_file, offset).await {
+                Ok(file) => file,
+                Err(e) => {
+                    warn!("Failed to deserialize MediaFile at offset {}: {}", offset, e);
+                    return Ok(None);
+                }
             };
             
             Some(media_file)

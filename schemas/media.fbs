@@ -1,6 +1,32 @@
 // FlatBuffer schema for zero-copy media database
 namespace MediaDB;
 
+// Types of batch operations
+enum BatchOperationType: byte {
+    Insert = 0,
+    Update = 1,
+    Delete = 2,
+    Upsert = 3
+}
+
+// Types of indexes
+enum IndexType: byte {
+    PathIndex = 0,
+    DirectoryIndex = 1,
+    ArtistIndex = 2,
+    AlbumIndex = 3,
+    GenreIndex = 4
+}
+
+// WAL operation types
+enum WALOperation: byte {
+    BatchInsert = 0,
+    BatchUpdate = 1,
+    BatchDelete = 2,
+    IndexUpdate = 3,
+    Checkpoint = 4
+}
+
 // Media file record optimized for zero-copy operations
 table MediaFile {
     id: uint64;
@@ -30,14 +56,6 @@ table MediaFileBatch {
     operation_type: BatchOperationType;
 }
 
-// Types of batch operations
-enum BatchOperationType: byte {
-    Insert = 0,
-    Update = 1,
-    Delete = 2,
-    Upsert = 3
-}
-
 // Index entry for fast lookups
 table IndexEntry {
     key: string;  // Path or other lookup key
@@ -52,15 +70,6 @@ table IndexBatch {
     generation: uint64;  // Index generation for consistency
 }
 
-// Types of indexes
-enum IndexType: byte {
-    PathIndex = 0,
-    DirectoryIndex = 1,
-    ArtistIndex = 2,
-    AlbumIndex = 3,
-    GenreIndex = 4
-}
-
 // WAL (Write-Ahead Log) entry for crash recovery
 table WALEntry {
     operation: WALOperation;
@@ -69,15 +78,6 @@ table WALEntry {
     data_offset: uint64;
     data_size: uint32;
     checksum: uint32;  // CRC32 checksum of data
-}
-
-// WAL operation types
-enum WALOperation: byte {
-    BatchInsert = 0,
-    BatchUpdate = 1,
-    BatchDelete = 2,
-    IndexUpdate = 3,
-    Checkpoint = 4
 }
 
 // Playlist record for zero-copy operations

@@ -9,8 +9,7 @@ use tempfile::TempDir;
 
 use vuio::database::{
     DatabaseManager, MediaFile, SqliteDatabase,
-    zerocopy::{ZeroCopyDatabase, PerformanceProfile},
-    memory_optimized_zerocopy::MemoryOptimizedZeroCopyDatabase
+    zerocopy::{ZeroCopyDatabase, PerformanceProfile}
 };
 
 /// Helper function to create test media files

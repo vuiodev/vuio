@@ -8,7 +8,7 @@ pub mod generated {
     include!(concat!(env!("OUT_DIR"), "/media_generated.rs"));
 }
 
-pub use generated::media_d_b::*;
+pub use generated::media_db::*;
 
 /// Helper functions for converting between Rust types and FlatBuffer types
 pub struct FlatBufferConverter;
@@ -447,8 +447,24 @@ impl MediaFileSerializer {
         let operation_type = fb_batch.operation_type();
         let timestamp = FlatBufferConverter::timestamp_to_system_time(fb_batch.timestamp());
         
-        let files = Vec::new(); // Stub implementation - would deserialize files here
-        let deserialization_errors = Vec::new();
+        let mut files = Vec::new();
+        let mut deserialization_errors = Vec::new();
+        
+        // Deserialize all files in the batch
+        if let Some(fb_files) = fb_batch.files() {
+            for i in 0..fb_files.len() {
+                let fb_file = fb_files.get(i);
+                match Self::deserialize_media_file(fb_file) {
+                    Ok(media_file) => files.push(media_file),
+                    Err(e) => {
+                        deserialization_errors.push(BatchDeserializationError {
+                            file_index: i,
+                            error: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
         
         let deserialization_time = start_time.elapsed();
         
@@ -456,8 +472,8 @@ impl MediaFileSerializer {
             batch_id,
             operation_type,
             timestamp,
+            files_count: files.len(),
             files,
-            files_count: 0, // Stub implementation
             deserialization_time,
             errors: deserialization_errors,
         })
