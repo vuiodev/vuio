@@ -1,6 +1,6 @@
 # Database Performance Tests
 
-This document describes the database performance tests implemented in `database_performance_tests.rs`.
+This document describes the database performance tests implemented in `database_performance_tests.rs` and the large dataset benchmarks in `large_dataset_benchmarks.rs`.
 
 ## Overview
 
@@ -164,6 +164,81 @@ If tests fail:
 
 3. **Concurrent operation failures**: May indicate database locking issues or resource contention.
 
+## Large Dataset Benchmarks
+
+The `large_dataset_benchmarks.rs` file contains comprehensive benchmarks for testing with 1,000,000+ media files. These benchmarks are designed to:
+
+- **Verify scalability**: Ensure database operations work correctly with million-file datasets
+- **Measure optimization impact**: Compare performance before and after database optimizations
+- **Validate memory bounds**: Confirm memory usage remains bounded during large operations
+- **Test real-world scenarios**: Simulate actual usage patterns with large media libraries
+
+### Large Dataset Test Cases
+
+1. **Million File Creation Benchmark** (`benchmark_million_file_creation`)
+   - Creates 1,000,000 media files with realistic metadata
+   - Measures creation time and memory usage
+   - Verifies database integrity with large datasets
+
+2. **Million File Streaming Benchmark** (`benchmark_million_file_streaming`)
+   - Tests streaming performance with 1,000,000 files
+   - Monitors memory usage during streaming
+   - Validates that streaming remains memory-bounded
+
+3. **Database-Native Cleanup Benchmark** (`benchmark_database_native_cleanup_million_files`)
+   - Tests optimized cleanup with 1,000,000 files
+   - Compares performance of database-native vs. application-level cleanup
+   - Measures memory efficiency of large cleanup operations
+
+4. **Directory Operations Benchmark** (`benchmark_directory_operations_million_files`)
+   - Tests directory listing and path prefix queries with million files
+   - Validates performance of hierarchical directory structures
+   - Ensures query times remain reasonable at scale
+
+5. **Memory Bounded Operations Benchmark** (`benchmark_memory_bounded_operations`)
+   - Verifies memory usage remains bounded during large operations
+   - Tests streaming and cleanup memory efficiency
+   - Validates that operations don't cause memory leaks
+
+6. **Database Maintenance Benchmark** (`benchmark_database_maintenance_million_files`)
+   - Tests vacuum and maintenance operations with million files
+   - Measures space reclamation efficiency
+   - Validates database integrity after maintenance
+
+### Running Large Dataset Benchmarks
+
+**Warning**: These benchmarks create very large datasets and may take significant time and disk space.
+
+```bash
+# Run all large dataset benchmarks (requires --ignored flag)
+cargo test --test large_dataset_benchmarks -- --ignored --nocapture
+
+# Run a specific benchmark
+cargo test --test large_dataset_benchmarks benchmark_million_file_creation -- --ignored --nocapture
+
+# Run with release optimizations for more realistic performance
+cargo test --release --test large_dataset_benchmarks -- --ignored --nocapture
+```
+
+### Performance Expectations (Million Files)
+
+Based on optimized implementations:
+
+- **File Creation**: ~300-500 files/second (30-50 minutes for 1M files)
+- **Streaming**: ~8,000-15,000 files/second (1-2 minutes for 1M files)
+- **Database-Native Cleanup**: ~50,000-100,000 files/second (10-20 seconds for 1M files)
+- **Directory Listing**: 1-5 seconds for directories with 10k+ files
+- **Path Prefix Queries**: 2-10 seconds for 10k+ matching files
+- **Database Vacuum**: 2-5 minutes for 1M file database
+
+### System Requirements
+
+For million-file benchmarks:
+- **Disk Space**: 5-10 GB for database and temporary files
+- **Memory**: 4-8 GB RAM recommended
+- **Time**: 1-3 hours for complete benchmark suite
+- **Platform**: Unix systems preferred for memory measurement
+
 ## Integration with CI/CD
 
 These tests are designed to:
@@ -177,3 +252,5 @@ Consider running these tests:
 - When database-related code changes
 - On different hardware configurations
 - With different dataset sizes for stress testing
+
+**Note**: Large dataset benchmarks should be run separately from regular CI due to their resource requirements and execution time.
