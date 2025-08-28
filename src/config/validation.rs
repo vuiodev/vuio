@@ -649,6 +649,8 @@ mod tests {
         let temp_dir = tempfile::TempDir::new()?;
         
         // Create a TOML config with mixed validation modes
+        // Escape backslashes in Windows paths for TOML
+        let temp_path = temp_dir.path().to_string_lossy().replace("\\", "\\\\");
         let config_content = format!(r#"
 [server]
 port = 8080
@@ -686,7 +688,7 @@ validation_mode = "Skip"
 [database]
 vacuum_on_startup = false
 backup_enabled = true
-"#, temp_dir.path().to_string_lossy());
+"#, temp_path);
 
         temp_file.write_all(config_content.as_bytes())?;
         temp_file.flush()?;

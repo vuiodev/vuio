@@ -791,50 +791,62 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
 async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Duration;
     
-    // Try to extract metadata using audiotags library
-    match audiotags::Tag::new().read_from_path(&media_file.path) {
-        Ok(tag) => {
-            // Extract basic metadata
-            if let Some(title) = tag.title() {
-                media_file.title = Some(title.to_string());
+    // Clone the path for the blocking operation
+    let path = media_file.path.clone();
+    
+    // Wrap the synchronous I/O operation in spawn_blocking to prevent blocking the async runtime
+    let metadata_result = tokio::task::spawn_blocking(move || {
+        audiotags::Tag::new().read_from_path(&path)
+    }).await;
+    
+    // Handle the result from spawn_blocking
+    let tag = match metadata_result {
+        Ok(tag_result) => match tag_result {
+            Ok(tag) => tag,
+            Err(e) => {
+                return Err(format!("Failed to extract metadata: {}", e).into());
             }
-            
-            if let Some(artist) = tag.artist() {
-                media_file.artist = Some(artist.to_string());
-            }
-            
-            if let Some(album) = tag.album_title() {
-                media_file.album = Some(album.to_string());
-            }
-            
-            if let Some(genre) = tag.genre() {
-                media_file.genre = Some(genre.to_string());
-            }
-            
-            // Extract track number
-            if let Some(track_num) = tag.track_number() {
-                media_file.track_number = Some(track_num as u32);
-            }
-            
-            // Extract year
-            if let Some(year) = tag.year() {
-                media_file.year = Some(year as u32);
-            }
-            
-            // Extract album artist
-            if let Some(album_artist) = tag.album_artist() {
-                media_file.album_artist = Some(album_artist.to_string());
-            }
-            
-            // Extract duration if available
-            if let Some(duration) = tag.duration() {
-                media_file.duration = Some(Duration::from_secs(duration as u64));
-            }
-        }
+        },
         Err(e) => {
-            // For now, we'll just return an error but this is not critical
-            return Err(format!("Failed to extract metadata: {}", e).into());
+            return Err(format!("Failed to execute blocking metadata extraction: {}", e).into());
         }
+    };
+    
+    // Extract basic metadata
+    if let Some(title) = tag.title() {
+        media_file.title = Some(title.to_string());
+    }
+    
+    if let Some(artist) = tag.artist() {
+        media_file.artist = Some(artist.to_string());
+    }
+    
+    if let Some(album) = tag.album_title() {
+        media_file.album = Some(album.to_string());
+    }
+    
+    if let Some(genre) = tag.genre() {
+        media_file.genre = Some(genre.to_string());
+    }
+    
+    // Extract track number
+    if let Some(track_num) = tag.track_number() {
+        media_file.track_number = Some(track_num as u32);
+    }
+    
+    // Extract year
+    if let Some(year) = tag.year() {
+        media_file.year = Some(year as u32);
+    }
+    
+    // Extract album artist
+    if let Some(album_artist) = tag.album_artist() {
+        media_file.album_artist = Some(album_artist.to_string());
+    }
+    
+    // Extract duration if available
+    if let Some(duration) = tag.duration() {
+        media_file.duration = Some(Duration::from_secs(duration as u64));
     }
     
     Ok(())

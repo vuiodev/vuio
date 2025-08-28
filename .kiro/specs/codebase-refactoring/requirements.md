@@ -62,6 +62,8 @@ This feature addresses critical architectural and performance issues identified 
 2. WHEN argument parsing happens THEN it SHALL occur only once during startup, not multiple times
 3. WHEN configuration changes are detected THEN the system SHALL use proper file watching instead of manual polling
 4. WHEN media scanning occurs THEN recursive directory scanning SHALL minimize database queries through batching
+5. WHEN metadata extraction is performed THEN synchronous I/O operations SHALL be wrapped in spawn_blocking to prevent blocking the async runtime
+6. WHEN database queries use path parameters THEN they SHALL use canonical paths consistently to avoid case-sensitivity issues on different filesystems
 
 ### Requirement 6: Configuration and Validation Improvements
 

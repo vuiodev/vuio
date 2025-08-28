@@ -920,10 +920,12 @@ impl DatabaseManager for SqliteDatabase {
     }
 
     async fn remove_media_file(&self, path: &Path) -> Result<bool> {
-        let path_str = path.to_string_lossy().to_string();
+        // Use canonical path for consistent querying
+        let canonical_path = self.path_normalizer.to_canonical(path)
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
-        let result = sqlx::query("DELETE FROM media_files WHERE path = ?")
-            .bind(&path_str)
+        let result = sqlx::query("DELETE FROM media_files WHERE canonical_path = ?")
+            .bind(&canonical_path)
             .execute(&*self.pool.read().await)
             .await?;
 
@@ -979,18 +981,20 @@ impl DatabaseManager for SqliteDatabase {
     }
 
     async fn get_files_in_directory(&self, dir: &Path) -> Result<Vec<MediaFile>> {
-        let dir_str = format!("{}%", dir.to_string_lossy());
+        // Use canonical path for consistent querying
+        let canonical_dir = self.path_normalizer.to_canonical(dir)
+            .unwrap_or_else(|_| dir.to_string_lossy().to_string());
 
         let rows = sqlx::query(
             r#"
             SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
             FROM media_files 
-            WHERE path LIKE ?
+            WHERE canonical_parent_path = ?
             ORDER BY filename
             LIMIT 1000
             "#,
         )
-        .bind(&dir_str)
+        .bind(&canonical_dir)
         .fetch_all(&*self.pool.read().await)
         .await?;
 
@@ -1117,22 +1121,24 @@ impl DatabaseManager for SqliteDatabase {
             return Ok(0);
         }
 
-        let existing_paths: Vec<String> = existing_paths
+        // Convert existing paths to canonical format for consistent querying
+        let existing_canonical_paths: Vec<String> = existing_paths
             .iter()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| self.path_normalizer.to_canonical(p)
+                .unwrap_or_else(|_| p.to_string_lossy().to_string()))
             .collect();
 
         // Create placeholders for the IN clause
-        let placeholders = existing_paths
+        let placeholders = existing_canonical_paths
             .iter()
             .map(|_| "?")
             .collect::<Vec<_>>()
             .join(",");
-        let query = format!("DELETE FROM media_files WHERE path NOT IN ({})", placeholders);
+        let query = format!("DELETE FROM media_files WHERE canonical_path NOT IN ({})", placeholders);
 
         let mut query_builder = sqlx::query(&query);
-        for path in &existing_paths {
-            query_builder = query_builder.bind(path);
+        for canonical_path in &existing_canonical_paths {
+            query_builder = query_builder.bind(canonical_path);
         }
 
         let result = query_builder.execute(&*self.pool.read().await).await?;
@@ -1141,16 +1147,18 @@ impl DatabaseManager for SqliteDatabase {
     }
 
     async fn get_file_by_path(&self, path: &Path) -> Result<Option<MediaFile>> {
-        let path_str = path.to_string_lossy().to_string();
+        // Use canonical path for consistent querying
+        let canonical_path = self.path_normalizer.to_canonical(path)
+            .unwrap_or_else(|_| path.to_string_lossy().to_string());
 
         let row = sqlx::query(
             r#"
             SELECT id, path, filename, size, modified, mime_type, duration, title, artist, album, genre, track_number, year, album_artist, created_at, updated_at 
             FROM media_files 
-            WHERE path = ?
+            WHERE canonical_path = ?
             "#,
         )
-        .bind(&path_str)
+        .bind(&canonical_path)
         .fetch_optional(&*self.pool.read().await)
         .await?;
 

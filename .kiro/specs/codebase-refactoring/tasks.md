@@ -171,3 +171,18 @@
   - Verify existing media libraries continue to work after upgrade
   - Test rollback scenarios if migration fails
   - _Requirements: 1.1, 1.3_
+
+## Phase 5: Async I/O and Database Query Consistency
+
+- [x] 28. Implement spawn_blocking for synchronous I/O operations
+  - Wrap audiotags::Tag::new().read_from_path() calls in tokio::task::spawn_blocking in src/media.rs
+  - Update metadata extraction functions to return async results
+  - Ensure proper error handling for blocking operations moved to thread pool
+  - _Requirements: 5.5_
+
+- [x] 29. Fix database query path consistency
+
+  - Update remove_media_file and get_file_by_path methods in database/mod.rs to use canonical paths
+  - Modify path parameter normalization to query against canonical_path column instead of path column
+  - Add path canonicalization to all database query methods that accept Path parameters
+  - _Requirements: 5.6, 1.1_
