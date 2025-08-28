@@ -11,6 +11,7 @@ use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalize
 use crate::platform::DatabaseError;
 
 pub mod playlist_formats;
+pub mod flatbuffer;
 
 /// Represents a subdirectory in the media library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
