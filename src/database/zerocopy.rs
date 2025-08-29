@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 
+use crate::platform::DatabaseError;
+
 use super::memory_mapped::MemoryMappedFile;
 
 #[derive(Debug, Clone, Copy)]
@@ -1957,7 +1959,7 @@ impl DatabaseManager for ZeroCopyDatabase {
         }
     }
     
-    fn stream_all_media_files(&self) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, sqlx::Error>> + Send + '_>> {
+    fn stream_all_media_files(&self) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>> {
 
         
         let db = self;
@@ -1974,12 +1976,12 @@ impl DatabaseManager for ZeroCopyDatabase {
                 match db.read_media_file_at_offset(&*data_file, offset).await {
                     Ok(file) => yield Ok(file),
                     Err(e) => {
-                        // Convert anyhow::Error to sqlx::Error for compatibility
-                        let sqlx_error = sqlx::Error::Io(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            e.to_string()
-                        ));
-                        yield Err(sqlx_error);
+                        // Convert anyhow::Error to DatabaseError for compatibility
+                        let db_error = DatabaseError::QueryFailed {
+                            query: "stream_all_media_files".to_string(),
+                            reason: e.to_string()
+                        };
+                        yield Err(db_error);
                     }
                 }
             }

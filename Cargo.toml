@@ -22,7 +22,6 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures-util = "0.3"
 async-stream = "0.3"
 libc = "0.2"
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "sqlite", "chrono"] }
 chrono = { version = "0.4", features = ["serde"] }
 notify = "8.2"
 notify-debouncer-full = "0.6"

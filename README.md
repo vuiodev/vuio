@@ -38,7 +38,7 @@ docker-compose -f docker-compose.yml up
 - **Platform-Specific Optimizations** - Optimized networking and filesystem handling
 
 ### Advanced Database Management
-- **SQLite Database** - Persistent media library with metadata caching
+- **ZeroCopy Database** - Persistent media library with metadata caching
 - **Health Monitoring** - Automatic integrity checks and repair capabilities
 - **Backup System** - Automated backups with cleanup and restoration
 - **Performance Optimization** - Database vacuuming and query optimization
@@ -59,7 +59,6 @@ docker-compose -f docker-compose.yml up
 
 ### Prerequisites
 - Rust 1.75+ (for building from source)
-- SQLite 3.x (bundled with the application)
 
 ### Build from Source
 ```bash
@@ -648,25 +647,6 @@ VuIO is built with a modular, cross-platform architecture:
 ### Regular Tests
 ```bash
 cargo test
-```
-
-### Database Performance Comparison
-
-VuIO includes comprehensive performance tests that compare SQLite vs ZeroCopy database performance across different configurations. These tests are excluded from regular test runs due to their duration (30-60 seconds) and are designed to help you choose the optimal configuration for your environment.
-
-#### Run Full Performance Comparison
-```bash
-# Complete comparison across all configurations (Minimal, Small, Medium, Large)
-# Duration: 30-60 seconds, Tests: 5,000 files across 4 configurations
-cargo test test_database_performance_comparison --test database_performance_comparison -- --ignored --nocapture
-```
-
-**Expected Results:** ZeroCopy shows 1200-1300% performance improvement over SQLite across all configurations, with throughput ranging from ~60,000 to ~63,000 files/sec compared to SQLite's ~4,500 files/sec.
-
-#### Run Quick Configuration Test
-```bash
-# Quick test of all ZeroCopy configurations
-cargo test test_zerocopy_configurations --test database_performance_comparison -- --ignored --nocapture
 ```
 
 #### Run Individual Performance Tests

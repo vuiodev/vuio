@@ -34,7 +34,6 @@ cd "$(dirname "$0")"
 echo "Creating build directory: $OUTPUT_DIR"
 mkdir -p "$OUTPUT_DIR"
 
-# CGO is required for the go-sqlite3 driver. Cross-compiling CGO
 # requires a C cross-compiler toolchain for each target platform.
 #
 # Before running this script, you MUST have these toolchains installed.

@@ -33,7 +33,6 @@ mkdir -p "$OUTPUT_DIR"
 
 echo "Starting optimized build for macOS on Apple Silicon ($TARGET_OS/$TARGET_ARCH)..."
 
-# CGO_ENABLED=1 is required for the go-sqlite3 driver.
 # On macOS, the necessary C compiler (Clang) is available with Xcode Command Line Tools.
 env CGO_ENABLED=1 GOOS="$TARGET_OS" GOARCH="$TARGET_ARCH" go build \
     -ldflags="$LDFLAGS" \

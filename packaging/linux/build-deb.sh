@@ -175,7 +175,6 @@ Description: $DESCRIPTION
   - Cross-platform compatibility (Linux, Windows, macOS)
   - Automatic media discovery and indexing
   - Real-time file system monitoring
-  - SQLite database for fast media access
   - Configurable via TOML configuration files
   - Systemd integration for service management
 Homepage: https://github.com/vuio/vuio
@@ -337,7 +336,6 @@ $PACKAGE_NAME ($VERSION-1) unstable; urgency=low
   * Initial release of VuIO Server
   * Cross-platform DLNA media server
   * Systemd integration
-  * SQLite database support
   * Real-time file system monitoring
 
  -- $MAINTAINER  $(date -R)

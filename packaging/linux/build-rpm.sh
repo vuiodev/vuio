@@ -195,7 +195,6 @@ Features:
 - Cross-platform compatibility (Linux, Windows, macOS)
 - Automatic media discovery and indexing
 - Real-time file system monitoring
-- SQLite database for fast media access
 - Configurable via TOML configuration files
 - Systemd integration for service management
 
@@ -286,7 +285,6 @@ fi
 - Initial release of VuIO Server
 - Cross-platform DLNA media server
 - Systemd integration
-- SQLite database support
 - Real-time file system monitoring
 EOF
 
