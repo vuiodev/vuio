@@ -9,9 +9,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn, error};
 
 use super::memory_mapped::MemoryMappedFile;
-// Removed flatbuffer imports - using only binary format now
 
-// Simple enum to replace flatbuffer BatchOperationType
 #[derive(Debug, Clone, Copy)]
 pub enum BatchOperationType {
     Insert,
@@ -40,7 +38,6 @@ pub struct ZeroCopyConfig {
     pub index_cache_size: usize,
     /// Enable compression (disabled for maximum speed)
     pub enable_compression: bool,
-    /// Always use custom binary format (flatbuffers removed)
     pub use_binary_format: bool,
     /// Sync frequency for durability
     pub sync_frequency: Duration,
@@ -179,9 +176,8 @@ impl ZeroCopyConfig {
             info!("Compression {}", if config.enable_compression { "enabled" } else { "disabled" });
         }
         
-        // Always use binary format (flatbuffers removed)
         config.use_binary_format = true;
-        info!("Using custom binary format (flatbuffers removed)");
+        info!("Using custom binary format");
         
         if let Ok(monitor_interval) = std::env::var("ZEROCOPY_MONITOR_INTERVAL_SECS") {
             if let Ok(secs) = monitor_interval.parse::<u64>() {
@@ -602,7 +598,7 @@ pub struct BatchProcessingResult {
     pub data_size: usize,
     pub throughput: f64, // files per second
     pub checksum: u32,
-    pub errors: Vec<String>, // Simplified error handling (flatbuffers removed)
+    pub errors: Vec<String>,
     pub assigned_ids: Vec<i64>, // IDs assigned to the files
 }
 
@@ -705,8 +701,6 @@ pub struct ZeroCopyDatabase {
     is_initialized: AtomicU64,  // 0 = not initialized, 1 = initialized
     is_open: AtomicU64,         // 0 = closed, 1 = open
     
-    // Binary format serialization (flatbuffers removed)
-    
     // Atomic counters for ID generation
     next_media_file_id: AtomicU64,
     next_playlist_id: AtomicU64,
@@ -756,10 +750,6 @@ impl ZeroCopyDatabase {
         // Create path normalizer
         let path_normalizer = create_platform_path_normalizer();
         
-        // Binary format only (flatbuffers removed)
-        
-        // Using binary format only (flatbuffers removed)
-        
         info!(
             "Created zero-copy database at {}",
             db_path.display()
@@ -781,7 +771,6 @@ impl ZeroCopyDatabase {
             path_normalizer,
             is_initialized: AtomicU64::new(0),
             is_open: AtomicU64::new(0),
-            // Binary format only (flatbuffers removed)
             next_media_file_id: AtomicU64::new(1),
             next_playlist_id: AtomicU64::new(1),
             next_playlist_entry_id: AtomicU64::new(1),
@@ -927,7 +916,6 @@ impl ZeroCopyDatabase {
     
     /// Create database header with atomic setup (binary format only)
     fn create_database_header(&self) -> Result<Vec<u8>> {
-        // Using binary format only (flatbuffers removed)
         let magic = b"ZEROCOPY_DB_V1";
         let created_at = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -1370,20 +1358,14 @@ impl ZeroCopyDatabase {
     
     /// Helper method to serialize MediaFiles using the configured format
     async fn serialize_media_files(&self, files: &[MediaFile], _batch_id: u64, _operation_type: BatchOperationType, _canonical_paths: Option<&[String]>) -> Result<Vec<u8>> {
-        // Always use our ultra-fast custom binary format (flatbuffers removed)
         BinaryMediaFileSerializer::serialize_batch(files)
     }
     
     /// Helper method to deserialize MediaFiles using the configured format
     fn deserialize_media_files(&self, data: &[u8]) -> Result<Vec<MediaFile>> {
-        // For now, always use binary format for simplicity
-        // TODO: Make this configurable without async
-        // Always use our ultra-fast custom binary format (flatbuffers removed)
         BinaryMediaFileSerializer::deserialize_batch(data)
     }
-    
-    // Removed flatbuffer deserialization method (using binary format only)
-    
+
     /// Helper method to deserialize single MediaFile from data
     fn deserialize_media_file_from_data(&self, data: &[u8]) -> Result<MediaFile> {
         let files = self.deserialize_media_files(data)?;
@@ -1393,7 +1375,7 @@ impl ZeroCopyDatabase {
         Ok(files.into_iter().next().unwrap())
     }
     
-    /// Batch insert files using zero-copy FlatBuffer serialization
+    /// Batch insert files using zero-copy custom binary serialization
     pub async fn batch_insert_files(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
         if files.is_empty() {
             return Ok(BatchProcessingResult::empty());
@@ -1499,7 +1481,7 @@ impl ZeroCopyDatabase {
         
         // Ultra-fast serialization using configured format
         let (write_offset, data_size) = {
-            // Serialize using the configured format (binary or FlatBuffers)
+            // Serialize using the custom binary format
             let serialized_data = self.serialize_media_files(
                 files, // Use original files directly
                 batch_id,
@@ -1594,7 +1576,7 @@ impl ZeroCopyDatabase {
         })
     }
     
-    /// Batch update files using zero-copy FlatBuffer serialization
+    /// Batch update files using zero-copy custom binary serialization
     pub async fn batch_update_files(&self, files: &[MediaFile]) -> Result<BatchProcessingResult> {
         if !self.is_open() {
             return Err(anyhow!("Database is not open"));
@@ -1644,8 +1626,7 @@ impl ZeroCopyDatabase {
         let write_offset = {
             let mut data_file = self.data_file.write().await;
             
-            // Skip integrity validation for binary format (it's built-in)
-            // For FlatBuffers, we could add validation but skip for performance
+            // Skip integrity validation for custom binary format (it's built-in)
             
             let io_start = Instant::now();
             let offset = data_file.append_data(&serialized_data)?;
@@ -1854,17 +1835,17 @@ impl ZeroCopyDatabase {
     }
     
     /// Read a media file from memory-mapped storage at the specified offset
-    /// Uses zero-copy FlatBuffer deserialization for maximum performance
+    /// Uses custom binary format deserialization for maximum performance
     async fn read_media_file_at_offset(&self, data_file: &MemoryMappedFile, offset: u64) -> Result<MediaFile> {
         // Read the record length first (4 bytes)
         let length_data = data_file.read_at_offset(offset, 4)?;
         let record_length = u32::from_le_bytes([length_data[0], length_data[1], length_data[2], length_data[3]]) as usize;
         
-        // Read the actual FlatBuffer data
-        let fb_data = data_file.read_at_offset(offset + 4, record_length)?;
+        // Read the actual binary data
+        let binary_data = data_file.read_at_offset(offset + 4, record_length)?;
         
-        // Deserialize the data
-        self.deserialize_media_file_from_data(fb_data)
+        // Deserialize the data using custom binary format
+        self.deserialize_media_file_from_data(binary_data)
     }
     
     /// Check if a directory contains files of the specified media type
@@ -1890,7 +1871,7 @@ impl ZeroCopyDatabase {
         // Check if any file matches the media type filter
         let data_file = self.data_file.read().await;
         for offset in file_offsets.iter().take(10) { // Check only first 10 files for performance
-            // Read and check file media type using FlatBuffer deserialization
+            // Read and check file media type using custom binary format
             match self.read_media_file_at_offset(&*data_file, *offset).await {
                 Ok(media_file) => {
                     if media_file.mime_type.starts_with(_media_type_filter) {
@@ -2246,7 +2227,7 @@ impl DatabaseManager for ZeroCopyDatabase {
             // Read the file data from the memory-mapped file at the given offset
             let data_file = self.data_file.read().await;
             
-            // Read and deserialize the actual MediaFile from FlatBuffer data
+            // Read and deserialize the actual MediaFile from custom binary format
             let media_file = match self.read_media_file_at_offset(&*data_file, offset).await {
                 Ok(file) => file,
                 Err(e) => {
@@ -2300,7 +2281,7 @@ impl DatabaseManager for ZeroCopyDatabase {
             // Cache hit - record atomic statistics
             self.performance_tracker.record_cache_access(true);
             
-            // Read and deserialize the actual MediaFile from FlatBuffer data
+            // Read and deserialize the actual MediaFile from custom binary format
             let data_file = self.data_file.read().await;
             let media_file = match self.read_media_file_at_offset(&*data_file, offset).await {
                 Ok(file) => file,
@@ -2879,7 +2860,7 @@ impl DatabaseManager for ZeroCopyDatabase {
                     
                     // Read the file data from the memory-mapped file
                     // For now, we'll create a placeholder MediaFile
-                    // In a full implementation, we'd deserialize from FlatBuffer data
+                    // In a full implementation, we'd deserialize from custom binary format
                     let media_file = MediaFile::new(
                         PathBuf::from(canonical_path),
                         1000, // placeholder size
@@ -3635,7 +3616,7 @@ impl DatabaseManager for ZeroCopyDatabase {
                 // Read from memory-mapped file at offset (zero-copy access)
                 let data_file = self.data_file.read().await;
                 if let Ok(data) = data_file.read_at_offset(offset, 1024) { // Read reasonable chunk
-                    // Deserialize MediaFile from FlatBuffer data
+                    // Deserialize MediaFile from custom binary format
                     if let Ok(media_file) = self.deserialize_media_file_from_data(data) {
                         tracks.push(media_file);
                     }
@@ -4019,7 +4000,7 @@ impl ZeroCopyDatabase {
                 // Read from memory-mapped file at offset (zero-copy access)
                 let data_file = self.data_file.read().await;
                 if let Ok(data) = data_file.read_at_offset(offset, 1024) { // Read reasonable chunk
-                    // Deserialize MediaFile from FlatBuffer data
+                    // Deserialize MediaFile from custom binary format
                     if let Ok(media_file) = self.deserialize_media_file_from_data(data) {
                         tracks.push(media_file);
                     }

@@ -457,7 +457,6 @@ impl DatabasePerformanceComparison {
         println!("\nZeroCopy Database (Minimal Settings):");
         println!("   + Zero-copy memory access");
         println!("   + Minimal resource usage by default");
-        println!("   + FlatBuffer serialization efficiency");
         println!("   + Memory-mapped file performance");
         println!("   + Configurable for different workloads");
         println!("   - More complex implementation");
