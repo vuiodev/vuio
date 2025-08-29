@@ -9,8 +9,8 @@
 port = 8080
 interface = "0.0.0.0"
 name = "VuIO"
-uuid = "auto-generated-on-first-run"
-ip = "192.168.1.100"
+uuid = "129c3ee9-4fd2-45ea-9f11-7a15e6d831ef"
+ip = "192.168.1.126"
 
 [network]
 multicast_ttl = 4
@@ -30,7 +30,7 @@ supported_extensions = [
 
 # Add one or more media directories to monitor
 [[media.directories]]
-path = "/path/to/your/media"  # Change this to your actual media directory
+path = "/Users/alex/Movies"  # Change this to your actual media directory
 recursive = true
 # extensions = ["mp4", "mkv", "avi"]  # Optional: Override global extensions for this directory
 # exclude_patterns = ["*.tmp", ".*"]  # Optional: Files/patterns to exclude
@@ -42,7 +42,7 @@ recursive = true
 # extensions = ["mp3", "flac", "wav"]
 
 [database]
-path = "/config/media.db"  # Will use platform-appropriate default if not specified
+path = "./config/media.db"  # Will use platform-appropriate default if not specified
 vacuum_on_startup = false
 backup_enabled = true
 

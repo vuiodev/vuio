@@ -360,6 +360,9 @@ impl IndexManager {
         if let Some(parent) = file.path.parent() {
             let parent_key = parent.to_string_lossy().to_string();
             
+            tracing::debug!("Indexing file '{}' under directory key '{}'", 
+                file.path.display(), parent_key);
+            
             // Update in-memory directory index
             self.directory_index.entry(parent_key.clone()).or_insert_with(Vec::new).push(offset);
             
@@ -449,13 +452,18 @@ impl IndexManager {
     pub fn find_files_in_directory(&mut self, dir_path: &str) -> Vec<u64> {
         self.lookup_count.fetch_add(1, Ordering::Relaxed);
         
+        tracing::debug!("Looking up files in directory: '{}'. Available directories: {:?}", 
+            dir_path, self.directory_index.keys().collect::<Vec<_>>());
+        
         // Try cache first
         if let Some(cached_files) = self.cache_manager.get_directory(dir_path) {
+            tracing::debug!("Found {} files in cache for directory '{}'", cached_files.len(), dir_path);
             return cached_files;
         }
         
         // Fall back to in-memory index
         let files = self.directory_index.get(dir_path).cloned().unwrap_or_default();
+        tracing::debug!("Found {} files in index for directory '{}'", files.len(), dir_path);
         
         // Cache the result for future lookups
         if !files.is_empty() {

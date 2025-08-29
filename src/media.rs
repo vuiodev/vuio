@@ -200,11 +200,14 @@ impl MediaScanner {
         
         // Apply canonical path normalization to all scanned files before database operations
         for file in &mut current_files {
+            let original_path = file.path.clone();
             if let Ok(canonical_path) = self.filesystem_manager.get_canonical_path(&file.path) {
                 file.path = PathBuf::from(canonical_path);
+                tracing::debug!("Path normalization: '{}' -> '{}'", original_path.display(), file.path.display());
             } else {
                 // Fallback to basic normalization if canonical fails
                 file.path = self.filesystem_manager.normalize_path(&file.path);
+                tracing::debug!("Path normalization (fallback): '{}' -> '{}'", original_path.display(), file.path.display());
             }
         }
         
@@ -335,6 +338,10 @@ impl MediaScanner {
         // Bulk insert new files
         if !files_to_insert.is_empty() {
             tracing::info!("Bulk inserting {} new files using ZeroCopy database", files_to_insert.len());
+            for file in &files_to_insert {
+                tracing::debug!("Inserting file: path='{}', mime_type='{}', size={}", 
+                    file.path.display(), file.mime_type, file.size);
+            }
             let insert_ids = self.database_manager.bulk_store_media_files(&files_to_insert).await?;
             
             // Update result with inserted files and their IDs

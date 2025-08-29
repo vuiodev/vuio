@@ -50,18 +50,16 @@ windows = { version = "0.61", features = [
     "Win32_Networking_WinSock"
 ] }
 
-
-
-
 [dev-dependencies]
 tempfile = "3.21"
 futures-util = "0.3"
 
 [profile.release]
-opt-level = "z"
+opt-level = 3
 lto = "fat"
 codegen-units = 1
 panic = "abort"
 debug = 0
 strip = true
 overflow-checks = false
+target-cpu = "native"

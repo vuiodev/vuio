@@ -1475,6 +1475,16 @@ impl ZeroCopyDatabase {
             (offset, prefixed_data.len())
         };
         
+        // Update indexes - CRITICAL: This was missing!
+        {
+            let mut index_manager = self.index_manager.write().await;
+            for file in &files_with_ids {
+                tracing::debug!("Adding file to index: path='{}', offset={}", 
+                    file.path.display(), write_offset);
+                index_manager.insert_file_index(file, write_offset);
+            }
+        }
+        
         let total_time = start_time.elapsed();
         let throughput = files.len() as f64 / total_time.as_secs_f64();
         
@@ -2091,6 +2101,9 @@ impl DatabaseManager for ZeroCopyDatabase {
         // Normalize directory path for consistent lookups
         let canonical_dir = self.path_normalizer.to_canonical(dir)
             .map_err(|e| anyhow!("Path normalization failed: {}", e))?;
+        
+        tracing::debug!("Database query: looking for files in directory '{}' -> canonical '{}'", 
+            dir.display(), canonical_dir);
         
         // Get file offsets from directory index with atomic lookup
         let file_offsets = {

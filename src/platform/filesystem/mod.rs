@@ -138,6 +138,68 @@ impl PathNormalizer for WindowsPathNormalizer {
     }
 }
 
+/// Unix/macOS path normalizer that preserves case sensitivity
+#[derive(Debug, Clone)]
+pub struct UnixPathNormalizer;
+
+impl UnixPathNormalizer {
+    pub fn new() -> Self {
+        Self
+    }
+    
+    /// Convert Unix path to canonical format (preserves case, uses forward slashes)
+    fn normalize_to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        let path_str = path.to_string_lossy();
+        
+        // Validate path length
+        if path_str.len() > 4096 {
+            return Err(PathNormalizationError::PathTooLong {
+                path: path_str.to_string(),
+            });
+        }
+        
+        // Check for null bytes (invalid on Unix)
+        if path_str.contains('\0') {
+            return Err(PathNormalizationError::InvalidCharacters {
+                path: path_str.to_string(),
+            });
+        }
+        
+        // Unix paths already use forward slashes and are case-sensitive
+        // Just ensure we have a consistent string representation
+        let canonical = path_str.to_string();
+        
+        Ok(canonical)
+    }
+    
+    /// Convert canonical format back to Unix path format
+    fn canonical_to_unix(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
+        if canonical.is_empty() {
+            return Err(PathNormalizationError::InvalidFormat {
+                path: canonical.to_string(),
+            });
+        }
+        
+        // Unix canonical format is already the correct format
+        Ok(PathBuf::from(canonical))
+    }
+}
+
+impl PathNormalizer for UnixPathNormalizer {
+    fn to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        self.normalize_to_canonical(path)
+    }
+    
+    fn from_canonical(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
+        self.canonical_to_unix(canonical)
+    }
+    
+    fn normalize_for_query(&self, path: &Path) -> Result<String, PathNormalizationError> {
+        // Same as to_canonical - explicit method for query context
+        self.normalize_to_canonical(path)
+    }
+}
+
 impl Default for WindowsPathNormalizer {
     fn default() -> Self {
         Self::new()
@@ -153,9 +215,7 @@ pub fn create_platform_path_normalizer() -> Box<dyn PathNormalizer> {
     
     #[cfg(not(target_os = "windows"))]
     {
-        // For non-Windows platforms, we'll use a simple normalizer
-        // This can be enhanced later with platform-specific implementations
-        Box::new(WindowsPathNormalizer::new()) // Placeholder - would be UnixPathNormalizer
+        Box::new(UnixPathNormalizer::new())
     }
 }
 
