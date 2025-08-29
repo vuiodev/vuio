@@ -1423,36 +1423,12 @@ impl ZeroCopyDatabase {
             files_with_ids.push(file_with_id);
         }
         
-        // ULTRA-FAST binary serialization (no FlatBuffers overhead)
+        // Use consistent binary serialization format
         let (write_offset, data_size) = {
             let mut data_file = self.data_file.write().await;
             
-            // Create simple binary format: [file_count][file1][file2]...
-            // Each file: [id][path_len][path][size][modified_timestamp]
-            let mut binary_data = Vec::with_capacity(files_with_ids.len() * 256);
-            
-            // Write file count
-            binary_data.extend_from_slice(&(files_with_ids.len() as u32).to_le_bytes());
-            
-            // Write each file in simple binary format
-            for file in &files_with_ids {
-                // File ID (8 bytes)
-                binary_data.extend_from_slice(&file.id.unwrap_or(0).to_le_bytes());
-                
-                // Path (length + data)
-                let path_str = file.path.to_string_lossy();
-                let path_bytes = path_str.as_bytes();
-                binary_data.extend_from_slice(&(path_bytes.len() as u32).to_le_bytes());
-                binary_data.extend_from_slice(path_bytes);
-                
-                // File size (8 bytes)
-                binary_data.extend_from_slice(&file.size.to_le_bytes());
-                
-                // Modified timestamp (8 bytes)
-                let timestamp = file.modified.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default().as_secs();
-                binary_data.extend_from_slice(&timestamp.to_le_bytes());
-            }
+            // Use the same format that deserialize_batch expects
+            let binary_data = BinaryMediaFileSerializer::serialize_batch(&files_with_ids)?;
             
             // Write with length prefix
             let data_len = binary_data.len() as u32;
