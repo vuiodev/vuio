@@ -3,7 +3,7 @@
 
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 use crate::database::MediaFile;
 
 /// Magic bytes to identify our binary format
@@ -426,7 +426,7 @@ impl BinaryMediaFileSerializer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::SystemTime;
+    use std::time::{SystemTime, UNIX_EPOCH};
     
     fn create_test_file() -> MediaFile {
         MediaFile {

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use vuio::database::{MediaFile, binary_format::BinaryMediaFileSerializer};
 
 /// Benchmark comparing custom binary format vs FlatBuffers
@@ -38,57 +38,24 @@ async fn binary_format_benchmark() -> Result<()> {
              binary_data.len(),
              binary_data.len() as f64 / test_files.len() as f64);
     
-    // Test FlatBuffers for comparison
-    println!("\n🐌 FLATBUFFERS (for comparison)");
-    println!("{}", "-".repeat(40));
-    
-    let start = Instant::now();
-    let flatbuffer_data = serialize_with_flatbuffers(&test_files)?;
-    let flatbuffer_serialize_time = start.elapsed();
-    
-    let start = Instant::now();
-    let flatbuffer_deserialized = deserialize_with_flatbuffers(&flatbuffer_data)?;
-    let flatbuffer_deserialize_time = start.elapsed();
-    
-    println!("✅ Serialization:   {:>8.2}ms ({:>8.0} files/sec)", 
-             flatbuffer_serialize_time.as_millis(),
-             test_files.len() as f64 / flatbuffer_serialize_time.as_secs_f64());
-    
-    println!("✅ Deserialization: {:>8.2}ms ({:>8.0} files/sec)", 
-             flatbuffer_deserialize_time.as_millis(),
-             flatbuffer_deserialized.len() as f64 / flatbuffer_deserialize_time.as_secs_f64());
-    
-    println!("📦 Data size:       {:>8} bytes ({:.1} bytes/file)", 
-             flatbuffer_data.len(),
-             flatbuffer_data.len() as f64 / test_files.len() as f64);
-    
-    // Performance comparison
-    println!("\n🏆 PERFORMANCE COMPARISON");
+    // Performance summary
+    println!("\n🏆 PERFORMANCE SUMMARY");
     println!("{}", "=".repeat(60));
     
-    let serialize_speedup = flatbuffer_serialize_time.as_secs_f64() / binary_serialize_time.as_secs_f64();
-    let deserialize_speedup = flatbuffer_deserialize_time.as_secs_f64() / binary_deserialize_time.as_secs_f64();
-    let size_ratio = flatbuffer_data.len() as f64 / binary_data.len() as f64;
+    let total_throughput = test_files.len() as f64 / (binary_serialize_time.as_secs_f64() + binary_deserialize_time.as_secs_f64());
     
-    println!("⚡ Serialization speedup:   {:.1}x faster", serialize_speedup);
-    println!("⚡ Deserialization speedup: {:.1}x faster", deserialize_speedup);
-    println!("📦 Size efficiency:         {:.1}x smaller", size_ratio);
-    println!("🎯 Overall performance:     {:.1}x better", (serialize_speedup + deserialize_speedup) / 2.0);
+    println!("⚡ Total throughput:        {:.0} files/sec", total_throughput);
+    println!("📦 Data efficiency:        {:.1} bytes/file", binary_data.len() as f64 / test_files.len() as f64);
+    println!("🎯 Round-trip time:        {:.2}ms", (binary_serialize_time + binary_deserialize_time).as_millis());
     
     // Memory efficiency
     println!("\n💾 MEMORY EFFICIENCY");
     println!("{}", "-".repeat(40));
     println!("Custom Binary: {} bytes total, {:.1} bytes/file", 
              binary_data.len(), binary_data.len() as f64 / test_files.len() as f64);
-    println!("FlatBuffers:   {} bytes total, {:.1} bytes/file", 
-             flatbuffer_data.len(), flatbuffer_data.len() as f64 / test_files.len() as f64);
-    println!("Memory saved:  {} bytes ({:.1}% reduction)", 
-             flatbuffer_data.len() - binary_data.len(),
-             (1.0 - binary_data.len() as f64 / flatbuffer_data.len() as f64) * 100.0);
     
     // Verify correctness
     assert_eq!(test_files.len(), binary_deserialized.len());
-    assert_eq!(test_files.len(), flatbuffer_deserialized.len());
     
     for i in 0..test_files.len().min(10) {
         assert_eq!(test_files[i].filename, binary_deserialized[i].filename);
@@ -136,34 +103,7 @@ fn random_genre() -> String {
     genres[fastrand::usize(0..genres.len())].to_string()
 }
 
-// FlatBuffer serialization for comparison
-fn serialize_with_flatbuffers(files: &[MediaFile]) -> Result<Vec<u8>> {
-    use vuio::database::flatbuffer::{MediaFileSerializer, BatchOperationType};
-    use flatbuffers::FlatBufferBuilder;
-    
-    let mut builder = FlatBufferBuilder::new();
-    
-    MediaFileSerializer::serialize_media_file_batch(
-        &mut builder,
-        files,
-        1, // batch_id
-        BatchOperationType::Insert,
-        None, // canonical_paths
-    )?;
-    
-    Ok(builder.finished_data().to_vec())
-}
-
-fn deserialize_with_flatbuffers(data: &[u8]) -> Result<Vec<MediaFile>> {
-    use vuio::database::flatbuffer::MediaFileSerializer;
-    
-    let result = MediaFileSerializer::deserialize_media_file_batch(
-        vuio::database::flatbuffer::generated::media_db::root_as_media_file_batch(data)
-            .map_err(|e| anyhow::anyhow!("Failed to parse FlatBuffer: {}", e))?
-    )?;
-    
-    Ok(result.files)
-}
+// Removed FlatBuffer serialization functions (using binary format only)
 
 /// Micro-benchmark for individual file operations
 #[tokio::test]
@@ -188,21 +128,7 @@ async fn micro_benchmark() -> Result<()> {
     println!("⚡ Time per operation: {:.2}μs", binary_time.as_micros() as f64 / iterations as f64);
     println!("⚡ Operations per sec: {:.0}", iterations as f64 / binary_time.as_secs_f64());
     
-    // FlatBuffer micro-benchmark
-    println!("\n🐌 FlatBuffers ({} iterations)", iterations);
-    
-    let start = Instant::now();
-    for _ in 0..iterations {
-        let data = serialize_with_flatbuffers(&[test_file.clone()])?;
-        let _ = deserialize_with_flatbuffers(&data)?;
-    }
-    let flatbuffer_time = start.elapsed();
-    
-    println!("⚡ Time per operation: {:.2}μs", flatbuffer_time.as_micros() as f64 / iterations as f64);
-    println!("⚡ Operations per sec: {:.0}", iterations as f64 / flatbuffer_time.as_secs_f64());
-    
-    let speedup = flatbuffer_time.as_secs_f64() / binary_time.as_secs_f64();
-    println!("\n🏆 Custom Binary is {:.1}x faster per operation!", speedup);
+    println!("\n🏆 Custom Binary format performance: {:.0} operations/sec!", iterations as f64 / binary_time.as_secs_f64());
     
     Ok(())
 }

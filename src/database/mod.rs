@@ -11,7 +11,7 @@ use crate::platform::filesystem::{create_platform_path_normalizer, PathNormalize
 use crate::platform::DatabaseError;
 
 pub mod playlist_formats;
-pub mod flatbuffer;
+
 pub mod binary_format;
 pub mod memory_mapped;
 pub mod memory_bounded_cache;
