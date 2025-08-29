@@ -55,6 +55,6 @@ backup_enabled = true
 # initial_file_size_mb = 2              # Initial DB file size in MB (1-1024, default: 1)
 # max_file_size_gb = 2                  # Max DB file size in GB (1-100, default: 1)
 # sync_frequency_secs = 120             # Sync frequency in seconds (1-3600, default: 60)
-# enable_wal = true                     # Enable Write-Ahead Logging (default: false)
+# enable_wal = true                     # Enable Write-Ahead Logging (default: true)
 # enable_compression = false            # Enable compression (default: false)
 # monitor_interval_secs = 900           # Performance monitoring interval (30-3600s, default: 600)

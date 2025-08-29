@@ -60,7 +60,7 @@ impl Default for ZeroCopyConfig {
             enable_compression: false,                            // Disabled by default
             use_binary_format: true,                              // Use fast binary format by default
             sync_frequency: Duration::from_secs(60),              // Less frequent syncing
-            enable_wal: false,                                    // Disabled by default
+            enable_wal: true,                                     // WAL enabled by default
             performance_monitoring_interval: Duration::from_secs(600), // Less frequent monitoring
         }
     }
