@@ -59,4 +59,3 @@ panic = "abort"
 debug = 0
 strip = true
 overflow-checks = false
-target-cpu = "native"
