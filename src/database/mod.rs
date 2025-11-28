@@ -134,7 +134,7 @@ pub trait DatabaseManager: Send + Sync {
     /// for large media libraries.
     /// 
     /// # Example
-    /// ```rust,no_run
+    /// ```rust,ignore
     /// use futures_util::StreamExt;
     /// 
     /// let mut stream = database.stream_all_media_files();

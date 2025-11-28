@@ -9,7 +9,7 @@ path = "src/lib.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1.47", features = ["rt", "net", "fs", "time", "sync", "macros", "io-util", "signal", "process"] }
+tokio = { version = "1.48", features = ["rt", "net", "fs", "time", "sync", "macros", "io-util", "signal", "process"] }
 serde = { version = "1.0", features = ["derive"] }
 uuid = { version = "1.18", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -26,21 +26,21 @@ chrono = { version = "0.4", features = ["serde"] }
 notify = "8.2"
 notify-debouncer-full = "0.6"
 toml = "0.9"
-toml_edit = "0.22"
+toml_edit = "0.23"
 serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 audiotags = "0.5"
-quick-xml = "0.36"
+quick-xml = "0.38"
 
 memmap2 = "0.9"
 crossbeam = "0.8"
-crc32fast = "1.4"
-fastrand = "2.0"
+crc32fast = "1.5"
+fastrand = "2.3"
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61", features = [
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
@@ -48,7 +48,7 @@ windows = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-tempfile = "3.21"
+tempfile = "3.23"
 futures-util = "0.3"
 
 [profile.release]

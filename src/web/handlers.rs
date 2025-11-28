@@ -148,7 +148,7 @@ fn parse_browse_params(body: &str) -> BrowseParams {
                 current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
             }
             Ok(Event::Text(ref e)) => {
-                let text = e.unescape().unwrap_or_default();
+                let text = reader.decoder().decode(e.as_ref()).unwrap_or_default();
                 match current_element.as_str() {
                     "ObjectID" => {
                         object_id = text.trim().to_string();

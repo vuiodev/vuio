@@ -950,6 +950,7 @@ pub fn create_custom_shared_error_handler(
 mod tests {
     use super::*;
     use tokio::time::sleep;
+    use anyhow::anyhow;
     
     #[tokio::test]
     async fn test_error_recording() {
