@@ -1,96 +1,375 @@
+# NSIS 3.11 Installer Script for VuIO
+# Installs VuIO as a Windows service with configurable install path
+#
+# Build with: makensis /V4 packaging\windows\nsis
+# Required defines (pass from command line):
+#   /DAPP_EXE=vuio.exe
+#   /DVERSION=1.0.0
+#   /DOUTFILE=vuio_setup.exe
+
+#--------------------------------
+# Includes
+#--------------------------------
 !include "MUI2.nsh"
-!include "nsDialogs.nsh"
+!include "FileFunc.nsh"
+!include "TextFunc.nsh"
 !include "LogicLib.nsh"
+!include "x64.nsh"
 
-# --- Installer Attributes ---
-Name "vuio"
-OutFile "vuio_installer.exe"
-InstallDir "$PROGRAMFILES\vuio"
+#--------------------------------
+# Defines
+#--------------------------------
+!define APP_NAME "VuIO"
+!define PUBLISHER "VuIO"
+!define SERVICE_NAME "vuio"
+!define SERVICE_DISPLAY_NAME "VuIO DLNA Server"
+!define SERVICE_DESCRIPTION "VuIO DLNA/UPnP Media Server"
+!define CONFIG_DIR "config"
+!define DEFAULT_CONFIG "config.example.toml"
+
+# Default paths - can be overridden from command line
+!ifndef APP_EXE
+    !define APP_EXE "vuio.exe"
+!endif
+!ifndef VERSION
+    !define VERSION "0.0.0"
+!endif
+!ifndef OUTFILE
+    !define OUTFILE "vuio_setup.exe"
+!endif
+
+#--------------------------------
+# Installer Attributes
+#--------------------------------
+Name "${APP_NAME} ${VERSION}"
+OutFile "${OUTFILE}"
+InstallDir "$PROGRAMFILES64\${APP_NAME}"
+InstallDirRegKey HKLM "Software\${APP_NAME}" "InstallDir"
 RequestExecutionLevel admin
+Unicode True
 
-# --- Global Variables ---
-Var MEDIA_FOLDER
-Var NETWORK_INTERFACE
+# Installer/Uninstaller file properties
+VIProductVersion "${VERSION}.0"
+VIAddVersionKey "ProductName" "${APP_NAME}"
+VIAddVersionKey "CompanyName" "${PUBLISHER}"
+VIAddVersionKey "FileVersion" "${VERSION}"
+VIAddVersionKey "FileDescription" "${APP_NAME} Installer"
+VIAddVersionKey "LegalCopyright" "Copyright (c) ${PUBLISHER}"
 
-# --- Pages ---
+#--------------------------------
+# Variables
+#--------------------------------
+Var DefaultInstDir
+
+#--------------------------------
+# Modern UI Configuration
+#--------------------------------
+!define MUI_ABORTWARNING
+!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
+!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+
+# Welcome page
+!define MUI_WELCOMEPAGE_TITLE "Welcome to ${APP_NAME} Setup"
+!define MUI_WELCOMEPAGE_TEXT "This wizard will guide you through the installation of ${APP_NAME} ${VERSION}.$\r$\n$\r$\n${APP_NAME} will be installed as a Windows service and will start automatically.$\r$\n$\r$\nClick Next to continue."
+
+# Directory page
+!define MUI_DIRECTORYPAGE_TEXT_TOP "Setup will install ${APP_NAME} in the following folder. To install in a different folder, click Browse and select another folder. Click Next to continue."
+
+# Finish page
+!define MUI_FINISHPAGE_TITLE "Installation Complete"
+!define MUI_FINISHPAGE_TEXT "${APP_NAME} has been installed successfully.$\r$\n$\r$\nThe service has been configured to start automatically.$\r$\n$\r$\nClick Finish to close this wizard."
+
+#--------------------------------
+# Pages
+#--------------------------------
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
-Page custom CustomPageCreate "" "Configuration"
 !insertmacro MUI_PAGE_INSTFILES
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
 !insertmacro MUI_UNPAGE_INSTFILES
 
-# --- Language ---
+#--------------------------------
+# Languages
+#--------------------------------
 !insertmacro MUI_LANGUAGE "English"
 
-# --- Custom Page ---
-Function CustomPageCreate
-    nsDialogs::Create 1018
-    Pop $0
-
-    ${NSD_CreateLabel} 0 0 100% 12u "Select Media Folder:"
-    ${NSD_CreateText} 0 13u 70% 12u ""
-    Pop $MEDIA_FOLDER_TEXT
-    ${NSD_CreateBrowseButton} 75% 12u 25% 12u "Browse..."
-    Pop $BROWSE_BUTTON
-    ${NSD_OnClick} $BROWSE_BUTTON OnBrowse
-
-    ${NSD_CreateLabel} 0 40u 100% 12u "Select Network Interface to Serve From:"
-    ${NSD_CreateDropList} 0 53u 100% 100u ""
-    Pop $NETWORK_INTERFACE_DROPDOWN
-
-    # --- Populate Network Interfaces ---
-    IpConfig::GetEnabledNetworkAdaptersIDs /NOUNLOAD
-    Pop $0 ; Number of adapters
-    ${For} $1 0 $0
-        IpConfig::GetEnabledNetworkAdaptersID $1 /NOUNLOAD
-        Pop $R0 ; Adapter ID
-        IpConfig::GetNetworkAdapterDescription $R0 /NOUNLOAD
-        Pop $R1 ; Adapter Description
-        Pop $R2
-        ${NSD_CB_AddString} $NETWORK_INTERFACE_DROPDOWN "$R1"
-    ${Next}
-    ${NSD_CB_SetCurSel} $NETWORK_INTERFACE_DROPDOWN 0
-
-    nsDialogs::Show
-FunctionEnd
-
-Function OnBrowse
-    nsDialogs::SelectFolderDialog "Select Media Folder" ""
-    Pop $MEDIA_FOLDER
-    ${NSD_SetText} $MEDIA_FOLDER_TEXT $MEDIA_FOLDER
-FunctionEnd
-
-# --- Installation Section ---
-Section "Install"
-    SetOutPath $INSTDIR
-
-    # --- TODO: Add your application files here ---
-    File "vuio.exe"
-
-    ${NSD_GetText} $MEDIA_FOLDER_TEXT $MEDIA_FOLDER
-    ${NSD_GetText} $NETWORK_INTERFACE_DROPDOWN $NETWORK_INTERFACE
-
-    # --- Create Service ---
-    SimpleSC::InstallService "vuio_service" "vuio Application Service" "16" "2" '"$INSTDIR\vuio.exe" --media-path "$MEDIA_FOLDER" --interface "$NETWORK_INTERFACE"'
-    Pop $0
-    ${If} $0 != "0"
-        MessageBox MB_OK|MB_ICONSTOP "Failed to create the vuio service. Error code: $0"
+#--------------------------------
+# Installer Functions
+#--------------------------------
+Function .onInit
+    # Store default installation directory
+    StrCpy $DefaultInstDir "$PROGRAMFILES64\${APP_NAME}"
+    
+    # Check for 64-bit Windows
+    ${IfNot} ${RunningX64}
+        MessageBox MB_OK|MB_ICONSTOP "This application requires 64-bit Windows."
+        Abort
     ${EndIf}
+    
+    # Check for admin privileges
+    UserInfo::GetAccountType
+    Pop $0
+    ${If} $0 != "admin"
+        MessageBox MB_OK|MB_ICONSTOP "Administrator privileges are required to install ${APP_NAME}."
+        Abort
+    ${EndIf}
+    
+    # Check if service is already running and stop it
+    nsExec::ExecToLog 'sc query "${SERVICE_NAME}"'
+    Pop $0
+    ${If} $0 == 0
+        MessageBox MB_YESNO|MB_ICONQUESTION "An existing ${APP_NAME} installation was detected. The service will be stopped for the update.$\r$\n$\r$\nContinue?" IDYES +2
+        Abort
+        nsExec::ExecToLog 'sc stop "${SERVICE_NAME}"'
+        Sleep 2000
+    ${EndIf}
+FunctionEnd
 
-    # --- Start Service ---
-    SimpleSC::StartService "vuio_service"
+#--------------------------------
+# Installation Section
+#--------------------------------
+Section "Install" SEC_INSTALL
+    SetOutPath $INSTDIR
+    
+    # Copy main executable
+    File "${APP_EXE}"
+    
+    # Create config directory
+    CreateDirectory "$INSTDIR\${CONFIG_DIR}"
+    
+    # Copy config file if it doesn't exist (preserve user config on upgrades)
+    ${IfNot} ${FileExists} "$INSTDIR\${CONFIG_DIR}\config.toml"
+        # Copy example config as config.toml
+        SetOutPath "$INSTDIR\${CONFIG_DIR}"
+        File "/oname=config.toml" "${DEFAULT_CONFIG}"
+        
+        # Update config paths if installation directory differs from default
+        StrCmp $INSTDIR $DefaultInstDir skip_config_update
+            # Update database path in config to use installation directory
+            # Replace the default database path with the actual install path
+            Push "$INSTDIR\${CONFIG_DIR}\config.toml"
+            Push './config/media.db'
+            Push '$INSTDIR\${CONFIG_DIR}\media.db'
+            Call ReplaceInFile
+        skip_config_update:
+    ${EndIf}
+    
+    SetOutPath $INSTDIR
+    
+    # Write registry keys
+    WriteRegStr HKLM "Software\${APP_NAME}" "InstallDir" "$INSTDIR"
+    WriteRegStr HKLM "Software\${APP_NAME}" "Version" "${VERSION}"
+    
+    # Write uninstaller registry keys
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayName" "${APP_NAME}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "DisplayVersion" "${VERSION}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "Publisher" "${PUBLISHER}"
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "UninstallString" '"$INSTDIR\uninstall.exe"'
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "QuietUninstallString" '"$INSTDIR\uninstall.exe" /S'
+    WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "InstallLocation" "$INSTDIR"
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoModify" 1
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "NoRepair" 1
+    
+    # Get installed size
+    ${GetSize} "$INSTDIR" "/S=0K" $0 $1 $2
+    IntFmt $0 "0x%08X" $0
+    WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}" "EstimatedSize" "$0"
+    
+    # Create uninstaller
+    WriteUninstaller "$INSTDIR\uninstall.exe"
+    
+    # Delete existing service if present (for upgrades)
+    nsExec::ExecToLog 'sc delete "${SERVICE_NAME}"'
+    Sleep 1000
+    
+    # Create Windows service
+    # Service type 16 = WIN32_OWN_PROCESS
+    # Start type: auto (delayed start for better boot performance)
+    nsExec::ExecToLog 'sc create "${SERVICE_NAME}" binPath= "\"$INSTDIR\${APP_EXE}\" --config \"$INSTDIR\${CONFIG_DIR}\config.toml\"" start= delayed-auto DisplayName= "${SERVICE_DISPLAY_NAME}"'
+    Pop $0
+    ${If} $0 != 0
+        MessageBox MB_OK|MB_ICONEXCLAMATION "Warning: Failed to create the service (error: $0).$\r$\n$\r$\nYou may need to create it manually."
+    ${Else}
+        # Set service description
+        nsExec::ExecToLog 'sc description "${SERVICE_NAME}" "${SERVICE_DESCRIPTION}"'
+        
+        # Configure service recovery options (restart on failure)
+        nsExec::ExecToLog 'sc failure "${SERVICE_NAME}" reset= 86400 actions= restart/5000/restart/10000/restart/30000'
+        
+        # Start the service
+        nsExec::ExecToLog 'sc start "${SERVICE_NAME}"'
+        Pop $0
+        ${If} $0 != 0
+            MessageBox MB_OK|MB_ICONINFORMATION "The service was installed but could not be started automatically.$\r$\n$\r$\nYou can start it manually from Services (services.msc)."
+        ${EndIf}
+    ${EndIf}
+    
+    # Create Start Menu shortcuts
+    CreateDirectory "$SMPROGRAMS\${APP_NAME}"
+    CreateShortcut "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk" "$INSTDIR\uninstall.exe"
+    CreateShortcut "$SMPROGRAMS\${APP_NAME}\${APP_NAME} Config.lnk" "$INSTDIR\${CONFIG_DIR}\config.toml"
 SectionEnd
 
-# --- Uninstaller Section ---
-Section "Uninstall"
-    # --- Stop and Delete Service ---
-    SimpleSC::StopService "vuio_service"
-    SimpleSC::RemoveService "vuio_service"
+#--------------------------------
+# Helper Functions
+#--------------------------------
 
-    # --- Remove Files and Directory ---
-    Delete "$INSTDIR\vuio.exe"
+# ReplaceInFile - Replace text in a file
+# Usage:
+#   Push "filepath"
+#   Push "search_string"
+#   Push "replacement_string"
+#   Call ReplaceInFile
+Function ReplaceInFile
+    Exch $R2 ; replacement
+    Exch
+    Exch $R1 ; search
+    Exch 2
+    Exch $R0 ; file
+    Push $R3
+    Push $R4
+    Push $R5
+    
+    # Read the file
+    FileOpen $R3 $R0 r
+    ${If} $R3 == ""
+        Goto done
+    ${EndIf}
+    
+    GetTempFileName $R4
+    FileOpen $R5 $R4 w
+    
+    ${Do}
+        FileRead $R3 $0
+        ${If} ${Errors}
+            ${Break}
+        ${EndIf}
+        
+        # Simple replacement - check if line contains search string
+        Push $0
+        Push $R1
+        Push $R2
+        Call StrReplace
+        Pop $0
+        
+        FileWrite $R5 $0
+    ${Loop}
+    
+    FileClose $R3
+    FileClose $R5
+    
+    # Replace original file
+    Delete $R0
+    Rename $R4 $R0
+    
+done:
+    Pop $R5
+    Pop $R4
+    Pop $R3
+    Pop $R2
+    Pop $R1
+    Pop $R0
+FunctionEnd
+
+# StrReplace - String replacement function
+# Usage:
+#   Push "original_string"
+#   Push "search_string"
+#   Push "replacement_string"
+#   Call StrReplace
+#   Pop $result
+Function StrReplace
+    Exch $R2 ; replacement
+    Exch
+    Exch $R1 ; search
+    Exch 2
+    Exch $R0 ; original
+    Push $R3
+    Push $R4
+    Push $R5
+    Push $R6
+    
+    StrLen $R3 $R1 ; length of search string
+    StrCpy $R4 0   ; position
+    StrCpy $R5 ""  ; result
+    
+    ${Do}
+        StrCpy $R6 $R0 $R3 $R4
+        ${If} $R6 == ""
+            # End of string - append remaining
+            StrCpy $R6 $R0 "" $R4
+            StrCpy $R5 "$R5$R6"
+            ${Break}
+        ${EndIf}
+        
+        ${If} $R6 == $R1
+            # Found match - append replacement
+            StrCpy $R5 "$R5$R2"
+            IntOp $R4 $R4 + $R3
+        ${Else}
+            # No match - append single character
+            StrCpy $R6 $R0 1 $R4
+            StrCpy $R5 "$R5$R6"
+            IntOp $R4 $R4 + 1
+        ${EndIf}
+    ${Loop}
+    
+    StrCpy $R0 $R5
+    
+    Pop $R6
+    Pop $R5
+    Pop $R4
+    Pop $R3
+    Pop $R2
+    Pop $R1
+    Exch $R0
+FunctionEnd
+
+#--------------------------------
+# Uninstaller Functions
+#--------------------------------
+Function un.onInit
+    # Check for admin privileges
+    UserInfo::GetAccountType
+    Pop $0
+    ${If} $0 != "admin"
+        MessageBox MB_OK|MB_ICONSTOP "Administrator privileges are required to uninstall ${APP_NAME}."
+        Abort
+    ${EndIf}
+FunctionEnd
+
+#--------------------------------
+# Uninstallation Section
+#--------------------------------
+Section "Uninstall"
+    # Stop the service
+    nsExec::ExecToLog 'sc stop "${SERVICE_NAME}"'
+    Sleep 3000 ; Give service time to stop
+    
+    # Delete the service
+    nsExec::ExecToLog 'sc delete "${SERVICE_NAME}"'
+    Sleep 2000 ; Give Windows time to clean up
+    
+    # Remove files
+    Delete "$INSTDIR\${APP_EXE}"
+    Delete "$INSTDIR\uninstall.exe"
+    Delete "$INSTDIR\${CONFIG_DIR}\config.toml"
+    Delete "$INSTDIR\${CONFIG_DIR}\media.db"
+    Delete "$INSTDIR\${CONFIG_DIR}\media.db-shm"
+    Delete "$INSTDIR\${CONFIG_DIR}\media.db-wal"
+    
+    # Remove directories (only if empty)
+    RMDir "$INSTDIR\${CONFIG_DIR}"
     RMDir "$INSTDIR"
+    
+    # Remove Start Menu shortcuts
+    Delete "$SMPROGRAMS\${APP_NAME}\Uninstall ${APP_NAME}.lnk"
+    Delete "$SMPROGRAMS\${APP_NAME}\${APP_NAME} Config.lnk"
+    RMDir "$SMPROGRAMS\${APP_NAME}"
+    
+    # Remove registry keys
+    DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\${APP_NAME}"
+    DeleteRegKey HKLM "Software\${APP_NAME}"
 SectionEnd

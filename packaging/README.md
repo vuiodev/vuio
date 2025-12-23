@@ -60,6 +60,10 @@ This directory contains scripts and configurations for building platform-specifi
 
 ### Build Individual Package Types
 ```bash
+# Windows NSIS
+cd windows
+makensis /V4 /DAPP_EXE=vuio.exe /DVERSION=1.0.0 /DOUTFILE=vuio_setup.exe packaging\windows\nsis
+
 # Windows MSI
 cd windows
 pwsh build-msi.ps1
