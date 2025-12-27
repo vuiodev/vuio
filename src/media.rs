@@ -726,7 +726,8 @@ mod tests {
     #[tokio::test]
     async fn test_media_scanner_path_normalization() {
         let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.redb");
+        let temp_path = temp_dir.path().to_path_buf(); // Keep path alive
+        let db_path = temp_path.join("test.redb");
         
         // Create Redb database
         let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
@@ -738,13 +739,11 @@ mod tests {
         let scanner = MediaScanner::with_filesystem_manager(filesystem_manager, db.clone());
         
         // Create a test media file in the temp directory
-        let test_file_path = temp_dir.path().join("test.mp4");
+        let test_file_path = temp_path.join("test.mp4");
         tokio::fs::write(&test_file_path, b"fake video content").await.unwrap();
         
         // Scan the directory
-        let result = scanner.scan_directory(temp_dir.path()).await.unwrap();
-        
-
+        let result = scanner.scan_directory(&temp_path).await.unwrap();
         
         // Verify that files were found and processed
         assert_eq!(result.new_files.len(), 1);
@@ -759,6 +758,9 @@ mod tests {
         assert!(stored_file.is_some());
         let stored_file = stored_file.unwrap();
         assert_eq!(stored_file.path.to_string_lossy(), expected_canonical);
+        
+        // Keep temp_dir alive until end of test
+        drop(temp_dir);
     }
     
     #[tokio::test]
