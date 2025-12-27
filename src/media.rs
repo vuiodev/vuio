@@ -744,9 +744,15 @@ mod tests {
         let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
         db.initialize().await.unwrap();
         
-        // Create scanner with custom path normalizer for testing
+        // Create scanner with platform-appropriate path normalizer
+        #[cfg(target_os = "windows")]
         let path_normalizer = Box::new(WindowsPathNormalizer::new());
-        let filesystem_manager = Box::new(BaseFileSystemManager::with_normalizer(false, path_normalizer));
+        #[cfg(not(target_os = "windows"))]
+        let path_normalizer = Box::new(crate::platform::filesystem::UnixPathNormalizer::new());
+        
+        // On Windows we want case-insensitivity (false), on Linux usually true but for this test we match the normalizer
+        let case_sensitive = !cfg!(target_os = "windows");
+        let filesystem_manager = Box::new(BaseFileSystemManager::with_normalizer(case_sensitive, path_normalizer));
         let scanner = MediaScanner::with_filesystem_manager(filesystem_manager, db.clone());
         
         // Verify directory still exists before scanning
