@@ -546,9 +546,9 @@ mod filesystem_integration_tests {
                                "Canonical path should use forward slashes: {}", canonical_path);
                     }
                     
-                    // Should be lowercase (except for UNC server names which preserve case)
-                    // On macOS, filesystem is case-preserving, so we don't enforce lowercase
-                    #[cfg(not(target_os = "macos"))]
+                    // Should be lowercase on Windows (case-insensitive filesystem)
+                    // Unix and macOS are case-sensitive/preserving, so paths keep original case
+                    #[cfg(target_os = "windows")]
                     if !canonical_path.starts_with("//") {
                         assert_eq!(canonical_path, canonical_path.to_lowercase(),
                                   "Canonical path should be lowercase: {}", canonical_path);
@@ -698,8 +698,9 @@ mod additional_integration_tests {
                 Ok(canonical_path) => {
                     println!("File {} normalized to: {}", filename, canonical_path);
                     
-                    // On macOS, filesystem is case-preserving, so we don't enforce lowercase
-                    #[cfg(not(target_os = "macos"))]
+                    // On Windows, paths are case-insensitive and should be lowercased
+                    // On Unix/Linux/macOS, filesystem is case-sensitive/preserving
+                    #[cfg(target_os = "windows")]
                     assert_eq!(canonical_path, canonical_path.to_lowercase(),
                               "Canonical path should be lowercase: {}", canonical_path);
                     
