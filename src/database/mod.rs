@@ -10,14 +10,8 @@ use std::time::{Duration, SystemTime};
 use crate::platform::DatabaseError;
 
 pub mod playlist_formats;
+pub mod redb;
 
-pub mod binary_format;
-pub mod memory_mapped;
-pub mod memory_bounded_cache;
-pub mod index_manager;
-pub mod atomic_performance;
-pub mod error_handling;
-pub mod zerocopy;
 
 /// Represents a subdirectory in the media library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

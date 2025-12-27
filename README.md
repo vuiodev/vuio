@@ -1,6 +1,6 @@
 # VuIO Media Server
 
-A comprehensive, cross-platform DLNA/UPnP media server written in Rust with advanced platform integration, real-time file monitoring, and robust database management. Built with Axum, Tokio, and SQLite for high performance and reliability.
+A comprehensive, cross-platform DLNA/UPnP media server written in Rust with advanced platform integration, real-time file monitoring, and robust database management. Built with Rust, Tokio, Axum, Redb for high performance and reliability.
 
 Windows, Linux, macOS, and Docker fully supported
 x64 and ARM64 supported

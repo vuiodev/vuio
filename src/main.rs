@@ -534,25 +534,23 @@ async fn initialize_config_manager(
 }
 
 /// Initialize database manager with health checks and recovery
-async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::zerocopy::ZeroCopyDatabase> {
-    info!("Initializing ZeroCopy database...");
+async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::redb::RedbDatabase> {
+    info!("Initializing Redb database...");
     
     let db_path = config.get_database_path();
+    // Change extension from .db to .redb
+    let db_path = db_path.with_extension("redb");
     info!("Database path: {}", db_path.display());
     
-    // Create ZeroCopy database manager with default configuration
-    let database = database::zerocopy::ZeroCopyDatabase::new(db_path.clone(), None).await
-        .context("Failed to create ZeroCopy database manager")?;
+    // Create Redb database manager
+    let database = database::redb::RedbDatabase::new(db_path.clone()).await
+        .context("Failed to create Redb database manager")?;
     
     // Initialize database schema
     database.initialize().await
         .context("Failed to initialize database schema")?;
     
-    // Open the database for operations
-    database.open().await
-        .context("Failed to open database")?;
-    
-    // Perform health check and repair if needed
+    // Perform health check
     info!("Performing database health check...");
     let health = database.check_and_repair().await
         .context("Failed to perform database health check")?;
@@ -588,10 +586,10 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::zer
     
     // Vacuum database if configured
     if config.database.vacuum_on_startup {
-        info!("Performing database vacuum...");
+        info!("Performing database compaction...");
         database.vacuum().await
-            .context("Failed to vacuum database")?;
-        info!("Database vacuum completed");
+            .context("Failed to compact database")?;
+        info!("Database compaction completed");
     }
     
     info!("Database initialized successfully");

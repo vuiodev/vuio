@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::warn;
 
-use crate::database::{DatabaseManager, MediaFile, zerocopy::ZeroCopyDatabase};
+use crate::database::{DatabaseManager, MediaFile, redb::RedbDatabase};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Media scanner that uses the file system manager and database for efficient scanning
@@ -18,15 +18,14 @@ pub struct MediaScanner {
 impl MediaScanner {
     /// Create a new media scanner with platform-specific file system manager
     pub async fn new() -> anyhow::Result<Self> {
-        // Create a temporary ZeroCopy database for basic scanning
-        let temp_path = std::env::temp_dir().join("temp_scanner_zerocopy.db");
-        let zerocopy_db = ZeroCopyDatabase::new(temp_path, None).await?;
+        // Create a temporary Redb database for basic scanning
+        let temp_path = std::env::temp_dir().join("temp_scanner.redb");
+        let redb_db = RedbDatabase::new(temp_path).await?;
         
-        // Initialize and open the database
-        zerocopy_db.initialize().await?;
-        zerocopy_db.open().await?;
+        // Initialize the database
+        redb_db.initialize().await?;
         
-        let database_manager = Arc::new(zerocopy_db) as Arc<dyn DatabaseManager>;
+        let database_manager = Arc::new(redb_db) as Arc<dyn DatabaseManager>;
         
         Ok(Self {
             filesystem_manager: create_platform_filesystem_manager(),
@@ -700,7 +699,7 @@ pub fn get_mime_type_legacy(path: &std::path::Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::zerocopy::ZeroCopyDatabase;
+    use crate::database::redb::RedbDatabase;
     use crate::platform::filesystem::{BaseFileSystemManager, WindowsPathNormalizer};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -708,12 +707,11 @@ mod tests {
     #[tokio::test]
     async fn test_media_scanner_basic_functionality() {
         let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
+        let db_path = temp_dir.path().join("test.redb");
         
-        // Create ZeroCopy database
-        let db = Arc::new(ZeroCopyDatabase::new(db_path, None).await.unwrap());
+        // Create Redb database
+        let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
         db.initialize().await.unwrap();
-        db.open().await.unwrap();
         
         // Create scanner with base filesystem manager
         let filesystem_manager = Box::new(BaseFileSystemManager::new(true));
@@ -728,12 +726,11 @@ mod tests {
     #[tokio::test]
     async fn test_media_scanner_path_normalization() {
         let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
+        let db_path = temp_dir.path().join("test.redb");
         
-        // Create ZeroCopy database
-        let db = Arc::new(ZeroCopyDatabase::new(db_path, None).await.unwrap());
+        // Create Redb database
+        let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
         db.initialize().await.unwrap();
-        db.open().await.unwrap();
         
         // Create scanner with custom path normalizer for testing
         let path_normalizer = Box::new(WindowsPathNormalizer::new());
@@ -824,12 +821,11 @@ mod tests {
     #[tokio::test]
     async fn test_recursive_scan_optimization() {
         let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
+        let db_path = temp_dir.path().join("test.redb");
         
-        // Create ZeroCopy database
-        let db = Arc::new(ZeroCopyDatabase::new(db_path, None).await.unwrap());
+        // Create Redb database
+        let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
         db.initialize().await.unwrap();
-        db.open().await.unwrap();
         
         // Create scanner with base filesystem manager
         let filesystem_manager = Box::new(BaseFileSystemManager::new(true));
