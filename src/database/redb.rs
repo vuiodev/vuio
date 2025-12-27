@@ -1395,4 +1395,59 @@ mod tests {
         let stats = db.get_stats().await.unwrap();
         assert_eq!(stats.total_files, 100);
     }
+
+    #[tokio::test]
+    async fn test_redb_database_playlist_operations() {
+        let temp_dir = tempdir().unwrap();
+        let db_path = temp_dir.path().join("test_playlist.redb");
+
+        let db = RedbDatabase::new(db_path).await.unwrap();
+        db.initialize().await.unwrap();
+
+        // Store some test files
+        let files: Vec<MediaFile> = (0..5)
+            .map(|i| MediaFile::new(
+                PathBuf::from(format!("/music/song{}.mp3", i)),
+                1024,
+                "audio/mpeg".to_string(),
+            ))
+            .collect();
+        let file_ids = db.bulk_store_media_files(&files).await.unwrap();
+
+        // Create a playlist
+        let playlist_id = db.create_playlist("Test Playlist", Some("A test playlist")).await.unwrap();
+        assert!(playlist_id > 0);
+
+        // Verify playlist was created
+        let playlists = db.get_playlists().await.unwrap();
+        assert_eq!(playlists.len(), 1);
+        assert_eq!(playlists[0].name, "Test Playlist");
+
+        // Add tracks to playlist
+        for (i, file_id) in file_ids.iter().enumerate() {
+            db.add_to_playlist(playlist_id, *file_id, Some(i as u32)).await.unwrap();
+        }
+
+        // Get playlist tracks
+        let tracks = db.get_playlist_tracks(playlist_id).await.unwrap();
+        assert_eq!(tracks.len(), 5);
+        assert_eq!(tracks[0].filename, "song0.mp3");
+        assert_eq!(tracks[4].filename, "song4.mp3");
+
+        // Remove a track
+        let removed = db.remove_from_playlist(playlist_id, file_ids[2]).await.unwrap();
+        assert!(removed);
+
+        // Verify track was removed
+        let tracks_after_remove = db.get_playlist_tracks(playlist_id).await.unwrap();
+        assert_eq!(tracks_after_remove.len(), 4);
+
+        // Delete the playlist
+        let deleted = db.delete_playlist(playlist_id).await.unwrap();
+        assert!(deleted);
+
+        // Verify playlist was deleted
+        let playlists_after_delete = db.get_playlists().await.unwrap();
+        assert_eq!(playlists_after_delete.len(), 0);
+    }
 }

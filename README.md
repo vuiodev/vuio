@@ -38,10 +38,10 @@ docker-compose -f docker-compose.yml up
 - **Platform-Specific Optimizations** - Optimized networking and filesystem handling
 
 ### Advanced Database Management
-- **ZeroCopy Database** - Persistent media library with metadata caching
-- **Health Monitoring** - Automatic integrity checks and repair capabilities
+- **Redb Database** - ACID-compliant embedded database with automatic crash recovery
+- **Health Monitoring** - Automatic integrity checks
 - **Backup System** - Automated backups with cleanup and restoration
-- **Performance Optimization** - Database vacuuming and query optimization
+- **Performance Optimization** - Automatic compaction
 
 ### Real-Time File Monitoring
 - **Cross-Platform File Watching** - Real-time detection of media file changes
@@ -113,17 +113,6 @@ VUIO_ANNOUNCE_INTERVAL=300                          # SSDP announcement interval
 VUIO_DB_PATH=/data/vuio.db                          # Database file path
 VUIO_DB_VACUUM=false                                # Vacuum database on startup
 VUIO_DB_BACKUP=true                                 # Enable database backups
-
-# ZeroCopy Database Configuration (optional - uses minimal defaults)
-ZEROCOPY_CACHE_MB=2                                 # Memory cache size (1-1024 MB, default: 1)
-ZEROCOPY_INDEX_SIZE=5000                            # Index cache entries (100-10M, default: 1000)
-ZEROCOPY_BATCH_SIZE=500                             # Batch processing size (10-1M, default: 100)
-ZEROCOPY_INITIAL_FILE_SIZE_MB=2                     # Initial DB file size (1-1024 MB, default: 1)
-ZEROCOPY_MAX_FILE_SIZE_GB=2                         # Max DB file size (1-100 GB, default: 1)
-ZEROCOPY_SYNC_FREQUENCY_SECS=120                    # Sync frequency (1-3600 seconds, default: 60)
-ZEROCOPY_ENABLE_WAL=true                            # Enable Write-Ahead Logging (default: true)
-ZEROCOPY_ENABLE_COMPRESSION=false                   # Enable compression (default: false)
-ZEROCOPY_MONITOR_INTERVAL_SECS=900                  # Performance monitoring (30-3600s, default: 600)
 
 # Debugging
 RUST_LOG=debug                                      # Enable debug logging
@@ -456,10 +445,37 @@ extensions = ["jpg", "jpeg", "png", "gif", "bmp"]
 exclude_patterns = ["*.tmp", ".*"]
 
 [database]
-path = "~/.local/share/vuio/media.db"
+path = "~/.local/share/vuio/media.redb"
 vacuum_on_startup = false
 backup_enabled = true
 ```
+
+## 🧹 Database Cleanup
+
+To reset the database and start fresh, simply delete the database file:
+
+**macOS/Linux:**
+```bash
+# Default database location (relative to executable)
+rm -f ./data/vuio.redb
+
+# Or if using custom path from config
+rm -f ~/.local/share/vuio/media.redb
+
+# Docker container
+docker exec vuio-server rm -f /data/vuio.redb
+```
+
+**Windows (PowerShell):**
+```powershell
+# Default database location
+Remove-Item -Force .\data\vuio.redb
+
+# Or if using custom path
+Remove-Item -Force $env:LOCALAPPDATA\vuio\media.redb
+```
+
+After removing the database, VuIO will automatically create a new one and rescan all media directories on next startup.
 
 ## 🎵 Audio Features & Music Management
 
@@ -648,44 +664,6 @@ VuIO is built with a modular, cross-platform architecture:
 ```bash
 cargo test
 ```
-
-#### Run Individual Performance Tests
-```bash
-# Test bulk insert performance
-cargo test test_bulk_insert_performance --test database_performance_comparison -- --ignored --nocapture
-
-# Test query performance
-cargo test test_query_performance --test database_performance_comparison -- --ignored --nocapture
-
-# Test concurrent access performance
-cargo test test_concurrent_access_performance --test database_performance_comparison -- --ignored --nocapture
-```
-
-#### Performance Test Configurations
-
-The performance tests evaluate four different ZeroCopy configurations:
-
-**🔧 Minimal (Default)**
-- 1MB cache, 1K index entries, 100 batch size
-- Best for: Embedded systems, containers with <512MB RAM
-- Environment variables: `ZEROCOPY_CACHE_MB=1 ZEROCOPY_INDEX_SIZE=1000 ZEROCOPY_BATCH_SIZE=100`
-
-**🖥️ Small**
-- 128MB cache, 50K index entries, 2K batch size
-- Best for: Small servers, Raspberry Pi 4, containers with 1-2GB RAM
-- Environment variables: `ZEROCOPY_CACHE_MB=128 ZEROCOPY_INDEX_SIZE=50000 ZEROCOPY_BATCH_SIZE=2000`
-
-**🖥️ Medium**
-- 256MB cache, 100K index entries, 5K batch size
-- Best for: Desktop systems, small NAS, containers with 4-8GB RAM
-- Environment variables: `ZEROCOPY_CACHE_MB=256 ZEROCOPY_INDEX_SIZE=100000 ZEROCOPY_BATCH_SIZE=5000`
-
-**🚀 Large**
-- 1GB cache, 500K index entries, 10K batch size
-- Best for: High-end servers, dedicated media servers, 16GB+ RAM
-- Environment variables: `ZEROCOPY_CACHE_MB=1024 ZEROCOPY_INDEX_SIZE=500000 ZEROCOPY_BATCH_SIZE=10000`
-
-The tests will show you exactly how each configuration performs on your hardware and provide specific recommendations for your use case.
 
 ### Diagnostic Information
 
