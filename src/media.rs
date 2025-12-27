@@ -725,13 +725,20 @@ mod tests {
     
     #[tokio::test]
     async fn test_media_scanner_path_normalization() {
-        // Keep temp_dir alive throughout the entire test
+        // Create temp directory and keep it alive
         let temp_dir = tempdir().unwrap();
+        let temp_path = temp_dir.path().to_path_buf();
         
-        // Store db_path before any async operations
-        let db_path = temp_dir.path().join("test.redb");
-        let test_file_path = temp_dir.path().join("test.mp4");
-        let scan_path = temp_dir.path().to_path_buf();
+        // Use synchronous std::fs to ensure file is created before any async ops
+        let db_path = temp_path.join("test.redb");
+        let test_file_path = temp_path.join("test.mp4");
+        
+        // Create test file synchronously to avoid race conditions
+        std::fs::write(&test_file_path, b"fake video content").unwrap();
+        
+        // Verify directory and file exist before proceeding
+        assert!(temp_path.exists(), "Temp directory should exist");
+        assert!(test_file_path.exists(), "Test file should exist");
         
         // Create Redb database
         let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
@@ -742,11 +749,11 @@ mod tests {
         let filesystem_manager = Box::new(BaseFileSystemManager::with_normalizer(false, path_normalizer));
         let scanner = MediaScanner::with_filesystem_manager(filesystem_manager, db.clone());
         
-        // Create a test media file in the temp directory
-        tokio::fs::write(&test_file_path, b"fake video content").await.unwrap();
+        // Verify directory still exists before scanning
+        assert!(temp_path.exists(), "Temp directory should still exist before scan");
         
-        // Scan the directory - use the stored path
-        let result = scanner.scan_directory(&scan_path).await.unwrap();
+        // Scan the directory
+        let result = scanner.scan_directory(&temp_path).await.unwrap();
         
         // Verify that files were found and processed
         assert_eq!(result.new_files.len(), 1);
@@ -762,7 +769,7 @@ mod tests {
         let stored_file = stored_file.unwrap();
         assert_eq!(stored_file.path.to_string_lossy(), expected_canonical);
         
-        // temp_dir is dropped here, cleaning up the directory
+        // temp_dir dropped here, auto-cleanup
     }
     
     #[tokio::test]
