@@ -1,6 +1,6 @@
 [package]
 name = "vuio"
-version = "0.0.19"
+version = "0.0.20"
 edition = "2021"
 authors = ["vyrti"]
 description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
