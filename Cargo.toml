@@ -2,6 +2,22 @@
 name = "vuio"
 version = "0.0.16"
 edition = "2021"
+authors = ["vyrti"]
+description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
+license = "Apache-2.0"
+repository = "https://github.com/vuiodev/vuio"
+homepage = "https://github.com/vuiodev/vuio"
+documentation = "https://docs.rs/vuio"
+readme = "README.md"
+keywords = ["dlna", "upnp", "media-server", "streaming", "ssdp"]
+categories = ["multimedia", "network-programming"]
+exclude = [
+    "test-media/**",
+    "docker-compose*.yml",
+    "Dockerfile",
+    ".github/**",
+    ".gitignore",
+]
 
 [lib]
 name = "vuio"

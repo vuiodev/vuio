@@ -111,8 +111,6 @@ VUIO_ANNOUNCE_INTERVAL=300                          # SSDP announcement interval
 
 # Database Configuration
 VUIO_DB_PATH=/data/vuio.db                          # Database file path
-VUIO_DB_VACUUM=false                                # Vacuum database on startup
-VUIO_DB_BACKUP=true                                 # Enable database backups
 
 # Debugging
 RUST_LOG=debug                                      # Enable debug logging
@@ -678,6 +676,11 @@ Contributions are welcome! Please read our contributing guidelines and ensure:
 
 Cross-platform compatibility is maintained
 
-## 📄 License
+## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+Vuio is dual-licensed under either:
+
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+
+at your option.
