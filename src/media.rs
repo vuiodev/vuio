@@ -700,7 +700,7 @@ pub fn get_mime_type_legacy(path: &std::path::Path) -> String {
 mod tests {
     use super::*;
     use crate::database::redb::RedbDatabase;
-    use crate::platform::filesystem::{BaseFileSystemManager, WindowsPathNormalizer};
+    use crate::platform::filesystem::BaseFileSystemManager;
     use std::sync::Arc;
     use tempfile::tempdir;
     

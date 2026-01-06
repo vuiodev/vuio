@@ -1,5 +1,5 @@
 #[cfg(target_os = "linux")]
-use super::{NetworkInterface, InterfaceType, PlatformResult};
+use super::PlatformResult;
 use std::collections::HashMap;
 
 /// Get Linux version information

@@ -233,7 +233,7 @@ impl ContentDirectoryHandler {
         use crate::web::xml::generate_browse_response;
 
         let start_time = Instant::now();
-        let mut cache_hit = false;
+        let cache_hit;
 
         // Determine the base path for the media type
         let media_root = state.config.get_primary_media_dir();

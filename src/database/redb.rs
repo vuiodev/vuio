@@ -1326,7 +1326,7 @@ impl DatabaseManager for RedbDatabase {
     async fn get_filtered_direct_subdirectories(
         &self,
         canonical_parent_path: &str,
-        mime_filter: &str,
+        _mime_filter: &str,
     ) -> Result<Vec<MediaDirectory>> {
         // For now, just return all subdirectories and let the caller filter
         // A more optimized version would filter during iteration

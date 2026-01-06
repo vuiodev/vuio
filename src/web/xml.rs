@@ -3,7 +3,6 @@ use crate::{
     database::{MediaDirectory, MediaFile},
     state::AppState,
 };
-use tracing::warn;
 
 /// XML escape helper with enhanced Unicode support
 fn xml_escape(s: &str) -> String {

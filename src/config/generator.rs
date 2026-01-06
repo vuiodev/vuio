@@ -344,6 +344,7 @@ mod tests {
                 watch_for_changes: false,
                 cleanup_deleted_files: false,
                 autoplay_enabled: false,
+                scan_playlists: false,
                 supported_extensions: vec!["mp4".to_string(), "avi".to_string()],
             },
             database: DatabaseConfig {
@@ -439,6 +440,7 @@ mod tests {
                 watch_for_changes: true,
                 cleanup_deleted_files: true,
                 autoplay_enabled: true,
+                scan_playlists: true,
                 supported_extensions: vec!["mp4".to_string()],
             },
             database: DatabaseConfig {
