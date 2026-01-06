@@ -633,37 +633,49 @@ async fn initialize_file_watcher(config: &AppConfig, _database: Arc<dyn Database
     Ok(watcher)
 }
 
-/// Validate cached files and remove any that no longer exist on disk (streaming version)
+/// Validate cached files and remove any that no longer exist on disk
+///
+/// Uses two-phase approach to avoid RwLock deadlock:
+/// 1. Stream all files and collect paths to delete (read lock)
+/// 2. Drop stream, then bulk delete (write lock)
 async fn validate_and_cleanup_deleted_files(
     database: Arc<dyn DatabaseManager>,
 ) -> anyhow::Result<()> {
     use futures_util::StreamExt;
-    
-    info!("Validating cached media files (streaming)...");
-    
-    let mut stream = database.stream_all_media_files();
-    let mut removed_count = 0;
+
+    info!("Validating cached media files...");
+
+    // Phase 1: Collect paths to delete (holds read lock)
+    let mut paths_to_delete = Vec::new();
     let mut total_checked = 0;
-    
-    while let Some(media_file_result) = stream.next().await {
-        let media_file = media_file_result
-            .context("Failed to read media file from database stream")?;
-        
-        total_checked += 1;
-        
-        if !media_file.path.exists() {
-            info!("Removing deleted file from database: {}", media_file.path.display());
-            if database.remove_media_file(&media_file.path).await? {
-                removed_count += 1;
+
+    {
+        let mut stream = database.stream_all_media_files();
+
+        while let Some(media_file_result) = stream.next().await {
+            let media_file = media_file_result
+                .context("Failed to read media file from database stream")?;
+
+            total_checked += 1;
+
+            if !media_file.path.exists() {
+                paths_to_delete.push(media_file.path.clone());
+            }
+
+            // Log progress every 1000 files
+            if total_checked % 1000 == 0 {
+                info!("Validated {} files so far...", total_checked);
             }
         }
-        
-        // Log progress every 1000 files to show we're making progress
-        if total_checked % 1000 == 0 {
-            info!("Validated {} files, removed {} deleted files so far", total_checked, removed_count);
-        }
+    } // Stream dropped here, read lock released
+
+    // Phase 2: Bulk delete (acquires write lock)
+    let removed_count = paths_to_delete.len();
+    if !paths_to_delete.is_empty() {
+        info!("Removing {} deleted files from database", removed_count);
+        database.bulk_remove_media_files(&paths_to_delete).await?;
     }
-    
+
     if removed_count > 0 {
         info!("Cleaned up {} deleted files from database (checked {} total)", removed_count, total_checked);
     } else {
