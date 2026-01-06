@@ -215,6 +215,12 @@ async fn main() -> anyhow::Result<()> {
         return Err(e);
     }
 
+    // Perform initial playlist file scan (after media scan so referenced files exist)
+    if let Err(e) = perform_initial_playlist_scan(&config, &database).await {
+        // Log warning but don't fail startup - playlists are not critical
+        warn!("Failed to scan playlist files: {}", e);
+    }
+
     // Create shared application state
     let filesystem_manager: Arc<dyn vuio::platform::filesystem::FileSystemManager> = 
         Arc::from(create_platform_filesystem_manager());
@@ -725,6 +731,51 @@ async fn perform_initial_media_scan(config: &AppConfig, database: &Arc<dyn Datab
 
         Ok(())
     }
+}
+
+/// Perform initial playlist file scan
+async fn perform_initial_playlist_scan(config: &AppConfig, database: &Arc<dyn DatabaseManager>) -> anyhow::Result<()> {
+    if !config.media.scan_playlists {
+        info!("Playlist scanning disabled in configuration");
+        return Ok(());
+    }
+
+    info!("Scanning for playlist files...");
+
+    let mut total_playlists = 0;
+
+    for dir_config in &config.media.directories {
+        let dir_path = std::path::PathBuf::from(&dir_config.path);
+
+        if !dir_path.exists() {
+            warn!("Media directory does not exist, skipping playlist scan: {}", dir_config.path);
+            continue;
+        }
+
+        info!("Scanning for playlists in: {}", dir_config.path);
+
+        let playlist_ids = if dir_config.recursive {
+            database.scan_and_import_playlists_recursive(&dir_path).await
+                .with_context(|| format!("Failed to scan playlists in: {}", dir_config.path))?
+        } else {
+            database.scan_and_import_playlists(&dir_path).await
+                .with_context(|| format!("Failed to scan playlists in: {}", dir_config.path))?
+        };
+
+        if !playlist_ids.is_empty() {
+            info!("Imported {} playlist(s) from {}", playlist_ids.len(), dir_config.path);
+        }
+
+        total_playlists += playlist_ids.len();
+    }
+
+    if total_playlists > 0 {
+        info!("Playlist scan completed: {} playlist(s) imported", total_playlists);
+    } else {
+        info!("Playlist scan completed: no playlist files found");
+    }
+
+    Ok(())
 }
 
 /// Start file system monitoring with database integration

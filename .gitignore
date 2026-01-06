@@ -12,6 +12,7 @@
 *.bak
 *.tmp
 *.vscode/
+CLAUDE.md
 
 # macOS
 .DS_Store

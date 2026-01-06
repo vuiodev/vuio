@@ -299,6 +299,11 @@ pub trait DatabaseManager: Send + Sync {
         playlist_formats::PlaylistFileManager::scan_and_import_playlists(self, directory).await
     }
 
+    /// Recursively scan directory tree for playlist files and import them
+    async fn scan_and_import_playlists_recursive(&self, directory: &Path) -> Result<Vec<i64>> {
+        playlist_formats::PlaylistFileManager::scan_and_import_playlists_recursive(self, directory).await
+    }
+
     // New methods for efficient path-based queries using canonical paths
 
     /// Get files with a specific canonical path prefix (for efficient directory deletion)

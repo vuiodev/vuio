@@ -61,6 +61,10 @@ fn default_autoplay_enabled() -> bool {
     true
 }
 
+fn default_scan_playlists() -> bool {
+    true
+}
+
 /// Media configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
@@ -71,6 +75,8 @@ pub struct MediaConfig {
     pub cleanup_deleted_files: bool,
     #[serde(default = "default_autoplay_enabled")]
     pub autoplay_enabled: bool,
+    #[serde(default = "default_scan_playlists")]
+    pub scan_playlists: bool,
     pub supported_extensions: Vec<String>,
 }
 
@@ -179,6 +185,9 @@ impl AppConfig {
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
             autoplay_enabled: std::env::var("VUIO_AUTOPLAY")
+                .map(|v| v.to_lowercase() == "true")
+                .unwrap_or(true),
+            scan_playlists: std::env::var("VUIO_SCAN_PLAYLISTS")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
             supported_extensions: vec![
@@ -332,6 +341,7 @@ impl AppConfig {
                 watch_for_changes: true,
                 cleanup_deleted_files: true,
                 autoplay_enabled: true,
+                scan_playlists: true,
                 supported_extensions: platform_config.get_default_media_extensions(),
             },
             database: DatabaseConfig {

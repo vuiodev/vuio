@@ -368,6 +368,61 @@ impl PlaylistFileManager {
         Ok(imported_playlists)
     }
 
+    /// Recursively scan a directory tree for playlist files and import them
+    pub async fn scan_and_import_playlists_recursive<D: DatabaseManager + ?Sized>(
+        database: &D,
+        directory: &Path,
+    ) -> Result<Vec<i64>> {
+        use tracing::info;
+
+        info!("Recursively scanning for playlist files: {}", directory.display());
+
+        let mut imported_playlists = Vec::new();
+        let mut dirs_to_scan = vec![directory.to_path_buf()];
+
+        while let Some(current_dir) = dirs_to_scan.pop() {
+            if !current_dir.is_dir() {
+                continue;
+            }
+
+            let mut entries = match tokio::fs::read_dir(&current_dir).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    warn!("Failed to read directory {}: {}", current_dir.display(), e);
+                    continue;
+                }
+            };
+
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                let path = entry.path();
+
+                if path.is_dir() {
+                    // Skip hidden directories
+                    if let Some(name) = path.file_name() {
+                        if !name.to_string_lossy().starts_with('.') {
+                            dirs_to_scan.push(path);
+                        }
+                    }
+                } else if path.is_file() {
+                    if PlaylistFormat::from_extension(&path).is_some() {
+                        match Self::import_playlist(database, &path, None).await {
+                            Ok(playlist_id) => {
+                                debug!("Imported playlist: {}", path.display());
+                                imported_playlists.push(playlist_id);
+                            }
+                            Err(e) => {
+                                warn!("Failed to import playlist {}: {}", path.display(), e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("Imported {} playlists from directory tree", imported_playlists.len());
+        Ok(imported_playlists)
+    }
+
     /// Get the appropriate file extension for a playlist export
     pub fn get_output_filename(playlist_name: &str, format: PlaylistFormat) -> String {
         // Sanitize the playlist name for use as filename
