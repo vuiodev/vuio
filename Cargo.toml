@@ -9,7 +9,7 @@ repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 documentation = "https://docs.rs/vuio"
 readme = "README.md"
-keywords = ["dlna", "upnp", "media-server", "server", "streaming", "ssdp"]
+keywords = ["dlna", "upnp", "server", "streaming", "ssdp"]
 categories = ["multimedia", "network-programming"]
 exclude = [
     "test-media/**",
