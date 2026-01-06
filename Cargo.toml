@@ -1,15 +1,15 @@
 [package]
 name = "vuio"
-version = "0.0.18"
+version = "0.0.19"
 edition = "2021"
 authors = ["vyrti"]
 description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
-license = "Apache-2.0"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 documentation = "https://docs.rs/vuio"
 readme = "README.md"
-keywords = ["dlna", "upnp", "media-server", "streaming", "ssdp"]
+keywords = ["dlna", "upnp", "media-server", "server", "streaming", "ssdp"]
 categories = ["multimedia", "network-programming"]
 exclude = [
     "test-media/**",
@@ -47,7 +47,7 @@ toml_edit = "0.24"
 serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 audiotags = "0.5"
 quick-xml = "0.38"
 
