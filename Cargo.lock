@@ -2152,7 +2152,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vuio"
-version = "0.0.19"
+version = "0.0.20"
 dependencies = [
  "anyhow",
  "async-stream",

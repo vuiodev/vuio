@@ -4,6 +4,7 @@
 **/*.rs.bk
 /vuio-config/
 /minidlna/
+Cargo.lock
 
 # IDEs and editors
 /.idea/
