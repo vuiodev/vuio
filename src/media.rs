@@ -1,13 +1,16 @@
 use anyhow::Result;
 use futures_util::StreamExt;
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
-use tracing::warn;
+use tracing::{warn, info, debug};
 
 use crate::database::{DatabaseManager, MediaFile, redb::RedbDatabase};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
+
+/// Batch size for database operations during parallel scanning
+const BATCH_SIZE: usize = 1000;
 
 /// Media scanner that uses the file system manager and database for efficient scanning
 pub struct MediaScanner {
@@ -429,113 +432,222 @@ impl MediaScanner {
         Ok(combined_result)
     }
     
-    /// Perform a recursive scan of a directory and its subdirectories
+    /// Perform a recursive scan of a directory using parallel multi-threaded traversal (jwalk)
     /// 
-    /// This method is optimized to avoid N+1 query problems by loading all existing files
-    /// from the database once at the start, then passing this collection down to each
-    /// directory scan. This significantly improves performance for large directory structures.
-    /// 
-    /// The method also implements batch processing to handle very large directory structures
-    /// efficiently without blocking the async runtime.
+    /// This method uses jwalk for fast parallel directory traversal, collecting all media files
+    /// in a single pass. Files are then batched for efficient database operations.
     pub async fn scan_directory_recursive(&self, directory: &Path) -> Result<ScanResult> {
+        use jwalk::WalkDir;
+        
         // Use canonical path normalization for consistent database storage
         let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
             Ok(canonical) => PathBuf::from(canonical),
             Err(e) => {
-                tracing::warn!("Failed to get canonical path for {}: {}, using basic normalization", directory.display(), e);
+                warn!("Failed to get canonical path for {}: {}, using basic normalization", directory.display(), e);
                 self.filesystem_manager.normalize_path(directory)
             }
         };
         
-        // Fix N+1 query problem: Load all existing files from database once at the start
-        tracing::debug!("Loading all existing files from database for recursive scan optimization");
-        let all_existing_files = {
-            let mut files = Vec::with_capacity(1000);
+        info!("Starting parallel directory scan of: {}", canonical_root.display());
+        
+        // Load all existing files from database once at the start (for incremental updates)
+        debug!("Loading existing files from database...");
+        let existing_files_map: HashMap<PathBuf, MediaFile> = {
+            let mut map = HashMap::with_capacity(10000);
             let mut stream = self.database_manager.stream_all_media_files();
             while let Some(result) = stream.next().await {
                 match result {
-                    Ok(file) => files.push(file),
+                    Ok(file) => {
+                        // Normalize path for consistent lookup
+                        let canonical = match self.filesystem_manager.get_canonical_path(&file.path) {
+                            Ok(c) => PathBuf::from(c),
+                            Err(_) => self.filesystem_manager.normalize_path(&file.path)
+                        };
+                        map.insert(canonical, file);
+                    }
                     Err(e) => {
-                        tracing::warn!("Error reading file from database during recursive scan: {}", e);
-                        // Continue processing other files
+                        warn!("Error reading file from database: {}", e);
                     }
                 }
             }
-            files
+            map
         };
+        debug!("Loaded {} existing files from database", existing_files_map.len());
         
-        tracing::debug!("Loaded {} existing files from database for recursive scan optimization", all_existing_files.len());
+        // Use jwalk for parallel directory traversal - runs in a blocking thread pool
+        let root_clone = canonical_root.clone();
+        let media_extensions: HashSet<&str> = [
+            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpg", "mpeg",
+            "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "aiff",
+            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
+        ].into_iter().collect();
         
-        // Perform recursive scan with batch processing
-        let result = self.scan_directory_recursive_with_existing_files(&canonical_root, &all_existing_files).await?;
-        
-        tracing::debug!("Recursive scan completed: {}", result.summary());
-        Ok(result)
-    }
-    
-    /// Internal optimized recursive scan that uses pre-loaded existing files to avoid N+1 queries
-    async fn scan_directory_recursive_with_existing_files(
-        &self, 
-        directory: &Path, 
-        all_existing_files: &[MediaFile]
-    ) -> Result<ScanResult> {
-        let mut combined_result = ScanResult::new();
-        let mut directories_to_scan = Vec::with_capacity(100);
-        directories_to_scan.push(directory.to_path_buf());
-        
-        // Process directories in batches to handle large directory structures efficiently
-        const BATCH_SIZE: usize = 50; // Process up to 50 directories at a time
-        
-        while !directories_to_scan.is_empty() {
-            // Take a batch of directories to process
-            let batch_size = std::cmp::min(BATCH_SIZE, directories_to_scan.len());
-            let current_batch: Vec<_> = directories_to_scan.drain(0..batch_size).collect();
-            
-            // Process each directory in the current batch
-            for current_dir in current_batch {
-                // Use the optimized scan method that accepts pre-loaded existing files
-                match self.scan_directory_with_existing_files(&current_dir, Some(all_existing_files)).await {
-                    Ok(result) => {
-                        combined_result.merge(result);
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to scan directory {}: {}", current_dir.display(), e);
-                        combined_result.errors.push(ScanError {
-                            path: current_dir.clone(),
-                            error: e.to_string(),
-                        });
-                        continue; // Skip subdirectory scanning if parent failed
-                    }
-                }
-                
-                // Find subdirectories to add to the scan queue
-                if let Ok(mut entries) = tokio::fs::read_dir(&current_dir).await {
-                    while let Ok(Some(entry)) = entries.next_entry().await {
-                        let entry_path = entry.path();
-                        if entry_path.is_dir() {
-                            // Skip hidden directories and common system directories
-                            if let Some(dir_name) = entry_path.file_name().and_then(|n| n.to_str()) {
-                                if !dir_name.starts_with('.') && 
-                                   !matches!(dir_name.to_lowercase().as_str(), 
-                                       "system volume information" | "$recycle.bin" | "recycler" | 
-                                       "windows" | "program files" | "program files (x86)"
-                                   ) {
-                                    directories_to_scan.push(entry_path);
-                                }
-                            }
+        let file_paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
+            WalkDir::new(&root_clone)
+                .skip_hidden(true)
+                .into_iter()
+                .filter_map(|entry| entry.ok())
+                .filter(|entry| entry.file_type().is_file())
+                .filter(|entry| {
+                    if let Some(ext) = entry.path().extension() {
+                        if let Some(ext_str) = ext.to_str() {
+                            return media_extensions.contains(ext_str.to_lowercase().as_str());
                         }
                     }
+                    false
+                })
+                .map(|entry| entry.path())
+                .collect()
+        }).await?;
+        
+        let total_files = file_paths.len();
+        info!("Found {} media files, processing in batches of {}", total_files, BATCH_SIZE);
+        
+        // Process files in batches
+        let mut result = ScanResult::new();
+        let mut files_to_insert: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
+        let mut files_to_update: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
+        let mut current_paths: HashSet<PathBuf> = HashSet::with_capacity(total_files);
+        let mut processed = 0;
+        
+        for path in file_paths {
+            // Normalize path for consistent storage
+            let canonical_path = match self.filesystem_manager.get_canonical_path(&path) {
+                Ok(c) => PathBuf::from(c),
+                Err(_) => self.filesystem_manager.normalize_path(&path)
+            };
+            current_paths.insert(canonical_path.clone());
+            
+            // Create MediaFile from path
+            let current_file = match self.create_media_file_from_path(&canonical_path).await {
+                Ok(f) => f,
+                Err(e) => {
+                    debug!("Failed to create MediaFile for {}: {}", path.display(), e);
+                    result.errors.push(ScanError {
+                        path: path.clone(),
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            
+            // Check if file exists in database
+            if let Some(existing) = existing_files_map.get(&canonical_path) {
+                if self.file_needs_update(existing, &current_file) {
+                    let mut updated = current_file;
+                    updated.id = existing.id;
+                    updated.created_at = existing.created_at;
+                    updated.updated_at = SystemTime::now();
+                    files_to_update.push(updated);
+                } else {
+                    result.unchanged_files.push(existing.clone());
+                }
+            } else {
+                files_to_insert.push(current_file);
+            }
+            
+            processed += 1;
+            
+            // Process batch when full
+            if files_to_insert.len() >= BATCH_SIZE {
+                info!("Inserting batch of {} files ({}/{})", files_to_insert.len(), processed, total_files);
+                let ids = self.database_manager.bulk_store_media_files(&files_to_insert).await?;
+                for (i, mut file) in files_to_insert.drain(..).enumerate() {
+                    if let Some(id) = ids.get(i) {
+                        file.id = Some(*id);
+                    }
+                    result.new_files.push(file);
                 }
             }
             
-            // Yield control periodically during large scans to prevent blocking
-            if directories_to_scan.len() > BATCH_SIZE * 2 {
-                tracing::debug!("Processing large directory structure: {} directories remaining", directories_to_scan.len());
-                tokio::task::yield_now().await;
+            if files_to_update.len() >= BATCH_SIZE {
+                info!("Updating batch of {} files ({}/{})", files_to_update.len(), processed, total_files);
+                self.database_manager.bulk_update_media_files(&files_to_update).await?;
+                result.updated_files.extend(files_to_update.drain(..));
+            }
+            
+            // Progress logging every 1000 files
+            if processed % 1000 == 0 {
+                info!("Progress: {}/{} files processed", processed, total_files);
             }
         }
         
-        Ok(combined_result)
+        // Process remaining files in last batch
+        if !files_to_insert.is_empty() {
+            info!("Inserting final batch of {} files", files_to_insert.len());
+            let ids = self.database_manager.bulk_store_media_files(&files_to_insert).await?;
+            for (i, mut file) in files_to_insert.into_iter().enumerate() {
+                if let Some(id) = ids.get(i) {
+                    file.id = Some(*id);
+                }
+                result.new_files.push(file);
+            }
+        }
+        
+        if !files_to_update.is_empty() {
+            info!("Updating final batch of {} files", files_to_update.len());
+            self.database_manager.bulk_update_media_files(&files_to_update).await?;
+            result.updated_files.extend(files_to_update);
+        }
+        
+        // Find and remove deleted files
+        let files_to_remove: Vec<PathBuf> = existing_files_map.iter()
+            .filter(|(path, _)| !current_paths.contains(*path))
+            .filter(|(path, _)| path.starts_with(&canonical_root)) // Only remove files under scanned directory
+            .map(|(_, file)| file.path.clone())
+            .collect();
+        
+        if !files_to_remove.is_empty() {
+            info!("Removing {} deleted files from database", files_to_remove.len());
+            self.database_manager.bulk_remove_media_files(&files_to_remove).await?;
+            for (path, file) in existing_files_map.iter() {
+                if !current_paths.contains(path) && path.starts_with(&canonical_root) {
+                    result.removed_files.push(file.clone());
+                }
+            }
+        }
+        
+        result.total_scanned = total_files;
+        
+        info!("Scan completed: {} new, {} updated, {} removed, {} unchanged",
+            result.new_files.len(),
+            result.updated_files.len(),
+            result.removed_files.len(),
+            result.unchanged_files.len()
+        );
+        
+        Ok(result)
+    }
+    
+    /// Create a MediaFile from a path by reading file metadata
+    async fn create_media_file_from_path(&self, path: &Path) -> Result<MediaFile> {
+        let metadata = tokio::fs::metadata(path).await?;
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let mime_type = crate::media::get_mime_type(path);
+        let size = metadata.len();
+        let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+        
+        Ok(MediaFile {
+            id: None,
+            path: path.to_path_buf(),
+            filename,
+            size,
+            modified,
+            mime_type,
+            duration: None,
+            title: None,
+            artist: None,
+            album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
+            created_at: SystemTime::now(),
+            updated_at: SystemTime::now(),
+        })
     }
     
     /// Get the file system manager (for testing or advanced usage)

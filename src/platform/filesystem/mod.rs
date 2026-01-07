@@ -74,6 +74,23 @@ impl WindowsPathNormalizer {
         let mut canonical = path_str.to_lowercase();
         canonical = canonical.replace('\\', "/");
         
+        // Deduplicate slashes
+        if canonical.starts_with("//") {
+            // UNC path: preserve leading double slash, clean the rest
+            let rest = canonical[2..].replace("//", "/");
+             // Iterate until stable to handle multiple consecutive slashes
+            let mut cleaned = rest;
+            while cleaned.contains("//") {
+                cleaned = cleaned.replace("//", "/");
+            }
+            canonical = format!("//{}", cleaned);
+        } else {
+            // Standard path: clean all double slashes
+            while canonical.contains("//") {
+                canonical = canonical.replace("//", "/");
+            }
+        }
+        
         // Handle UNC paths - preserve the leading double slash
         if canonical.starts_with("//") {
             // UNC path: //server/share/path
@@ -726,7 +743,7 @@ impl BaseFileSystemManager {
                 // Extract metadata if this is an audio file
                 if media_file.mime_type.starts_with("audio/") {
                     if let Err(e) = extract_audio_metadata(&mut media_file).await {
-                        debug!("Failed to extract metadata for {:?}: {}", media_file.path, e);
+                        debug!("Failed to extract metadata for {}: {}", media_file.path.display(), e);
                     }
                 }
                 

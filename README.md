@@ -303,14 +303,31 @@ Recommended directory structure:
 
 VuIO uses Redb, an embedded ACID-compliant database.
 
+### Database Location
+
+| Platform | Default Path |
+|----------|--------------|
+| **Windows** | `[exe dir]\config\database\media.redb` |
+| **Linux** | `~/.local/share/vuio/media.redb` |
+| **macOS** | `~/Library/Application Support/vuio/media.redb` |
+| **Docker** | `/data/vuio.redb` (or `VUIO_DB_PATH`) |
+
+When running from source on Windows:
+```
+C:\Users\Welcome\Downloads\code\rust\vuio\target\release\config\database\media.redb
+```
+
 ### Reset Database
 
 ```bash
-# Linux/macOS
-rm -f ./data/vuio.redb
+# Windows (PowerShell)
+Remove-Item -Force .\target\release\config\database\media.redb
 
-# Windows
-Remove-Item -Force .\data\vuio.redb
+# Linux
+rm -f ~/.local/share/vuio/media.redb
+
+# macOS
+rm -f ~/Library/Application\ Support/vuio/media.redb
 
 # Docker
 docker exec vuio-server rm -f /data/vuio.redb
@@ -372,6 +389,7 @@ RUST_LOG=debug ./vuio 2>&1 | tee vuio-debug.log
 ## Contributing
 
 Contributions welcome! Please ensure cross-platform compatibility is maintained.
+CLA is required for contributions.
 
 ## License
 

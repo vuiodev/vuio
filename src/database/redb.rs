@@ -63,7 +63,7 @@ impl RedbDatabase {
 
         // Open or create the database
         let db = Database::create(&path)
-            .with_context(|| format!("Failed to open redb database at {:?}", path))?;
+            .with_context(|| format!("Failed to open redb database at {}", path.display()))?;
 
         // Initialize tables
         {
@@ -101,8 +101,8 @@ impl RedbDatabase {
             (max_file, max_playlist)
         };
 
-        info!("Opened RedbDatabase at {:?} (max_file_id={}, max_playlist_id={})", 
-              path, max_file_id, max_playlist_id);
+        info!("Opened RedbDatabase at {} (max_file_id={}, max_playlist_id={})", 
+              path.display(), max_file_id, max_playlist_id);
 
         Ok(Self {
             db: Arc::new(RwLock::new(db)),
@@ -297,6 +297,7 @@ impl DatabaseManager for RedbDatabase {
         let serialized = Self::serialize_media_file(&file_with_id)?;
         let path_str = file.path.to_string_lossy().to_string();
         let dir_key = Self::get_dir_key(&file.path);
+        debug!("store_media_file: storing file '{}' in dir_key '{}'", path_str, dir_key);
 
         let db = self.db.write().await;
         let write_txn = db.begin_write()?;
@@ -434,11 +435,26 @@ impl DatabaseManager for RedbDatabase {
         parent_path: &Path,
         media_type_filter: &str,
     ) -> Result<(Vec<MediaDirectory>, Vec<MediaFile>)> {
-        let parent_str = parent_path.to_string_lossy().to_string();
-        let prefix = if parent_str.is_empty() || parent_str == "/" {
-            String::new()
+        let raw_parent_str = parent_path.to_string_lossy().to_string();
+        
+        // Strip trailing slash if present, unless it's the root path "/"
+        let parent_str = if raw_parent_str.len() > 1 && (raw_parent_str.ends_with('/') || raw_parent_str.ends_with('\\')) {
+            raw_parent_str[..raw_parent_str.len()-1].to_string()
         } else {
+            raw_parent_str
+        };
+        
+        info!("get_directory_listing: querying for parent_path='{}' (raw='{}'), filter='{}'", parent_str, parent_path.to_string_lossy(), media_type_filter);
+        
+        // Ensure prefix ends with a slash for subdirectory matching
+        let prefix = if parent_str.is_empty() {
+             String::new()
+        } else if parent_str == "/" {
+             "/".to_string()
+        } else if !parent_str.ends_with('/') {
             format!("{}/", parent_str)
+        } else {
+            parent_str.clone()
         };
 
         let db = self.db.read().await;
@@ -453,6 +469,30 @@ impl DatabaseManager for RedbDatabase {
         let file_ids = dir_index.get(parent_str.as_str())?
             .map(|v| Self::parse_dir_index(v.value()))
             .unwrap_or_default();
+        
+        info!("get_directory_listing: found {} file IDs for dir '{}'", file_ids.len(), parent_str);
+        
+        if file_ids.is_empty() {
+             info!("get_directory_listing: NO FILES FOUND. Dumping available DIR_INDEX keys (limit 20):");
+             let mut count = 0;
+             for result in dir_index.iter()? {
+                 let (key, value) = result?;
+                 info!("  Key: '{}', Value len: {}", key.value(), value.value().len());
+                 count += 1;
+                 if count >= 20 { break; }
+             }
+             
+             // Also try stripping trailing slash if present
+             if parent_str.ends_with('/') || parent_str.ends_with('\\') {
+                 let stripped = &parent_str[..parent_str.len()-1];
+                 info!("get_directory_listing: Trying stripped path '{}'...", stripped);
+                 if let Some(v) = dir_index.get(stripped)? {
+                     info!("  SUCCESS! Found entry for stripped path '{}'", stripped);
+                 } else {
+                     info!("  Failed for stripped path too.");
+                 }
+             }
+        }
 
         for file_id in file_ids {
             if let Some(data) = files_table.get(file_id)? {
@@ -641,13 +681,13 @@ impl DatabaseManager for RedbDatabase {
 
     async fn create_backup(&self, backup_path: &Path) -> Result<()> {
         tokio::fs::copy(&self.db_path, backup_path).await?;
-        info!("Created backup at {:?}", backup_path);
+        info!("Created backup at {}", backup_path.display());
         Ok(())
     }
 
     async fn restore_from_backup(&self, backup_path: &Path) -> Result<()> {
         tokio::fs::copy(backup_path, &self.db_path).await?;
-        info!("Restored from backup {:?}", backup_path);
+        info!("Restored from backup {}", backup_path.display());
         Ok(())
     }
 

@@ -243,8 +243,8 @@ impl ContentDirectoryHandler {
             media_root.join(path_prefix_str)
         };
         
+        
         // Apply canonical path normalization to match how paths are stored in the database
-        // Use the same normalization logic used during file scanning
         let canonical_browse_path = match state.filesystem_manager.get_canonical_path(&browse_path) {
             Ok(canonical) => std::path::PathBuf::from(canonical),
             Err(e) => {
@@ -254,7 +254,7 @@ impl ContentDirectoryHandler {
             }
         };
         
-        // Query the ZeroCopy database for the directory listing with timeout and atomic operations
+        // Query the ZeroCopy database for the directory listing
         let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
         let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
         

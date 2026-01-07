@@ -1,6 +1,6 @@
 [package]
 name = "vuio"
-version = "0.0.21"
+version = "0.0.22"
 edition = "2021"
 authors = ["vyrti"]
 description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
@@ -35,7 +35,7 @@ anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
 async-trait = "0.1"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] }
 futures-util = "0.3"
 async-stream = "0.3"
 libc = "0.2"
@@ -52,6 +52,7 @@ audiotags = "0.5"
 quick-xml = "0.38"
 
 redb = "3.1"
+jwalk = "0.8"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

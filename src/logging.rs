@@ -30,7 +30,8 @@ pub fn init_logging_with_options(log_level: Option<&str>, log_file: Option<PathB
         .with_target(true)
         .with_thread_ids(true)
         .with_file(true)
-        .with_line_number(true);
+        .with_line_number(true)
+        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
 
     let subscriber = tracing_subscriber::registry()
         .with(filter)
