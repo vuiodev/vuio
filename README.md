@@ -389,7 +389,7 @@ RUST_LOG=debug ./vuio 2>&1 | tee vuio-debug.log
 ## Contributing
 
 Contributions welcome! Please ensure cross-platform compatibility is maintained.
-CLA is required for contributions.
+DCO is required for contributions.
 
 ## License
 
