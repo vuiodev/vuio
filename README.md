@@ -393,6 +393,8 @@ DCO is required for contributions.
 
 ## License
 
-Dual-licensed under:
+Dual-licensed under either:
 - [MIT License](LICENSE-MIT)
+or
 - [Apache License 2.0](LICENSE-APACHE)
+at your choise.
