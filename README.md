@@ -260,7 +260,7 @@ backup_enabled = true
 - `vacuum_on_startup` - Compact database on startup
 - `backup_enabled` - Enable automatic backups
 
-## Audio Features
+## Audio Features (ALPHA)
 
 ### Metadata Extraction
 
@@ -389,12 +389,10 @@ RUST_LOG=debug ./vuio 2>&1 | tee vuio-debug.log
 ## Contributing
 
 Contributions welcome! Please ensure cross-platform compatibility is maintained.
-DCO is required for contributions.
+Input license = output license
 
 ## License
 
-Dual-licensed under either:
 - [MIT License](LICENSE-MIT)
 or
 - [Apache License 2.0](LICENSE-APACHE)
-at your choise.

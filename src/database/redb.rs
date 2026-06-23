@@ -143,7 +143,14 @@ impl RedbDatabase {
     /// Get the directory key for a path
     fn get_dir_key(path: &Path) -> String {
         path.parent()
-            .map(|p| p.to_string_lossy().to_string())
+            .map(|p| {
+                let s = p.to_string_lossy().to_string().replace('\\', "/");
+                if cfg!(target_os = "windows") {
+                    s.to_lowercase()
+                } else {
+                    s
+                }
+            })
             .unwrap_or_default()
     }
 
@@ -505,8 +512,15 @@ impl DatabaseManager for RedbDatabase {
 
         // Find subdirectories
         for result in dir_index.iter()? {
-            let (key, _) = result?;
+            let (key, value) = result?;
             let key_str = key.value();
+            let value_str = value.value();
+            
+            // Skip empty directories
+            if value_str.trim().is_empty() {
+                continue;
+            }
+            
             if key_str.starts_with(&prefix) && key_str != parent_str {
                 let relative = &key_str[prefix.len()..];
                 if let Some(first_component) = relative.split('/').next() {
@@ -522,7 +536,7 @@ impl DatabaseManager for RedbDatabase {
             }
         }
 
-        let directories: Vec<MediaDirectory> = subdirs
+        let mut directories: Vec<MediaDirectory> = subdirs
             .into_iter()
             .map(|path| {
                 let name = PathBuf::from(&path)
@@ -535,6 +549,17 @@ impl DatabaseManager for RedbDatabase {
                 }
             })
             .collect();
+
+        // Sort subdirectories case-insensitively
+        directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        
+        // Sort files by track number if available, then case-insensitively by filename
+        files.sort_by(|a, b| {
+            match (a.track_number, b.track_number) {
+                (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
+                _ => a.filename.to_lowercase().cmp(&b.filename.to_lowercase()),
+            }
+        });
 
         Ok((directories, files))
     }
