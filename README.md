@@ -1,6 +1,7 @@
 # VuIO Media Server
 
 A cross-platform DLNA/UPnP media server written in Rust. Streams video, audio, and images to any DLNA-compatible device (smart TVs, receivers, game consoles).
+Less than 8Mb of RAM needed
 
 Built with Tokio, Axum, and Redb for high performance and reliability.
 
