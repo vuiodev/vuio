@@ -17,35 +17,102 @@ pub fn init_logging_with_debug(debug: bool) -> Result<(), PlatformError> {
 
 /// Initialize logging with platform-specific configuration and options
 pub fn init_logging_with_options(log_level: Option<&str>, log_file: Option<PathBuf>, debug: bool) -> Result<(), PlatformError> {
-    let default_level = if debug { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(log_level.unwrap_or(default_level)))
+    // 1. Determine if console logging should be verbose/active
+    let is_rust_log_set = std::env::var("RUST_LOG").is_ok();
+    let in_docker = crate::config::AppConfig::is_running_in_docker();
+    let console_should_be_verbose = debug || is_rust_log_set || log_level.is_some() || in_docker;
+
+    // Determine console log level
+    let console_level = if console_should_be_verbose {
+        log_level.unwrap_or(if debug { "debug" } else { "info" })
+    } else {
+        "warn"
+    };
+
+    let console_filter = EnvFilter::try_from_default_env()
+        .or_else(|_| EnvFilter::try_new(console_level))
         .map_err(|e| PlatformError::Configuration(
             crate::platform::ConfigurationError::ValidationFailed { 
-                reason: format!("Invalid log level: {}", e) 
+                reason: format!("Invalid console log level: {}", e) 
             }
         ))?;
 
-    let fmt_layer = fmt::layer()
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true)
-        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339());
+    // Import Layer trait to get access to boxed method if needed, or just Box::new
+    use tracing_subscriber::Layer;
 
-    let subscriber = tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt_layer);
+    // Create console logging layer with conditional formatting
+    let console_layer: Box<dyn Layer<tracing_subscriber::Registry> + Send + Sync> = if console_should_be_verbose {
+        // Detailed format for verbose/debugging
+        Box::new(
+            fmt::layer()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+                .with_filter(console_filter)
+        )
+    } else {
+        // Clean, compact format for normal start (warnings and errors only)
+        Box::new(
+            fmt::layer()
+                .with_target(false)
+                .with_thread_ids(false)
+                .with_file(false)
+                .with_line_number(false)
+                .without_time()
+                .with_filter(console_filter)
+        )
+    };
 
-    // Add file logging if specified
-    if let Some(log_path) = log_file {
-        // TODO: Add file appender when available
-        info!("File logging requested but not yet implemented: {}", log_path.display());
+    // 2. Resolve log file destination
+    let resolved_log_file = log_file.unwrap_or_else(|| {
+        crate::config::AppConfig::get_platform_log_file_path()
+    });
+
+    // Create directory if it doesn't exist
+    if let Some(parent) = resolved_log_file.parent() {
+        let _ = std::fs::create_dir_all(parent);
     }
 
-    subscriber.init();
+    // Try to open the file and create the file logging layer
+    let file_layer = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(true)
+        .open(&resolved_log_file)
+    {
+        Ok(file) => {
+            // File logging level: capture everything info/debug depending on flags
+            let file_level = if debug { "debug" } else { "info" };
+            let file_filter = EnvFilter::try_new(file_level).unwrap_or_else(|_| EnvFilter::new("info"));
+            
+            let layer = fmt::layer()
+                .with_target(true)
+                .with_thread_ids(true)
+                .with_file(true)
+                .with_line_number(true)
+                .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+                .with_ansi(false) // Disable ANSI color escapes in log files
+                .with_writer(std::sync::Mutex::new(file))
+                .with_filter(file_filter);
+            Some(layer)
+        }
+        Err(e) => {
+            eprintln!("Warning: Failed to open log file {}: {}", resolved_log_file.display(), e);
+            None
+        }
+    };
+
+    // Initialize subscriber registry with both console and file layers
+    let subscriber = tracing_subscriber::registry()
+        .with(console_layer)
+        .with(file_layer);
+
+    // try_init avoids panicking if logging is already initialized (e.g. in tests)
+    let _ = subscriber.try_init();
     
-    info!("Logging initialized with level: {}", log_level.unwrap_or(default_level));
+    info!("Logging initialized. Console level: {}. File log: {}", console_level, resolved_log_file.display());
     Ok(())
 }
 

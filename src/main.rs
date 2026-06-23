@@ -62,9 +62,18 @@ async fn wait_for_shutdown_signal() {
     }
 }
 
+/// Struct containing parsed command line arguments
+struct CommandLineArgs {
+    debug: bool,
+    config_path: Option<String>,
+    log_file: Option<String>,
+    log_level: Option<String>,
+    config_override: Option<AppConfig>,
+}
+
 /// Parse command line arguments once and return configuration overrides
 /// This consolidates argument parsing into a single operation
-fn parse_args_once() -> anyhow::Result<(bool, Option<String>, Option<AppConfig>)> {
+fn parse_args_once() -> anyhow::Result<CommandLineArgs> {
     use clap::Parser;
     
     #[derive(Parser, Debug)]
@@ -92,13 +101,27 @@ fn parse_args_once() -> anyhow::Result<(bool, Option<String>, Option<AppConfig>)
         /// Path to configuration file
         #[arg(short, long)]
         config: Option<String>,
+
+        /// Path to log file
+        #[arg(long = "log-file")]
+        log_file: Option<String>,
+
+        /// Set log level (off, error, warn, info, debug, trace)
+        #[arg(long = "log-level")]
+        log_level: Option<String>,
     }
     
     let args = Args::parse();
     
     // If no media directories provided, return early args only
     if args.media_dir.is_none() && args.additional_media_dirs.is_empty() {
-        return Ok((args.debug, args.config, None));
+        return Ok(CommandLineArgs {
+            debug: args.debug,
+            config_path: args.config,
+            log_file: args.log_file,
+            log_level: args.log_level,
+            config_override: None,
+        });
     }
     
     // Build configuration from command line arguments
@@ -150,21 +173,28 @@ fn parse_args_once() -> anyhow::Result<(bool, Option<String>, Option<AppConfig>)
     
     config_override.media.directories = media_directories;
     
-    Ok((args.debug, args.config, Some(config_override)))
+    Ok(CommandLineArgs {
+        debug: args.debug,
+        config_path: args.config,
+        log_file: args.log_file,
+        log_level: args.log_level,
+        config_override: Some(config_override),
+    })
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
     // Parse command line arguments once and get configuration overrides
-    let (debug_enabled, config_file_path, config_override) = parse_args_once()
+    let cli_args = parse_args_once()
         .context("Failed to parse command line arguments")?;
     
-    // Initialize logging with debug flag
-    if debug_enabled {
-        logging::init_logging_with_debug(true).context("Failed to initialize debug logging")?;
-    } else {
-        logging::init_logging().context("Failed to initialize logging")?;
-    }
+    // Initialize logging with options
+    let log_file_path = cli_args.log_file.as_ref().map(PathBuf::from);
+    logging::init_logging_with_options(
+        cli_args.log_level.as_deref(),
+        log_file_path,
+        cli_args.debug,
+    ).context("Failed to initialize logging")?;
 
     info!("Starting VuIO Server...");
 
@@ -180,7 +210,7 @@ async fn main() -> anyhow::Result<()> {
     // Security checks removed for faster startup
 
     // Initialize configuration manager with file watching
-    let config_manager = match initialize_config_manager(&platform_info, config_file_path, config_override).await {
+    let config_manager = match initialize_config_manager(&platform_info, cli_args.config_path, cli_args.config_override).await {
         Ok(manager) => Arc::new(manager),
         Err(e) => {
             error!("Failed to initialize configuration manager: {}", e);
@@ -263,6 +293,73 @@ async fn main() -> anyhow::Result<()> {
             return Err(e);
         }
     };
+
+    // Determine if console logging is verbose
+    let is_rust_log_set = std::env::var("RUST_LOG").is_ok();
+    let in_docker = AppConfig::is_running_in_docker();
+    let console_is_verbose = cli_args.debug || is_rust_log_set || cli_args.log_level.is_some() || in_docker;
+
+    if !console_is_verbose {
+        let display_ip = if config.server.interface == "0.0.0.0" || config.server.interface.is_empty() {
+            if let Some(primary) = platform_info.get_primary_interface() {
+                primary.ip_address.to_string()
+            } else {
+                "127.0.0.1".to_string()
+            }
+        } else {
+            config.server.interface.clone()
+        };
+        let web_url = format!("http://{}:{}", display_ip, config.server.port);
+        let db_path = config.get_database_path().with_extension("redb");
+        
+        let name_str = config.server.name.clone();
+        let display_name = if name_str.len() > 42 {
+            format!("...{}", &name_str[name_str.len() - 39..])
+        } else {
+            name_str
+        };
+
+        let display_url = if web_url.len() > 42 {
+            format!("...{}", &web_url[web_url.len() - 39..])
+        } else {
+            web_url
+        };
+
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let display_db_path = if db_path_str.len() > 42 {
+            format!("...{}", &db_path_str[db_path_str.len() - 39..])
+        } else {
+            db_path_str
+        };
+
+        println!("┌────────────────────────────────────────────────────────┐");
+        println!("│  VuIO Media Server                                     │");
+        println!("├────────────────────────────────────────────────────────┤");
+        println!("│  Name:       {:<42} │", display_name);
+        println!("│  Version:    {:<42} │", env!("CARGO_PKG_VERSION"));
+        println!("│  Status:     Online & Streaming                        │");
+        println!("│  Address:    {:<42} │", display_url);
+        println!("│  SSDP:       Active on port 1900                       │");
+        println!("│  Database:   {:<42} │", display_db_path);
+        println!("│                                                        │");
+        println!("│  Monitored Directories:                                │");
+        if config.media.directories.is_empty() {
+            println!("│    (none configured)                                   │");
+        } else {
+            for dir in &config.media.directories {
+                let path_str = &dir.path;
+                let display_path = if path_str.len() > 50 {
+                    format!("...{}", &path_str[path_str.len() - 47..])
+                } else {
+                    path_str.clone()
+                };
+                println!("│    • {:<50} │", display_path);
+            }
+        }
+        println!("│                                                        │");
+        println!("│  Press Ctrl+C to stop the server safely.               │");
+        println!("└────────────────────────────────────────────────────────┘");
+    }
 
     // Wait for shutdown signal and cleanup
     tokio::select! {

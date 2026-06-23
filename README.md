@@ -55,6 +55,8 @@ Options:
   -c, --config <CONFIG>    Path to config file
       --media-dir <DIR>    Additional media directories
       --debug              Enable debug logging
+      --log-file <PATH>    Path to custom log file
+      --log-level <LEVEL>  Set log level (off, error, warn, info, debug, trace)
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -375,15 +377,57 @@ VuIO will create a new database and rescan media on next startup.
          └─────────────────────────────────────────────┘
 ```
 
+## Logging & Diagnostics
+
+VuIO is designed to run cleanly by default. Standard startup displays a clean, visual card containing crucial server information, while silencing verbose background execution traces.
+
+### Default Log File
+
+By default, all detailed logs (`INFO` level and below) are automatically recorded to a rolling background log file so that troubleshooting info is always preserved.
+
+**Default Log Path:**
+- **Windows**: `[exe dir]\config\logs\vuio.log`
+- **macOS**: `[exe dir]/config/logs/vuio.log` (Native) or platform cache path
+- **Linux**: `[exe dir]/config/logs/vuio.log`
+- **Docker**: `/data/logs/vuio.log`
+
+### Detailed Console Logs
+
+If you want to view verbose background logs directly on the console, you can use either of the following approaches:
+
+1. **Command Line Flag**:
+   Run with `--debug` to enable verbose debug logs on the terminal:
+   ```bash
+   ./vuio --debug
+   ```
+
+2. **Environment Variable**:
+   Set `RUST_LOG` env variable:
+   ```bash
+   RUST_LOG=info ./vuio
+   RUST_LOG=debug ./vuio
+   ```
+
+### Custom Log Destinations and Levels
+
+You can fully control where logs are written and their severity level using command line options:
+
+- **Specify Custom Log File**:
+  ```bash
+  ./vuio --log-file /path/to/my-custom.log
+  ```
+- **Set Log Level**:
+  ```bash
+  ./vuio --log-level debug
+  ./vuio --log-level warn
+  ```
+
+---
+
 ## Testing
 
 ```bash
 cargo test
-```
-
-Debug logging:
-```bash
-RUST_LOG=debug ./vuio 2>&1 | tee vuio-debug.log
 ```
 
 ## Contributing
