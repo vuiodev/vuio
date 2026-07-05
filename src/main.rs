@@ -313,21 +313,21 @@ async fn main() -> anyhow::Result<()> {
         let db_path = config.get_database_path().with_extension("redb");
         
         let name_str = config.server.name.clone();
-        let display_name = if name_str.len() > 42 {
-            format!("...{}", &name_str[name_str.len() - 39..])
+        let display_name = if name_str.len() > 40 {
+            format!("...{}", &name_str[name_str.len() - 37..])
         } else {
             name_str
         };
 
-        let display_url = if web_url.len() > 42 {
-            format!("...{}", &web_url[web_url.len() - 39..])
+        let display_url = if web_url.len() > 41 {
+            format!("...{}", &web_url[web_url.len() - 38..])
         } else {
             web_url
         };
 
         let db_path_str = db_path.to_string_lossy().to_string();
-        let display_db_path = if db_path_str.len() > 42 {
-            format!("...{}", &db_path_str[db_path_str.len() - 39..])
+        let display_db_path = if db_path_str.len() > 41 {
+            format!("...{}", &db_path_str[db_path_str.len() - 38..])
         } else {
             db_path_str
         };
@@ -335,12 +335,12 @@ async fn main() -> anyhow::Result<()> {
         println!("┌────────────────────────────────────────────────────────┐");
         println!("│  VuIO Media Server                                     │");
         println!("├────────────────────────────────────────────────────────┤");
-        println!("│  Name:       {:<42} │", display_name);
-        println!("│  Version:    {:<42} │", env!("CARGO_PKG_VERSION"));
+        println!("│  Name:       {:<40} │", display_name);
+        println!("│  Version:    {:<41} │", env!("CARGO_PKG_VERSION"));
         println!("│  Status:     Online & Streaming                        │");
-        println!("│  Address:    {:<42} │", display_url);
+        println!("│  Address:    {:<41} │", display_url);
         println!("│  SSDP:       Active on port 1900                       │");
-        println!("│  Database:   {:<42} │", display_db_path);
+        println!("│  Database:   {:<41} │", display_db_path);
         println!("│                                                        │");
         println!("│  Monitored Directories:                                │");
         if config.media.directories.is_empty() {
@@ -348,12 +348,12 @@ async fn main() -> anyhow::Result<()> {
         } else {
             for dir in &config.media.directories {
                 let path_str = &dir.path;
-                let display_path = if path_str.len() > 50 {
-                    format!("...{}", &path_str[path_str.len() - 47..])
+                let display_path = if path_str.len() > 49 {
+                    format!("...{}", &path_str[path_str.len() - 46..])
                 } else {
                     path_str.clone()
                 };
-                println!("│    • {:<50} │", display_path);
+                println!("│    • {:<49} │", display_path);
             }
         }
         println!("│                                                        │");

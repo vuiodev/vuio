@@ -159,7 +159,12 @@ pub async fn generate_browse_response_with_totals(
                 debug!("Processing subdirectory {}/{}: {}", idx, subdirectories.len(), container.name);
             }
             
-            let container_id = format!("{}/{}", object_id.trim_end_matches('/'), container.name);
+            let path_str = container.path.to_string_lossy();
+            let container_id = if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit()) {
+                format!("{}/{}", object_id.trim_end_matches('/'), path_str)
+            } else {
+                format!("{}/{}", object_id.trim_end_matches('/'), container.name)
+            };
             let container_xml = format!(
                 r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class></container>"#,
                 xml_escape(&container_id),

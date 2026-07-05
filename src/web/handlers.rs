@@ -10,6 +10,7 @@ use axum::{
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -970,6 +971,7 @@ impl ContentDirectoryHandler {
         Self::handle_folder_browse(params, state, "image/", path_prefix_str).await
     }
 
+
     /// Handle generic folder-based browse requests with consistent path normalization
     /// Enhanced with atomic performance tracking and cache-friendly operations
     async fn handle_folder_browse(
@@ -983,140 +985,163 @@ impl ContentDirectoryHandler {
         let start_time = Instant::now();
         let cache_hit;
 
-        // Determine the base path for the media type
-        let media_root = state.config.get_primary_media_dir();
-        let browse_path = if path_prefix_str.is_empty() {
-            media_root.clone()
-        } else {
-            media_root.join(path_prefix_str)
-        };
+        let monitored_dirs = &state.config.media.directories;
         
-        
-        // Apply canonical path normalization to match how paths are stored in the database
-        let canonical_browse_path = match state.filesystem_manager.get_canonical_path(&browse_path) {
-            Ok(canonical) => std::path::PathBuf::from(canonical),
-            Err(e) => {
-                warn!("Failed to get canonical path for browse request '{}': {}, using basic normalization", browse_path.display(), e);
-                state.web_metrics.record_error();
-                state.filesystem_manager.normalize_path(&browse_path)
+        // Parse directory index prefix (e.g. "d0/movies" -> index 0, relative path "movies")
+        let (dir_index_opt, relative_path) = parse_dir_index_prefix(path_prefix_str);
+
+        let browse_path = match dir_index_opt {
+            Some(idx) if idx < monitored_dirs.len() => {
+                let base_path = PathBuf::from(&monitored_dirs[idx].path);
+                if relative_path.is_empty() {
+                    base_path
+                } else {
+                    base_path.join(relative_path)
+                }
+            }
+            _ => {
+                let media_root = state.config.get_primary_media_dir();
+                if path_prefix_str.is_empty() {
+                    media_root
+                } else {
+                    media_root.join(path_prefix_str)
+                }
             }
         };
-        
-        // Query the ZeroCopy database for the directory listing
-        let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
-        let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
-        
-        match tokio::time::timeout(timeout_duration, query_future).await {
-            Ok(Ok((subdirectories, files))) => {
-                cache_hit = !subdirectories.is_empty() || !files.is_empty(); // Assume cache hit if data found
-                
-                debug!("ZeroCopy browse request for '{}' -> canonical '{}' (filter: '{}') returned {} subdirs, {} files", 
-                       browse_path.display(), canonical_browse_path.display(), media_type_filter, subdirectories.len(), files.len());
-                       
-                // Apply pagination if requested
-                let starting_index = params.starting_index as usize;
-                let requested_count = if params.requested_count == 0 { 
-                    // If RequestedCount is 0, return all items (but limit to prevent hanging)
-                    2000 
-                } else { 
-                    std::cmp::min(params.requested_count as usize, 2000) 
-                };
-                
-                // Combine directories and files for pagination with atomic counting
-                let mut all_items = Vec::new();
-                for subdir in &subdirectories {
-                    all_items.push((subdir.clone(), None));
+
+        // If there are multiple monitored directories and we are at the root, return virtual folders
+        let (subdirectories, files) = if path_prefix_str.is_empty() && monitored_dirs.len() > 1 {
+            let mut subdirs = Vec::new();
+            for (idx, dir) in monitored_dirs.iter().enumerate() {
+                let path = PathBuf::from(&dir.path);
+                let name = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| dir.path.clone());
+                subdirs.push(MediaDirectory {
+                    path: PathBuf::from(format!("d{}", idx)),
+                    name,
+                });
+            }
+            (subdirs, Vec::new())
+        } else {
+            // Apply canonical path normalization to match how paths are stored in the database
+            let canonical_browse_path = match state.filesystem_manager.get_canonical_path(&browse_path) {
+                Ok(canonical) => std::path::PathBuf::from(canonical),
+                Err(e) => {
+                    warn!("Failed to get canonical path for browse request '{}': {}, using basic normalization", browse_path.display(), e);
+                    state.web_metrics.record_error();
+                    state.filesystem_manager.normalize_path(&browse_path)
                 }
-                for file in &files {
-                    all_items.push((MediaDirectory { path: file.path.clone(), name: String::new() }, Some(file.clone())));
-                }
-                
-                let total_matches = all_items.len();
-                let end_index = std::cmp::min(starting_index + requested_count, total_matches);
-                
-                if starting_index >= total_matches {
-                    // Starting index is beyond available items - record metrics and return empty
+            };
+            
+            // Query the ZeroCopy database for the directory listing
+            let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
+            let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
+            
+            match tokio::time::timeout(timeout_duration, query_future).await {
+                Ok(Ok(res)) => res,
+                Ok(Err(e)) => {
+                    error!("ZeroCopy database error getting directory listing for {}: {}", params.object_id, e);
+                    state.web_metrics.record_error();
                     let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, cache_hit);
-                    
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
+                    state.web_metrics.record_browse_request(response_time, false);
                     return (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response();
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Error browsing content".to_string(),
+                    ).into_response();
                 }
-                
-                // Extract paginated items with zero-copy operations
-                let paginated_items = &all_items[starting_index..end_index];
-                let mut paginated_subdirs = Vec::new();
-                let mut paginated_files = Vec::new();
-                
-                for (item, file_opt) in paginated_items {
-                    if let Some(file) = file_opt {
-                        paginated_files.push(file.clone());
-                    } else {
-                        paginated_subdirs.push(item.clone());
-                    }
+                Err(_) => {
+                    error!("Database query timed out for {}", params.object_id);
+                    state.web_metrics.record_error();
+                    let response_time = start_time.elapsed().as_millis() as u64;
+                    state.web_metrics.record_browse_request(response_time, false);
+                    return (
+                        StatusCode::REQUEST_TIMEOUT,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "Request timeout - directory too large".to_string(),
+                    ).into_response();
                 }
-                
-                debug!("ZeroCopy returning paginated results: {} subdirs, {} files (index {}-{} of {})",
-                       paginated_subdirs.len(), paginated_files.len(), 
-                       starting_index, end_index, total_matches);
-                
-                // Record atomic performance metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_browse_request(response_time, cache_hit);
-                state.web_metrics.record_directory_listing(response_time);
-                
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
-            },
-            Ok(Err(e)) => {
-                error!("ZeroCopy database error getting directory listing for {}: {}", params.object_id, e);
-                
-                // Record atomic error metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_error();
-                state.web_metrics.record_browse_request(response_time, false);
-                
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing content".to_string(),
-                )
-                    .into_response()
-            },
-            Err(_timeout) => {
-                error!("ZeroCopy database query timeout for object_id: {} (path: {} -> canonical: {})", params.object_id, browse_path.display(), canonical_browse_path.display());
-                
-                // Record atomic timeout metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_error();
-                state.web_metrics.record_browse_request(response_time, false);
-                
-                (
-                    StatusCode::REQUEST_TIMEOUT,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Request timeout - directory too large".to_string(),
-                )
-                    .into_response()
+            }
+        };
+
+        cache_hit = !subdirectories.is_empty() || !files.is_empty();
+        
+        debug!("ZeroCopy browse request for '{}' (filter: '{}') returned {} subdirs, {} files", 
+               browse_path.display(), media_type_filter, subdirectories.len(), files.len());
+               
+        // Apply pagination if requested
+        let starting_index = params.starting_index as usize;
+        let requested_count = if params.requested_count == 0 { 
+            // If RequestedCount is 0, return all items (but limit to prevent hanging)
+            2000 
+        } else { 
+            std::cmp::min(params.requested_count as usize, 2000) 
+        };
+        
+        // Combine directories and files for pagination with atomic counting
+        let mut all_items = Vec::new();
+        for subdir in &subdirectories {
+            all_items.push((subdir.clone(), None));
+        }
+        for file in &files {
+            all_items.push((MediaDirectory { path: file.path.clone(), name: String::new() }, Some(file.clone())));
+        }
+        
+        let total_matches = all_items.len();
+        let end_index = std::cmp::min(starting_index + requested_count, total_matches);
+        
+        if starting_index >= total_matches {
+            // Starting index is beyond available items - record metrics and return empty
+            let response_time = start_time.elapsed().as_millis() as u64;
+            state.web_metrics.record_browse_request(response_time, cache_hit);
+            
+            let server_ip = state.get_server_ip();
+            let response = generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                    (header::HeaderName::from_static("ext"), ""),
+                ],
+                response,
+            )
+                .into_response();
+        }
+        
+        // Extract paginated items with zero-copy operations
+        let paginated_items = &all_items[starting_index..end_index];
+        let mut paginated_subdirs = Vec::new();
+        let mut paginated_files = Vec::new();
+        
+        for (item, file_opt) in paginated_items {
+            if let Some(file) = file_opt {
+                paginated_files.push(file.clone());
+            } else {
+                paginated_subdirs.push(item.clone());
             }
         }
+        
+        debug!("ZeroCopy returning paginated results: {} subdirs, {} files (index {}-{} of {})",
+               paginated_subdirs.len(), paginated_files.len(), 
+               starting_index, end_index, total_matches);
+        
+        // Record atomic performance metrics
+        let response_time = start_time.elapsed().as_millis() as u64;
+        state.web_metrics.record_browse_request(response_time, cache_hit);
+        state.web_metrics.record_directory_listing(response_time);
+        
+        let server_ip = state.get_server_ip();
+        let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, state, &server_ip).await;
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                (header::HeaderName::from_static("ext"), ""),
+            ],
+            response,
+        )
+            .into_response()
     }
 
     /// Handle root browse request (ObjectID "0")
@@ -1176,6 +1201,9 @@ pub async fn content_directory_control(
                 return handle_years_browse(&params, &state, audio_path).await;
             } else if audio_path.starts_with("playlists") {
                 return handle_playlists_browse(&params, &state, audio_path).await;
+            } else if audio_path.starts_with("folders") {
+                let folder_path = audio_path.strip_prefix("folders").unwrap_or("").trim_start_matches('/');
+                return ContentDirectoryHandler::handle_music_browse(&params, &state, folder_path).await;
             } else {
                 // Traditional folder browsing within audio
                 return ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await;
@@ -2074,6 +2102,37 @@ async fn handle_playlists_browse(
     }
 }
 
+fn parse_dir_index_prefix(path_prefix_str: &str) -> (Option<usize>, &str) {
+    if path_prefix_str.starts_with('d') {
+        let chars = path_prefix_str.chars().skip(1);
+        let mut num_str = String::new();
+        for c in chars {
+            if c.is_ascii_digit() {
+                num_str.push(c);
+            } else {
+                break;
+            }
+        }
+        if !num_str.is_empty() {
+            if let Ok(idx) = num_str.parse::<usize>() {
+                let prefix_len = 1 + num_str.len();
+                let rem = if path_prefix_str.len() > prefix_len {
+                    path_prefix_str[prefix_len..].trim_start_matches('/')
+                } else {
+                    ""
+                };
+                (Some(idx), rem)
+            } else {
+                (None, path_prefix_str)
+            }
+        } else {
+            (None, path_prefix_str)
+        }
+    } else {
+        (None, path_prefix_str)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2187,6 +2246,18 @@ mod tests {
         assert_eq!(params.object_id, "video/movies/action");
         assert_eq!(params.starting_index, 100);
         assert_eq!(params.requested_count, 50);
+    }
+
+    #[test]
+    fn test_parse_dir_index_prefix() {
+        assert_eq!(parse_dir_index_prefix("d0"), (Some(0), ""));
+        assert_eq!(parse_dir_index_prefix("d0/movies"), (Some(0), "movies"));
+        assert_eq!(parse_dir_index_prefix("d12/movies/action"), (Some(12), "movies/action"));
+        assert_eq!(parse_dir_index_prefix("d0/"), (Some(0), ""));
+        assert_eq!(parse_dir_index_prefix("movies"), (None, "movies"));
+        assert_eq!(parse_dir_index_prefix("d"), (None, "d"));
+        assert_eq!(parse_dir_index_prefix("dx"), (None, "dx"));
+        assert_eq!(parse_dir_index_prefix(""), (None, ""));
     }
 
 }/// 
