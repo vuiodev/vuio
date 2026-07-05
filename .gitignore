@@ -2,6 +2,7 @@
 /target/
 /builds/
 **/*.rs.bk
+ideas.txt
 /vuio-config/
 /minidlna/
 Cargo.lock
