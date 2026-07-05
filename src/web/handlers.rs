@@ -110,14 +110,17 @@ pub async fn root_handler(
         }
     }
     
-    // Sort files alphabetically by filename
-    files.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+    #[derive(serde::Serialize)]
+    struct WebMediaFile {
+        id: i64,
+        path: String,
+        name: String,
+        size_str: String,
+        ext: String,
+        cat: String,
+    }
 
-    let total_count = files.len();
-    let total_size: u64 = files.iter().map(|f| f.size).sum();
-    let formatted_total_size = format_size(total_size);
-
-    let mut files_html = String::new();
+    let mut web_files = Vec::new();
     for file in &files {
         let extension = file.path.extension()
             .and_then(|e| e.to_str())
@@ -134,51 +137,23 @@ pub async fn root_handler(
             "file"
         };
         
-        let icon_svg = match category {
-            "video" => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>"#,
-            "audio" => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>"#,
-            "image" => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>"#,
-            _ => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>"#,
-        };
-        
-        let size_str = format_size(file.size);
-        let file_id = file.id.unwrap_or(0);
-        let escaped_filename = html_escape(&file.filename);
-        
-        files_html.push_str(&format!(
-            r#"<a href="/media/{file_id}" class="media-card" data-name="{escaped_filename}" data-category="{category}">
-                <div class="media-info">
-                    <div class="media-icon-wrapper">
-                        {icon_svg}
-                    </div>
-                    <div class="media-details">
-                        <div class="media-name" title="{escaped_filename}">{escaped_filename}</div>
-                        <div class="media-meta">
-                            <span>{size_str}</span>
-                            <span class="media-meta-dot"></span>
-                            <span style="text-transform: uppercase;">{extension}</span>
-                        </div>
-                    </div>
-                </div>
-                <div class="action-area">
-                    <div class="btn-action" title="Download / Play">
-                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-                    </div>
-                </div>
-            </a>
-            "#
-        ));
+        web_files.push(WebMediaFile {
+            id: file.id.unwrap_or(0),
+            path: file.path.to_string_lossy().to_string(),
+            name: file.filename.clone(),
+            size_str: format_size(file.size),
+            ext: extension,
+            cat: category.to_string(),
+        });
     }
 
-    let empty_state_html = if total_count == 0 {
-        r#"<div class="empty-state">
-            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
-            <h3>No Media Files Found</h3>
-            <p>Add some media files to your monitored directory to see them here.</p>
-        </div>"#
-    } else {
-        ""
-    };
+    let files_json = serde_json::to_string(&web_files).unwrap_or_else(|_| "[]".to_string());
+    
+    let monitored_dirs: Vec<String> = state.config.media.directories
+        .iter()
+        .map(|dir| dir.path.clone())
+        .collect();
+    let dirs_json = serde_json::to_string(&monitored_dirs).unwrap_or_else(|_| "[]".to_string());
 
     let server_name = html_escape(&state.config.server.name);
 
@@ -200,6 +175,8 @@ pub async fn root_handler(
             --accent-gradient: linear-gradient(135deg, #00f0ff 0%, #7000ff 100%);
             --accent-hover: #00d8e6;
             --focus-ring: rgba(0, 240, 255, 0.2);
+            --folder-color: #ffb300;
+            --folder-bg: rgba(255, 179, 0, 0.06);
         }}
         
         * {{
@@ -231,7 +208,7 @@ pub async fn root_handler(
             max-width: 800px;
             display: flex;
             flex-direction: column;
-            gap: 1.5rem;
+            gap: 1.25rem;
         }}
 
         header {{
@@ -281,27 +258,31 @@ pub async fn root_handler(
             color: var(--text-secondary);
         }}
 
-        .stats-section {{
+        /* Breadcrumbs navigation */
+        .breadcrumbs {{
             display: flex;
-            gap: 1.25rem;
-        }}
-
-        .stat-item {{
-            display: flex;
-            flex-direction: column;
-            gap: 0.125rem;
-        }}
-
-        .stat-val {{
-            font-size: 1.05rem;
-            font-weight: 700;
-        }}
-
-        .stat-lbl {{
-            font-size: 0.65rem;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.25rem;
+            font-size: 0.85rem;
             color: var(--text-secondary);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
+            padding: 0 0.5rem;
+        }}
+
+        .breadcrumb-item {{
+            cursor: pointer;
+            transition: color 0.2s ease;
+            font-weight: 500;
+        }}
+
+        .breadcrumb-item:hover {{
+            color: var(--accent-color);
+            text-decoration: underline;
+        }}
+
+        .breadcrumb-separator {{
+            color: rgba(255, 255, 255, 0.2);
+            user-select: none;
         }}
 
         /* Controls: Search & Tabs */
@@ -446,6 +427,17 @@ pub async fn root_handler(
             background: rgba(0, 240, 255, 0.06);
         }}
 
+        /* Folder Specific Styles */
+        .folder-card .media-icon-wrapper {{
+            color: var(--folder-color);
+            background: var(--folder-bg);
+        }}
+
+        .folder-card:hover .media-icon-wrapper {{
+            color: #ffe082;
+            background: rgba(255, 179, 0, 0.12);
+        }}
+
         .media-details {{
             min-width: 0;
             display: flex;
@@ -541,6 +533,9 @@ pub async fn root_handler(
     </style>
 </head>
 <body>
+    <div id="files-data" style="display: none;">{files_json}</div>
+    <div id="dirs-data" style="display: none;">{dirs_json}</div>
+
     <div class="container">
         <header>
             <div class="brand-section">
@@ -550,39 +545,33 @@ pub async fn root_handler(
                     <p>VuIO Media Streamer</p>
                 </div>
             </div>
-            <div class="stats-section">
-                <div class="stat-item">
-                    <span class="stat-val">{total_count}</span>
-                    <span class="stat-lbl">Files</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-val">{formatted_total_size}</span>
-                    <span class="stat-lbl">Total Size</span>
-                </div>
-            </div>
         </header>
+
+        <div class="breadcrumbs" id="breadcrumbs"></div>
 
         <div class="controls">
             <div class="search-box">
                 <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                <input type="text" id="search-input" placeholder="Search files..." oninput="filterFiles()">
+                <input type="text" id="search-input" placeholder="Search files..." oninput="onSearch()">
             </div>
             <div class="tabs">
-                <button class="tab-btn active" data-tab="all" onclick="setTab('all')">All</button>
-                <button class="tab-btn" data-tab="video" onclick="setTab('video')">Videos</button>
+                <button class="tab-btn" data-tab="all" onclick="setTab('all')">All</button>
+                <button class="tab-btn active" data-tab="video" onclick="setTab('video')">Videos</button>
                 <button class="tab-btn" data-tab="audio" onclick="setTab('audio')">Music</button>
                 <button class="tab-btn" data-tab="image" onclick="setTab('image')">Images</button>
             </div>
         </div>
 
-        <div class="file-list" id="file-list">
-            {files_html}
-            {empty_state_html}
-        </div>
+        <div class="file-list" id="file-list"></div>
     </div>
 
     <script>
-        let currentTab = 'all';
+        const filesData = JSON.parse(document.getElementById('files-data').textContent);
+        const monitoredDirs = JSON.parse(document.getElementById('dirs-data').textContent);
+
+        let currentTab = 'video'; // Videos active by default!
+        let currentPath = [];
+        let searchQuery = '';
 
         function setTab(tab) {{
             currentTab = tab;
@@ -593,46 +582,236 @@ pub async fn root_handler(
                     btn.classList.remove('active');
                 }}
             }});
-            filterFiles();
+            currentPath = [];
+            render();
         }}
 
-        function filterFiles() {{
-            const query = document.getElementById('search-input').value.toLowerCase();
-            const cards = document.querySelectorAll('.media-card');
-            let visibleCount = 0;
+        function onSearch() {{
+            searchQuery = document.getElementById('search-input').value.toLowerCase();
+            render();
+        }}
 
-            cards.forEach(card => {{
-                const name = card.dataset.name.toLowerCase();
-                const category = card.dataset.category;
-                
-                const matchesQuery = name.includes(query);
-                const matchesTab = currentTab === 'all' || category === currentTab;
+        function playMedia(id) {{
+            window.location.href = '/media/' + id;
+        }}
 
-                if (matchesQuery && matchesTab) {{
-                    card.style.display = '';
-                    visibleCount++;
-                }} else {{
-                    card.style.display = 'none';
+        function getRelativeComponents(filePath) {{
+            let path = filePath.replace(/\\/g, '/');
+            for (const dir of monitoredDirs) {{
+                let dirNorm = dir.replace(/\\/g, '/');
+                if (!dirNorm.endsWith('/')) {{
+                    dirNorm += '/';
                 }}
+                if (path.startsWith(dirNorm)) {{
+                    return path.substring(dirNorm.length).split('/').filter(p => p.length > 0);
+                }}
+            }}
+            const parts = path.split('/').filter(p => p.length > 0);
+            return parts.slice(-1);
+        }}
+
+        function render() {{
+            const fileListContainer = document.getElementById('file-list');
+            fileListContainer.innerHTML = '';
+
+            // Filter files by tab and search
+            let filteredFiles = filesData.filter(file => {{
+                const matchesTab = currentTab === 'all' || file.cat === currentTab;
+                const matchesSearch = searchQuery === '' || file.name.toLowerCase().includes(searchQuery);
+                return matchesTab && matchesSearch;
             }});
 
-            // Dynamically show empty state if nothing found
-            let emptyState = document.querySelector('.empty-state');
-            if (visibleCount === 0) {{
-                if (!emptyState) {{
-                    emptyState = document.createElement('div');
-                    emptyState.className = 'empty-state';
-                    emptyState.innerHTML = `
-                        <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-                        <h3>No matching files</h3>
-                        <p>Try broadening your search query or switching categories.</p>
-                    `;
-                    document.getElementById('file-list').appendChild(emptyState);
+            // If searching, show a flat search results view
+            if (searchQuery !== '') {{
+                document.getElementById('breadcrumbs').innerHTML = '<span>Search Results</span>';
+                
+                if (filteredFiles.length === 0) {{
+                    renderEmptyState("No matching files found.");
+                    return;
                 }}
-            }} else if (emptyState) {{
-                emptyState.remove();
+                
+                filteredFiles.forEach(file => {{
+                    fileListContainer.appendChild(createFileCard(file));
+                }});
+                return;
+            }}
+
+            // Build directory tree
+            const tree = {{ folders: {{}}, files: [] }};
+            
+            filteredFiles.forEach(file => {{
+                const components = getRelativeComponents(file.path);
+                let curr = tree;
+                
+                for (let i = 0; i < components.length - 1; i++) {{
+                    const folderName = components[i];
+                    if (!curr.folders[folderName]) {{
+                        curr.folders[folderName] = {{ folders: {{}}, files: [] }};
+                    }}
+                    curr = curr.folders[folderName];
+                }}
+                
+                curr.files.push(file);
+            }});
+
+            // Navigate tree to currentPath
+            let activeNode = tree;
+            for (const folder of currentPath) {{
+                if (activeNode.folders[folder]) {{
+                    activeNode = activeNode.folders[folder];
+                }} else {{
+                    currentPath = [];
+                    activeNode = tree;
+                    break;
+                }}
+            }}
+
+            renderBreadcrumbs();
+
+            // Parent Folder row
+            if (currentPath.length > 0) {{
+                const parentCard = document.createElement('div');
+                parentCard.className = 'media-card';
+                parentCard.style.cursor = 'pointer';
+                parentCard.onclick = goBack;
+                parentCard.innerHTML = `
+                    <div class="media-info">
+                        <div class="media-icon-wrapper">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </div>
+                        <div class="media-details">
+                            <div class="media-name">..</div>
+                            <div class="media-meta">Parent Directory</div>
+                        </div>
+                    </div>
+                `;
+                fileListContainer.appendChild(parentCard);
+            }}
+
+            // Render Subfolders
+            const sortedFolders = Object.keys(activeNode.folders).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+            sortedFolders.forEach(folderName => {{
+                const folderCard = document.createElement('div');
+                folderCard.className = 'media-card folder-card';
+                folderCard.style.cursor = 'pointer';
+                folderCard.onclick = () => enterFolder(folderName);
+                folderCard.innerHTML = `
+                    <div class="media-info">
+                        <div class="media-icon-wrapper">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        </div>
+                        <div class="media-details">
+                            <div class="media-name" title="${{folderName}}">${{folderName}}</div>
+                            <div class="media-meta">Folder</div>
+                        </div>
+                    </div>
+                `;
+                fileListContainer.appendChild(folderCard);
+            }});
+
+            // Render Files
+            const sortedFiles = activeNode.files.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            sortedFiles.forEach(file => {{
+                fileListContainer.appendChild(createFileCard(file));
+            }});
+
+            if (sortedFolders.length === 0 && sortedFiles.length === 0) {{
+                renderEmptyState("This folder contains no items matching the active filter.");
             }}
         }}
+
+        function createFileCard(file) {{
+            const card = document.createElement('div');
+            card.className = 'media-card';
+            card.style.cursor = 'pointer';
+            card.onclick = () => playMedia(file.id);
+            
+            let iconSvg = '';
+            if (file.cat === 'video') {{
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
+            }} else if (file.cat === 'audio') {{
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`;
+            }} else if (file.cat === 'image') {{
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+            }} else {{
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`;
+            }}
+
+            card.innerHTML = `
+                <div class="media-info">
+                    <div class="media-icon-wrapper">
+                        ${{iconSvg}}
+                    </div>
+                    <div class="media-details">
+                        <div class="media-name" title="${{file.name}}">${{file.name}}</div>
+                        <div class="media-meta">
+                            <span>${{file.size_str}}</span>
+                            <span class="media-meta-dot"></span>
+                            <span style="text-transform: uppercase;">${{file.ext}}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action-area">
+                    <a href="/media/${{file.id}}" download="${{file.name}}" onclick="event.stopPropagation()" class="btn-action" title="Download File">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </a>
+                </div>
+            `;
+            return card;
+        }}
+
+        function renderBreadcrumbs() {{
+            const container = document.getElementById('breadcrumbs');
+            container.innerHTML = '';
+            
+            const rootSpan = document.createElement('span');
+            rootSpan.className = 'breadcrumb-item';
+            rootSpan.onclick = () => jumpToBreadcrumb(-1);
+            rootSpan.textContent = 'Home';
+            container.appendChild(rootSpan);
+            
+            currentPath.forEach((folder, idx) => {{
+                const separator = document.createElement('span');
+                separator.className = 'breadcrumb-separator';
+                separator.textContent = ' / ';
+                container.appendChild(separator);
+                
+                const folderSpan = document.createElement('span');
+                folderSpan.className = 'breadcrumb-item';
+                folderSpan.onclick = () => jumpToBreadcrumb(idx);
+                folderSpan.textContent = folder;
+                container.appendChild(folderSpan);
+            }});
+        }}
+
+        function jumpToBreadcrumb(idx) {{
+            currentPath = currentPath.slice(0, idx + 1);
+            render();
+        }}
+
+        function enterFolder(folderName) {{
+            currentPath.push(folderName);
+            render();
+        }}
+
+        function goBack() {{
+            currentPath.pop();
+            render();
+        }}
+
+        function renderEmptyState(message) {{
+            const container = document.getElementById('file-list');
+            container.innerHTML = `
+                <div class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                    <h3>No items found</h3>
+                    <p>${{message}}</p>
+                </div>
+            `;
+        }}
+
+        // Initial render
+        render();
     </script>
 </body>
 </html>"#,
@@ -643,6 +822,7 @@ pub async fn root_handler(
         html_content,
     ))
 }
+
 
 fn format_size(bytes: u64) -> String {
     if bytes == 0 {
