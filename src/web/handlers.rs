@@ -1267,9 +1267,13 @@ pub async fn serve_media(
     let metadata = file.metadata().await.map_err(AppError::Io)?;
     let file_size = metadata.len();
 
+    let encoded_filename = percent_encoding::utf8_percent_encode(&file_info.filename, percent_encoding::NON_ALPHANUMERIC).to_string();
+    let content_disposition = format!("inline; filename=\"{}\"; filename*=UTF-8''{}", file_info.filename.replace('"', "\\\""), encoded_filename);
+
     let mut response_builder = Response::builder()
         .header(header::CONTENT_TYPE, &file_info.mime_type)
         .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::CONTENT_DISPOSITION, &content_disposition)
         .header("transferMode.dlna.org", "Streaming")
         .header("contentFeatures.dlna.org", "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
 

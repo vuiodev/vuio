@@ -50,6 +50,7 @@ hostname = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 audiotags = "0.5"
 quick-xml = "0.41"
+percent-encoding = "2.3"
 
 redb = "4.1"
 jwalk = "0.8"
