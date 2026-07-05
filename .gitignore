@@ -4,7 +4,7 @@
 **/*.rs.bk
 ideas.txt
 /vuio-config/
-/minidlna/
+/demo/
 Cargo.lock
 
 # IDEs and editors

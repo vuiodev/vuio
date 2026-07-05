@@ -24,6 +24,7 @@ pub mod state {
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
         pub web_metrics: Arc<crate::web::handlers::WebHandlerMetrics>,
+        pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
     }
 
     impl AppState {

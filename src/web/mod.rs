@@ -1,5 +1,6 @@
 pub mod handlers;
 pub mod xml;
+pub mod client;
 
 use crate::state::AppState;
 use axum::{routing::get, Router};
@@ -20,7 +21,24 @@ pub fn create_router(state: AppState) -> Router {
             "/event/ContentDirectory",
             axum::routing::any(handlers::content_directory_subscribe),
         )
+        .route(
+            "/ConnectionManager.xml",
+            get(handlers::connection_manager_scpd),
+        )
+        .route(
+            "/control/ConnectionManager",
+            get(handlers::connection_manager_control).post(handlers::connection_manager_control),
+        )
+        .route(
+            "/X_MS_MediaReceiverRegistrar.xml",
+            get(handlers::media_receiver_registrar_scpd),
+        )
+        .route(
+            "/control/X_MS_MediaReceiverRegistrar",
+            get(handlers::media_receiver_registrar_control).post(handlers::media_receiver_registrar_control),
+        )
         .route("/media/{id}", get(handlers::serve_media).head(handlers::serve_media))
+        .route("/media/{id}/subtitle", get(handlers::serve_subtitle))
         .route("/metrics", get(handlers::get_web_metrics))
         .with_state(state)
 }

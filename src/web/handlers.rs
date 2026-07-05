@@ -1167,64 +1167,89 @@ impl ContentDirectoryHandler {
 
 pub async fn content_directory_control(
     State(state): State<AppState>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
-    if body.contains("<u:Browse") {
-        let params = parse_browse_params(&body);
-        info!("Browse request - ObjectID: {}, StartingIndex: {}, RequestedCount: {}", 
-              params.object_id, params.starting_index, params.requested_count);
+    let client = crate::web::client::detect_client(&headers);
+    crate::web::client::CURRENT_CLIENT.scope(client, async move {
+        if body.contains("<u:Browse") {
+            let params = parse_browse_params(&body);
+            info!("Browse request - ObjectID: {}, StartingIndex: {}, RequestedCount: {}", 
+                  params.object_id, params.starting_index, params.requested_count);
 
-        // Handle root browse request (ObjectID "0")
-        if params.object_id == "0" {
-            return ContentDirectoryHandler::handle_root_browse(&params, &state).await;
-        }
-
-        // Determine media type and delegate to specialized handlers
-        if params.object_id.starts_with("video") {
-            let path_prefix_str = params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/');
-            return ContentDirectoryHandler::handle_video_browse(&params, &state, path_prefix_str).await;
-        } else if params.object_id.starts_with("audio") {
-            // Handle music categorization within audio section
-            let audio_path = params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/');
-            
-            // Check for music categorization paths
-            if audio_path.is_empty() {
-                // Root audio container - return categorization containers
-                return handle_audio_root_browse(&params, &state).await;
-            } else if audio_path.starts_with("artists") {
-                return ContentDirectoryHandler::handle_artist_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("albums") {
-                return ContentDirectoryHandler::handle_album_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("genres") {
-                return handle_genres_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("years") {
-                return handle_years_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("playlists") {
-                return handle_playlists_browse(&params, &state, audio_path).await;
-            } else if audio_path.starts_with("folders") {
-                let folder_path = audio_path.strip_prefix("folders").unwrap_or("").trim_start_matches('/');
-                return ContentDirectoryHandler::handle_music_browse(&params, &state, folder_path).await;
-            } else {
-                // Traditional folder browsing within audio
-                return ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await;
+            // Handle root browse request (ObjectID "0")
+            if params.object_id == "0" {
+                return ContentDirectoryHandler::handle_root_browse(&params, &state).await;
             }
-        } else if params.object_id.starts_with("image") {
-            let path_prefix_str = params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/');
-            return ContentDirectoryHandler::handle_image_browse(&params, &state, path_prefix_str).await;
+
+            // Determine media type and delegate to specialized handlers
+            if params.object_id.starts_with("video") {
+                let path_prefix_str = params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/');
+                return ContentDirectoryHandler::handle_video_browse(&params, &state, path_prefix_str).await;
+            } else if params.object_id.starts_with("audio") {
+                // Handle music categorization within audio section
+                let audio_path = params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/');
+                
+                // Check for music categorization paths
+                if audio_path.is_empty() {
+                    // Root audio container - return categorization containers
+                    return handle_audio_root_browse(&params, &state).await;
+                } else if audio_path.starts_with("artists") {
+                    return ContentDirectoryHandler::handle_artist_browse(&params, &state, audio_path).await;
+                } else if audio_path.starts_with("albums") {
+                    return ContentDirectoryHandler::handle_album_browse(&params, &state, audio_path).await;
+                } else if audio_path.starts_with("genres") {
+                    return handle_genres_browse(&params, &state, audio_path).await;
+                } else if audio_path.starts_with("years") {
+                    return handle_years_browse(&params, &state, audio_path).await;
+                } else if audio_path.starts_with("playlists") {
+                    return handle_playlists_browse(&params, &state, audio_path).await;
+                } else if audio_path.starts_with("folders") {
+                    let folder_path = audio_path.strip_prefix("folders").unwrap_or("").trim_start_matches('/');
+                    return ContentDirectoryHandler::handle_music_browse(&params, &state, folder_path).await;
+                } else {
+                    // Traditional folder browsing within audio
+                    return ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await;
+                }
+            } else if params.object_id.starts_with("image") {
+                let path_prefix_str = params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/');
+                return ContentDirectoryHandler::handle_image_browse(&params, &state, path_prefix_str).await;
+            } else {
+                // This case might happen for deeper browsing or custom object IDs.
+                // Assume no specific type filter for the database query, and the object_id itself
+                // represents the path relative to the media root.
+                return ContentDirectoryHandler::handle_folder_browse(&params, &state, "", params.object_id.as_str()).await;
+            }
+        } else if body.contains("<u:GetSearchCapabilities") {
+            let content = "<SearchCaps>dc:creator,dc:date,dc:title,upnp:album,upnp:actor,upnp:artist,upnp:class,upnp:genre,@refID</SearchCaps>";
+            build_soap_response("GetSearchCapabilities", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
+        } else if body.contains("<u:GetSortCapabilities") {
+            let content = "<SortCaps>dc:title,dc:date,upnp:class,upnp:album,upnp:originalTrackNumber</SortCaps>";
+            build_soap_response("GetSortCapabilities", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
+        } else if body.contains("<u:GetSystemUpdateID") {
+            let update_id = state.content_update_id.load(Ordering::Relaxed);
+            let content = format!("<Id>{}</Id>", update_id);
+            build_soap_response("GetSystemUpdateID", "urn:schemas-upnp-org:service:ContentDirectory:1", &content)
+        } else if body.contains("<u:X_GetFeatureList") {
+            let content = r#"<FeatureList>&lt;?xml version="1.0" encoding="utf-8"?&gt;&lt;Features xmlns="urn:schemas-upnp-org:av:avs" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="urn:schemas-upnp-org:av:avs http://www.upnp.org/schemas/av/avs.xsd"&gt;&lt;Feature name="samsung.com_BASICVIEW" version="1"&gt;&lt;container id="1" type="object.item.audioItem"/&gt;&lt;container id="2" type="object.item.videoItem"/&gt;&lt;container id="3" type="object.item.imageItem"/&gt;&lt;/Feature&gt;&lt;/Features&gt;</FeatureList>"#;
+            build_soap_response("X_GetFeatureList", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
+        } else if body.contains("<u:X_SetBookmark") {
+            let object_id = body.split("<ObjectID>").nth(1).and_then(|s| s.split("</ObjectID>").next()).unwrap_or("");
+            let pos_second_str = body.split("<PosSecond>").nth(1).and_then(|s| s.split("</PosSecond>").next()).unwrap_or("");
+            if let (Ok(file_id), Ok(pos)) = (object_id.parse::<i64>(), pos_second_str.parse::<u32>()) {
+                let mut bookmarks_guard = state.bookmarks.lock().await;
+                bookmarks_guard.insert(file_id, pos);
+            }
+            build_soap_response("X_SetBookmark", "urn:schemas-upnp-org:service:ContentDirectory:1", "")
         } else {
-            // This case might happen for deeper browsing or custom object IDs.
-            // Assume no specific type filter for the database query, and the object_id itself
-            // represents the path relative to the media root.
-            return ContentDirectoryHandler::handle_folder_browse(&params, &state, "", params.object_id.as_str()).await;
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                "Not implemented".to_string(),
+            )
+                .into_response()
         }
-    } else {
-        (
-            StatusCode::NOT_IMPLEMENTED,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Not implemented".to_string(),
-        )
-            .into_response()
-    }
+    }).await
 }
 
 pub async fn serve_media(
@@ -1267,11 +1292,29 @@ pub async fn serve_media(
     let metadata = file.metadata().await.map_err(AppError::Io)?;
     let file_size = metadata.len();
 
+    let client = crate::web::client::detect_client(&headers);
+
+    let mime_override = match client {
+        crate::web::client::DlnaClientProfile::SamsungTv if file_info.mime_type == "video/x-matroska" => {
+            "video/x-mkv".to_string()
+        }
+        crate::web::client::DlnaClientProfile::SamsungTv if file_info.mime_type == "video/x-msvideo" => {
+            "video/mpeg".to_string()
+        }
+        crate::web::client::DlnaClientProfile::SonyBdp if file_info.mime_type == "video/x-matroska" || file_info.mime_type == "video/mpeg" => {
+            "video/divx".to_string()
+        }
+        crate::web::client::DlnaClientProfile::Xbox if file_info.mime_type == "video/x-msvideo" => {
+            "video/avi".to_string()
+        }
+        _ => file_info.mime_type.clone(),
+    };
+
     let encoded_filename = percent_encoding::utf8_percent_encode(&file_info.filename, percent_encoding::NON_ALPHANUMERIC).to_string();
     let content_disposition = format!("inline; filename=\"{}\"; filename*=UTF-8''{}", file_info.filename.replace('"', "\\\""), encoded_filename);
 
     let mut response_builder = Response::builder()
-        .header(header::CONTENT_TYPE, &file_info.mime_type)
+        .header(header::CONTENT_TYPE, &mime_override)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_DISPOSITION, &content_disposition)
         .header("transferMode.dlna.org", "Streaming")
@@ -2135,6 +2178,135 @@ fn parse_dir_index_prefix(path_prefix_str: &str) -> (Option<usize>, &str) {
     } else {
         (None, path_prefix_str)
     }
+}
+
+fn build_soap_response(action: &str, service_type: &str, content: &str) -> Response {
+    let xml = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:{action}Response xmlns:u="{service_type}">
+            {content}
+        </u:{action}Response>
+    </s:Body>
+</s:Envelope>"#,
+        action = action,
+        service_type = service_type,
+        content = content
+    );
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+            (header::HeaderName::from_static("ext"), ""),
+        ],
+        xml,
+    )
+        .into_response()
+}
+
+pub async fn connection_manager_scpd() -> impl IntoResponse {
+    let xml = crate::web::xml::generate_connection_manager_scpd();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/xml; charset=utf-8")],
+        xml,
+    )
+}
+
+pub async fn media_receiver_registrar_scpd() -> impl IntoResponse {
+    let xml = crate::web::xml::generate_registrar_scpd();
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/xml; charset=utf-8")],
+        xml,
+    )
+}
+
+pub async fn connection_manager_control(
+    State(_state): State<AppState>,
+    body: String,
+) -> Response {
+    if body.contains("<u:GetProtocolInfo") {
+        let content = r#"<Source>http-get:*:video/x-msvideo:*,http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-mkv:*,http-get:*:video/mpeg:*,http-get:*:video/divx:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,http-get:*:audio/mp4:*,http-get:*:image/jpeg:*,http-get:*:image/png:*,http-get:*:image/gif:*</Source><Sink></Sink>"#;
+        build_soap_response("GetProtocolInfo", "urn:schemas-upnp-org:service:ConnectionManager:1", content)
+    } else if body.contains("<u:GetCurrentConnectionIDs") {
+        let content = "<ConnectionIDs>0</ConnectionIDs>";
+        build_soap_response("GetCurrentConnectionIDs", "urn:schemas-upnp-org:service:ConnectionManager:1", content)
+    } else if body.contains("<u:GetCurrentConnectionInfo") {
+        let content = r#"<RcsID>-1</RcsID><AVTransportID>-1</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Output</Direction><Status>Unknown</Status>"#;
+        build_soap_response("GetCurrentConnectionInfo", "urn:schemas-upnp-org:service:ConnectionManager:1", content)
+    } else {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Not implemented".to_string(),
+        )
+            .into_response()
+    }
+}
+
+pub async fn media_receiver_registrar_control(
+    State(_state): State<AppState>,
+    body: String,
+) -> Response {
+    if body.contains("<u:IsAuthorized") {
+        let content = "<Result>1</Result>";
+        build_soap_response("IsAuthorized", "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1", content)
+    } else if body.contains("<u:RegisterDevice") {
+        let content = "<RegistrationRespMsg></RegistrationRespMsg>";
+        build_soap_response("RegisterDevice", "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1", content)
+    } else {
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "Not implemented".to_string(),
+        )
+            .into_response()
+    }
+}
+
+pub async fn serve_subtitle(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let file_id = id.parse::<i64>().map_err(|_| {
+        state.web_metrics.record_error();
+        AppError::NotFound
+    })?;
+    
+    let file_info = state.database
+        .get_file_by_id(file_id)
+        .await
+        .map_err(|e| {
+            error!("Error getting file by ID for subtitle {}: {}", file_id, e);
+            state.web_metrics.record_error();
+            AppError::NotFound
+        })?
+        .ok_or_else(|| {
+            state.web_metrics.record_error();
+            AppError::NotFound
+        })?;
+
+    let srt_path = PathBuf::from(&file_info.path).with_extension("srt");
+    if !srt_path.exists() {
+        return Err(AppError::NotFound);
+    }
+
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(false)
+        .open(&srt_path)
+        .await
+        .map_err(AppError::Io)?;
+
+    let stream = tokio_util::io::ReaderStream::new(file);
+    let body = Body::from_stream(stream);
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/srt")
+        .body(body)
+        .map_err(|_| AppError::NotFound)
 }
 
 #[cfg(test)]

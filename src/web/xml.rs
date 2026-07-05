@@ -71,6 +71,20 @@ pub async fn generate_description_xml(state: &AppState) -> String {
                 <controlURL>/control/ContentDirectory</controlURL>
                 <eventSubURL>/event/ContentDirectory</eventSubURL>
             </service>
+            <service>
+                <serviceType>urn:schemas-upnp-org:service:ConnectionManager:1</serviceType>
+                <serviceId>urn:upnp-org:serviceId:ConnectionManager</serviceId>
+                <SCPDURL>/ConnectionManager.xml</SCPDURL>
+                <controlURL>/control/ConnectionManager</controlURL>
+                <eventSubURL>/event/ConnectionManager</eventSubURL>
+            </service>
+            <service>
+                <serviceType>urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1</serviceType>
+                <serviceId>urn:microsoft.com:serviceId:X_MS_MediaReceiverRegistrar</serviceId>
+                <SCPDURL>/X_MS_MediaReceiverRegistrar.xml</SCPDURL>
+                <controlURL>/control/X_MS_MediaReceiverRegistrar</controlURL>
+                <eventSubURL>/event/X_MS_MediaReceiverRegistrar</eventSubURL>
+            </service>
         </serviceList>
     </device>
 </root>"#,
@@ -116,6 +130,85 @@ pub fn generate_scpd_xml() -> String {
 </scpd>"#.to_string()
 }
 
+pub fn generate_connection_manager_scpd() -> String {
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+    <specVersion><major>1</major><minor>0</minor></specVersion>
+    <actionList>
+        <action>
+            <name>GetProtocolInfo</name>
+            <argumentList>
+                <argument><name>Source</name><direction>out</direction><relatedStateVariable>SourceProtocolInfo</relatedStateVariable></argument>
+                <argument><name>Sink</name><direction>out</direction><relatedStateVariable>SinkProtocolInfo</relatedStateVariable></argument>
+            </argumentList>
+        </action>
+        <action>
+            <name>GetCurrentConnectionIDs</name>
+            <argumentList>
+                <argument><name>ConnectionIDs</name><direction>out</direction><relatedStateVariable>CurrentConnectionIDs</relatedStateVariable></argument>
+            </argumentList>
+        </action>
+        <action>
+            <name>GetCurrentConnectionInfo</name>
+            <argumentList>
+                <argument><name>ConnectionID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+                <argument><name>RcsID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RcsID</relatedStateVariable></argument>
+                <argument><name>AVTransportID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_AVTransportID</relatedStateVariable></argument>
+                <argument><name>ProtocolInfo</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ProtocolInfo</relatedStateVariable></argument>
+                <argument><name>PeerConnectionManager</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionManager</relatedStateVariable></argument>
+                <argument><name>PeerConnectionID</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionID</relatedStateVariable></argument>
+                <argument><name>Direction</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Direction</relatedStateVariable></argument>
+                <argument><name>Status</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_ConnectionStatus</relatedStateVariable></argument>
+            </argumentList>
+        </action>
+    </actionList>
+    <serviceStateTable>
+        <stateVariable sendEvents="yes"><name>SourceProtocolInfo</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="yes"><name>SinkProtocolInfo</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="yes"><name>CurrentConnectionIDs</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionID</name><dataType>i4</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_RcsID</name><dataType>i4</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_AVTransportID</name><dataType>i4</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_ProtocolInfo</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionManager</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_Direction</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_ConnectionStatus</name><dataType>string</dataType></stateVariable>
+    </serviceStateTable>
+</scpd>"#.to_string()
+}
+
+pub fn generate_registrar_scpd() -> String {
+    r#"<?xml version="1.0" encoding="UTF-8"?>
+<scpd xmlns="urn:schemas-upnp-org:service-1-0">
+    <specVersion><major>1</major><minor>0</minor></specVersion>
+    <actionList>
+        <action>
+            <name>IsAuthorized</name>
+            <argumentList>
+                <argument><name>DeviceID</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_DeviceID</relatedStateVariable></argument>
+                <argument><name>Result</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_Result</relatedStateVariable></argument>
+            </argumentList>
+        </action>
+        <action>
+            <name>RegisterDevice</name>
+            <argumentList>
+                <argument><name>RegistrationReqMsg</name><direction>in</direction><relatedStateVariable>A_ARG_TYPE_RegistrationReqMsg</relatedStateVariable></argument>
+                <argument><name>RegistrationRespMsg</name><direction>out</direction><relatedStateVariable>A_ARG_TYPE_RegistrationRespMsg</relatedStateVariable></argument>
+            </argumentList>
+        </action>
+    </actionList>
+    <serviceStateTable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_DeviceID</name><dataType>string</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_Result</name><dataType>ui4</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_RegistrationReqMsg</name><dataType>bin.base64</dataType></stateVariable>
+        <stateVariable sendEvents="no"><name>A_ARG_TYPE_RegistrationRespMsg</name><dataType>bin.base64</dataType></stateVariable>
+        <stateVariable sendEvents="yes"><name>AuthorizationDeniedUpdateID</name><dataType>ui4</dataType></stateVariable>
+        <stateVariable sendEvents="yes"><name>ValidationSucceededUpdateID</name><dataType>ui4</dataType></stateVariable>
+        <stateVariable sendEvents="yes"><name>ValidationDeniedUpdateID</name><dataType>ui4</dataType></stateVariable>
+    </serviceStateTable>
+</scpd>"#.to_string()
+}
+
 pub async fn generate_browse_response(
     object_id: &str,
     subdirectories: &[MediaDirectory],
@@ -136,11 +229,15 @@ pub async fn generate_browse_response_with_totals(
 ) -> String {
     use tracing::{debug, warn};
     
+    let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
+        .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
+
     debug!(
-        "Generating browse response for object_id: '{}', {} subdirs, {} files",
+        "Generating browse response for object_id: '{}', {} subdirs, {} files, client: {:?}",
         object_id,
         subdirectories.len(),
-        files.len()
+        files.len(),
+        client
     );
     
 
@@ -165,11 +262,30 @@ pub async fn generate_browse_response_with_totals(
             } else {
                 format!("{}/{}", object_id.trim_end_matches('/'), container.name)
             };
+
+            let mut media_class_xml = String::new();
+            if client == crate::web::client::DlnaClientProfile::SonyBdp || 
+               client == crate::web::client::DlnaClientProfile::SonyBravia || 
+               client == crate::web::client::DlnaClientProfile::PlayStation {
+                let class_char = if container_id.contains("audio") || container_id.contains("music") {
+                    "A"
+                } else if container_id.contains("image") || container_id.contains("picture") {
+                    "P"
+                } else {
+                    "V"
+                };
+                media_class_xml = format!(
+                    r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{}</av:mediaClass>"#,
+                    class_char
+                );
+            }
+
             let container_xml = format!(
-                r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class></container>"#,
+                r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>{}</container>"#,
                 xml_escape(&container_id),
                 xml_escape(object_id),
-                xml_escape(&container.name)
+                xml_escape(&container.name),
+                media_class_xml
             );
             didl.push_str(&container_xml);
         }
@@ -271,23 +387,84 @@ pub async fn generate_browse_response_with_totals(
                 "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
             };
 
+            let has_srt = file.path.with_extension("srt").exists();
+            let mut title = file.filename.clone();
+            if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
+                title.push('.');
+            }
+            let title_escaped = xml_escape(&title);
+
+            let mime_override = match client {
+                crate::web::client::DlnaClientProfile::SamsungTv if file.mime_type == "video/x-matroska" => {
+                    "video/x-mkv".to_string()
+                }
+                crate::web::client::DlnaClientProfile::SamsungTv if file.mime_type == "video/x-msvideo" => {
+                    "video/mpeg".to_string()
+                }
+                crate::web::client::DlnaClientProfile::SonyBdp if file.mime_type == "video/x-matroska" || file.mime_type == "video/mpeg" => {
+                    "video/divx".to_string()
+                }
+                crate::web::client::DlnaClientProfile::Xbox if file.mime_type == "video/x-msvideo" => {
+                    "video/avi".to_string()
+                }
+                _ => file.mime_type.clone(),
+            };
+
+            let mut res_tags = Vec::new();
+            res_tags.push(format!(
+                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}"{duration}>{url}</res>"#,
+                mime = mime_override,
+                dlna_flags = dlna_flags,
+                size = file.size,
+                duration = duration_attr,
+                url = xml_escape(&url)
+            ));
+
+            if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
+                let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
+                res_tags.push(format!(
+                    r#"<res protocolInfo="http-get:*:text/srt:*">{}</res>"#,
+                    xml_escape(&srt_url)
+                ));
+            }
+
+            let mut caption_ex_xml = String::new();
+            if client == crate::web::client::DlnaClientProfile::SamsungTv && has_srt {
+                let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
+                caption_ex_xml = format!(
+                    r#"<sec:CaptionInfoEx sec:type="srt">{}</sec:CaptionInfoEx>"#,
+                    xml_escape(&srt_url)
+                );
+            }
+
+            let mut dcm_info_xml = String::new();
+            if client == crate::web::client::DlnaClientProfile::SamsungTv {
+                let bookmarks_guard = state.bookmarks.lock().await;
+                let bookmark_sec = bookmarks_guard.get(&file_id).cloned().unwrap_or(0);
+                dcm_info_xml = format!(
+                    r#"<sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={}</sec:dcmInfo>"#,
+                    xml_escape(&file.filename),
+                    bookmark_sec
+                );
+            }
+
             let item_xml = format!(
                 r#"<item id="{id}" parentID="{parent_id}" restricted="1">
                 <dc:title>{title}</dc:title>
                 {metadata}
                 <upnp:class>{upnp_class}</upnp:class>
-                <res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}"{duration}>{url}</res>
+                {res_elements}
+                {caption_ex}
+                {dcm_info}
             </item>"#,
                 id = file_id,
                 parent_id = xml_escape(object_id),
-                title = xml_escape(&file.filename),
+                title = title_escaped,
                 metadata = metadata_xml,
                 upnp_class = upnp_class,
-                mime = &file.mime_type,
-                dlna_flags = dlna_flags,
-                size = file.size,
-                duration = duration_attr,
-                url = xml_escape(&url)
+                res_elements = res_tags.join("\n"),
+                caption_ex = caption_ex_xml,
+                dcm_info = dcm_info_xml
             );
             didl.push_str(&item_xml);
         }
