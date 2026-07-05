@@ -142,33 +142,31 @@ fn parse_args_once() -> anyhow::Result<CommandLineArgs> {
     // Add primary media directory if provided
     if let Some(media_dir_str) = &args.media_dir {
         let media_dir = std::path::PathBuf::from(media_dir_str);
-        if media_dir.exists() && media_dir.is_dir() {
-            media_directories.push(MonitoredDirectoryConfig {
-                path: media_dir.to_string_lossy().to_string(),
-                recursive: true,
-                extensions: None,
-                exclude_patterns: None,
-                validation_mode: ValidationMode::Warn,
-            });
-        } else {
+        if !media_dir.exists() || !media_dir.is_dir() {
             tracing::warn!("Media directory does not exist or is not a directory: {}", media_dir.display());
         }
+        media_directories.push(MonitoredDirectoryConfig {
+            path: media_dir.to_string_lossy().to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Warn,
+        });
     }
     
     // Add additional media directories
     for additional_dir_str in &args.additional_media_dirs {
         let additional_dir = std::path::PathBuf::from(additional_dir_str);
-        if additional_dir.exists() && additional_dir.is_dir() {
-            media_directories.push(MonitoredDirectoryConfig {
-                path: additional_dir.to_string_lossy().to_string(),
-                recursive: true,
-                extensions: None,
-                exclude_patterns: None,
-                validation_mode: ValidationMode::Warn,
-            });
-        } else {
+        if !additional_dir.exists() || !additional_dir.is_dir() {
             tracing::warn!("Additional media directory does not exist or is not a directory: {}", additional_dir.display());
         }
+        media_directories.push(MonitoredDirectoryConfig {
+            path: additional_dir.to_string_lossy().to_string(),
+            recursive: true,
+            extensions: None,
+            exclude_patterns: None,
+            validation_mode: ValidationMode::Warn,
+        });
     }
     
     config_override.media.directories = media_directories;
@@ -313,8 +311,8 @@ async fn main() -> anyhow::Result<()> {
         let db_path = config.get_database_path().with_extension("redb");
         
         let name_str = config.server.name.clone();
-        let display_name = if name_str.len() > 40 {
-            format!("...{}", &name_str[name_str.len() - 37..])
+        let display_name = if name_str.len() > 41 {
+            format!("...{}", &name_str[name_str.len() - 38..])
         } else {
             name_str
         };
@@ -335,7 +333,7 @@ async fn main() -> anyhow::Result<()> {
         println!("┌────────────────────────────────────────────────────────┐");
         println!("│  VuIO Media Server                                     │");
         println!("├────────────────────────────────────────────────────────┤");
-        println!("│  Name:       {:<40} │", display_name);
+        println!("│  Name:       {:<41} │", display_name);
         println!("│  Version:    {:<41} │", env!("CARGO_PKG_VERSION"));
         println!("│  Status:     Online & Streaming                        │");
         println!("│  Address:    {:<41} │", display_url);

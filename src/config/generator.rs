@@ -100,9 +100,12 @@ impl ConfigGenerator {
         }
         media_table["supported_extensions"] = value(extensions_array);
         
-        // Clear existing directories from template
         if let Some(media_table) = self.template_doc["media"].as_table_mut() {
-            media_table.remove("directories");
+            if config.media.directories.is_empty() {
+                media_table["directories"] = value(Array::new());
+            } else {
+                media_table.remove("directories");
+            }
         }
         
         // Add directories as array of tables - only use the provided directories, not platform defaults
