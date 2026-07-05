@@ -17,6 +17,8 @@ cargo build --release
 ## Features
 
 - **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
+- **Web Interface** - Modern dashboard showing server status, scanned files, and directories
+- **Global Search** - Instant search across all indexed filenames and paths
 - **HTTP Range Streaming** - Seek support for large media files
 - **Multi-format Support** - MKV, MP4, AVI, MP3, FLAC, WAV, AAC, OGG, JPEG, PNG, and more
 - **Audio Metadata** - Automatic extraction of artist, album, genre, year from tags
@@ -25,6 +27,13 @@ cargo build --release
 - **Real-time Monitoring** - Detects file changes and updates database automatically
 - **Cross-platform** - Native integration for Windows, macOS, Linux
 - **Redb Database** - Embedded ACID-compliant database with crash recovery
+
+## Web Interface & Search
+
+VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: `http://localhost:8080`):
+- **Sleek Dashboard**: Real-time server status, monitored directories, and database statistics.
+- **Media Explorer**: Browse all scanned videos, music, and pictures directly in your web browser.
+- **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
 
 ## Quick Start
 
