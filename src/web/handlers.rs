@@ -1271,7 +1271,7 @@ pub async fn serve_media(
         .header(header::CONTENT_TYPE, &file_info.mime_type)
         .header(header::ACCEPT_RANGES, "bytes")
         .header("transferMode.dlna.org", "Streaming")
-        .header("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
+        .header("contentFeatures.dlna.org", "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
 
     let (start, end, is_range_request) = if let Some(range_header) = headers.get(header::RANGE) {
         let range_str = range_header.to_str().map_err(|_| AppError::InvalidRange)?;
