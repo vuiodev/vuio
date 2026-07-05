@@ -241,7 +241,7 @@ pub async fn generate_browse_response_with_totals(
     );
     
 
-    let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">"#);
+    let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/">"#);
 
     let number_returned = if object_id == "0" {
         // Root directory: show containers for media types
@@ -395,10 +395,10 @@ pub async fn generate_browse_response_with_totals(
             let title_escaped = xml_escape(&title);
 
             let mime_override = match client {
-                crate::web::client::DlnaClientProfile::SamsungTv if file.mime_type == "video/x-matroska" => {
+                crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-matroska" => {
                     "video/x-mkv".to_string()
                 }
-                crate::web::client::DlnaClientProfile::SamsungTv if file.mime_type == "video/x-msvideo" => {
+                crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-msvideo" => {
                     "video/mpeg".to_string()
                 }
                 crate::web::client::DlnaClientProfile::SonyBdp if file.mime_type == "video/x-matroska" || file.mime_type == "video/mpeg" => {
@@ -410,13 +410,23 @@ pub async fn generate_browse_response_with_totals(
                 _ => file.mime_type.clone(),
             };
 
+            let mut extra_attrs = String::new();
+            if (client == crate::web::client::DlnaClientProfile::LgTv || client == crate::web::client::DlnaClientProfile::PanasonicTv) && has_srt {
+                let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
+                extra_attrs = format!(
+                    r#" pv:subtitleFileUri="{}" pv:subtitleFileType="SRT""#,
+                    xml_escape(&srt_url)
+                );
+            }
+
             let mut res_tags = Vec::new();
             res_tags.push(format!(
-                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}"{duration}>{url}</res>"#,
+                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}"{duration}{extra_attrs}>{url}</res>"#,
                 mime = mime_override,
                 dlna_flags = dlna_flags,
                 size = file.size,
                 duration = duration_attr,
+                extra_attrs = extra_attrs,
                 url = xml_escape(&url)
             ));
 
@@ -429,7 +439,7 @@ pub async fn generate_browse_response_with_totals(
             }
 
             let mut caption_ex_xml = String::new();
-            if client == crate::web::client::DlnaClientProfile::SamsungTv && has_srt {
+            if (client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ) && has_srt {
                 let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
                 caption_ex_xml = format!(
                     r#"<sec:CaptionInfoEx sec:type="srt">{}</sec:CaptionInfoEx>"#,
@@ -438,13 +448,18 @@ pub async fn generate_browse_response_with_totals(
             }
 
             let mut dcm_info_xml = String::new();
-            if client == crate::web::client::DlnaClientProfile::SamsungTv {
+            if client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ {
                 let bookmarks_guard = state.bookmarks.lock().await;
                 let bookmark_sec = bookmarks_guard.get(&file_id).cloned().unwrap_or(0);
+                let bookmark_val = if client == crate::web::client::DlnaClientProfile::SamsungTvQ {
+                    bookmark_sec * 1000
+                } else {
+                    bookmark_sec
+                };
                 dcm_info_xml = format!(
                     r#"<sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={}</sec:dcmInfo>"#,
                     xml_escape(&file.filename),
-                    bookmark_sec
+                    bookmark_val
                 );
             }
 

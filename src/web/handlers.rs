@@ -1295,10 +1295,10 @@ pub async fn serve_media(
     let client = crate::web::client::detect_client(&headers);
 
     let mime_override = match client {
-        crate::web::client::DlnaClientProfile::SamsungTv if file_info.mime_type == "video/x-matroska" => {
+        crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file_info.mime_type == "video/x-matroska" => {
             "video/x-mkv".to_string()
         }
-        crate::web::client::DlnaClientProfile::SamsungTv if file_info.mime_type == "video/x-msvideo" => {
+        crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file_info.mime_type == "video/x-msvideo" => {
             "video/mpeg".to_string()
         }
         crate::web::client::DlnaClientProfile::SonyBdp if file_info.mime_type == "video/x-matroska" || file_info.mime_type == "video/mpeg" => {
@@ -1319,6 +1319,27 @@ pub async fn serve_media(
         .header(header::CONTENT_DISPOSITION, &content_disposition)
         .header("transferMode.dlna.org", "Streaming")
         .header("contentFeatures.dlna.org", "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
+
+    // CaptionInfo.sec injection for Samsung TVs when subtitles exist
+    if let Some(caption_req) = headers.get("getcaptioninfo.sec").and_then(|h| h.to_str().ok()) {
+        if caption_req == "1" {
+            let srt_path = std::path::PathBuf::from(&file_info.path).with_extension("srt");
+            if srt_path.exists() {
+                let server_ip = headers.get(header::HOST)
+                    .and_then(|h| h.to_str().ok())
+                    .and_then(|h| h.split(':').next())
+                    .unwrap_or("127.0.0.1");
+                let srt_url = format!(
+                    "http://{}:{}/media/{}/subtitle",
+                    server_ip,
+                    state.config.server.port,
+                    file_id
+                );
+                debug!("Injecting Samsung subtitle header CaptionInfo.sec: {}", srt_url);
+                response_builder = response_builder.header("CaptionInfo.sec", srt_url);
+            }
+        }
+    }
 
     let (start, end, is_range_request) = if let Some(range_header) = headers.get(header::RANGE) {
         let range_str = range_header.to_str().map_err(|_| AppError::InvalidRange)?;
