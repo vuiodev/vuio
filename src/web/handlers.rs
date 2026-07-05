@@ -97,8 +97,577 @@ pub struct WebHandlerStats {
 
 // Web metrics will be stored in AppState for atomic access
 
-pub async fn root_handler() -> &'static str {
-    "VuIO Media Server"
+pub async fn root_handler(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    use futures_util::StreamExt;
+    
+    let mut stream = state.database.stream_all_media_files();
+    let mut files = Vec::new();
+    while let Some(res) = stream.next().await {
+        if let Ok(file) = res {
+            files.push(file);
+        }
+    }
+    
+    // Sort files alphabetically by filename
+    files.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+
+    let total_count = files.len();
+    let total_size: u64 = files.iter().map(|f| f.size).sum();
+    let formatted_total_size = format_size(total_size);
+
+    let mut files_html = String::new();
+    for file in &files {
+        let extension = file.path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+            
+        let category = if file.mime_type.starts_with("video/") {
+            "video"
+        } else if file.mime_type.starts_with("audio/") {
+            "audio"
+        } else if file.mime_type.starts_with("image/") {
+            "image"
+        } else {
+            "file"
+        };
+        
+        let icon_svg = match category {
+            "video" => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>"#,
+            "audio" => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>"#,
+            "image" => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>"#,
+            _ => r#"<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>"#,
+        };
+        
+        let size_str = format_size(file.size);
+        let file_id = file.id.unwrap_or(0);
+        let escaped_filename = html_escape(&file.filename);
+        
+        files_html.push_str(&format!(
+            r#"<a href="/media/{file_id}" class="media-card" data-name="{escaped_filename}" data-category="{category}">
+                <div class="media-info">
+                    <div class="media-icon-wrapper">
+                        {icon_svg}
+                    </div>
+                    <div class="media-details">
+                        <div class="media-name" title="{escaped_filename}">{escaped_filename}</div>
+                        <div class="media-meta">
+                            <span>{size_str}</span>
+                            <span class="media-meta-dot"></span>
+                            <span style="text-transform: uppercase;">{extension}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action-area">
+                    <div class="btn-action" title="Download / Play">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </div>
+                </div>
+            </a>
+            "#
+        ));
+    }
+
+    let empty_state_html = if total_count == 0 {
+        r#"<div class="empty-state">
+            <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>
+            <h3>No Media Files Found</h3>
+            <p>Add some media files to your monitored directory to see them here.</p>
+        </div>"#
+    } else {
+        ""
+    };
+
+    let server_name = html_escape(&state.config.server.name);
+
+    let html_content = format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{server_name}</title>
+    <style>
+        :root {{
+            --bg-color: #0c0f12;
+            --card-bg: rgba(22, 28, 36, 0.6);
+            --card-border: rgba(255, 255, 255, 0.06);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-color: #00f0ff;
+            --accent-gradient: linear-gradient(135deg, #00f0ff 0%, #7000ff 100%);
+            --accent-hover: #00d8e6;
+            --focus-ring: rgba(0, 240, 255, 0.2);
+        }}
+        
+        * {{
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }}
+        
+        body {{
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.5;
+            padding: 1rem;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+
+        @media (min-width: 640px) {{
+            body {{
+                padding: 2rem;
+            }}
+        }}
+
+        .container {{
+            width: 100%;
+            max-width: 800px;
+            display: flex;
+            flex-direction: column;
+            gap: 1.5rem;
+        }}
+
+        header {{
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 16px;
+            padding: 1.25rem;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }}
+
+        .brand-section {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }}
+
+        .brand-logo {{
+            width: 40px;
+            height: 40px;
+            background: var(--accent-gradient);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.25rem;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
+        }}
+
+        .brand-info h1 {{
+            font-size: 1.15rem;
+            font-weight: 700;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }}
+
+        .brand-info p {{
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }}
+
+        .stats-section {{
+            display: flex;
+            gap: 1.25rem;
+        }}
+
+        .stat-item {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.125rem;
+        }}
+
+        .stat-val {{
+            font-size: 1.05rem;
+            font-weight: 700;
+        }}
+
+        .stat-lbl {{
+            font-size: 0.65rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }}
+
+        /* Controls: Search & Tabs */
+        .controls {{
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }}
+
+        @media (min-width: 640px) {{
+            .controls {{
+                flex-direction: row;
+                align-items: center;
+            }}
+        }}
+
+        .search-box {{
+            position: relative;
+            flex: 1;
+        }}
+
+        .search-box input {{
+            width: 100%;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            color: var(--text-primary);
+            font-size: 0.9375rem;
+            outline: none;
+            transition: all 0.2s ease;
+        }}
+
+        .search-box input:focus {{
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px var(--focus-ring);
+        }}
+
+        .search-icon {{
+            position: absolute;
+            left: 0.875rem;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 16px;
+            color: var(--text-secondary);
+            pointer-events: none;
+        }}
+
+        .tabs {{
+            display: flex;
+            background: rgba(22, 28, 36, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.25rem;
+            gap: 0.25rem;
+            align-self: flex-start;
+        }}
+
+        @media (max-width: 639px) {{
+            .tabs {{
+                width: 100%;
+                justify-content: stretch;
+            }}
+            .tab-btn {{
+                flex: 1;
+            }}
+        }}
+
+        .tab-btn {{
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            text-align: center;
+        }}
+
+        .tab-btn.active {{
+            background: var(--card-border);
+            color: var(--text-primary);
+        }}
+
+        .tab-btn:hover:not(.active) {{
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.02);
+        }}
+
+        /* File List Container */
+        .file-list {{
+            display: flex;
+            flex-direction: column;
+            gap: 0.65rem;
+        }}
+
+        .media-card {{
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.875rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            color: inherit;
+        }}
+
+        .media-card:hover {{
+            border-color: rgba(0, 240, 255, 0.25);
+            background: rgba(22, 28, 36, 0.85);
+            transform: translateY(-1px);
+        }}
+
+        .media-info {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            min-width: 0;
+            flex: 1;
+        }}
+
+        .media-icon-wrapper {{
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            color: var(--text-secondary);
+        }}
+
+        .media-card:hover .media-icon-wrapper {{
+            color: var(--accent-color);
+            background: rgba(0, 240, 255, 0.06);
+        }}
+
+        .media-details {{
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.125rem;
+        }}
+
+        .media-name {{
+            font-size: 0.9rem;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        .media-meta {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.725rem;
+            color: var(--text-secondary);
+        }}
+
+        .media-meta-dot {{
+            width: 3px;
+            height: 3px;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.15);
+        }}
+
+        .action-area {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }}
+
+        .btn-action {{
+            width: 38px;
+            height: 38px;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            background: rgba(255, 255, 255, 0.01);
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }}
+
+        .media-card:hover .btn-action {{
+            border-color: rgba(0, 240, 255, 0.15);
+            background: rgba(0, 240, 255, 0.04);
+            color: var(--accent-color);
+        }}
+
+        .btn-action:hover {{
+            background: var(--accent-gradient) !important;
+            color: white !important;
+            border-color: transparent !important;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+        }}
+
+        /* Empty State */
+        .empty-state {{
+            text-align: center;
+            padding: 3rem 1.5rem;
+            background: var(--card-bg);
+            border: 1px dashed var(--card-border);
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.75rem;
+        }}
+
+        .empty-icon {{
+            width: 40px;
+            height: 40px;
+            color: var(--text-secondary);
+        }}
+
+        .empty-state h3 {{
+            font-size: 1.05rem;
+            font-weight: 600;
+        }}
+
+        .empty-state p {{
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }}
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div class="brand-section">
+                <div class="brand-logo">▶</div>
+                <div class="brand-info">
+                    <h1>{server_name}</h1>
+                    <p>VuIO Media Streamer</p>
+                </div>
+            </div>
+            <div class="stats-section">
+                <div class="stat-item">
+                    <span class="stat-val">{total_count}</span>
+                    <span class="stat-lbl">Files</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-val">{formatted_total_size}</span>
+                    <span class="stat-lbl">Total Size</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="controls">
+            <div class="search-box">
+                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                <input type="text" id="search-input" placeholder="Search files..." oninput="filterFiles()">
+            </div>
+            <div class="tabs">
+                <button class="tab-btn active" data-tab="all" onclick="setTab('all')">All</button>
+                <button class="tab-btn" data-tab="video" onclick="setTab('video')">Videos</button>
+                <button class="tab-btn" data-tab="audio" onclick="setTab('audio')">Music</button>
+                <button class="tab-btn" data-tab="image" onclick="setTab('image')">Images</button>
+            </div>
+        </div>
+
+        <div class="file-list" id="file-list">
+            {files_html}
+            {empty_state_html}
+        </div>
+    </div>
+
+    <script>
+        let currentTab = 'all';
+
+        function setTab(tab) {{
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => {{
+                if (btn.dataset.tab === tab) {{
+                    btn.classList.add('active');
+                }} else {{
+                    btn.classList.remove('active');
+                }}
+            }});
+            filterFiles();
+        }}
+
+        function filterFiles() {{
+            const query = document.getElementById('search-input').value.toLowerCase();
+            const cards = document.querySelectorAll('.media-card');
+            let visibleCount = 0;
+
+            cards.forEach(card => {{
+                const name = card.dataset.name.toLowerCase();
+                const category = card.dataset.category;
+                
+                const matchesQuery = name.includes(query);
+                const matchesTab = currentTab === 'all' || category === currentTab;
+
+                if (matchesQuery && matchesTab) {{
+                    card.style.display = '';
+                    visibleCount++;
+                }} else {{
+                    card.style.display = 'none';
+                }}
+            }});
+
+            // Dynamically show empty state if nothing found
+            let emptyState = document.querySelector('.empty-state');
+            if (visibleCount === 0) {{
+                if (!emptyState) {{
+                    emptyState = document.createElement('div');
+                    emptyState.className = 'empty-state';
+                    emptyState.innerHTML = `
+                        <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                        <h3>No matching files</h3>
+                        <p>Try broadening your search query or switching categories.</p>
+                    `;
+                    document.getElementById('file-list').appendChild(emptyState);
+                }}
+            }} else if (emptyState) {{
+                emptyState.remove();
+            }}
+        }}
+    </script>
+</body>
+</html>"#,
+    );
+
+    Ok((
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html_content,
+    ))
+}
+
+fn format_size(bytes: u64) -> String {
+    if bytes == 0 {
+        return "0 Bytes".to_string();
+    }
+    let k = 1024.0;
+    let sizes = ["Bytes", "KB", "MB", "GB", "TB"];
+    let i = (bytes as f64).log(k).floor() as usize;
+    let i = std::cmp::min(i, sizes.len() - 1);
+    format!("{:.1} {}", bytes as f64 / k.powi(i as i32), sizes[i])
+}
+
+fn html_escape(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + s.len() / 4);
+    for ch in s.chars() {
+        match ch {
+            '&' => result.push_str("&amp;"),
+            '<' => result.push_str("&lt;"),
+            '>' => result.push_str("&gt;"),
+            '"' => result.push_str("&quot;"),
+            '\'' => result.push_str("&#39;"),
+            c => result.push(c),
+        }
+    }
+    result
 }
 
 pub async fn description_handler(State(state): State<AppState>) -> impl IntoResponse {
