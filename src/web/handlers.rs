@@ -10,10 +10,9 @@ use axum::{
     http::{header, HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
-use futures_util::StreamExt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
-use tokio::io::AsyncSeekExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 use tracing::{debug, error, info, warn};
 
@@ -454,6 +453,7 @@ pub async fn content_directory_control(
 pub async fn serve_media(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    method: Method,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let start_time = Instant::now();
@@ -485,28 +485,40 @@ pub async fn serve_media(
         .open(&file_info.path)
         .await
         .map_err(AppError::Io)?;
-    let file_size = file_info.size;
+
+    // Use actual file size from disk to avoid stale DB values causing range mismatches
+    let metadata = file.metadata().await.map_err(AppError::Io)?;
+    let file_size = metadata.len();
 
     let mut response_builder = Response::builder()
-        .header(header::CONTENT_TYPE, file_info.mime_type)
+        .header(header::CONTENT_TYPE, &file_info.mime_type)
         .header(header::ACCEPT_RANGES, "bytes")
         .header("transferMode.dlna.org", "Streaming")
-        .header("contentFeatures.dlna.org", "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
+        .header("contentFeatures.dlna.org", "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
 
-    let (start, end) = if let Some(range_header) = headers.get(header::RANGE) {
+    let (start, end, is_range_request) = if let Some(range_header) = headers.get(header::RANGE) {
         let range_str = range_header.to_str().map_err(|_| AppError::InvalidRange)?;
         debug!("Received range request: {}", range_str);
         
+        if file_size == 0 {
+            return Err(AppError::InvalidRange);
+        }
+        
         // Parse the range header manually to avoid enum variant issues
-        parse_range_header(range_str, file_size)?
+        let (start, end) = parse_range_header(range_str, file_size)?;
+        (start, end, true)
     } else {
         // No range requested, serve the whole file
-        (0, file_size - 1)
+        (0, file_size.saturating_sub(1), false)
     };
 
-    let len = end - start + 1;
+    let len = if file_size == 0 {
+        0
+    } else {
+        end - start + 1
+    };
 
-    let response_status = if len < file_size {
+    let response_status = if is_range_request {
         response_builder = response_builder.header(
             header::CONTENT_RANGE,
             format!("bytes {}-{}/{}", start, end, file_size),
@@ -518,29 +530,41 @@ pub async fn serve_media(
 
     response_builder = response_builder.header(header::CONTENT_LENGTH, len);
 
+    // For HEAD requests, return headers only without streaming the body
+    if method == Method::HEAD {
+        debug!("HEAD request for media file ID {} (size: {})", file_id, file_size);
+        let response_time = start_time.elapsed().as_millis() as u64;
+        state.web_metrics.record_file_serve(response_time);
+        return Ok(response_builder.status(response_status).body(Body::empty())?);
+    }
+
     file.seek(std::io::SeekFrom::Start(start)).await?;
-    let stream = ReaderStream::with_capacity(file, 64 * 1024).take(len as usize);
+    let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
     let body = Body::from_stream(stream);
 
     // Record atomic performance metrics for file serving
     let response_time = start_time.elapsed().as_millis() as u64;
     state.web_metrics.record_file_serve(response_time);
     
-    debug!("ZeroCopy served media file ID {} in {}ms", file_id, response_time);
+    debug!("Served media file ID {} ({} bytes from offset {}) in {}ms", file_id, len, start, response_time);
 
     Ok(response_builder.status(response_status).body(body)?)
 }
 
 // Helper function to parse range header manually
 fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
+    let range_str = range_str.trim();
     // Remove "bytes=" prefix
-    let range_part = range_str.strip_prefix("bytes=").ok_or(AppError::InvalidRange)?;
+    let range_part = range_str.strip_prefix("bytes=").ok_or(AppError::InvalidRange)?.trim();
     
     // Split on comma to get individual ranges (we'll just handle the first one)
-    let first_range = range_part.split(',').next().ok_or(AppError::InvalidRange)?;
+    let first_range = range_part.split(',').next().ok_or(AppError::InvalidRange)?.trim();
     
     // Parse the range
     if let Some((start_str, end_str)) = first_range.split_once('-') {
+        let start_str = start_str.trim();
+        let end_str = end_str.trim();
+        
         let start = if start_str.is_empty() {
             // Suffix range like "-500" (last 500 bytes)
             let suffix_len: u64 = end_str.parse().map_err(|_| AppError::InvalidRange)?;

@@ -114,15 +114,37 @@ impl CrossPlatformWatcher {
                         }
                     }
                 }
-                notify::EventKind::Modify(_) => {
-                    // Only process modify events for media files
-                    let media_paths: Vec<_> = event.event.paths.iter()
-                        .filter(|path| self.is_media_file(path))
-                        .collect();
-                    
-                    for path in media_paths {
-                        debug!("Media file modified: {}", path.display());
-                        fs_events.push(FileSystemEvent::Modified(path.clone()));
+                notify::EventKind::Modify(modify_kind) => {
+                    match modify_kind {
+                        notify::event::ModifyKind::Name(_) => {
+                            if event.event.paths.len() >= 2 {
+                                let from = event.event.paths[0].clone();
+                                let to = event.event.paths[1].clone();
+                                info!("Path renamed (detected by watcher): {} -> {}", from.display(), to.display());
+                                fs_events.push(FileSystemEvent::Renamed { from, to });
+                            } else {
+                                for path in &event.event.paths {
+                                    if path.exists() {
+                                        if path.is_dir() || self.is_media_file(path) {
+                                            fs_events.push(FileSystemEvent::Created(path.clone()));
+                                        }
+                                    } else {
+                                        fs_events.push(FileSystemEvent::Deleted(path.clone()));
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            // Only process modify events for media files
+                            let media_paths: Vec<_> = event.event.paths.iter()
+                                .filter(|path| self.is_media_file(path))
+                                .collect();
+                            
+                            for path in media_paths {
+                                debug!("Media file modified: {}", path.display());
+                                fs_events.push(FileSystemEvent::Modified(path.clone()));
+                            }
+                        }
                     }
                 }
                 notify::EventKind::Remove(_) => {
@@ -194,10 +216,10 @@ impl CrossPlatformWatcher {
                         let relevant_events: Vec<_> = events.into_iter()
                             .filter(|event| {
                                 event.paths.iter().any(|path| {
-                                    // For deletion events, we can't check if path.is_dir() since it's gone
-                                    // So we include all deletion events
-                                    if matches!(event.event.kind, notify::EventKind::Remove(_)) {
-                                        info!("Including deletion event for path: {}", path.display());
+                                    // If the path does not exist, it was deleted or renamed/moved.
+                                    // We must include it so the database can be cleaned up.
+                                    if !path.exists() {
+                                        info!("Including non-existent path (deleted or renamed): {}", path.display());
                                         return true;
                                     }
                                     

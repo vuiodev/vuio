@@ -164,7 +164,7 @@ impl UnixPathNormalizer {
         Self
     }
     
-    /// Convert Unix path to canonical format (preserves case, uses forward slashes)
+    /// Convert Unix path to canonical format (preserves case, uses forward slashes, and resolves symlinks/private paths)
     fn normalize_to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
         let path_str = path.to_string_lossy();
         
@@ -182,10 +182,40 @@ impl UnixPathNormalizer {
             });
         }
         
-        // Unix paths already use forward slashes and are case-sensitive
-        // Just ensure we have a consistent string representation
-        let canonical = path_str.to_string();
+        // On Unix/macOS, we resolve symlinks (e.g. /var -> /private/var) to ensure consistency
+        // between the initial scanner paths and directory watcher events.
+        // If the path itself does not exist (e.g., a Deleted event), we resolve the longest
+        // existing parent directory prefix and append the remaining components.
+        let mut resolved_path = std::path::PathBuf::new();
+        let mut components = Vec::new();
+        let mut current = path;
         
+        while !current.as_os_str().is_empty() {
+            if let Ok(canonical) = std::fs::canonicalize(current) {
+                resolved_path = canonical;
+                break;
+            }
+            if let Some(parent) = current.parent() {
+                if let Some(file_name) = current.file_name() {
+                    components.push(file_name);
+                }
+                current = parent;
+            } else {
+                break;
+            }
+        }
+        
+        let final_path = if resolved_path.as_os_str().is_empty() {
+            path.to_path_buf()
+        } else {
+            let mut p = resolved_path;
+            for comp in components.into_iter().rev() {
+                p.push(comp);
+            }
+            p
+        };
+        
+        let canonical = final_path.to_string_lossy().to_string();
         Ok(canonical)
     }
     
@@ -1018,7 +1048,7 @@ mod tests {
             
             // Test multiple consecutive separators
             let result = normalizer.to_canonical(Path::new(r"C:\Users\\Media")).unwrap();
-            assert_eq!(result, "c:/users//media");
+            assert_eq!(result, "c:/users/media");
         }
         
         #[test]

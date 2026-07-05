@@ -20,7 +20,7 @@ pub fn create_router(state: AppState) -> Router {
             "/event/ContentDirectory",
             axum::routing::any(handlers::content_directory_subscribe),
         )
-        .route("/media/{id}", get(handlers::serve_media))
+        .route("/media/{id}", get(handlers::serve_media).head(handlers::serve_media))
         .route("/metrics", get(handlers::get_web_metrics))
         .with_state(state)
 }

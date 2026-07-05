@@ -1,6 +1,6 @@
 [package]
 name = "vuio"
-version = "0.0.24"
+version = "0.0.25"
 edition = "2021"
 authors = ["vyrti"]
 description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
@@ -41,17 +41,17 @@ async-stream = "0.3"
 libc = "0.2"
 chrono = { version = "0.4", features = ["serde"] }
 notify = "8.2"
-notify-debouncer-full = "0.6"
-toml = "0.9"
-toml_edit = "0.24"
+notify-debouncer-full = "0.7"
+toml = "1.1"
+toml_edit = "0.25"
 serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 audiotags = "0.5"
-quick-xml = "0.38"
+quick-xml = "0.41"
 
-redb = "3.1"
+redb = "4.1"
 jwalk = "0.8"
 
 [target.'cfg(windows)'.dependencies]

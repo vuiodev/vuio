@@ -261,9 +261,9 @@ pub async fn generate_browse_response_with_totals(
 
             // Use enhanced DLNA flags that support autoplay and streaming
             let dlna_flags = if state.config.media.autoplay_enabled {
-                "DLNA.ORG_PN=;DLNA.ORG_OP=11;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+                "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             } else {
-                "DLNA.ORG_PN=;DLNA.ORG_OP=11;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
+                "DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
             };
 
             let item_xml = format!(
