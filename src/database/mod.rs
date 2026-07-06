@@ -333,6 +333,10 @@ pub struct DatabaseStats {
     pub total_files: usize,
     pub total_size: u64,
     pub database_size: u64,
+    pub video_files: usize,
+    pub audio_files: usize,
+    pub image_files: usize,
+    pub playlists: usize,
 }
 
 #[derive(Debug, Clone)]

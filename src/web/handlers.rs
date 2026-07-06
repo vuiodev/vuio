@@ -58,10 +58,11 @@ impl WebHandlerMetrics {
         self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
     }
     
-    pub fn record_file_serve(&self, response_time_ms: u64, bytes: u64) {
-        self.file_serves.fetch_add(1, Ordering::Relaxed);
+    pub fn record_file_serve(&self, response_time_ms: u64, is_actual_serve: bool) {
+        if is_actual_serve {
+            self.file_serves.fetch_add(1, Ordering::Relaxed);
+        }
         self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
-        self.bytes_transferred.fetch_add(bytes, Ordering::Relaxed);
     }
     
     pub fn record_error(&self) {
@@ -170,7 +171,7 @@ pub async fn root_handler(
     let server_name = html_escape(&state.config.server.name);
 
     let html_content = format!(
-        r#"<!DOCTYPE html>
+        r##"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -221,6 +222,39 @@ pub async fn root_handler(
             display: flex;
             flex-direction: column;
             gap: 1.25rem;
+        }}
+
+        .main-nav {{
+            display: flex;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 0.75rem;
+            margin-bottom: 0.5rem;
+            width: 100%;
+        }}
+
+        .nav-tab {{
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0.5rem 1.25rem;
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            border-radius: 8px;
+            outline: none;
+        }}
+
+        .nav-tab.active {{
+            background: var(--accent-gradient);
+            color: white;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+        }}
+
+        .nav-tab:hover:not(.active) {{
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.04);
         }}
 
         header {{
@@ -559,25 +593,199 @@ pub async fn root_handler(
             </div>
         </header>
 
-        <div class="breadcrumbs" id="breadcrumbs"></div>
-
-        <div class="controls">
-            <div class="search-box">
-                <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
-                <input type="text" id="search-input" placeholder="Search files..." oninput="onSearch()">
-            </div>
-            <div class="tabs">
-                <button class="tab-btn" data-tab="all" onclick="setTab('all')">All</button>
-                <button class="tab-btn active" data-tab="video" onclick="setTab('video')">Videos</button>
-                <button class="tab-btn" data-tab="audio" onclick="setTab('audio')">Music</button>
-                <button class="tab-btn" data-tab="image" onclick="setTab('image')">Images</button>
-            </div>
+        <!-- Main Navigation Tab Bar -->
+        <div class="main-nav">
+            <button id="nav-browse" class="nav-tab active" onclick="switchNav('browse')">Browse Files</button>
+            <button id="nav-stats" class="nav-tab" onclick="switchNav('stats')">System Stats</button>
         </div>
 
-        <div class="file-list" id="file-list"></div>
+        <!-- Browse View -->
+        <div id="view-browse">
+            <div class="breadcrumbs" id="breadcrumbs"></div>
+
+            <div class="controls">
+                <div class="search-box">
+                    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input type="text" id="search-input" placeholder="Search files..." oninput="onSearch()">
+                </div>
+                <div class="tabs">
+                    <button class="tab-btn" data-tab="all" onclick="setTab('all')">All</button>
+                    <button class="tab-btn active" data-tab="video" onclick="setTab('video')">Videos</button>
+                    <button class="tab-btn" data-tab="audio" onclick="setTab('audio')">Music</button>
+                    <button class="tab-btn" data-tab="image" onclick="setTab('image')">Images</button>
+                </div>
+            </div>
+
+            <div class="file-list" id="file-list"></div>
+        </div>
+
+        <!-- System Stats View -->
+        <div id="view-stats" style="display: none; flex-direction: column; gap: 1.25rem;">
+            <!-- Stats Dashboard Grid -->
+            <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem;">
+                
+                <!-- Database stats card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">DATABASE INFO</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-2.239 10-5V7c0-2.761-4.477-5-10-5S2 4.239 2 7v10c0 2.761 4.477 5 10 5z"></path><path d="M2 7c0 2.761 4.477 5 10 5s10-2.239 10-5"></path><path d="M2 12c0 2.761 4.477 5 10 5s10-2.239 10-5"></path></svg>
+                    </div>
+                    <div id="db-total-files" style="font-size: 1.75rem; font-weight: 700; background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">0</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                        Total media size: <span id="db-total-size" style="color: var(--text-primary); font-weight: 600;">0 B</span><br>
+                        DB File Size: <span id="db-file-size" style="color: var(--text-primary); font-weight: 600;">0 B</span>
+                    </div>
+                </div>
+
+                <!-- Media breakdown card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.65rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">MEDIA BREAKDOWN</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-6M6 20V10M18 20V4M3 20h18"></path></svg>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: var(--text-secondary);">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Videos:</span> <span id="db-video-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Music:</span> <span id="db-audio-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Images:</span> <span id="db-image-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.3rem;">
+                            <span>Playlists:</span> <span id="db-playlist-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Web Traffic stats card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">WEB TRAFFIC</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.2 15c.7-1.2 1-2.5.7-3.9-.3-2-1.5-3.8-3.2-4.5M2.8 9c-.7 1.2-1 2.5-.7 3.9.3 2 1.5 3.8 3.2 4.5M16 12a4 4 0 10-8 0 4 4 0 008 0z"></path></svg>
+                    </div>
+                    <div id="web-gigabytes" style="font-size: 1.75rem; font-weight: 700; color: #f59e0b;">0.00 GB</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                        File Serves: <span id="web-file-serves" style="color: var(--text-primary); font-weight: 600;">0</span><br>
+                        Dir Listings: <span id="web-dir-listings" style="color: var(--text-primary); font-weight: 600;">0</span>
+                    </div>
+                </div>
+
+                <!-- Cache metrics card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">CACHE HIT RATE</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>
+                    </div>
+                    <div id="web-cache-rate" style="font-size: 1.75rem; font-weight: 700; color: #3b82f6;">0.0%</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                        Hits: <span id="web-cache-hits" style="color: var(--text-primary); font-weight: 600;">0</span><br>
+                        Misses: <span id="web-cache-misses" style="color: var(--text-primary); font-weight: 600;">0</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Server Performance Info -->
+            <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0.05em; color: var(--text-secondary);">SERVER HEALTH & PERFORMANCE</h3>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; font-size: 0.875rem;">
+                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <span style="color: var(--text-secondary);">Avg Response Time:</span>
+                        <span id="web-response-time" style="font-size: 1.15rem; font-weight: 700; color: var(--accent-color);">0 ms</span>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <span style="color: var(--text-secondary);">Errors Logged:</span>
+                        <span id="web-errors" style="font-size: 1.15rem; font-weight: 700; color: #ef4444;">0</span>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <span style="color: var(--text-secondary);">Status:</span>
+                        <span style="font-size: 1.15rem; font-weight: 700; color: #10b981; display: flex; align-items: center; gap: 0.35rem;">
+                            <span style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; box-shadow: 0 0 8px #10b981;"></span>
+                            Online
+                        </span>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script>
+        let activeNav = 'browse';
+        let metricsTimer = null;
+
+        function switchNav(nav) {{
+            activeNav = nav;
+            document.querySelectorAll('.nav-tab').forEach(btn => {{
+                if (btn.id === 'nav-' + nav) {{
+                    btn.classList.add('active');
+                }} else {{
+                    btn.classList.remove('active');
+                }}
+            }});
+
+            if (nav === 'browse') {{
+                document.getElementById('view-browse').style.display = 'block';
+                document.getElementById('view-stats').style.display = 'none';
+                if (metricsTimer) {{
+                    clearInterval(metricsTimer);
+                    metricsTimer = null;
+                }}
+            }} else {{
+                document.getElementById('view-browse').style.display = 'none';
+                document.getElementById('view-stats').style.display = 'flex';
+                updateMetrics();
+                metricsTimer = setInterval(updateMetrics, 5000);
+            }}
+        }}
+
+        function formatBytes(bytes) {{
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }}
+
+        async function updateMetrics() {{
+            try {{
+                const res = await fetch('/metrics/json');
+                if (!res.ok) return;
+                const data = await res.json();
+                
+                const stats = data.web_handler_metrics;
+                const db = data.database_stats;
+
+                // Update Database
+                document.getElementById('db-total-files').textContent = db.total_files.toLocaleString();
+                document.getElementById('db-total-size').textContent = formatBytes(db.total_size_bytes);
+                document.getElementById('db-file-size').textContent = formatBytes(db.database_size_bytes);
+                
+                document.getElementById('db-video-count').textContent = db.video_files.toLocaleString();
+                document.getElementById('db-audio-count').textContent = db.audio_files.toLocaleString();
+                document.getElementById('db-image-count').textContent = db.image_files.toLocaleString();
+                document.getElementById('db-playlist-count').textContent = db.playlists.toLocaleString();
+
+                // Update Web Traffic
+                document.getElementById('web-gigabytes').textContent = stats.gigabytes_transferred.toFixed(3) + ' GB';
+                document.getElementById('web-file-serves').textContent = stats.file_serves.toLocaleString();
+                document.getElementById('web-dir-listings').textContent = stats.directory_listings.toLocaleString();
+
+                // Update Cache
+                document.getElementById('web-cache-rate').textContent = stats.cache_hit_rate_percent.toFixed(1) + '%';
+                document.getElementById('web-cache-hits').textContent = stats.cache_hits.toLocaleString();
+                document.getElementById('web-cache-misses').textContent = stats.cache_misses.toLocaleString();
+
+                // Update Server Health
+                document.getElementById('web-response-time').textContent = stats.average_response_time_ms.toFixed(1) + ' ms';
+                document.getElementById('web-errors').textContent = stats.errors.toLocaleString();
+
+            }} catch (err) {{
+                console.error("Failed to fetch metrics:", err);
+            }}
+        }}
+
         const filesData = JSON.parse(document.getElementById('files-data').textContent);
         const monitoredDirs = JSON.parse(document.getElementById('dirs-data').textContent);
 
@@ -834,7 +1042,7 @@ pub async fn root_handler(
         render();
     </script>
 </body>
-</html>"#,
+</html>"##,
     );
 
     Ok((
@@ -1318,6 +1526,32 @@ pub async fn content_directory_control(
     }).await
 }
 
+pub struct MetricsTrackingReader<R> {
+    inner: R,
+    metrics: std::sync::Arc<WebHandlerMetrics>,
+}
+
+impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MetricsTrackingReader<R> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        match std::pin::Pin::new(&mut self.inner).poll_read(cx, buf) {
+            std::task::Poll::Ready(Ok(())) => {
+                let after = buf.filled().len();
+                let bytes_read = after - before;
+                if bytes_read > 0 {
+                    self.metrics.bytes_transferred.fetch_add(bytes_read as u64, Ordering::Relaxed);
+                }
+                std::task::Poll::Ready(Ok(()))
+            }
+            other => other,
+        }
+    }
+}
+
 pub async fn serve_media(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1445,17 +1679,22 @@ pub async fn serve_media(
     if method == Method::HEAD {
         debug!("HEAD request for media file ID {} (size: {})", file_id, file_size);
         let response_time = start_time.elapsed().as_millis() as u64;
-        state.web_metrics.record_file_serve(response_time, 0);
+        state.web_metrics.record_file_serve(response_time, false);
         return Ok(response_builder.status(response_status).body(Body::empty())?);
     }
 
     file.seek(std::io::SeekFrom::Start(start)).await?;
-    let stream = ReaderStream::with_capacity(file.take(len), 64 * 1024);
+    let tracking_reader = MetricsTrackingReader {
+        inner: file.take(len),
+        metrics: state.web_metrics.clone(),
+    };
+    let stream = ReaderStream::with_capacity(tracking_reader, 64 * 1024);
     let body = Body::from_stream(stream);
 
     // Record atomic performance metrics for file serving
     let response_time = start_time.elapsed().as_millis() as u64;
-    state.web_metrics.record_file_serve(response_time, len);
+    let is_actual_serve = method == Method::GET && start == 0 && (len > 2 || len == file_size);
+    state.web_metrics.record_file_serve(response_time, is_actual_serve);
     
     debug!("Served media file ID {} ({} bytes from offset {}) in {}ms", file_id, len, start, response_time);
 
@@ -2253,6 +2492,19 @@ mod tests {
 pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
     
+    let db_stats = match state.database.get_stats().await {
+        Ok(s) => s,
+        Err(_) => crate::database::DatabaseStats {
+            total_files: 0,
+            total_size: 0,
+            database_size: 0,
+            video_files: 0,
+            audio_files: 0,
+            image_files: 0,
+            playlists: 0,
+        }
+    };
+    
     let metrics_json = serde_json::json!({
         "web_handler_metrics": {
             "browse_requests": stats.browse_requests,
@@ -2265,6 +2517,15 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             "average_response_time_ms": stats.average_response_time_ms,
             "gigabytes_transferred": stats.gigabytes_transferred,
             "redb_database": "active"
+        },
+        "database_stats": {
+            "total_files": db_stats.total_files,
+            "total_size_bytes": db_stats.total_size,
+            "database_size_bytes": db_stats.database_size,
+            "video_files": db_stats.video_files,
+            "audio_files": db_stats.audio_files,
+            "image_files": db_stats.image_files,
+            "playlists": db_stats.playlists,
         }
     });
     
@@ -2332,9 +2593,9 @@ pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse 
 pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
     
-    let (db_files, db_total_size, db_size) = match state.database.get_stats().await {
-        Ok(s) => (s.total_files, s.total_size, s.database_size),
-        Err(_) => (0, 0, 0),
+    let (db_files, db_total_size, db_size, db_video, db_audio, db_image, db_playlists) = match state.database.get_stats().await {
+        Ok(s) => (s.total_files, s.total_size, s.database_size, s.video_files, s.audio_files, s.image_files, s.playlists),
+        Err(_) => (0, 0, 0, 0, 0, 0, 0),
     };
 
     let mut body = String::new();
@@ -2381,7 +2642,23 @@ pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoR
 
     body.push_str("# HELP vuio_database_size_bytes Size of the database file on disk in bytes\n");
     body.push_str("# TYPE vuio_database_size_bytes gauge\n");
-    body.push_str(&format!("vuio_database_size_bytes {}\n", db_size));
+    body.push_str(&format!("vuio_database_size_bytes {}\n\n", db_size));
+
+    body.push_str("# HELP vuio_database_video_files Total video files indexed in database\n");
+    body.push_str("# TYPE vuio_database_video_files gauge\n");
+    body.push_str(&format!("vuio_database_video_files {}\n\n", db_video));
+
+    body.push_str("# HELP vuio_database_audio_files Total audio files indexed in database\n");
+    body.push_str("# TYPE vuio_database_audio_files gauge\n");
+    body.push_str(&format!("vuio_database_audio_files {}\n\n", db_audio));
+
+    body.push_str("# HELP vuio_database_image_files Total image/picture files indexed in database\n");
+    body.push_str("# TYPE vuio_database_image_files gauge\n");
+    body.push_str(&format!("vuio_database_image_files {}\n\n", db_image));
+
+    body.push_str("# HELP vuio_database_playlists Total playlists imported in database\n");
+    body.push_str("# TYPE vuio_database_playlists gauge\n");
+    body.push_str(&format!("vuio_database_playlists {}\n", db_playlists));
 
     (
         StatusCode::OK,

@@ -856,10 +856,44 @@ impl DatabaseManager for RedbDatabase {
             .map(|m| m.len())
             .unwrap_or(0);
 
+        let mut video_files = 0;
+        let mut audio_files = 0;
+        let mut image_files = 0;
+        let mut playlists = 0;
+
+        if let Ok(read_txn) = self.db.begin_read() {
+            if let Ok(files_table) = read_txn.open_table(FILES_TABLE) {
+                if let Ok(iter) = files_table.iter() {
+                    for result in iter {
+                        if let Ok((_, value)) = result {
+                            if let Ok(file) = Self::deserialize_media_file(value.value()) {
+                                if file.mime_type.starts_with("video/") {
+                                    video_files += 1;
+                                } else if file.mime_type.starts_with("audio/") {
+                                    audio_files += 1;
+                                } else if file.mime_type.starts_with("image/") {
+                                    image_files += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Ok(playlists_table) = read_txn.open_table(PLAYLISTS_TABLE) {
+                if let Ok(iter) = playlists_table.iter() {
+                    playlists = iter.count();
+                }
+            }
+        }
+
         Ok(DatabaseStats {
             total_files,
             total_size,
             database_size,
+            video_files,
+            audio_files,
+            image_files,
+            playlists,
         })
     }
 
