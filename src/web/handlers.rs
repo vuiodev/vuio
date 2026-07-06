@@ -1641,7 +1641,7 @@ pub async fn root_handler(
                 }}
                 
                 filteredFiles.forEach(file => {{
-                    if (file.cat === 'image') {{
+                    if (currentTab === 'image' && file.cat === 'image') {{
                         fileListContainer.appendChild(createImageCard(file));
                     }} else {{
                         fileListContainer.appendChild(createFileCard(file));
@@ -1711,7 +1711,7 @@ pub async fn root_handler(
                 folderCard.onclick = () => enterFolder(folderName);
 
                 let actionAreaHtml = '';
-                if (currentTab === 'audio') {{
+                if (currentTab === 'audio' || currentTab === 'all') {{
                     actionAreaHtml = `
                         <div class="action-area" onclick="event.stopPropagation(); playFolder('${{folderName}}')">
                             <button class="btn-action" title="Play Folder Content">
@@ -1739,7 +1739,7 @@ pub async fn root_handler(
             // Render Files
             const sortedFiles = activeNode.files.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
             sortedFiles.forEach(file => {{
-                if (file.cat === 'image') {{
+                if (currentTab === 'image' && file.cat === 'image') {{
                     fileListContainer.appendChild(createImageCard(file));
                 }} else {{
                     fileListContainer.appendChild(createFileCard(file));
@@ -1757,6 +1757,8 @@ pub async fn root_handler(
             card.style.cursor = 'pointer';
             if (file.cat === 'audio') {{
                 card.onclick = () => playAudioFile(file);
+            }} else if (file.cat === 'image') {{
+                card.onclick = () => openLightbox(file.id);
             }} else {{
                 card.onclick = () => playMedia(file.id);
             }}
