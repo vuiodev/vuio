@@ -16,6 +16,15 @@ pub mod state {
     };
     use std::sync::Arc;
 
+    #[derive(Hash, PartialEq, Eq, Clone, Debug)]
+    pub struct SoapCacheKey {
+        pub object_id: String,
+        pub starting_index: u32,
+        pub requested_count: u32,
+        pub client_profile: crate::web::client::DlnaClientProfile,
+        pub content_update_id: u32,
+    }
+
     #[derive(Clone)]
     pub struct AppState {
         pub config: Arc<AppConfig>,
@@ -26,6 +35,7 @@ pub mod state {
         pub web_metrics: Arc<crate::web::handlers::WebHandlerMetrics>,
         pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
         pub log_file_path: std::path::PathBuf,
+        pub browse_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, String>>>,
     }
 
     impl AppState {

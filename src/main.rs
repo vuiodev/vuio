@@ -281,6 +281,7 @@ async fn main() -> anyhow::Result<()> {
         web_metrics: Arc::new(vuio::web::handlers::WebHandlerMetrics::new()),
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         log_file_path: resolved_log_file,
+        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Start file system monitoring

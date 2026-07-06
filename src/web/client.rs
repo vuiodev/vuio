@@ -1,6 +1,6 @@
 use axum::http::HeaderMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DlnaClientProfile {
     Xbox,
     PlayStation,

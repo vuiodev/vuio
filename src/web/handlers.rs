@@ -26,6 +26,7 @@ pub struct WebHandlerMetrics {
     pub file_serves: AtomicU64,
     pub errors: AtomicU64,
     pub total_response_time_ms: AtomicU64,
+    pub bytes_transferred: AtomicU64,
 }
 
 impl WebHandlerMetrics {
@@ -38,6 +39,7 @@ impl WebHandlerMetrics {
             file_serves: AtomicU64::new(0),
             errors: AtomicU64::new(0),
             total_response_time_ms: AtomicU64::new(0),
+            bytes_transferred: AtomicU64::new(0),
         }
     }
     
@@ -56,9 +58,10 @@ impl WebHandlerMetrics {
         self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
     }
     
-    pub fn record_file_serve(&self, response_time_ms: u64) {
+    pub fn record_file_serve(&self, response_time_ms: u64, bytes: u64) {
         self.file_serves.fetch_add(1, Ordering::Relaxed);
         self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+        self.bytes_transferred.fetch_add(bytes, Ordering::Relaxed);
     }
     
     pub fn record_error(&self) {
@@ -80,6 +83,7 @@ impl WebHandlerMetrics {
             cache_hit_rate: if browse_requests > 0 { 
                 (self.cache_hits.load(Ordering::Relaxed) as f64 / browse_requests as f64) * 100.0 
             } else { 0.0 },
+            gigabytes_transferred: self.bytes_transferred.load(Ordering::Relaxed) as f64 / 1_073_741_824.0,
         }
     }
 }
@@ -94,6 +98,7 @@ pub struct WebHandlerStats {
     pub errors: u64,
     pub average_response_time_ms: u64,
     pub cache_hit_rate: f64,
+    pub gigabytes_transferred: f64,
 }
 
 // Web metrics will be stored in AppState for atomic access
@@ -983,7 +988,43 @@ impl ContentDirectoryHandler {
         use crate::web::xml::generate_browse_response;
 
         let start_time = Instant::now();
-        let cache_hit;
+        
+        let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
+            .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
+        
+        let current_update_id = state.content_update_id.load(Ordering::Relaxed);
+        let cache_key = crate::state::SoapCacheKey {
+            object_id: params.object_id.clone(),
+            starting_index: params.starting_index,
+            requested_count: params.requested_count,
+            client_profile: client,
+            content_update_id: current_update_id,
+        };
+
+        // Cache lookup
+        {
+            let mut cache = state.browse_cache.lock().await;
+            let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+            if needs_clear {
+                cache.clear();
+            }
+            if let Some(cached_xml) = cache.get(&cache_key) {
+                let response_time = start_time.elapsed().as_millis() as u64;
+                state.web_metrics.record_browse_request(response_time, true);
+                state.web_metrics.record_directory_listing(response_time);
+                debug!("Browse Cache Hit for Folder ObjectID: {} ({}ms)", params.object_id, response_time);
+                return (
+                    StatusCode::OK,
+                    [
+                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                        (header::HeaderName::from_static("ext"), ""),
+                    ],
+                    cached_xml.clone(),
+                ).into_response();
+            }
+        }
+
+        let cache_hit = false;
 
         let monitored_dirs = &state.config.media.directories;
         
@@ -1065,7 +1106,7 @@ impl ContentDirectoryHandler {
             }
         };
 
-        cache_hit = !subdirectories.is_empty() || !files.is_empty();
+
         
         debug!("ReDB browse request for '{}' (filter: '{}') returned {} subdirs, {} files", 
                browse_path.display(), media_type_filter, subdirectories.len(), files.len());
@@ -1133,6 +1174,17 @@ impl ContentDirectoryHandler {
         
         let server_ip = state.get_server_ip();
         let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, state, &server_ip).await;
+        
+        // Cache insert
+        {
+            let mut cache = state.browse_cache.lock().await;
+            let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+            if needs_clear {
+                cache.clear();
+            }
+            cache.insert(cache_key, response.clone());
+        }
+
         (
             StatusCode::OK,
             [
@@ -1379,7 +1431,7 @@ pub async fn serve_media(
     if method == Method::HEAD {
         debug!("HEAD request for media file ID {} (size: {})", file_id, file_size);
         let response_time = start_time.elapsed().as_millis() as u64;
-        state.web_metrics.record_file_serve(response_time);
+        state.web_metrics.record_file_serve(response_time, 0);
         return Ok(response_builder.status(response_status).body(Body::empty())?);
     }
 
@@ -1389,7 +1441,7 @@ pub async fn serve_media(
 
     // Record atomic performance metrics for file serving
     let response_time = start_time.elapsed().as_millis() as u64;
-    state.web_metrics.record_file_serve(response_time);
+    state.web_metrics.record_file_serve(response_time, len);
     
     debug!("Served media file ID {} ({} bytes from offset {}) in {}ms", file_id, len, start, response_time);
 
@@ -1732,6 +1784,41 @@ where
     use crate::web::xml::generate_browse_response;
     
     let start_time = Instant::now();
+    
+    let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
+        .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
+    
+    let current_update_id = state.content_update_id.load(Ordering::Relaxed);
+    let cache_key = crate::state::SoapCacheKey {
+        object_id: params.object_id.clone(),
+        starting_index: params.starting_index,
+        requested_count: params.requested_count,
+        client_profile: client,
+        content_update_id: current_update_id,
+    };
+
+    // Cache lookup
+    {
+        let mut cache = state.browse_cache.lock().await;
+        let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+        if needs_clear {
+            cache.clear();
+        }
+        if let Some(cached_xml) = cache.get(&cache_key) {
+            let response_time = start_time.elapsed().as_millis() as u64;
+            state.web_metrics.record_browse_request(response_time, true);
+            debug!("Browse Cache Hit for Category ObjectID: {} ({}ms)", params.object_id, response_time);
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                    (header::HeaderName::from_static("ext"), ""),
+                ],
+                cached_xml.clone(),
+            ).into_response();
+        }
+    }
+
     let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
     
     if path_parts.len() == 1 {
@@ -1750,6 +1837,17 @@ where
                     
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
+                
+                // Cache insert
+                {
+                    let mut cache = state.browse_cache.lock().await;
+                    let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+                    if needs_clear {
+                        cache.clear();
+                    }
+                    cache.insert(cache_key.clone(), response.clone());
+                }
+
                 (
                     StatusCode::OK,
                     [
@@ -1788,6 +1886,17 @@ where
                 
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
+                
+                // Cache insert
+                {
+                    let mut cache = state.browse_cache.lock().await;
+                    let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+                    if needs_clear {
+                        cache.clear();
+                    }
+                    cache.insert(cache_key.clone(), response.clone());
+                }
+
                 (
                     StatusCode::OK,
                     [
@@ -2134,6 +2243,7 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             "file_serves": stats.file_serves,
             "errors": stats.errors,
             "average_response_time_ms": stats.average_response_time_ms,
+            "gigabytes_transferred": stats.gigabytes_transferred,
             "redb_database": "active"
         }
     });
@@ -2228,6 +2338,10 @@ pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoR
     body.push_str("# HELP vuio_web_file_serves_total Total number of files served\n");
     body.push_str("# TYPE vuio_web_file_serves_total counter\n");
     body.push_str(&format!("vuio_web_file_serves_total {}\n\n", stats.file_serves));
+
+    body.push_str("# HELP vuio_web_gigabytes_transferred_total Total gigabytes of media transferred\n");
+    body.push_str("# TYPE vuio_web_gigabytes_transferred_total counter\n");
+    body.push_str(&format!("vuio_web_gigabytes_transferred_total {}\n\n", stats.gigabytes_transferred));
     
     body.push_str("# HELP vuio_web_errors_total Total number of web handler errors\n");
     body.push_str("# TYPE vuio_web_errors_total counter\n");

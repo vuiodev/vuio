@@ -444,15 +444,36 @@ VuIO contains built-in endpoints optimized for Kubernetes orchestration and obse
 - **Readiness Probe (`/readyz`)**: Verifies database connectivity and readiness to serve requests.
   - Returns: `200 OK` with JSON `{"status": "ready"}` if healthy, or `503 Service Unavailable` if database access fails.
 
-### Metrics (Prometheus / Grafana)
-- **Prometheus Exposition Format (`/metrics`)**: Returns raw performance metrics (browse counts, cache hit rate, response times, database size) formatted for Prometheus.
-  - Returns: `200 OK` with `text/plain` Prometheus exposition metrics.
-- **JSON Metrics (`/metrics/json`)**: Legacy JSON format metrics.
-  - Returns: `200 OK` with JSON telemetry.
+### Metrics & Monitoring
+To monitor the server health, cache efficiency, and indexing status, you can query the metrics endpoints:
+- **Prometheus Exposition Format (`/metrics`)**: Returns raw metrics formatted for Prometheus.
+  - Query: `curl http://localhost:8080/metrics`
+  - Returns: `200 OK` with `text/plain` Prometheus exposition format.
+- **JSON Format (`/metrics/json`)**: Returns JSON telemetry.
+  - Query: `curl http://localhost:8080/metrics/json`
+  - Returns: `200 OK` with JSON structure like:
+    ```json
+    {
+      "web_handler_metrics": {
+        "browse_requests": 12,
+        "cache_hits": 9,
+        "cache_misses": 3,
+        "cache_hit_rate_percent": 75.0,
+        "average_response_time_ms": 12,
+        "gigabytes_transferred": 0.25,
+        "redb_database": "active"
+      }
+    }
+    ```
+
+### DLNA Browse Caching
+To support instant directory listings for directories containing 1000+ files, VuIO implements an automatic, thread-safe SOAP response cache:
+- **How it works**: The cache stores the fully rendered XML response mapped to a unique signature of `(ObjectID, StartingIndex, RequestedCount, ClientProfile, UpdateID)`. Subsequent scrolls or refreshes from the TV/client are served in sub-milliseconds without hitting the database, resolving paths, or performing memory cloning.
+- **Cache Invalidation**: The cache is automatically and immediately cleared whenever a filesystem change or directory scan increments the `UpdateID` counter, ensuring no stale data is ever served.
 
 ### Log Streaming (Grafana / Loki / Alloy)
 - **Log Scraper Endpoint (`/logs`)**: Stream the last N log entries (default `100`, max `5000`) dynamically over HTTP. Useful for pull-based logs scraping.
-  - Query parameters: `?limit=N`
+  - Query: `curl http://localhost:8080/logs?limit=50`
   - Returns: `200 OK` with raw plaintext log lines.
 
 ---
