@@ -5,9 +5,16 @@ use crate::{
 };
 
 /// XML escape helper with enhanced Unicode support
-fn xml_escape(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + s.len() / 4);
+fn xml_escape(s: &str) -> std::borrow::Cow<'_, str> {
+    fn needs_escaping(c: char) -> bool {
+        matches!(c, '&' | '<' | '>' | '"' | '\'') || ((c as u32) < 32 && c != '\t' && c != '\n' && c != '\r')
+    }
+
+    if !s.chars().any(needs_escaping) {
+        return std::borrow::Cow::Borrowed(s);
+    }
     
+    let mut result = String::with_capacity(s.len() + s.len() / 4);
     for ch in s.chars() {
         match ch {
             '&' => result.push_str("&amp;"),
@@ -17,14 +24,15 @@ fn xml_escape(s: &str) -> String {
             '\'' => result.push_str("&#39;"),
             // Handle control characters (except tab, newline, carriage return)
             c if (c as u32) < 32 && c != '\t' && c != '\n' && c != '\r' => {
-                result.push_str(&format!("&#{};", c as u32));
+                use std::fmt::Write;
+                let _ = write!(&mut result, "&#{};", c as u32);
             },
             // Handle other potentially problematic characters
             c => result.push(c),
         }
     }
     
-    result
+    std::borrow::Cow::Owned(result)
 }
 
 
@@ -228,6 +236,7 @@ pub async fn generate_browse_response_with_totals(
     total_matches: Option<usize>,
 ) -> String {
     use tracing::{debug, warn};
+    use std::fmt::Write;
     
     let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
         .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
@@ -240,8 +249,9 @@ pub async fn generate_browse_response_with_totals(
         client
     );
     
-
-    let mut didl = String::from(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/">"#);
+    let estimated_capacity = 250 + subdirectories.len() * 250 + files.len() * 500;
+    let mut didl = String::with_capacity(estimated_capacity);
+    didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/">"#);
 
     let number_returned = if object_id == "0" {
         // Root directory: show containers for media types
@@ -263,7 +273,14 @@ pub async fn generate_browse_response_with_totals(
                 format!("{}/{}", object_id.trim_end_matches('/'), container.name)
             };
 
-            let mut media_class_xml = String::new();
+            let _ = write!(
+                &mut didl,
+                r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>"#,
+                xml_escape(&container_id),
+                xml_escape(object_id),
+                xml_escape(&container.name)
+            );
+
             if client == crate::web::client::DlnaClientProfile::SonyBdp || 
                client == crate::web::client::DlnaClientProfile::SonyBravia || 
                client == crate::web::client::DlnaClientProfile::PlayStation {
@@ -274,20 +291,13 @@ pub async fn generate_browse_response_with_totals(
                 } else {
                     "V"
                 };
-                media_class_xml = format!(
+                let _ = write!(
+                    &mut didl,
                     r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{}</av:mediaClass>"#,
                     class_char
                 );
             }
-
-            let container_xml = format!(
-                r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>{}</container>"#,
-                xml_escape(&container_id),
-                xml_escape(object_id),
-                xml_escape(&container.name),
-                media_class_xml
-            );
-            didl.push_str(&container_xml);
+            didl.push_str("</container>");
         }
 
         // Add items to DIDL with enhanced processing and error handling
@@ -309,75 +319,66 @@ pub async fn generate_browse_response_with_totals(
             if file.filename.chars().any(|c| c as u32 > 127) {
                 debug!("Processing file with Unicode characters: '{}' ({})", file.filename, file.path.display());
             }
-            let url = format!(
-                "http://{}:{}/media/{}",
-                server_ip,
-                state.config.server.port,
-                file_id
-            );
+            
             let upnp_class = get_upnp_class(&file.mime_type);
             
+            let has_srt = file.path.with_extension("srt").exists();
+            let mut title = file.filename.clone();
+            if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
+                title.push('.');
+            }
+            let title_escaped = xml_escape(&title);
+
+            let _ = write!(
+                &mut didl,
+                r#"<item id="{}" parentID="{}" restricted="1">
+                <dc:title>{}</dc:title>
+                "#,
+                file_id,
+                xml_escape(object_id),
+                title_escaped
+            );
+
             // Enhanced metadata for audio items
-            let metadata_xml = if file.mime_type.starts_with("audio/") {
-                let mut metadata_parts = Vec::new();
-                
+            if file.mime_type.starts_with("audio/") {
                 if let Some(ref artist) = file.artist {
-                    metadata_parts.push(format!(
-                        "<upnp:artist>{}</upnp:artist>",
-                        xml_escape(artist)
-                    ));
+                    let _ = write!(&mut didl, "<upnp:artist>{}</upnp:artist>", xml_escape(artist));
                 }
                 
                 if let Some(ref album) = file.album {
-                    metadata_parts.push(format!(
-                        "<upnp:album>{}</upnp:album>",
-                        xml_escape(album)
-                    ));
+                    let _ = write!(&mut didl, "<upnp:album>{}</upnp:album>", xml_escape(album));
                 }
                 
                 if let Some(ref genre) = file.genre {
-                    metadata_parts.push(format!(
-                        "<upnp:genre>{}</upnp:genre>",
-                        xml_escape(genre)
-                    ));
+                    let _ = write!(&mut didl, "<upnp:genre>{}</upnp:genre>", xml_escape(genre));
                 }
                 
                 if let Some(track_num) = file.track_number {
-                    metadata_parts.push(format!(
-                        "<upnp:originalTrackNumber>{}</upnp:originalTrackNumber>",
-                        track_num
-                    ));
+                    let _ = write!(&mut didl, "<upnp:originalTrackNumber>{}</upnp:originalTrackNumber>", track_num);
                 }
                 
                 if let Some(year) = file.year {
-                    metadata_parts.push(format!(
-                        "<dc:date>{}-01-01</dc:date>",
-                        year
-                    ));
+                    let _ = write!(&mut didl, "<dc:date>{}-01-01</dc:date>", year);
                 }
                 
                 if let Some(ref album_artist) = file.album_artist {
-                    metadata_parts.push(format!(
-                        "<upnp:albumArtist>{}</upnp:albumArtist>",
-                        xml_escape(album_artist)
-                    ));
+                    let _ = write!(&mut didl, "<upnp:albumArtist>{}</upnp:albumArtist>", xml_escape(album_artist));
                 }
-                
-                metadata_parts.join("")
-            } else {
-                String::new()
-            };
+            }
+
+            let _ = write!(
+                &mut didl,
+                r#"<upnp:class>{}</upnp:class>
+                "#,
+                upnp_class
+            );
             
             // Create the XML for this item with autoplay attributes
             // Add duration for media files if available
-            let duration_attr = if file.mime_type.starts_with("video/") || file.mime_type.starts_with("audio/") {
-                if let Some(duration) = file.duration {
-                    format!(" duration=\"{}\"", format_duration(duration.as_secs()))
-                } else {
-                    String::new()
-                }
+            let duration_secs = if file.mime_type.starts_with("video/") || file.mime_type.starts_with("audio/") {
+                file.duration.map(|d| d.as_secs())
             } else {
-                String::new()
+                None
             };
 
             // Use enhanced DLNA flags that support autoplay and streaming
@@ -387,67 +388,74 @@ pub async fn generate_browse_response_with_totals(
                 "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
             };
 
-            let has_srt = file.path.with_extension("srt").exists();
-            let mut title = file.filename.clone();
-            if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
-                title.push('.');
-            }
-            let title_escaped = xml_escape(&title);
-
             let mime_override = match client {
                 crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-matroska" => {
-                    "video/x-mkv".to_string()
+                    "video/x-mkv"
                 }
                 crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-msvideo" => {
-                    "video/mpeg".to_string()
+                    "video/mpeg"
                 }
                 crate::web::client::DlnaClientProfile::SonyBdp if file.mime_type == "video/x-matroska" || file.mime_type == "video/mpeg" => {
-                    "video/divx".to_string()
+                    "video/divx"
                 }
                 crate::web::client::DlnaClientProfile::Xbox if file.mime_type == "video/x-msvideo" => {
-                    "video/avi".to_string()
+                    "video/avi"
                 }
-                _ => file.mime_type.clone(),
+                _ => &file.mime_type,
             };
 
-            let mut extra_attrs = String::new();
-            if (client == crate::web::client::DlnaClientProfile::LgTv || client == crate::web::client::DlnaClientProfile::PanasonicTv) && has_srt {
-                let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
-                extra_attrs = format!(
-                    r#" pv:subtitleFileUri="{}" pv:subtitleFileType="SRT""#,
-                    xml_escape(&srt_url)
-                );
-            }
-
-            let mut res_tags = Vec::new();
-            res_tags.push(format!(
-                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}"{duration}{extra_attrs}>{url}</res>"#,
+            let _ = write!(
+                &mut didl,
+                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
                 mime = mime_override,
                 dlna_flags = dlna_flags,
-                size = file.size,
-                duration = duration_attr,
-                extra_attrs = extra_attrs,
-                url = xml_escape(&url)
-            ));
+                size = file.size
+            );
 
-            if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
-                let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
-                res_tags.push(format!(
-                    r#"<res protocolInfo="http-get:*:text/srt:*">{}</res>"#,
-                    xml_escape(&srt_url)
-                ));
+            if let Some(secs) = duration_secs {
+                let _ = write!(&mut didl, r#" duration="{}""#, format_duration(secs));
             }
 
-            let mut caption_ex_xml = String::new();
-            if (client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ) && has_srt {
-                let srt_url = format!("http://{}:{}/media/{}/subtitle", server_ip, state.config.server.port, file_id);
-                caption_ex_xml = format!(
-                    r#"<sec:CaptionInfoEx sec:type="srt">{}</sec:CaptionInfoEx>"#,
-                    xml_escape(&srt_url)
+            if (client == crate::web::client::DlnaClientProfile::LgTv || client == crate::web::client::DlnaClientProfile::PanasonicTv) && has_srt {
+                let _ = write!(
+                    &mut didl,
+                    r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                    server_ip,
+                    state.config.server.port,
+                    file_id
                 );
             }
 
-            let mut dcm_info_xml = String::new();
+            let _ = write!(
+                &mut didl,
+                r#">http://{}:{}/media/{}</res>"#,
+                server_ip,
+                state.config.server.port,
+                file_id
+            );
+
+            if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
+                let _ = write!(
+                    &mut didl,
+                    r#"
+                <res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#,
+                    server_ip,
+                    state.config.server.port,
+                    file_id
+                );
+            }
+
+            if (client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ) && has_srt {
+                let _ = write!(
+                    &mut didl,
+                    r#"
+                <sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#,
+                    server_ip,
+                    state.config.server.port,
+                    file_id
+                );
+            }
+
             if client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ {
                 let bookmarks_guard = state.bookmarks.lock().await;
                 let bookmark_sec = bookmarks_guard.get(&file_id).cloned().unwrap_or(0);
@@ -456,32 +464,16 @@ pub async fn generate_browse_response_with_totals(
                 } else {
                     bookmark_sec
                 };
-                dcm_info_xml = format!(
-                    r#"<sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={}</sec:dcmInfo>"#,
+                let _ = write!(
+                    &mut didl,
+                    r#"
+                <sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={}</sec:dcmInfo>"#,
                     xml_escape(&file.filename),
                     bookmark_val
                 );
             }
 
-            let item_xml = format!(
-                r#"<item id="{id}" parentID="{parent_id}" restricted="1">
-                <dc:title>{title}</dc:title>
-                {metadata}
-                <upnp:class>{upnp_class}</upnp:class>
-                {res_elements}
-                {caption_ex}
-                {dcm_info}
-            </item>"#,
-                id = file_id,
-                parent_id = xml_escape(object_id),
-                title = title_escaped,
-                metadata = metadata_xml,
-                upnp_class = upnp_class,
-                res_elements = res_tags.join("\n"),
-                caption_ex = caption_ex_xml,
-                dcm_info = dcm_info_xml
-            );
-            didl.push_str(&item_xml);
+            didl.push_str("\n            </item>");
         }
 
         let total_items = subdirectories.len() + files.len();

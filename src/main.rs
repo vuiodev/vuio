@@ -12,7 +12,6 @@ use vuio::{
 use std::{net::SocketAddr, sync::Arc, path::PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
-use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 /// Wait for shutdown signals (Ctrl+C, SIGTERM, etc.)
@@ -962,47 +961,61 @@ struct AtomicAppStats {
     directories_scanned: AtomicU64,
     events_handled: AtomicU64,
     errors_encountered: AtomicU64,
-    last_activity: Arc<RwLock<SystemTime>>,
+    last_activity: AtomicU64,
 }
 
 impl AtomicAppStats {
     fn new() -> Self {
+        let initial_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
         Self {
             files_processed: AtomicU64::new(0),
             directories_scanned: AtomicU64::new(0),
             events_handled: AtomicU64::new(0),
             errors_encountered: AtomicU64::new(0),
-            last_activity: Arc::new(RwLock::new(SystemTime::now())),
+            last_activity: AtomicU64::new(initial_secs),
         }
     }
     
-    async fn record_files_processed(&self, count: u64) {
+    fn update_last_activity(&self) {
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.last_activity.store(secs, Ordering::Relaxed);
+    }
+
+    fn record_files_processed(&self, count: u64) {
         self.files_processed.fetch_add(count, Ordering::Relaxed);
-        *self.last_activity.write().await = SystemTime::now();
+        self.update_last_activity();
     }
     
-    async fn record_directory_scanned(&self) {
+    fn record_directory_scanned(&self) {
         self.directories_scanned.fetch_add(1, Ordering::Relaxed);
-        *self.last_activity.write().await = SystemTime::now();
+        self.update_last_activity();
     }
     
-    async fn record_event_handled(&self) {
+    fn record_event_handled(&self) {
         self.events_handled.fetch_add(1, Ordering::Relaxed);
-        *self.last_activity.write().await = SystemTime::now();
+        self.update_last_activity();
     }
     
-    async fn record_error(&self) {
+    fn record_error(&self) {
         self.errors_encountered.fetch_add(1, Ordering::Relaxed);
-        *self.last_activity.write().await = SystemTime::now();
+        self.update_last_activity();
     }
     
-    async fn get_stats(&self) -> (u64, u64, u64, u64, SystemTime) {
+    fn get_stats(&self) -> (u64, u64, u64, u64, SystemTime) {
+        let last_secs = self.last_activity.load(Ordering::Relaxed);
+        let last_activity = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(last_secs);
         (
             self.files_processed.load(Ordering::Relaxed),
             self.directories_scanned.load(Ordering::Relaxed),
             self.events_handled.load(Ordering::Relaxed),
             self.errors_encountered.load(Ordering::Relaxed),
-            *self.last_activity.read().await,
+            last_activity,
         )
     }
 }
@@ -1023,7 +1036,7 @@ async fn handle_file_system_event(
     let stats = get_app_stats();
     
     // Record event handling with atomic counter
-    stats.record_event_handled().await;
+    stats.record_event_handled();
     
     match event {
         FileSystemEvent::Created(path) => {
@@ -1040,8 +1053,8 @@ async fn handle_file_system_event(
                         // Files are already stored in database by the scanner using bulk operations
                         
                         // Record atomic statistics
-                        stats.record_directory_scanned().await;
-                        stats.record_files_processed(scan_result.new_files.len() as u64).await;
+                        stats.record_directory_scanned();
+                        stats.record_files_processed(scan_result.new_files.len() as u64);
                         
                         info!("Added {} media files from new directory using ZeroCopy bulk operations: {}", 
                               scan_result.new_files.len(), path.display());
@@ -1088,7 +1101,7 @@ async fn handle_file_system_event(
                 }
                 
                 // Record atomic statistics
-                stats.record_files_processed(1).await;
+                stats.record_files_processed(1);
                 
                 info!("Added new media file to ZeroCopy database: {}", path.display());
                 
@@ -1111,7 +1124,7 @@ async fn handle_file_system_event(
                 database.bulk_update_media_files(&[existing_file]).await?;
                 
                 // Record atomic statistics
-                stats.record_files_processed(1).await;
+                stats.record_files_processed(1);
                 
                 info!("Updated media file in ZeroCopy database: {}", path.display());
                 
@@ -1160,14 +1173,14 @@ async fn handle_file_system_event(
                 let total_removed = match database.bulk_remove_media_files(&paths_to_remove).await {
                     Ok(removed_count) => {
                         // Record atomic statistics
-                        stats.record_files_processed(removed_count as u64).await;
+                        stats.record_files_processed(removed_count as u64);
                         
                         info!("ZeroCopy bulk removal completed: {} files removed from database for path: {}", 
                               removed_count, path.display());
                         removed_count
                     }
                     Err(e) => {
-                        stats.record_error().await;
+                        stats.record_error();
                         error!("Error during ZeroCopy bulk removal for path {}: {}", path.display(), e);
                         0
                     }
@@ -1273,7 +1286,7 @@ async fn perform_graceful_shutdown(database: &Arc<dyn DatabaseManager>) -> anyho
     info!("Performing graceful shutdown with atomic state persistence...");
     
     let stats = get_app_stats();
-    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) = stats.get_stats().await;
+    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) = stats.get_stats();
     
     // Log final application statistics
     info!("Final application statistics:");
@@ -1320,7 +1333,7 @@ async fn start_atomic_monitoring(database: Arc<dyn DatabaseManager>) -> anyhow::
         loop {
             tokio::select! {
                 _ = interval.tick() => {
-                    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) = stats.get_stats().await;
+                    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) = stats.get_stats();
                     
                     // Log periodic statistics
                     debug!("Atomic application statistics:");
