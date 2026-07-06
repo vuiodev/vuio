@@ -300,6 +300,12 @@ pub async fn generate_browse_response_with_totals(
             didl.push_str("</container>");
         }
 
+        let bookmarks_guard = if client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ {
+            Some(state.bookmarks.lock().await)
+        } else {
+            None
+        };
+
         // Add items to DIDL with enhanced processing and error handling
         for (idx, file) in files.iter().enumerate() {
             if idx % 100 == 0 && idx > 0 {
@@ -457,8 +463,7 @@ pub async fn generate_browse_response_with_totals(
             }
 
             if client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ {
-                let bookmarks_guard = state.bookmarks.lock().await;
-                let bookmark_sec = bookmarks_guard.get(&file_id).cloned().unwrap_or(0);
+                let bookmark_sec = bookmarks_guard.as_ref().and_then(|g| g.get(&file_id).cloned()).unwrap_or(0);
                 let bookmark_val = if client == crate::web::client::DlnaClientProfile::SamsungTvQ {
                     bookmark_sec * 1000
                 } else {
