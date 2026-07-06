@@ -3610,14 +3610,3 @@ pub async fn get_logs_handler(
         }
     }
 }
-
-pub async fn serve_logo() -> impl IntoResponse {
-    let logo_bytes = include_bytes!("../../logo.png");
-    (
-        [
-            (header::CONTENT_TYPE, "image/png"),
-            (header::CACHE_CONTROL, "public, max-age=86400"),
-        ],
-        logo_bytes.as_slice(),
-    )
-}
