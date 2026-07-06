@@ -54,9 +54,9 @@ async fn test_metrics_endpoints_data() {
     let web_metrics = Arc::new(WebHandlerMetrics::new());
     
     // Record some mock web events to verify web metrics
-    web_metrics.record_browse_request(15, true); // Cache hit
-    web_metrics.record_browse_request(30, false); // Cache miss
-    web_metrics.record_file_serve(50, true); // 1 file served
+    web_metrics.record_browse_request(15000, true); // Cache hit
+    web_metrics.record_browse_request(30000, false); // Cache miss
+    web_metrics.record_file_serve(50000, true); // 1 file served
     web_metrics.bytes_transferred.fetch_add(1024 * 1024 * 100, std::sync::atomic::Ordering::Relaxed); // 100MB served
 
     let app_state = AppState {

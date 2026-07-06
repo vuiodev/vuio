@@ -25,7 +25,7 @@ pub struct WebHandlerMetrics {
     pub directory_listings: AtomicU64,
     pub file_serves: AtomicU64,
     pub errors: AtomicU64,
-    pub total_response_time_ms: AtomicU64,
+    pub total_response_time_us: AtomicU64,
     pub bytes_transferred: AtomicU64,
 }
 
@@ -38,14 +38,14 @@ impl WebHandlerMetrics {
             directory_listings: AtomicU64::new(0),
             file_serves: AtomicU64::new(0),
             errors: AtomicU64::new(0),
-            total_response_time_ms: AtomicU64::new(0),
+            total_response_time_us: AtomicU64::new(0),
             bytes_transferred: AtomicU64::new(0),
         }
     }
     
-    pub fn record_browse_request(&self, response_time_ms: u64, cache_hit: bool) {
+    pub fn record_browse_request(&self, response_time_us: u64, cache_hit: bool) {
         self.browse_requests.fetch_add(1, Ordering::Relaxed);
-        self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+        self.total_response_time_us.fetch_add(response_time_us, Ordering::Relaxed);
         if cache_hit {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
         } else {
@@ -53,16 +53,16 @@ impl WebHandlerMetrics {
         }
     }
     
-    pub fn record_directory_listing(&self, response_time_ms: u64) {
+    pub fn record_directory_listing(&self, response_time_us: u64) {
         self.directory_listings.fetch_add(1, Ordering::Relaxed);
-        self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+        self.total_response_time_us.fetch_add(response_time_us, Ordering::Relaxed);
     }
     
-    pub fn record_file_serve(&self, response_time_ms: u64, is_actual_serve: bool) {
+    pub fn record_file_serve(&self, response_time_us: u64, is_actual_serve: bool) {
         if is_actual_serve {
             self.file_serves.fetch_add(1, Ordering::Relaxed);
         }
-        self.total_response_time_ms.fetch_add(response_time_ms, Ordering::Relaxed);
+        self.total_response_time_us.fetch_add(response_time_us, Ordering::Relaxed);
     }
     
     pub fn record_error(&self) {
@@ -71,7 +71,7 @@ impl WebHandlerMetrics {
     
     pub fn get_stats(&self) -> WebHandlerStats {
         let browse_requests = self.browse_requests.load(Ordering::Relaxed);
-        let total_time = self.total_response_time_ms.load(Ordering::Relaxed);
+        let total_time_us = self.total_response_time_us.load(Ordering::Relaxed);
         
         WebHandlerStats {
             browse_requests,
@@ -80,7 +80,7 @@ impl WebHandlerMetrics {
             directory_listings: self.directory_listings.load(Ordering::Relaxed),
             file_serves: self.file_serves.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
-            average_response_time_ms: if browse_requests > 0 { total_time / browse_requests } else { 0 },
+            average_response_time_ms: if browse_requests > 0 { (total_time_us as f64 / browse_requests as f64) / 1000.0 } else { 0.0 },
             cache_hit_rate: if browse_requests > 0 { 
                 (self.cache_hits.load(Ordering::Relaxed) as f64 / browse_requests as f64) * 100.0 
             } else { 0.0 },
@@ -97,7 +97,7 @@ pub struct WebHandlerStats {
     pub directory_listings: u64,
     pub file_serves: u64,
     pub errors: u64,
-    pub average_response_time_ms: u64,
+    pub average_response_time_ms: f64,
     pub cache_hit_rate: f64,
     pub gigabytes_transferred: f64,
 }
@@ -668,7 +668,8 @@ pub async fn root_handler(
                     <div id="web-gigabytes" style="font-size: 1.75rem; font-weight: 700; color: #f59e0b;">0.00 GB</div>
                     <div style="font-size: 0.8rem; color: var(--text-secondary);">
                         File Serves: <span id="web-file-serves" style="color: var(--text-primary); font-weight: 600;">0</span><br>
-                        Dir Listings: <span id="web-dir-listings" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        Dir Listings: <span id="web-dir-listings" style="color: var(--text-primary); font-weight: 600;">0</span><br>
+                        Current Speed: <span id="web-speed" style="color: var(--text-primary); font-weight: 600;">0 Mbps</span>
                     </div>
                 </div>
 
@@ -714,6 +715,8 @@ pub async fn root_handler(
     <script>
         let activeNav = 'browse';
         let metricsTimer = null;
+        let lastBytes = null;
+        let lastTime = null;
 
         function switchNav(nav) {{
             activeNav = nav;
@@ -772,13 +775,30 @@ pub async fn root_handler(
                 document.getElementById('web-file-serves').textContent = stats.file_serves.toLocaleString();
                 document.getElementById('web-dir-listings').textContent = stats.directory_listings.toLocaleString();
 
+                // Calculate network usage speed in Mbps
+                const currentBytes = stats.gigabytes_transferred * 1073741824;
+                const currentTime = Date.now();
+                if (lastBytes !== null && lastTime !== null) {{
+                    const deltaBytes = currentBytes - lastBytes;
+                    const deltaTimeSeconds = (currentTime - lastTime) / 1000.0;
+                    if (deltaTimeSeconds > 0) {{
+                        const speedBps = (deltaBytes * 8) / deltaTimeSeconds;
+                        const speedMbps = speedBps / 1000000.0;
+                        document.getElementById('web-speed').textContent = Math.round(speedMbps) + ' Mbps';
+                    }}
+                }} else {{
+                    document.getElementById('web-speed').textContent = '0 Mbps';
+                }}
+                lastBytes = currentBytes;
+                lastTime = currentTime;
+
                 // Update Cache
                 document.getElementById('web-cache-rate').textContent = stats.cache_hit_rate_percent.toFixed(1) + '%';
                 document.getElementById('web-cache-hits').textContent = stats.cache_hits.toLocaleString();
                 document.getElementById('web-cache-misses').textContent = stats.cache_misses.toLocaleString();
 
                 // Update Server Health
-                document.getElementById('web-response-time').textContent = stats.average_response_time_ms.toFixed(1) + ' ms';
+                document.getElementById('web-response-time').textContent = stats.average_response_time_ms.toFixed(2) + ' ms';
                 document.getElementById('web-errors').textContent = stats.errors.toLocaleString();
 
             }} catch (err) {{
@@ -1231,7 +1251,7 @@ impl ContentDirectoryHandler {
                 cache.clear();
             }
             if let Some(cached_xml) = cache.get(&cache_key) {
-                let response_time = start_time.elapsed().as_millis() as u64;
+                let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_browse_request(response_time, true);
                 state.web_metrics.record_directory_listing(response_time);
                 debug!("Browse Cache Hit for Folder ObjectID: {} ({}ms)", params.object_id, response_time);
@@ -1306,7 +1326,7 @@ impl ContentDirectoryHandler {
                 Ok(Err(e)) => {
                     error!("ReDB database error getting directory listing for {}: {}", params.object_id, e);
                     state.web_metrics.record_error();
-                    let response_time = start_time.elapsed().as_millis() as u64;
+                    let response_time = start_time.elapsed().as_micros() as u64;
                     state.web_metrics.record_browse_request(response_time, false);
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
@@ -1317,7 +1337,7 @@ impl ContentDirectoryHandler {
                 Err(_) => {
                     error!("Database query timed out for {}", params.object_id);
                     state.web_metrics.record_error();
-                    let response_time = start_time.elapsed().as_millis() as u64;
+                    let response_time = start_time.elapsed().as_micros() as u64;
                     state.web_metrics.record_browse_request(response_time, false);
                     return (
                         StatusCode::REQUEST_TIMEOUT,
@@ -1356,7 +1376,7 @@ impl ContentDirectoryHandler {
         
         if starting_index >= total_matches {
             // Starting index is beyond available items - record metrics and return empty
-            let response_time = start_time.elapsed().as_millis() as u64;
+            let response_time = start_time.elapsed().as_micros() as u64;
             state.web_metrics.record_browse_request(response_time, cache_hit);
             
             let server_ip = state.get_server_ip();
@@ -1390,7 +1410,7 @@ impl ContentDirectoryHandler {
                starting_index, end_index, total_matches);
         
         // Record atomic performance metrics
-        let response_time = start_time.elapsed().as_millis() as u64;
+        let response_time = start_time.elapsed().as_micros() as u64;
         state.web_metrics.record_browse_request(response_time, cache_hit);
         state.web_metrics.record_directory_listing(response_time);
         
@@ -1678,7 +1698,7 @@ pub async fn serve_media(
     // For HEAD requests, return headers only without streaming the body
     if method == Method::HEAD {
         debug!("HEAD request for media file ID {} (size: {})", file_id, file_size);
-        let response_time = start_time.elapsed().as_millis() as u64;
+        let response_time = start_time.elapsed().as_micros() as u64;
         state.web_metrics.record_file_serve(response_time, false);
         return Ok(response_builder.status(response_status).body(Body::empty())?);
     }
@@ -1692,7 +1712,7 @@ pub async fn serve_media(
     let body = Body::from_stream(stream);
 
     // Record atomic performance metrics for file serving
-    let response_time = start_time.elapsed().as_millis() as u64;
+    let response_time = start_time.elapsed().as_micros() as u64;
     let is_actual_serve = method == Method::GET && start == 0 && (len > 2 || len == file_size);
     state.web_metrics.record_file_serve(response_time, is_actual_serve);
     
@@ -2058,7 +2078,7 @@ where
             cache.clear();
         }
         if let Some(cached_xml) = cache.get(&cache_key) {
-            let response_time = start_time.elapsed().as_millis() as u64;
+            let response_time = start_time.elapsed().as_micros() as u64;
             state.web_metrics.record_browse_request(response_time, true);
             debug!("Browse Cache Hit for Category ObjectID: {} ({}ms)", params.object_id, response_time);
             return (
@@ -2092,7 +2112,7 @@ where
                     .map(map_category_fn)
                     .collect();
                 
-                let response_time = start_time.elapsed().as_millis() as u64;
+                let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_browse_request(response_time, has_data);
                 
                 debug!("ReDB retrieved {} {} in {}ms", subdirectories.len(), category_name, response_time);
@@ -2123,7 +2143,7 @@ where
             Err(e) => {
                 error!("ReDB error getting {}: {}", category_name, e);
                 
-                let response_time = start_time.elapsed().as_millis() as u64;
+                let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_error();
                 state.web_metrics.record_browse_request(response_time, false);
                 
@@ -2138,7 +2158,7 @@ where
     } else if let Some(key_str) = key_str_opt {
         match list_items_fn(key_str.clone()).await {
             Ok(files) => {
-                let response_time = start_time.elapsed().as_millis() as u64;
+                let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_browse_request(response_time, !files.is_empty());
                 
                 debug!("ReDB retrieved {} tracks for {} '{}' in {}ms", files.len(), category_name, key_str, response_time);
@@ -2169,7 +2189,7 @@ where
             Err(e) => {
                 error!("ReDB error getting music by {} {}: {}", category_name, key_str, e);
                 
-                let response_time = start_time.elapsed().as_millis() as u64;
+                let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_error();
                 state.web_metrics.record_browse_request(response_time, false);
                 
@@ -2182,7 +2202,7 @@ where
             }
         }
     } else {
-        let response_time = start_time.elapsed().as_millis() as u64;
+        let response_time = start_time.elapsed().as_micros() as u64;
         state.web_metrics.record_error();
         state.web_metrics.record_browse_request(response_time, false);
         
