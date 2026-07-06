@@ -198,6 +198,121 @@ fn get_tools_list() -> serde_json::Value {
                         }
                     }
                 }
+            },
+            {
+                "name": "list_playlists",
+                "description": "List all playlists currently stored on the server.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            },
+            {
+                "name": "create_playlist",
+                "description": "Create a new media playlist.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "The name of the new playlist"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Optional description for the playlist"
+                        }
+                    },
+                    "required": ["name"]
+                }
+            },
+            {
+                "name": "delete_playlist",
+                "description": "Delete a playlist by its ID.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "playlist_id": {
+                            "type": "integer",
+                            "description": "The numeric ID of the playlist to delete"
+                        }
+                    },
+                    "required": ["playlist_id"]
+                }
+            },
+            {
+                "name": "add_to_playlist",
+                "description": "Add one or more media files to a playlist in bulk.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "playlist_id": {
+                            "type": "integer",
+                            "description": "The numeric ID of the target playlist"
+                        },
+                        "media_file_ids": {
+                            "type": "array",
+                            "items": {
+                                "type": "integer"
+                            },
+                            "description": "An array of media file IDs to add to the playlist"
+                        }
+                    },
+                    "required": ["playlist_id", "media_file_ids"]
+                }
+            },
+            {
+                "name": "remove_from_playlist",
+                "description": "Remove a specific media file from a playlist.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "playlist_id": {
+                            "type": "integer",
+                            "description": "The numeric ID of the playlist"
+                        },
+                        "media_file_id": {
+                            "type": "integer",
+                            "description": "The numeric ID of the media file to remove"
+                        }
+                    },
+                    "required": ["playlist_id", "media_file_id"]
+                }
+            },
+            {
+                "name": "get_playlist_tracks",
+                "description": "Get all media files/tracks in a specific playlist.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "playlist_id": {
+                            "type": "integer",
+                            "description": "The numeric ID of the playlist"
+                        }
+                    },
+                    "required": ["playlist_id"]
+                }
+            },
+            {
+                "name": "cast_playlist_to_tv",
+                "description": "Cast a playlist to a smart TV or media renderer by name. Starts playing the first item of the playlist (or the track specified by track_index).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "playlist_id": {
+                            "type": "integer",
+                            "description": "The numeric ID of the playlist to cast"
+                        },
+                        "tv_name": {
+                            "type": "string",
+                            "description": "The friendly name of the TV (partial, case-insensitive match supported)"
+                        },
+                        "track_index": {
+                            "type": "integer",
+                            "description": "Optional 0-based index of the track in the playlist to start playing from (defaults to 0)"
+                        }
+                    },
+                    "required": ["playlist_id", "tv_name"]
+                }
             }
         ]
     })
@@ -388,6 +503,13 @@ async fn handle_tools_call(state: &AppState, request: &JsonRpcRequest) -> JsonRp
         "cast_media_to_tv" => tool_cast_media_to_tv(state, &arguments).await,
         "control_tv" => tool_control_tv(&arguments).await,
         "list_media" => tool_list_media(state, &arguments).await,
+        "list_playlists" => tool_list_playlists(state).await,
+        "create_playlist" => tool_create_playlist(state, &arguments).await,
+        "delete_playlist" => tool_delete_playlist(state, &arguments).await,
+        "add_to_playlist" => tool_add_to_playlist(state, &arguments).await,
+        "remove_from_playlist" => tool_remove_from_playlist(state, &arguments).await,
+        "get_playlist_tracks" => tool_get_playlist_tracks(state, &arguments).await,
+        "cast_playlist_to_tv" => tool_cast_playlist_to_tv(state, &arguments).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -434,7 +556,7 @@ async fn tool_search_media(
         .await
         .map_err(|e| format!("Database error: {}", e))?;
 
-    let matches: Vec<serde_json::Value> = all_files
+    let mut matches: Vec<_> = all_files
         .into_iter()
         .filter(|f| {
             f.filename.to_lowercase().contains(&query)
@@ -451,13 +573,20 @@ async fn tool_search_media(
                     .map(|a| a.to_lowercase().contains(&query))
                     .unwrap_or(false)
         })
+        .collect();
+
+    // Sort files case-insensitively by filename to maintain natural ordering (e.g. S05E01 before S05E10)
+    matches.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+
+    let matches_json: Vec<serde_json::Value> = matches
+        .into_iter()
         .take(50) // Limit results
         .map(|f| media_file_to_json(&f))
         .collect();
 
     Ok(serde_json::json!({
-        "total_matches": matches.len(),
-        "files": matches
+        "total_matches": matches_json.len(),
+        "files": matches_json
     }))
 }
 
@@ -548,7 +677,7 @@ async fn tool_list_media(
         .await
         .map_err(|e| format!("Database error: {}", e))?;
 
-    let filtered: Vec<serde_json::Value> = all_files
+    let mut filtered: Vec<_> = all_files
         .into_iter()
         .filter(|f| {
             if category == "all" || category.is_empty() {
@@ -557,13 +686,20 @@ async fn tool_list_media(
                 f.mime_type.to_lowercase().starts_with(category)
             }
         })
+        .collect();
+
+    // Sort files case-insensitively by filename
+    filtered.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
+
+    let filtered_json: Vec<serde_json::Value> = filtered
+        .into_iter()
         .take(limit)
         .map(|f| media_file_to_json(&f))
         .collect();
 
     Ok(serde_json::json!({
-        "total_files": filtered.len(),
-        "files": filtered
+        "total_files": filtered_json.len(),
+        "files": filtered_json
     }))
 }
 
@@ -727,6 +863,387 @@ async fn tool_control_tv(args: &serde_json::Value) -> Result<serde_json::Value, 
         "tv": matched_tv.friendly_name
     }))
 }
+async fn tool_list_playlists(state: &AppState) -> Result<serde_json::Value, String> {
+    let playlists = state
+        .database
+        .get_playlists()
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    let list: Vec<serde_json::Value> = playlists
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id,
+                "name": p.name,
+                "description": p.description,
+                "created_at": p.created_at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+                "updated_at": p.updated_at.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "playlists": list
+    }))
+}
+
+async fn tool_create_playlist(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let name = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'name' parameter")?;
+    let description = args
+        .get("description")
+        .and_then(|v| v.as_str());
+
+    let id = state
+        .database
+        .create_playlist(name, description)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    Ok(serde_json::json!({
+        "playlist_id": id,
+        "status": "created",
+        "name": name
+    }))
+}
+
+async fn tool_delete_playlist(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let id = args
+        .get("playlist_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'playlist_id' parameter")?;
+
+    let deleted = state
+        .database
+        .delete_playlist(id)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    Ok(serde_json::json!({
+        "playlist_id": id,
+        "status": if deleted { "deleted" } else { "not_found" }
+    }))
+}
+
+async fn tool_add_to_playlist(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let playlist_id = args
+        .get("playlist_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'playlist_id' parameter")?;
+
+    let media_file_ids = args
+        .get("media_file_ids")
+        .and_then(|v| v.as_array())
+        .ok_or("Missing 'media_file_ids' parameter")?;
+
+    let mut ids_to_add = Vec::new();
+    for (pos, val) in media_file_ids.iter().enumerate() {
+        let id = val.as_i64().ok_or("Invalid media_file_id, must be integer")?;
+        ids_to_add.push((id, pos as u32));
+    }
+
+    let entry_ids = state
+        .database
+        .batch_add_to_playlist(playlist_id, &ids_to_add)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    Ok(serde_json::json!({
+        "playlist_id": playlist_id,
+        "tracks_added": entry_ids.len(),
+        "status": "success"
+    }))
+}
+
+async fn tool_remove_from_playlist(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let playlist_id = args
+        .get("playlist_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'playlist_id' parameter")?;
+
+    let media_file_id = args
+        .get("media_file_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'media_file_id' parameter")?;
+
+    let removed = state
+        .database
+        .remove_from_playlist(playlist_id, media_file_id)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    Ok(serde_json::json!({
+        "playlist_id": playlist_id,
+        "media_file_id": media_file_id,
+        "status": if removed { "removed" } else { "not_found" }
+    }))
+}
+
+async fn tool_get_playlist_tracks(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let playlist_id = args
+        .get("playlist_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'playlist_id' parameter")?;
+
+    let tracks = state
+        .database
+        .get_playlist_tracks(playlist_id)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    let list: Vec<serde_json::Value> = tracks
+        .iter()
+        .map(|f| media_file_to_json(f))
+        .collect();
+
+    Ok(serde_json::json!({
+        "playlist_id": playlist_id,
+        "tracks_count": list.len(),
+        "tracks": list
+    }))
+}
+
+async fn tool_cast_playlist_to_tv(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let playlist_id = args
+        .get("playlist_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'playlist_id' parameter")?;
+
+    let tv_name_query = args
+        .get("tv_name")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'tv_name' parameter")?
+        .to_lowercase();
+
+    let track_index = args
+        .get("track_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    // Get playlist tracks
+    let tracks = state
+        .database
+        .get_playlist_tracks(playlist_id)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+
+    if tracks.is_empty() {
+        return Err("Cannot cast an empty playlist".to_string());
+    }
+
+    if track_index >= tracks.len() {
+        return Err(format!(
+            "track_index {} is out of bounds (playlist only has {} tracks)",
+            track_index,
+            tracks.len()
+        ));
+    }
+
+    // Get selected track
+    let selected_track = &tracks[track_index];
+    let file_id = selected_track.id.ok_or("Media file is missing an ID")?;
+
+    // Discover TVs and find a match
+    let tvs = tv_control::discover_tvs()
+        .await
+        .map_err(|e| format!("TV discovery error: {}", e))?;
+
+    let matched_tv = tvs
+        .iter()
+        .find(|tv| tv.friendly_name.to_lowercase().contains(&tv_name_query))
+        .ok_or(format!(
+            "No TV found matching '{}'. Available TVs: {}",
+            tv_name_query,
+            tvs.iter()
+                .map(|tv| tv.friendly_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))?;
+
+    // Build the media URL
+    let server_ip = state.get_server_ip();
+    let port = state.config.server.port;
+    let media_url = format!(
+        "http://{}:{}/media/{}",
+        server_ip,
+        port,
+        file_id
+    );
+
+    let title = selected_track
+        .title
+        .as_deref()
+        .unwrap_or(&selected_track.filename);
+
+    // Cast selected track
+    tv_control::cast_media(&matched_tv.control_url, &media_url, title, &selected_track.mime_type)
+        .await
+        .map_err(|e| format!("Cast error: {}", e))?;
+
+    // Cancel existing monitor for this TV if any
+    {
+        let mut monitors = state.active_monitors.lock().await;
+        if let Some(cancel_tx) = monitors.remove(&matched_tv.control_url) {
+            let _ = cancel_tx.send(());
+        }
+    }
+
+    // Queue the next track if available (DLNA automatic transitioning)
+    let mut queued_file = None;
+    if track_index + 1 < tracks.len() {
+        let next_track = &tracks[track_index + 1];
+        if let Some(next_id) = next_track.id {
+            let next_media_url = format!(
+                "http://{}:{}/media/{}",
+                server_ip,
+                port,
+                next_id
+            );
+            let next_title = next_track
+                .title
+                .as_deref()
+                .unwrap_or(&next_track.filename);
+            
+            // Queue on the TV and log/ignore failures on non-compliant devices
+            match tv_control::set_next_media(
+                &matched_tv.control_url,
+                &next_media_url,
+                next_title,
+                &next_track.mime_type,
+            ).await {
+                Ok(_) => {
+                    queued_file = Some(next_track.filename.clone());
+                }
+                Err(e) => {
+                    tracing::warn!("SetNextAVTransportURI not supported by TV: {}", e);
+                }
+            }
+        }
+    }
+
+    // Spawn new queue monitor to dynamically handle subsequent track transitions
+    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut monitors = state.active_monitors.lock().await;
+        monitors.insert(matched_tv.control_url.clone(), cancel_tx);
+    }
+
+    let state_clone = state.clone();
+    let control_url_clone = matched_tv.control_url.clone();
+    let server_ip_clone = server_ip.clone();
+    
+    tokio::spawn(async move {
+        let mut current_idx = track_index;
+        
+        loop {
+            // Check cancellation or sleep 4s
+            tokio::select! {
+                _ = &mut cancel_rx => {
+                    debug!("Queue monitor cancelled for TV: {}", control_url_clone);
+                    break;
+                }
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(4)) => {}
+            }
+            
+            // Poll TV current playing track URI and transport state
+            let current_uri = match tv_control::get_position_info(&control_url_clone).await {
+                Ok(uri) => uri,
+                Err(e) => {
+                    debug!("Queue monitor failed to get position info: {}", e);
+                    continue;
+                }
+            };
+            
+            let transport_state = match tv_control::get_transport_state(&control_url_clone).await {
+                Ok(st) => st,
+                Err(_) => "STOPPED".to_string(),
+            };
+            
+            // Fetch playlist tracks from DB to get the latest list
+            let latest_tracks = match state_clone.database.get_playlist_tracks(playlist_id).await {
+                Ok(t) => t,
+                Err(_) => break,
+            };
+            
+            if latest_tracks.is_empty() {
+                break;
+            }
+            
+            // If current track URI matches a track URL, check if the TV transitioned
+            let mut matched_any = false;
+            for (idx, track) in latest_tracks.iter().enumerate() {
+                if let Some(id) = track.id {
+                    let track_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, id);
+                    if current_uri == track_media_url {
+                        matched_any = true;
+                        if idx != current_idx {
+                            info!("Queue monitor: TV transitioned to track index {} ({})", idx, track.filename);
+                            current_idx = idx;
+                            
+                            // Queue the next track if available
+                            if current_idx + 1 < latest_tracks.len() {
+                                let next_track = &latest_tracks[current_idx + 1];
+                                if let Some(next_id) = next_track.id {
+                                    let next_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, next_id);
+                                    let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
+                                    if let Err(e) = tv_control::set_next_media(
+                                        &control_url_clone,
+                                        &next_media_url,
+                                        next_title,
+                                        &next_track.mime_type,
+                                    ).await {
+                                        warn!("Queue monitor: Failed to queue next track: {}", e);
+                                    } else {
+                                        debug!("Queue monitor: Queued next track index {} ({})", current_idx + 1, next_track.filename);
+                                    }
+                                }
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+            
+            // If TV is stopped and not playing any of our tracks, stop monitoring
+            if !matched_any && transport_state == "STOPPED" {
+                debug!("Queue monitor: TV stopped playing the playlist");
+                break;
+            }
+        }
+    });
+
+    Ok(serde_json::json!({
+        "status": "playing",
+        "playlist_id": playlist_id,
+        "tracks_count": tracks.len(),
+        "current_index": track_index,
+        "current_file": selected_track.filename,
+        "queued_next_file": queued_file,
+        "tv": matched_tv.friendly_name,
+        "media_url": media_url
+    }))
+}
 
 // ──────────────────────────────────────────
 // Helpers
@@ -827,7 +1344,14 @@ mod tests {
         assert!(tool_names.contains(&"cast_media_to_tv"));
         assert!(tool_names.contains(&"control_tv"));
         assert!(tool_names.contains(&"list_media"));
-        assert_eq!(tool_names.len(), 8);
+        assert!(tool_names.contains(&"list_playlists"));
+        assert!(tool_names.contains(&"create_playlist"));
+        assert!(tool_names.contains(&"delete_playlist"));
+        assert!(tool_names.contains(&"add_to_playlist"));
+        assert!(tool_names.contains(&"remove_from_playlist"));
+        assert!(tool_names.contains(&"get_playlist_tracks"));
+        assert!(tool_names.contains(&"cast_playlist_to_tv"));
+        assert_eq!(tool_names.len(), 15);
     }
 
     #[test]

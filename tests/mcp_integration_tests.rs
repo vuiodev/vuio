@@ -59,6 +59,7 @@ async fn test_mcp_initialize_and_tools_list() {
         log_file_path: temp_dir.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Add a fake client channel so message handler can send back to the SSE receiver
@@ -164,4 +165,85 @@ async fn test_mcp_initialize_and_tools_list() {
     let list_data: serde_json::Value = serde_json::from_str(text_list).unwrap();
     assert_eq!(list_data["total_files"], 1);
     assert_eq!(list_data["files"][0]["filename"], "song.mp3");
+
+    // 7. Test playlist creation via MCP
+    let create_pl_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 5,
+        "params": {
+            "name": "create_playlist",
+            "arguments": {
+                "name": "My Favorites",
+                "description": "Best tracks"
+            }
+        }
+    });
+
+    let _resp = message_handler(
+        State(app_state.clone()),
+        Query(MessageQuery { client_id: client_id.clone() }),
+        create_pl_req.to_string()
+    ).await;
+
+    let response_str5 = rx.recv().await.unwrap();
+    let create_pl_res: serde_json::Value = serde_json::from_str(&response_str5).unwrap();
+    assert_eq!(create_pl_res["id"], 5);
+
+    let create_text = create_pl_res["result"]["content"][0]["text"].as_str().unwrap();
+    let create_data: serde_json::Value = serde_json::from_str(create_text).unwrap();
+    let playlist_id = create_data["playlist_id"].as_i64().unwrap();
+    assert!(playlist_id > 0);
+
+    // 8. Test adding a media file to the playlist in bulk
+    let add_track_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 6,
+        "params": {
+            "name": "add_to_playlist",
+            "arguments": {
+                "playlist_id": playlist_id,
+                "media_file_ids": [1] // The song we added has ID 1 (inserted into database)
+            }
+        }
+    });
+
+    let _resp = message_handler(
+        State(app_state.clone()),
+        Query(MessageQuery { client_id: client_id.clone() }),
+        add_track_req.to_string()
+    ).await;
+
+    let response_str6 = rx.recv().await.unwrap();
+    let add_track_res: serde_json::Value = serde_json::from_str(&response_str6).unwrap();
+    assert_eq!(add_track_res["id"], 6);
+
+    // 9. Test getting tracks in the playlist
+    let get_tracks_req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 7,
+        "params": {
+            "name": "get_playlist_tracks",
+            "arguments": {
+                "playlist_id": playlist_id
+            }
+        }
+    });
+
+    let _resp = message_handler(
+        State(app_state.clone()),
+        Query(MessageQuery { client_id: client_id.clone() }),
+        get_tracks_req.to_string()
+    ).await;
+
+    let response_str7 = rx.recv().await.unwrap();
+    let get_tracks_res: serde_json::Value = serde_json::from_str(&response_str7).unwrap();
+    assert_eq!(get_tracks_res["id"], 7);
+
+    let tracks_text = get_tracks_res["result"]["content"][0]["text"].as_str().unwrap();
+    let tracks_data: serde_json::Value = serde_json::from_str(tracks_text).unwrap();
+    assert_eq!(tracks_data["tracks_count"], 1);
+    assert_eq!(tracks_data["tracks"][0]["filename"], "song.mp3");
 }

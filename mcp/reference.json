@@ -125,6 +125,113 @@
           }
         }
       }
+    },
+    {
+      "name": "list_playlists",
+      "description": "List all playlists currently stored on the server.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 9,
+        "params": {
+          "name": "list_playlists",
+          "arguments": {}
+        }
+      }
+    },
+    {
+      "name": "create_playlist",
+      "description": "Create a new media playlist.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 10,
+        "params": {
+          "name": "create_playlist",
+          "arguments": {
+            "name": "My Series Playlist",
+            "description": "Season 1 episodes"
+          }
+        }
+      }
+    },
+    {
+      "name": "delete_playlist",
+      "description": "Delete a playlist by its ID.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 11,
+        "params": {
+          "name": "delete_playlist",
+          "arguments": {
+            "playlist_id": 42
+          }
+        }
+      }
+    },
+    {
+      "name": "add_to_playlist",
+      "description": "Add multiple media file IDs to a playlist in bulk.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 12,
+        "params": {
+          "name": "add_to_playlist",
+          "arguments": {
+            "playlist_id": 42,
+            "media_file_ids": [286, 287, 288]
+          }
+        }
+      }
+    },
+    {
+      "name": "remove_from_playlist",
+      "description": "Remove a specific media file from a playlist.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 13,
+        "params": {
+          "name": "remove_from_playlist",
+          "arguments": {
+            "playlist_id": 42,
+            "media_file_id": 287
+          }
+        }
+      }
+    },
+    {
+      "name": "get_playlist_tracks",
+      "description": "Get all media files/tracks in a specific playlist.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 14,
+        "params": {
+          "name": "get_playlist_tracks",
+          "arguments": {
+            "playlist_id": 42
+          }
+        }
+      }
+    },
+    {
+      "name": "cast_playlist_to_tv",
+      "description": "Cast a playlist to a smart TV by name. Starts playing the first item.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 15,
+        "params": {
+          "name": "cast_playlist_to_tv",
+          "arguments": {
+            "playlist_id": 42,
+            "tv_name": "Living Room TV"
+          }
+        }
+      }
     }
   ]
 }

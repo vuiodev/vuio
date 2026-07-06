@@ -278,6 +278,144 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
     Ok(())
 }
 
+/// Queue the next media file to a TV by sending SOAP SetNextAVTransportURI
+pub async fn set_next_media(control_url: &str, media_url: &str, title: &str, mime_type: &str) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()?;
+
+    let class = if mime_type.starts_with("audio/") {
+        "object.item.audioItem.musicTrack"
+    } else if mime_type.starts_with("video/") {
+        "object.item.videoItem"
+    } else if mime_type.starts_with("image/") {
+        "object.item.imageItem.photo"
+    } else {
+        "object.item"
+    };
+
+    // Construct fully compliant DIDL-Lite metadata with standard XML escaping for SOAP
+    let didl_metadata = format!(
+        r#"&lt;DIDL-Lite xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot; xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot;&gt;&lt;item id=&quot;0&quot; parentID=&quot;0&quot; restricted=&quot;1&quot;&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;{}&lt;/upnp:class&gt;&lt;res protocolInfo=&quot;http-get:*:{}:*&quot;&gt;{}&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#,
+        title, class, mime_type, media_url
+    );
+
+    let body = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+    s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:SetNextAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+            <InstanceID>0</InstanceID>
+            <NextURI>{media_url}</NextURI>
+            <NextURIMetaData>{didl_metadata}</NextURIMetaData>
+        </u:SetNextAVTransportURI>
+    </s:Body>
+</s:Envelope>"#
+    );
+
+    let resp = client
+        .post(control_url)
+        .header("Content-Type", "text/xml; charset=\"utf-8\"")
+        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#SetNextAVTransportURI\"")
+        .body(body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("SetNextAVTransportURI failed (HTTP {}): {}", status, err_body);
+    }
+
+    debug!("SetNextAVTransportURI succeeded on {}", control_url);
+    Ok(())
+}
+
+/// Query what media URI is currently active/playing on the TV
+pub async fn get_position_info(control_url: &str) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+
+    let body = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+    s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:GetPositionInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+            <InstanceID>0</InstanceID>
+        </u:GetPositionInfo>
+    </s:Body>
+</s:Envelope>"#;
+
+    let resp = client
+        .post(control_url)
+        .header("Content-Type", "text/xml; charset=\"utf-8\"")
+        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo\"")
+        .body(body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("GetPositionInfo failed (HTTP {}): {}", status, err_body);
+    }
+
+    let text = resp.text().await?;
+    
+    // Extract TrackURI
+    if let Some(uri_part) = text.split("<TrackURI>").nth(1) {
+        if let Some(uri) = uri_part.split("</TrackURI>").next() {
+            return Ok(uri.trim().to_string());
+        }
+    }
+
+    anyhow::bail!("TrackURI not found in SOAP response");
+}
+
+/// Query the current transport state (PLAYING, STOPPED, PAUSED_PLAYBACK) of the TV
+pub async fn get_transport_state(control_url: &str) -> Result<String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()?;
+
+    let body = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
+    s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:GetTransportInfo xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+            <InstanceID>0</InstanceID>
+        </u:GetTransportInfo>
+    </s:Body>
+</s:Envelope>"#;
+
+    let resp = client
+        .post(control_url)
+        .header("Content-Type", "text/xml; charset=\"utf-8\"")
+        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"")
+        .body(body)
+        .send()
+        .await?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("GetTransportInfo failed (HTTP {}): {}", status, err_body);
+    }
+
+    let text = resp.text().await?;
+    if let Some(state_part) = text.split("<CurrentTransportState>").nth(1) {
+        if let Some(state) = state_part.split("</CurrentTransportState>").next() {
+            return Ok(state.trim().to_string());
+        }
+    }
+
+    Ok("STOPPED".to_string())
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use super::*;

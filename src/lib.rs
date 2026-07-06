@@ -38,6 +38,7 @@ pub mod state {
         pub log_file_path: std::path::PathBuf,
         pub browse_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, String>>>,
         pub mcp_clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
+        pub active_monitors: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
     }
 
     impl AppState {

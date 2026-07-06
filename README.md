@@ -503,6 +503,13 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
 | `cast_media_to_tv` | `file_id` (integer), `tv_name` (string) | Start playing a media file on a discovered smart TV |
 | `control_tv` | `tv_name` (string), `action` ("play"\|"pause"\|"stop") | Send playback control commands to a smart TV |
 | `list_media` | `category` (optional string), `limit` (optional integer) | Retrieve a flat list of indexed media files (all, audio, video, image) |
+| `list_playlists` | None | List all playlists stored on the server |
+| `create_playlist` | `name` (string), `description` (optional string) | Create a new media playlist |
+| `delete_playlist` | `playlist_id` (integer) | Delete a playlist by ID |
+| `add_to_playlist` | `playlist_id` (integer), `media_file_ids` (integer[]) | Add multiple tracks in bulk to a playlist |
+| `remove_from_playlist` | `playlist_id` (integer), `media_file_id` (integer) | Remove a specific track from a playlist |
+| `get_playlist_tracks` | `playlist_id` (integer) | Retrieve all media files/tracks in a specific playlist |
+| `cast_playlist_to_tv` | `playlist_id` (integer), `tv_name` (string) | Cast a playlist to a local smart TV and start playing it |
 
 ### Example Usage
 
