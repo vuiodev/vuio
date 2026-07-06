@@ -2144,3 +2144,148 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
         metrics_json.to_string(),
     )
 }
+
+/// Helper to read the last N lines of the log file using a ring buffer
+async fn read_last_log_lines(path: &std::path::Path, limit: usize) -> Result<String, std::io::Error> {
+    use tokio::fs::File;
+    use tokio::io::{BufReader, AsyncBufReadExt};
+    
+    let file = File::open(path).await?;
+    let reader = BufReader::new(file);
+    let mut queue = std::collections::VecDeque::with_capacity(limit + 1);
+    let mut lines_stream = reader.lines();
+    
+    while let Some(line) = lines_stream.next_line().await? {
+        queue.push_back(line);
+        if queue.len() > limit {
+            queue.pop_front();
+        }
+    }
+    
+    let mut result = String::new();
+    for line in queue {
+        result.push_str(&line);
+        result.push('\n');
+    }
+    Ok(result)
+}
+
+/// Liveness probe to check if the server is running
+pub async fn healthz_handler() -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        r#"{"status":"healthy"}"#,
+    )
+}
+
+/// Readiness probe to check if the database is accessible
+pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.database.get_stats().await {
+        Ok(_) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "application/json")],
+            r#"{"status":"ready"}"#.to_string(),
+        ),
+        Err(e) => {
+            error!("Readiness check failed: {}", e);
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                [(header::CONTENT_TYPE, "application/json")],
+                format!(r#"{{"status":"unhealthy","error":{}}}"#, serde_json::to_string(&e.to_string()).unwrap_or_default()),
+            )
+        }
+    }
+}
+
+/// Serve metrics in standard Prometheus Exposition Format (plain text)
+pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let stats = state.web_metrics.get_stats();
+    
+    let (db_files, db_total_size, db_size) = match state.database.get_stats().await {
+        Ok(s) => (s.total_files, s.total_size, s.database_size),
+        Err(_) => (0, 0, 0),
+    };
+
+    let mut body = String::new();
+    
+    body.push_str("# HELP vuio_web_browse_requests_total Total number of media browse requests\n");
+    body.push_str("# TYPE vuio_web_browse_requests_total counter\n");
+    body.push_str(&format!("vuio_web_browse_requests_total {}\n\n", stats.browse_requests));
+    
+    body.push_str("# HELP vuio_web_cache_hits_total Total number of browse cache hits\n");
+    body.push_str("# TYPE vuio_web_cache_hits_total counter\n");
+    body.push_str(&format!("vuio_web_cache_hits_total {}\n\n", stats.cache_hits));
+    
+    body.push_str("# HELP vuio_web_cache_misses_total Total number of browse cache misses\n");
+    body.push_str("# TYPE vuio_web_cache_misses_total counter\n");
+    body.push_str(&format!("vuio_web_cache_misses_total {}\n\n", stats.cache_misses));
+    
+    body.push_str("# HELP vuio_web_directory_listings_total Total number of directory listing requests\n");
+    body.push_str("# TYPE vuio_web_directory_listings_total counter\n");
+    body.push_str(&format!("vuio_web_directory_listings_total {}\n\n", stats.directory_listings));
+    
+    body.push_str("# HELP vuio_web_file_serves_total Total number of files served\n");
+    body.push_str("# TYPE vuio_web_file_serves_total counter\n");
+    body.push_str(&format!("vuio_web_file_serves_total {}\n\n", stats.file_serves));
+    
+    body.push_str("# HELP vuio_web_errors_total Total number of web handler errors\n");
+    body.push_str("# TYPE vuio_web_errors_total counter\n");
+    body.push_str(&format!("vuio_web_errors_total {}\n\n", stats.errors));
+    
+    body.push_str("# HELP vuio_web_average_response_time_ms Average response time in milliseconds\n");
+    body.push_str("# TYPE vuio_web_average_response_time_ms gauge\n");
+    body.push_str(&format!("vuio_web_average_response_time_ms {}\n\n", stats.average_response_time_ms));
+
+    body.push_str("# HELP vuio_database_files Total media files indexed in database\n");
+    body.push_str("# TYPE vuio_database_files gauge\n");
+    body.push_str(&format!("vuio_database_files {}\n\n", db_files));
+
+    body.push_str("# HELP vuio_database_total_size_bytes Cumulative size of all media files in bytes\n");
+    body.push_str("# TYPE vuio_database_total_size_bytes gauge\n");
+    body.push_str(&format!("vuio_database_total_size_bytes {}\n\n", db_total_size));
+
+    body.push_str("# HELP vuio_database_size_bytes Size of the database file on disk in bytes\n");
+    body.push_str("# TYPE vuio_database_size_bytes gauge\n");
+    body.push_str(&format!("vuio_database_size_bytes {}\n", db_size));
+
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+}
+
+#[derive(serde::Deserialize)]
+pub struct LogsQuery {
+    pub limit: Option<usize>,
+}
+
+/// Serve log file contents for Loki / Grafana scraping or debugging
+pub async fn get_logs_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(query): axum::extract::Query<LogsQuery>,
+) -> impl IntoResponse {
+    let limit = query.limit.unwrap_or(100).min(5000); // Caps limit at 5000 lines to prevent memory issues
+    
+    match read_last_log_lines(&state.log_file_path, limit).await {
+        Ok(content) => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            content,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::OK,
+            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            "No log entries recorded yet.".to_string(),
+        ),
+        Err(e) => {
+            error!("Failed to read log file: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                format!("Failed to read log file: {}", e),
+            )
+        }
+    }
+}

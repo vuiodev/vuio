@@ -25,6 +25,7 @@ pub mod state {
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
         pub web_metrics: Arc<crate::web::handlers::WebHandlerMetrics>,
         pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
+        pub log_file_path: std::path::PathBuf,
     }
 
     impl AppState {

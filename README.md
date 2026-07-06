@@ -434,6 +434,29 @@ You can fully control where logs are written and their severity level using comm
 
 ---
 
+## Monitoring & Probes (HA & Kubernetes Native)
+
+VuIO contains built-in endpoints optimized for Kubernetes orchestration and observability via Grafana, Prometheus, and Loki.
+
+### Kubernetes Probes
+- **Liveness Probe (`/healthz`)**: A lightweight endpoint indicating that the web server is running.
+  - Returns: `200 OK` with JSON `{"status": "healthy"}`
+- **Readiness Probe (`/readyz`)**: Verifies database connectivity and readiness to serve requests.
+  - Returns: `200 OK` with JSON `{"status": "ready"}` if healthy, or `503 Service Unavailable` if database access fails.
+
+### Metrics (Prometheus / Grafana)
+- **Prometheus Exposition Format (`/metrics`)**: Returns raw performance metrics (browse counts, cache hit rate, response times, database size) formatted for Prometheus.
+  - Returns: `200 OK` with `text/plain` Prometheus exposition metrics.
+- **JSON Metrics (`/metrics/json`)**: Legacy JSON format metrics.
+  - Returns: `200 OK` with JSON telemetry.
+
+### Log Streaming (Grafana / Loki / Alloy)
+- **Log Scraper Endpoint (`/logs`)**: Stream the last N log entries (default `100`, max `5000`) dynamically over HTTP. Useful for pull-based logs scraping.
+  - Query parameters: `?limit=N`
+  - Returns: `200 OK` with raw plaintext log lines.
+
+---
+
 ## Testing
 
 ```bash

@@ -200,7 +200,7 @@ async fn main() -> anyhow::Result<()> {
     let log_file_path = cli_args.log_file.as_ref().map(PathBuf::from);
     logging::init_logging_with_options(
         cli_args.log_level.as_deref(),
-        log_file_path,
+        log_file_path.clone(),
         cli_args.debug,
     )
     .context("Failed to initialize logging")?;
@@ -269,6 +269,9 @@ async fn main() -> anyhow::Result<()> {
     // Create shared application state
     let filesystem_manager: Arc<dyn vuio::platform::filesystem::FileSystemManager> =
         Arc::from(create_platform_filesystem_manager());
+    let resolved_log_file = log_file_path.unwrap_or_else(|| {
+        vuio::config::AppConfig::get_platform_log_file_path()
+    });
     let app_state = AppState {
         config: config.clone(),
         database: database.clone(),
@@ -277,6 +280,7 @@ async fn main() -> anyhow::Result<()> {
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
         web_metrics: Arc::new(vuio::web::handlers::WebHandlerMetrics::new()),
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        log_file_path: resolved_log_file,
     };
 
     // Start file system monitoring
