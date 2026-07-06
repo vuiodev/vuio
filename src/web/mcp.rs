@@ -1021,25 +1021,13 @@ async fn tool_get_playlist_tracks(
     }))
 }
 
-async fn tool_cast_playlist_to_tv(
+pub async fn cast_playlist_helper(
     state: &AppState,
-    args: &serde_json::Value,
+    playlist_id: i64,
+    tv_name_query: &str,
+    track_index: usize,
 ) -> Result<serde_json::Value, String> {
-    let playlist_id = args
-        .get("playlist_id")
-        .and_then(|v| v.as_i64())
-        .ok_or("Missing 'playlist_id' parameter")?;
-
-    let tv_name_query = args
-        .get("tv_name")
-        .and_then(|v| v.as_str())
-        .ok_or("Missing 'tv_name' parameter")?
-        .to_lowercase();
-
-    let track_index = args
-        .get("track_index")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    let tv_name_query = tv_name_query.to_lowercase();
 
     // Get playlist tracks
     let tracks = state
@@ -1243,6 +1231,28 @@ async fn tool_cast_playlist_to_tv(
         "tv": matched_tv.friendly_name,
         "media_url": media_url
     }))
+}
+
+async fn tool_cast_playlist_to_tv(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let playlist_id = args
+        .get("playlist_id")
+        .and_then(|v| v.as_i64())
+        .ok_or("Missing 'playlist_id' parameter")?;
+
+    let tv_name_query = args
+        .get("tv_name")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'tv_name' parameter")?;
+
+    let track_index = args
+        .get("track_index")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    cast_playlist_helper(state, playlist_id, tv_name_query, track_index).await
 }
 
 // ──────────────────────────────────────────

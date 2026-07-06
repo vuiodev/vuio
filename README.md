@@ -29,6 +29,8 @@ cargo build --release
 - **Cross-platform** - Native integration for Windows, macOS, Linux
 - **Redb Database** - Embedded ACID-compliant database with crash recovery
 
+For a detailed guide on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](api.md).
+
 ## Web Interface & Search
 
 VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: `http://localhost:8080`):

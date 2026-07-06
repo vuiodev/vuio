@@ -1057,6 +1057,35 @@ pub async fn root_handler(
             color: #ef4444;
             background: rgba(239, 68, 68, 0.08);
         }}
+
+        /* TV Selection Modal Styles */
+        .tv-select-btn {{
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            color: var(--text-primary);
+            padding: 0.85rem 1.15rem;
+            border-radius: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            transition: all 0.2s ease;
+            font-weight: 600;
+            outline: none;
+            width: 100%;
+            font-size: 0.95rem;
+        }}
+        .tv-select-btn:hover {{
+            border-color: var(--accent-color);
+            background: rgba(0, 240, 255, 0.06);
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
+            transform: translateY(-1px);
+        }}
+        .tv-icon-wrapper {{
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+        }}
     </style>
 </head>
 <body>
@@ -1281,6 +1310,24 @@ pub async fn root_handler(
         </div>
     </div>
 
+    <!-- TV Selection Modal -->
+    <div id="tv-modal" class="lightbox-modal" style="display: none;" onclick="closeTvModal()">
+        <span class="lightbox-close" onclick="closeTvModal()">&times;</span>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()" style="max-width: 420px; background: #0f172a; border: 1px solid var(--card-border); border-radius: 16px; padding: 1.75rem; display: flex; flex-direction: column; gap: 1.25rem; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);">
+            <div style="display: flex; flex-direction: column; gap: 0.35rem;">
+                <h3 style="font-size: 1.3rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 0.5rem;">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                    Play on TV
+                </h3>
+                <p id="tv-modal-subtitle" style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.4;">Select the destination TV screen to play folder "<span id="tv-modal-folder-name" style="color: var(--text-primary); font-weight: 600;"></span>"</p>
+            </div>
+            <div id="tv-list-container" style="display: flex; flex-direction: column; gap: 0.75rem; margin: 0.25rem 0; max-height: 250px; overflow-y: auto; padding-right: 4px;">
+                <!-- TV buttons will be dynamically generated here -->
+            </div>
+            <button onclick="closeTvModal()" style="background: rgba(255, 255, 255, 0.04); border: 1px solid var(--card-border); color: var(--text-secondary); border-radius: 10px; padding: 0.7rem; cursor: pointer; transition: all 0.2s; font-weight: 600;" onmouseover="this.style.background='rgba(255,255,255,0.08)'; this.style.color='var(--text-primary)';" onmouseout="this.style.background='rgba(255,255,255,0.04)'; this.style.color='var(--text-secondary)';">Cancel</button>
+        </div>
+    </div>
+
     <script>
         let activeNav = 'browse';
         let metricsTimer = null;
@@ -1378,6 +1425,153 @@ pub async fn root_handler(
             playlist = folderAudio;
             currentTrackIndex = 0;
             loadAndPlayTrack();
+        }}
+
+        function playVideoFolderOnTv(folderName) {{
+            const targetPath = [...currentPath, folderName];
+            
+            // Filter all video files that reside in targetPath or any subdirectory
+            let folderVideos = filesData.filter(file => {{
+                if (file.cat !== 'video') return false;
+                const comps = getRelativeComponents(file.path);
+                if (comps.length <= targetPath.length) return false;
+                for (let i = 0; i < targetPath.length; i++) {{
+                    if (comps[i] !== targetPath[i]) return false;
+                }}
+                return true;
+            }});
+
+            if (folderVideos.length === 0) {{
+                showToast("No video files found in this folder.", "error");
+                return;
+            }}
+
+            // Sort playlist alphabetically by name
+            folderVideos.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            const fileIds = folderVideos.map(v => v.id);
+
+            showToast("Discovering TVs on local network...", "info");
+            
+            fetch('/api/tvs')
+                .then(res => res.json())
+                .then(tvs => {{
+                    if (!Array.isArray(tvs) || tvs.length === 0) {{
+                        showToast("No TVs found on your local network.", "error");
+                        return;
+                    }}
+                    
+                    if (tvs.length === 1) {{
+                        // Only one TV found, cast immediately!
+                        castPlaylistToTv(tvs[0], folderName, fileIds);
+                    }} else {{
+                        // Multiple TVs found, show selection modal
+                        showTvSelectionModal(tvs, folderName, fileIds);
+                    }}
+                }})
+                .catch(err => {{
+                    console.error("TV discovery failed", err);
+                    showToast("Failed to discover TVs: " + err, "error");
+                }});
+        }}
+
+        function showTvSelectionModal(tvs, folderName, fileIds) {{
+            document.getElementById('tv-modal-folder-name').textContent = folderName;
+            const container = document.getElementById('tv-list-container');
+            container.innerHTML = '';
+            
+            tvs.forEach(tvName => {{
+                const btn = document.createElement('button');
+                btn.className = 'tv-select-btn';
+                btn.onclick = () => {{
+                    closeTvModal();
+                    castPlaylistToTv(tvName, folderName, fileIds);
+                }};
+                btn.innerHTML = `
+                    <div class="tv-icon-wrapper">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                        <span>${{tvName}}</span>
+                    </div>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                `;
+                container.appendChild(btn);
+            }});
+            
+            document.getElementById('tv-modal').style.display = 'flex';
+        }}
+
+        function closeTvModal() {{
+            document.getElementById('tv-modal').style.display = 'none';
+        }}
+
+        function castPlaylistToTv(tvName, folderName, fileIds) {{
+            showToast("Casting playlist to " + tvName + "...", "info");
+            
+            fetch('/api/cast/playlist', {{
+                method: 'POST',
+                headers: {{ 'Content-Type': 'application/json' }},
+                body: JSON.stringify({{
+                    tv_name: tvName,
+                    folder_name: folderName,
+                    file_ids: fileIds
+                }})
+            }})
+            .then(res => res.json())
+            .then(data => {{
+                if (data.error) {{
+                    showToast("Cast error: " + data.error, "error");
+                }} else {{
+                    showToast("Successfully playing on " + tvName + "!", "success");
+                }}
+            }})
+            .catch(err => {{
+                console.error("Cast request failed", err);
+                showToast("Failed to cast to TV: " + err, "error");
+            }});
+        }}
+
+        function showToast(message, type = 'info') {{
+            let container = document.getElementById('toast-container');
+            if (!container) {{
+                container = document.createElement('div');
+                container.id = 'toast-container';
+                container.style.position = 'fixed';
+                container.style.bottom = '1.5rem';
+                container.style.right = '1.5rem';
+                container.style.display = 'flex';
+                container.style.flexDirection = 'column';
+                container.style.gap = '0.5rem';
+                container.style.zIndex = '9999';
+                document.body.appendChild(container);
+            }}
+
+            const toast = document.createElement('div');
+            toast.style.background = '#1e293b';
+            toast.style.border = '1px solid ' + (type === 'error' ? '#ef4444' : type === 'success' ? '#10b981' : 'var(--accent-color)');
+            toast.style.color = '#fff';
+            toast.style.padding = '0.8rem 1.4rem';
+            toast.style.borderRadius = '12px';
+            toast.style.fontSize = '0.9rem';
+            toast.style.fontWeight = '600';
+            toast.style.boxShadow = '0 15px 30px rgba(0,0,0,0.3)';
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateY(15px)';
+            toast.style.transition = 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
+            
+            toast.textContent = message;
+            container.appendChild(toast);
+            
+            setTimeout(() => {{
+                toast.style.opacity = '1';
+                toast.style.transform = 'translateY(0)';
+            }}, 15);
+            
+            setTimeout(() => {{
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(-15px)';
+                setTimeout(() => {{
+                    toast.remove();
+                }}, 300);
+            }}, 4500);
         }}
 
         function loadAndPlayTrack() {{
@@ -1784,6 +1978,29 @@ pub async fn root_handler(
                     `;
                 }}
 
+                // Calculate video files in this folder to see if "Play on TV" is applicable
+                const targetPath = [...currentPath, folderName];
+                const folderVideos = filesData.filter(file => {{
+                    if (file.cat !== 'video') return false;
+                    const comps = getRelativeComponents(file.path);
+                    if (comps.length <= targetPath.length) return false;
+                    for (let i = 0; i < targetPath.length; i++) {{
+                        if (comps[i] !== targetPath[i]) return false;
+                    }}
+                    return true;
+                }});
+
+                let tvActionHtml = '';
+                if ((currentTab === 'video' || currentTab === 'all') && folderVideos.length > 0) {{
+                    tvActionHtml = `
+                        <div class="action-area" onclick="event.stopPropagation(); playVideoFolderOnTv('${{folderName}}')">
+                            <button class="btn-action" title="Play on TV" style="color: var(--accent-color);">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                            </button>
+                        </div>
+                    `;
+                }}
+
                 folderCard.innerHTML = `
                     <div class="media-info">
                         <div class="media-icon-wrapper">
@@ -1794,7 +2011,10 @@ pub async fn root_handler(
                             <div class="media-meta">Folder</div>
                         </div>
                     </div>
-                    ${{actionAreaHtml}}
+                    <div style="display: flex; gap: 0.5rem;">
+                        ${{actionAreaHtml}}
+                        ${{tvActionHtml}}
+                    </div>
                 `;
                 fileListContainer.appendChild(folderCard);
             }});
@@ -3608,5 +3828,83 @@ pub async fn get_logs_handler(
                 format!("Failed to read log file: {}", e),
             )
         }
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct ApiCastPlaylistRequest {
+    pub tv_name: String,
+    pub folder_name: String,
+    pub file_ids: Vec<i64>,
+}
+
+/// Discover UPnP/DLNA TVs and return their friendly names in JSON format
+pub async fn api_list_tvs() -> impl IntoResponse {
+    match crate::tv_control::discover_tvs().await {
+        Ok(tvs) => {
+            let names: Vec<String> = tvs.into_iter().map(|tv| tv.friendly_name).collect();
+            (StatusCode::OK, axum::Json(names))
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(vec![format!("Discovery error: {}", e)]),
+        ),
+    }
+}
+
+/// Create a temporary playlist with the provided video files and cast it to the TV
+pub async fn api_cast_playlist(
+    State(state): State<AppState>,
+    axum::Json(payload): axum::Json<ApiCastPlaylistRequest>,
+) -> impl IntoResponse {
+    // 1. List playlists to find and delete old "Web Cast - " playlists
+    let playlists = match state.database.get_playlists().await {
+        Ok(list) => list,
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+        ),
+    };
+
+    for pl in playlists {
+        if pl.name.starts_with("Web Cast - ") {
+            if let Some(id) = pl.id {
+                let _ = state.database.delete_playlist(id).await;
+            }
+        }
+    }
+
+    // 2. Create the new playlist
+    let playlist_name = format!("Web Cast - {}", payload.folder_name);
+    let playlist_id = match state.database.create_playlist(&playlist_name, None).await {
+        Ok(id) => id,
+        Err(e) => return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("Failed to create playlist: {}", e) })),
+        ),
+    };
+
+    // 3. Add file IDs to the playlist (batch add)
+    let tracks_to_add: Vec<(i64, u32)> = payload
+        .file_ids
+        .iter()
+        .enumerate()
+        .map(|(idx, &id)| (id, idx as u32))
+        .collect();
+
+    if let Err(e) = state.database.batch_add_to_playlist(playlist_id, &tracks_to_add).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": format!("Failed to add tracks: {}", e) })),
+        );
+    }
+
+    // 4. Cast the playlist starting at index 0 using our shared helper
+    match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.tv_name, 0).await {
+        Ok(result) => (StatusCode::OK, axum::Json(result)),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": format!("Cast error: {}", e) })),
+        ),
     }
 }
