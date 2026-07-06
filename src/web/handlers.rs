@@ -961,19 +961,63 @@ pub async fn root_handler(
 
         .player-progress-bar input[type="range"] {{
             flex: 1;
-            height: 4px;
-            border-radius: 2px;
-            background: rgba(255, 255, 255, 0.1);
+            -webkit-appearance: none;
+            appearance: none;
+            height: 24px;
+            background: transparent;
+            margin: 0;
+            padding: 0;
             outline: none;
             cursor: pointer;
-            accent-color: var(--accent-color);
-            -webkit-appearance: none;
         }}
 
+        /* Webkit (Chrome, Safari, Edge) */
         .player-progress-bar input[type="range"]::-webkit-slider-runnable-track {{
-            background: rgba(255, 255, 255, 0.1);
-            height: 4px;
-            border-radius: 2px;
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 3px;
+            border: none;
+        }}
+
+        .player-progress-bar input[type="range"]::-webkit-slider-thumb {{
+            -webkit-appearance: none;
+            height: 14px;
+            width: 14px;
+            border-radius: 50%;
+            background: #ffffff;
+            margin-top: -4px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            transition: transform 0.1s ease, background-color 0.1s ease;
+        }}
+
+        .player-progress-bar input[type="range"]:active::-webkit-slider-thumb {{
+            transform: scale(1.3);
+            background: var(--accent-color);
+        }}
+
+        /* Firefox */
+        .player-progress-bar input[type="range"]::-moz-range-track {{
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 3px;
+            border: none;
+        }}
+
+        .player-progress-bar input[type="range"]::-moz-range-thumb {{
+            height: 14px;
+            width: 14px;
+            border: none;
+            border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            transition: transform 0.1s ease, background-color 0.1s ease;
+        }}
+
+        .player-progress-bar input[type="range"]:active::-moz-range-thumb {{
+            transform: scale(1.3);
+            background: var(--accent-color);
         }}
 
         .player-extra {{
@@ -1216,6 +1260,25 @@ pub async fn root_handler(
         <button class="lightbox-nav lightbox-next" onclick="event.stopPropagation(); showNextImage()" title="Next Image">
             <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
         </button>
+    </div>
+
+    <!-- Video Player Modal -->
+    <div id="video-modal" class="lightbox-modal" style="display: none;" onclick="closeVideoPlayer()">
+        <span class="lightbox-close" onclick="closeVideoPlayer()">&times;</span>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()" style="max-width: 90%; max-height: 90%; width: 800px;">
+            <video id="video-player-element" controls autoplay style="width: 100%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.05);">
+                <track id="video-subtitle-track" kind="subtitles" srclang="en" label="English">
+            </video>
+            <div class="lightbox-meta" style="justify-content: space-between; padding: 0.5rem 0.25rem; display: flex; align-items: center; width: 100%;">
+                <div style="display: flex; align-items: center; gap: 1rem; min-width: 0; flex: 1;">
+                    <span id="video-player-title" style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Video Name</span>
+                    <select id="video-audio-tracks" style="display: none; background: rgba(255,255,255,0.06); border: 1px solid var(--card-border); color: var(--text-primary); border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.8rem; cursor: pointer; outline: none;"></select>
+                </div>
+                <a id="video-player-download" href="" download="" class="lightbox-download-btn" title="Download Video">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </a>
+            </div>
+        </div>
     </div>
 
     <script>
