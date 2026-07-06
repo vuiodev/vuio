@@ -558,7 +558,7 @@ Version=2
     }
 
     // DISABLED: This test uses SqliteDatabase which has been removed
-    // TODO: Update to use ZeroCopyDatabase
+    // TODO: Update to use ReDBDatabase
     /*
     #[tokio::test]
     async fn test_batch_add_tracks_to_playlist() {

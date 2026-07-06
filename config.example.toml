@@ -46,9 +46,9 @@ path = "./config/media.db"  # Will use platform-appropriate default if not speci
 vacuum_on_startup = false
 backup_enabled = true
 
-# ZeroCopy Database Configuration (optional - uses minimal defaults if not set)
+# ReDB Database Configuration (optional - uses minimal defaults if not set)
 # All values are optional and will use minimal defaults if not specified
-[database.zerocopy]
+[database.redb]
 # cache_mb = 2                          # Memory cache size in MB (1-1024, default: 1)
 # index_size = 5000                     # Index cache entries (100-10M, default: 1000)
 # batch_size = 500                      # Batch processing size (10-1M, default: 100)

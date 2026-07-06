@@ -1034,14 +1034,14 @@ impl ContentDirectoryHandler {
                 }
             };
             
-            // Query the ZeroCopy database for the directory listing
+            // Query the ReDB database for the directory listing
             let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
             let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
             
             match tokio::time::timeout(timeout_duration, query_future).await {
                 Ok(Ok(res)) => res,
                 Ok(Err(e)) => {
-                    error!("ZeroCopy database error getting directory listing for {}: {}", params.object_id, e);
+                    error!("ReDB database error getting directory listing for {}: {}", params.object_id, e);
                     state.web_metrics.record_error();
                     let response_time = start_time.elapsed().as_millis() as u64;
                     state.web_metrics.record_browse_request(response_time, false);
@@ -1067,7 +1067,7 @@ impl ContentDirectoryHandler {
 
         cache_hit = !subdirectories.is_empty() || !files.is_empty();
         
-        debug!("ZeroCopy browse request for '{}' (filter: '{}') returned {} subdirs, {} files", 
+        debug!("ReDB browse request for '{}' (filter: '{}') returned {} subdirs, {} files", 
                browse_path.display(), media_type_filter, subdirectories.len(), files.len());
                
         // Apply pagination if requested
@@ -1122,7 +1122,7 @@ impl ContentDirectoryHandler {
             }
         }
         
-        debug!("ZeroCopy returning paginated results: {} subdirs, {} files (index {}-{} of {})",
+        debug!("ReDB returning paginated results: {} subdirs, {} files (index {}-{} of {})",
                paginated_subdirs.len(), paginated_files.len(), 
                starting_index, end_index, total_matches);
         
@@ -1265,17 +1265,17 @@ pub async fn serve_media(
         AppError::NotFound
     })?;
     
-    // Use ZeroCopy database with atomic cache lookup
+    // Use ReDB database with atomic cache lookup
     let file_info = state.database
         .get_file_by_id(file_id)
         .await
         .map_err(|e| {
-            error!("ZeroCopy database error getting file by ID {}: {}", file_id, e);
+            error!("ReDB database error getting file by ID {}: {}", file_id, e);
             state.web_metrics.record_error();
             AppError::NotFound
         })?
         .ok_or_else(|| {
-            debug!("ZeroCopy database: file ID {} not found", file_id);
+            debug!("ReDB database: file ID {} not found", file_id);
             state.web_metrics.record_error();
             AppError::NotFound
         })?;
@@ -1584,7 +1584,7 @@ async fn handle_audio_root_browse(
 }
     
 impl ContentDirectoryHandler {
-    /// Handle artist browse requests with atomic performance tracking and ZeroCopy operations
+    /// Handle artist browse requests with atomic performance tracking and ReDB operations
     async fn handle_artist_browse(
         params: &BrowseParams,
         state: &AppState,
@@ -1607,7 +1607,7 @@ impl ContentDirectoryHandler {
         ).await
     }
 
-    /// Handle album browse requests with atomic performance tracking and ZeroCopy operations
+    /// Handle album browse requests with atomic performance tracking and ReDB operations
     async fn handle_album_browse(
         params: &BrowseParams,
         state: &AppState,
@@ -1631,7 +1631,7 @@ impl ContentDirectoryHandler {
     }
 }
 
-/// Handle browsing genres with atomic performance tracking and ZeroCopy operations
+/// Handle browsing genres with atomic performance tracking and ReDB operations
 async fn handle_genres_browse(
     params: &BrowseParams,
     state: &AppState,
@@ -1654,7 +1654,7 @@ async fn handle_genres_browse(
     ).await
 }
 
-/// Handle browsing years with atomic performance tracking and ZeroCopy operations
+/// Handle browsing years with atomic performance tracking and ReDB operations
 async fn handle_years_browse(
     params: &BrowseParams,
     state: &AppState,
@@ -1683,7 +1683,7 @@ async fn handle_years_browse(
     ).await
 }
 
-/// Handle browsing playlists with atomic performance tracking and ZeroCopy operations
+/// Handle browsing playlists with atomic performance tracking and ReDB operations
 async fn handle_playlists_browse(
     params: &BrowseParams,
     state: &AppState,
@@ -1746,7 +1746,7 @@ where
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_browse_request(response_time, has_data);
                 
-                debug!("ZeroCopy retrieved {} {} in {}ms", subdirectories.len(), category_name, response_time);
+                debug!("ReDB retrieved {} {} in {}ms", subdirectories.len(), category_name, response_time);
                     
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -1761,7 +1761,7 @@ where
                     .into_response()
             }
             Err(e) => {
-                error!("ZeroCopy error getting {}: {}", category_name, e);
+                error!("ReDB error getting {}: {}", category_name, e);
                 
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_error();
@@ -1784,7 +1784,7 @@ where
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_browse_request(response_time, !files.is_empty());
                 
-                debug!("ZeroCopy retrieved {} tracks for {} '{}' in {}ms", files.len(), category_name, key_str, response_time);
+                debug!("ReDB retrieved {} tracks for {} '{}' in {}ms", files.len(), category_name, key_str, response_time);
                 
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
@@ -1799,7 +1799,7 @@ where
                     .into_response()
             }
             Err(e) => {
-                error!("ZeroCopy error getting music by {} {}: {}", category_name, key_str, e);
+                error!("ReDB error getting music by {} {}: {}", category_name, key_str, e);
                 
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_error();
@@ -2134,7 +2134,7 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             "file_serves": stats.file_serves,
             "errors": stats.errors,
             "average_response_time_ms": stats.average_response_time_ms,
-            "zerocopy_database": "active"
+            "redb_database": "active"
         }
     });
     
