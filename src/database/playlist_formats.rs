@@ -54,9 +54,11 @@ impl PlaylistFileManager {
                 .to_string()
         });
 
+        let base_dir = file_path.parent().unwrap_or_else(|| Path::new(""));
+
         match format {
-            PlaylistFormat::M3U => Self::import_m3u(database, &file_content, &playlist_name).await,
-            PlaylistFormat::PLS => Self::import_pls(database, &file_content, &playlist_name).await,
+            PlaylistFormat::M3U => Self::import_m3u(database, &file_content, &playlist_name, base_dir).await,
+            PlaylistFormat::PLS => Self::import_pls(database, &file_content, &playlist_name, base_dir).await,
         }
     }
 
@@ -85,6 +87,7 @@ impl PlaylistFileManager {
         database: &D,
         content: &str,
         playlist_name: &str,
+        base_dir: &Path,
     ) -> Result<i64> {
         debug!("Importing M3U playlist: {}", playlist_name);
 
@@ -111,11 +114,13 @@ impl PlaylistFileManager {
                 i += 1;
                 if i < lines.len() {
                     let file_path_str = lines[i].trim();
-                    track_paths.push(file_path_str.to_string());
+                    let resolved = resolve_playlist_path(base_dir, file_path_str);
+                    track_paths.push(resolved.to_string_lossy().to_string());
                 }
             } else if !line.starts_with('#') {
                 // Simple M3U format - just file paths
-                track_paths.push(line.to_string());
+                let resolved = resolve_playlist_path(base_dir, line);
+                track_paths.push(resolved.to_string_lossy().to_string());
             }
 
             i += 1;
@@ -144,6 +149,7 @@ impl PlaylistFileManager {
         database: &D,
         content: &str,
         playlist_name: &str,
+        base_dir: &Path,
     ) -> Result<i64> {
         debug!("Importing PLS playlist: {}", playlist_name);
 
@@ -161,7 +167,8 @@ impl PlaylistFileManager {
 
                     // Extract the number from "File1", "File2", etc.
                     if let Ok(track_num) = key[4..].parse::<u32>() {
-                        tracks.push((track_num, value.to_string()));
+                        let resolved = resolve_playlist_path(base_dir, value);
+                        tracks.push((track_num, resolved.to_string_lossy().to_string()));
                     }
                 }
             }
@@ -437,6 +444,33 @@ impl PlaylistFileManager {
     }
 }
 
+/// Resolve a relative playlist path to absolute
+fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf {
+    let raw_path = PathBuf::from(track_path_str.replace('\\', "/"));
+    let absolute_path = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        base_dir.join(raw_path)
+    };
+
+    if let Ok(canonical) = std::fs::canonicalize(&absolute_path) {
+        canonical
+    } else {
+        let mut components = Vec::new();
+        for component in absolute_path.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    components.pop();
+                }
+                std::path::Component::CurDir => {}
+                c => components.push(c),
+            }
+        }
+        components.iter().collect()
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +501,27 @@ mod tests {
             PlaylistFileManager::get_output_filename("Test<>Playlist", PlaylistFormat::M3U),
             "Test__Playlist.m3u"
         );
+    }
+
+    #[test]
+    fn test_resolve_playlist_path() {
+        let base_dir = Path::new("/media/music");
+        
+        // Absolute path
+        let resolved = resolve_playlist_path(base_dir, "/other/track.mp3");
+        assert_eq!(resolved, PathBuf::from("/other/track.mp3"));
+
+        // Relative path
+        let resolved = resolve_playlist_path(base_dir, "album/track.mp3");
+        assert_eq!(resolved, PathBuf::from("/media/music/album/track.mp3"));
+
+        // Relative path with parent directory (..)
+        let resolved = resolve_playlist_path(base_dir, "../other/track.mp3");
+        assert_eq!(resolved, PathBuf::from("/media/other/track.mp3"));
+
+        // Windows-style backslashes replaced with forward slashes
+        let resolved = resolve_playlist_path(base_dir, r"album\track.mp3");
+        assert_eq!(resolved, PathBuf::from("/media/music/album/track.mp3"));
     }
 
     #[test]

@@ -916,7 +916,7 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
 }
 
 /// Extract audio metadata using audiotags library
-async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Duration;
     
     // Clone the path for the blocking operation
@@ -928,57 +928,153 @@ async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result<(), Box<dy
     }).await;
     
     // Handle the result from spawn_blocking
-    let tag = match metadata_result {
-        Ok(tag_result) => match tag_result {
-            Ok(tag) => tag,
-            Err(e) => {
-                return Err(format!("Failed to extract metadata: {}", e).into());
+    match metadata_result {
+        Ok(Ok(tag)) => {
+            // Extract basic metadata
+            if let Some(title) = tag.title() {
+                media_file.title = Some(title.to_string());
             }
-        },
-        Err(e) => {
-            return Err(format!("Failed to execute blocking metadata extraction: {}", e).into());
+            
+            if let Some(artist) = tag.artist() {
+                media_file.artist = Some(artist.to_string());
+            }
+            
+            if let Some(album) = tag.album_title() {
+                media_file.album = Some(album.to_string());
+            }
+            
+            if let Some(genre) = tag.genre() {
+                media_file.genre = Some(genre.to_string());
+            }
+            
+            // Extract track number
+            if let Some(track_num) = tag.track_number() {
+                media_file.track_number = Some(track_num as u32);
+            }
+            
+            // Extract year
+            if let Some(year) = tag.year() {
+                media_file.year = Some(year as u32);
+            }
+            
+            // Extract album artist
+            if let Some(album_artist) = tag.album_artist() {
+                media_file.album_artist = Some(album_artist.to_string());
+            }
+            
+            // Extract duration if available
+            if let Some(duration) = tag.duration() {
+                media_file.duration = Some(Duration::from_secs(duration as u64));
+            }
         }
-    };
-    
-    // Extract basic metadata
-    if let Some(title) = tag.title() {
-        media_file.title = Some(title.to_string());
+        Ok(Err(e)) => {
+            // Failed to parse tags, but we still apply fallback filename parsing
+            debug!("Failed to extract metadata for {}: {}", media_file.path.display(), e);
+        }
+        Err(e) => {
+            // spawn_blocking failed
+            debug!("Failed to execute blocking metadata extraction for {}: {}", media_file.path.display(), e);
+        }
     }
     
-    if let Some(artist) = tag.artist() {
-        media_file.artist = Some(artist.to_string());
-    }
-    
-    if let Some(album) = tag.album_title() {
-        media_file.album = Some(album.to_string());
-    }
-    
-    if let Some(genre) = tag.genre() {
-        media_file.genre = Some(genre.to_string());
-    }
-    
-    // Extract track number
-    if let Some(track_num) = tag.track_number() {
-        media_file.track_number = Some(track_num as u32);
-    }
-    
-    // Extract year
-    if let Some(year) = tag.year() {
-        media_file.year = Some(year as u32);
-    }
-    
-    // Extract album artist
-    if let Some(album_artist) = tag.album_artist() {
-        media_file.album_artist = Some(album_artist.to_string());
-    }
-    
-    // Extract duration if available
-    if let Some(duration) = tag.duration() {
-        media_file.duration = Some(Duration::from_secs(duration as u64));
-    }
+    // Always fall back to parsing from filename for missing fields
+    fallback_parse_filename(media_file);
     
     Ok(())
 }
+
+/// Parse metadata fields from a file path when tags are missing
+fn fallback_parse_filename(media_file: &mut MediaFile) {
+    if media_file.title.is_some() {
+        return;
+    }
+
+    let filename_sans_ext = media_file.path
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| media_file.filename.clone());
+
+    if filename_sans_ext.contains(" - ") {
+        let parts: Vec<&str> = filename_sans_ext.split(" - ").collect();
+        if parts.len() >= 3 {
+            let track_part = parts[0].trim();
+            let mut track_num = None;
+            let clean_track: String = track_part.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !clean_track.is_empty() {
+                if let Ok(num) = clean_track.parse::<u32>() {
+                    track_num = Some(num);
+                }
+            }
+            
+            if track_num.is_some() {
+                if media_file.track_number.is_none() {
+                    media_file.track_number = track_num;
+                }
+                if media_file.artist.is_none() {
+                    media_file.artist = Some(parts[1].trim().to_string());
+                }
+                media_file.title = Some(parts[2..].join(" - ").trim().to_string());
+            } else {
+                if media_file.artist.is_none() {
+                    media_file.artist = Some(parts[0].trim().to_string());
+                }
+                media_file.title = Some(parts[1..].join(" - ").trim().to_string());
+            }
+        } else if parts.len() == 2 {
+            let part0 = parts[0].trim();
+            let part1 = parts[1].trim();
+            
+            let clean_track: String = part0.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !clean_track.is_empty() && clean_track == part0 {
+                if let Ok(num) = clean_track.parse::<u32>() {
+                    if media_file.track_number.is_none() {
+                        media_file.track_number = Some(num);
+                    }
+                }
+                media_file.title = Some(part1.to_string());
+            } else {
+                let mut artist_name = part0;
+                let mut track_num = None;
+                if let Some(first_space) = part0.find(' ') {
+                    let maybe_num = &part0[..first_space].trim_end_matches('.');
+                    let clean: String = maybe_num.chars().filter(|c| c.is_ascii_digit()).collect();
+                    if !clean.is_empty() && clean == *maybe_num {
+                        if let Ok(num) = clean.parse::<u32>() {
+                            track_num = Some(num);
+                            artist_name = &part0[first_space + 1..];
+                        }
+                    }
+                }
+                
+                if media_file.artist.is_none() {
+                    media_file.artist = Some(artist_name.trim().to_string());
+                }
+                if media_file.track_number.is_none() && track_num.is_some() {
+                    media_file.track_number = track_num;
+                }
+                media_file.title = Some(part1.to_string());
+            }
+        }
+    } else {
+        let mut title_part = filename_sans_ext.as_str();
+        
+        if let Some(first_space) = filename_sans_ext.find(' ') {
+            let maybe_num = &filename_sans_ext[..first_space].trim_end_matches('.');
+            let clean: String = maybe_num.chars().filter(|c| c.is_ascii_digit()).collect();
+            if !clean.is_empty() && clean == *maybe_num {
+                if let Ok(num) = clean.parse::<u32>() {
+                    if media_file.track_number.is_none() {
+                        media_file.track_number = Some(num);
+                    }
+                    title_part = &filename_sans_ext[first_space + 1..];
+                }
+            }
+        }
+        
+        media_file.title = Some(title_part.trim().to_string());
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -1038,6 +1134,81 @@ mod tests {
         assert!(case_insensitive.matches_extension(path, &extensions));
     }
     
+    #[test]
+    fn test_fallback_parse_filename() {
+        use std::path::PathBuf;
+        use std::time::SystemTime;
+
+        let mut f1 = MediaFile {
+            id: None,
+            path: PathBuf::from("/path/to/01 - Artist Name - Song Title.mp3"),
+            filename: "01 - Artist Name - Song Title.mp3".to_string(),
+            size: 0,
+            modified: SystemTime::UNIX_EPOCH,
+            mime_type: "audio/mpeg".to_string(),
+            duration: None,
+            title: None,
+            artist: None,
+            album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        };
+        fallback_parse_filename(&mut f1);
+        assert_eq!(f1.track_number, Some(1));
+        assert_eq!(f1.artist.as_deref(), Some("Artist Name"));
+        assert_eq!(f1.title.as_deref(), Some("Song Title"));
+
+        let mut f2 = MediaFile {
+            id: None,
+            path: PathBuf::from("/path/to/Artist Name - Song Title.mp3"),
+            filename: "Artist Name - Song Title.mp3".to_string(),
+            size: 0,
+            modified: SystemTime::UNIX_EPOCH,
+            mime_type: "audio/mpeg".to_string(),
+            duration: None,
+            title: None,
+            artist: None,
+            album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        };
+        fallback_parse_filename(&mut f2);
+        assert_eq!(f2.track_number, None);
+        assert_eq!(f2.artist.as_deref(), Some("Artist Name"));
+        assert_eq!(f2.title.as_deref(), Some("Song Title"));
+
+        let mut f3 = MediaFile {
+            id: None,
+            path: PathBuf::from("/path/to/02 Song Title.mp3"),
+            filename: "02 Song Title.mp3".to_string(),
+            size: 0,
+            modified: SystemTime::UNIX_EPOCH,
+            mime_type: "audio/mpeg".to_string(),
+            duration: None,
+            title: None,
+            artist: None,
+            album: None,
+            genre: None,
+            track_number: None,
+            year: None,
+            album_artist: None,
+            created_at: SystemTime::UNIX_EPOCH,
+            updated_at: SystemTime::UNIX_EPOCH,
+        };
+        fallback_parse_filename(&mut f3);
+        assert_eq!(f3.track_number, Some(2));
+        assert_eq!(f3.artist, None);
+        assert_eq!(f3.title.as_deref(), Some("Song Title"));
+    }
+
     // PathNormalizer tests
     mod path_normalizer_tests {
         use super::*;

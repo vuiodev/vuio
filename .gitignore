@@ -28,5 +28,6 @@ Icon?
 # Byebug command history
 .byebug_history
 
+/demo-media/
 /test-media/
 /build/

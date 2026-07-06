@@ -741,7 +741,7 @@ impl MediaScanner {
         let size = metadata.len();
         let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
 
-        Ok(MediaFile {
+        let mut media_file = MediaFile {
             id: None,
             path: path.to_path_buf(),
             filename,
@@ -758,7 +758,13 @@ impl MediaScanner {
             album_artist: None,
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
-        })
+        };
+
+        if media_file.mime_type.starts_with("audio/") {
+            let _ = crate::platform::filesystem::extract_audio_metadata(&mut media_file).await;
+        }
+
+        Ok(media_file)
     }
 
     /// Get the file system manager (for testing or advanced usage)

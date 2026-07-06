@@ -267,7 +267,9 @@ pub async fn generate_browse_response_with_totals(
             }
             
             let path_str = container.path.to_string_lossy();
-            let container_id = if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit()) {
+            let container_id = if path_str.starts_with("audio/") || path_str.starts_with("video/") || path_str.starts_with("image/") || path_str == "audio" || path_str == "video" || path_str == "image" {
+                path_str.into_owned()
+            } else if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit()) {
                 format!("{}/{}", object_id.trim_end_matches('/'), path_str)
             } else {
                 format!("{}/{}", object_id.trim_end_matches('/'), container.name)
@@ -329,7 +331,7 @@ pub async fn generate_browse_response_with_totals(
             let upnp_class = get_upnp_class(&file.mime_type);
             
             let has_srt = file.path.with_extension("srt").exists();
-            let mut title = file.filename.clone();
+            let mut title = file.title.clone().unwrap_or_else(|| file.filename.clone());
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
                 title.push('.');
             }

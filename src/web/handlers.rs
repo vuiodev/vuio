@@ -121,6 +121,9 @@ pub async fn root_handler(
         id: i64,
         path: String,
         name: String,
+        title: Option<String>,
+        artist: Option<String>,
+        album: Option<String>,
         size_str: String,
         ext: String,
         cat: String,
@@ -147,6 +150,9 @@ pub async fn root_handler(
             id: file.id.unwrap_or(0),
             path: file.path.to_string_lossy().to_string(),
             name: file.filename.clone(),
+            title: file.title.clone(),
+            artist: file.artist.clone(),
+            album: file.album.clone(),
             size_str: format_size(file.size),
             ext: extension,
             cat: category.to_string(),
@@ -743,14 +749,22 @@ pub async fn root_handler(
                 iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`;
             }}
 
+            let detailsHtml = `<div class="media-name" title="${{file.name}}">${{file.title || file.name}}</div>`;
+            if (file.artist || file.album) {{
+                let metaParts = [];
+                if (file.artist) {{ metaParts.push(file.artist); }}
+                if (file.album) {{ metaParts.push(file.album); }}
+                detailsHtml += `<div class="media-artist-album" style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.1rem;">${{metaParts.join(' &mdash; ')}}</div>`;
+            }}
+
             card.innerHTML = `
                 <div class="media-info">
                     <div class="media-icon-wrapper">
                         ${{iconSvg}}
                     </div>
                     <div class="media-details">
-                        <div class="media-name" title="${{file.name}}">${{file.name}}</div>
-                        <div class="media-meta">
+                        ${{detailsHtml}}
+                        <div class="media-meta" style="margin-top: 0.25rem;">
                             <span>${{file.size_str}}</span>
                             <span class="media-meta-dot"></span>
                             <span style="text-transform: uppercase;">${{file.ext}}</span>
@@ -1819,9 +1833,18 @@ where
         }
     }
 
-    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
+    // Find if we are browsing a category list (e.g. "artists") or filtering by a category value (e.g. "artists/AC/DC")
+    let (is_category_list, key_str_opt) = if let Some(slash_idx) = audio_path.find('/') {
+        let key_raw = &audio_path[slash_idx + 1..];
+        let key_str = percent_encoding::percent_decode_str(key_raw)
+            .decode_utf8_lossy()
+            .into_owned();
+        (false, Some(key_str))
+    } else {
+        (true, None)
+    };
     
-    if path_parts.len() == 1 {
+    if is_category_list {
         match list_categories_fn().await {
             Ok(categories) => {
                 let has_data = !categories.is_empty();
@@ -1873,10 +1896,7 @@ where
                     .into_response()
             }
         }
-    } else if path_parts.len() == 2 {
-        let key_str = percent_encoding::percent_decode_str(path_parts[1])
-            .decode_utf8_lossy()
-            .into_owned();
+    } else if let Some(key_str) = key_str_opt {
         match list_items_fn(key_str.clone()).await {
             Ok(files) => {
                 let response_time = start_time.elapsed().as_millis() as u64;
