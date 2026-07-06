@@ -1,9 +1,10 @@
 pub mod handlers;
+pub mod mcp;
 pub mod xml;
 pub mod client;
 
 use crate::state::AppState;
-use axum::{routing::get, Router};
+use axum::{routing::{get, post}, Router};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
@@ -44,5 +45,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/healthz", get(handlers::healthz_handler))
         .route("/readyz", get(handlers::readyz_handler))
         .route("/logs", get(handlers::get_logs_handler))
+        .route("/sse", get(mcp::sse_handler))
+        .route("/mcp/message", post(mcp::message_handler))
         .with_state(state)
 }

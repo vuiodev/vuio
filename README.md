@@ -18,6 +18,7 @@ cargo build --release
 
 - **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
 - **Web Interface** - Modern dashboard showing server status, scanned files, and directories
+- **AI Agent & MCP Integration** - AI agents (voice assistants, chatbots, and autonomous agents) can interact with your media library and control playback on smart TVs on the local network.
 - **Global Search** - Instant search across all indexed filenames and paths
 - **HTTP Range Streaming** - Seek support for large media files
 - **Multi-format Support** - MKV, MP4, AVI, MP3, FLAC, WAV, AAC, OGG, JPEG, PNG, and more
@@ -475,6 +476,56 @@ To support instant directory listings for directories containing 1000+ files, Vu
 - **Log Scraper Endpoint (`/logs`)**: Stream the last N log entries (default `100`, max `5000`) dynamically over HTTP. Useful for pull-based logs scraping.
   - Query: `curl http://localhost:8080/logs?limit=50`
   - Returns: `200 OK` with raw plaintext log lines.
+
+---
+
+## AI Agent & MCP Integration
+
+VuIO supports the **Model Context Protocol (MCP)**, allowing AI agents (like voice assistants, chatbots, and autonomous agents) to interact with your media library and control playback on smart TVs on the local network.
+
+### Transport Protocols
+
+The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP port:
+- **Establish SSE Session**: `GET http://localhost:8080/sse`
+  - When connected, the server will yield an initial `endpoint` event containing the POST message target, e.g. `data: /mcp/message?client_id=<uuid>`
+- **Post Messages**: `POST http://localhost:8080/mcp/message?client_id=<uuid>`
+  - Used to send standard MCP JSON-RPC 2.0 messages to the server.
+
+### Available MCP Tools
+
+| Tool Name | Parameters | Description |
+| :--- | :--- | :--- |
+| `search_media` | `query` (string) | Search media files by keyword matching filenames or tags |
+| `browse_folder` | `path` (string), `category` (optional string) | Browse files and directories in a specific folder path |
+| `get_media_info` | `file_id` (integer) | Fetch detailed metadata for a file by its ID |
+| `get_server_stats` | None | Retrieve media counts, library size, and server URL info |
+| `list_tvs` | None | Scan the local network for DLNA/UPnP MediaRenderer TVs |
+| `cast_media_to_tv` | `file_id` (integer), `tv_name` (string) | Start playing a media file on a discovered smart TV |
+| `control_tv` | `tv_name` (string), `action` ("play"\|"pause"\|"stop") | Send playback control commands to a smart TV |
+| `list_media` | `category` (optional string), `limit` (optional integer) | Retrieve a flat list of indexed media files (all, audio, video, image) |
+
+### Example Usage
+
+1. **Discover TVs**:
+   ```bash
+   curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"list_tvs","arguments":{}}}'
+   ```
+
+2. **Search for Media**:
+   ```bash
+   curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","method":"tools/call","id":2,"params":{"name":"search_media","arguments":{"query":"matrix"}}}'
+   ```
+
+3. **Cast to Bedroom TV**:
+   ```bash
+   curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
+     -H "Content-Type: application/json" \
+     -d '{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"cast_media_to_tv","arguments":{"file_id":42,"tv_name":"bedroom"}}}'
+   ```
 
 ---
 

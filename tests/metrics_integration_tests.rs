@@ -69,6 +69,7 @@ async fn test_metrics_endpoints_data() {
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         log_file_path: temp_dir.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // 3. Test get_web_metrics handler (JSON format)

@@ -1,0 +1,130 @@
+{
+  "protocol": "Model Context Protocol (MCP) 2025-03-26",
+  "transport": "SSE (Server-Sent Events) + HTTP POST",
+  "endpoints": {
+    "sse": "GET /sse (Establishes the session stream, returns a unique client_id)",
+    "message": "POST /mcp/message?client_id=<uuid> (Sends JSON-RPC requests)"
+  },
+  "available_tools": [
+    {
+      "name": "search_media",
+      "description": "Search media files (video, audio, images) by keyword in filename or title.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 1,
+        "params": {
+          "name": "search_media",
+          "arguments": {
+            "query": "matrix"
+          }
+        }
+      }
+    },
+    {
+      "name": "browse_folder",
+      "description": "Browse files and subdirectories in a specific folder path.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 2,
+        "params": {
+          "name": "browse_folder",
+          "arguments": {
+            "path": "/movies",
+            "category": "video"
+          }
+        }
+      }
+    },
+    {
+      "name": "get_media_info",
+      "description": "Get detailed metadata for a specific media file by its numeric ID.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 3,
+        "params": {
+          "name": "get_media_info",
+          "arguments": {
+            "file_id": 123
+          }
+        }
+      }
+    },
+    {
+      "name": "get_server_stats",
+      "description": "Get server statistics including total media file counts by type.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 4,
+        "params": {
+          "name": "get_server_stats",
+          "arguments": {}
+        }
+      }
+    },
+    {
+      "name": "list_tvs",
+      "description": "Discover UPnP/DLNA MediaRenderer devices on the local network.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 5,
+        "params": {
+          "name": "list_tvs",
+          "arguments": {}
+        }
+      }
+    },
+    {
+      "name": "cast_media_to_tv",
+      "description": "Cast a media file to a smart TV or media renderer by name.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 6,
+        "params": {
+          "name": "cast_media_to_tv",
+          "arguments": {
+            "file_id": 123,
+            "tv_name": "Living Room TV"
+          }
+        }
+      }
+    },
+    {
+      "name": "control_tv",
+      "description": "Send a playback control command (play, pause, stop) to a smart TV.",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 7,
+        "params": {
+          "name": "control_tv",
+          "arguments": {
+            "tv_name": "Living Room TV",
+            "action": "pause"
+          }
+        }
+      }
+    },
+    {
+      "name": "list_media",
+      "description": "List all media files indexed on the server, optionally filtered by category (video, audio, image).",
+      "request_example": {
+        "jsonrpc": "2.0",
+        "method": "tools/call",
+        "id": 8,
+        "params": {
+          "name": "list_media",
+          "arguments": {
+            "category": "video",
+            "limit": 50
+          }
+        }
+      }
+    }
+  ]
+}

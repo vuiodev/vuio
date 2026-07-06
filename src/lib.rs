@@ -5,6 +5,7 @@ pub mod logging;
 pub mod media;
 pub mod platform;
 pub mod ssdp;
+pub mod tv_control;
 pub mod watcher;
 pub mod web;
 
@@ -36,6 +37,7 @@ pub mod state {
         pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
         pub log_file_path: std::path::PathBuf,
         pub browse_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, String>>>,
+        pub mcp_clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
     }
 
     impl AppState {
