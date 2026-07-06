@@ -576,6 +576,213 @@ pub async fn root_handler(
             font-size: 0.85rem;
             color: var(--text-secondary);
         }}
+
+        /* Floating Audio Player Bar Styles */
+        .audio-player-bar {{
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 90px;
+            background: rgba(18, 22, 28, 0.85);
+            border-top: 1px solid var(--card-border);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            padding: 0 1.5rem;
+            box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5);
+            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }}
+
+        @keyframes slideUp {{
+            from {{ transform: translateY(100%); }}
+            to {{ transform: translateY(0); }}
+        }}
+
+        .player-container {{
+            width: 100%;
+            max-width: 1200px;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 280px 1fr 220px;
+            align-items: center;
+            gap: 1.5rem;
+        }}
+
+        @media (max-width: 768px) {{
+            .audio-player-bar {{
+                height: 140px;
+                padding: 0.75rem 1rem;
+            }}
+            .player-container {{
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto auto;
+                gap: 0.5rem;
+            }}
+            .player-extra {{
+                justify-content: flex-end;
+            }}
+        }}
+
+        .player-track-info {{
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            min-width: 0;
+        }}
+
+        .player-icon-wrapper {{
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }}
+
+        .player-meta {{
+            min-width: 0;
+        }}
+
+        .player-title {{
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }}
+
+        .player-subtitle {{
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 0.15rem;
+        }}
+
+        .player-controls-progress {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.4rem;
+        }}
+
+        .player-controls {{
+            display: flex;
+            align-items: center;
+            gap: 1.25rem;
+        }}
+
+        .player-btn {{
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.35rem;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }}
+
+        .player-btn:hover {{
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.04);
+        }}
+
+        .player-btn.play-main {{
+            width: 38px;
+            height: 38px;
+            background: var(--accent-gradient);
+            color: white;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
+        }}
+
+        .player-btn.play-main:hover {{
+            transform: scale(1.05);
+            box-shadow: 0 0 16px rgba(0, 240, 255, 0.4);
+        }}
+
+        .player-progress-bar {{
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }}
+
+        .player-time {{
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+            width: 32px;
+        }}
+
+        #player-time-current {{
+            text-align: right;
+        }}
+
+        .player-progress-bar input[type="range"] {{
+            flex: 1;
+            height: 4px;
+            border-radius: 2px;
+            background: rgba(255, 255, 255, 0.1);
+            outline: none;
+            cursor: pointer;
+            accent-color: var(--accent-color);
+            -webkit-appearance: none;
+        }}
+
+        .player-progress-bar input[type="range"]::-webkit-slider-runnable-track {{
+            background: rgba(255, 255, 255, 0.1);
+            height: 4px;
+            border-radius: 2px;
+        }}
+
+        .player-extra {{
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 1.25rem;
+        }}
+
+        .player-volume {{
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-secondary);
+        }}
+
+        .player-volume input[type="range"] {{
+            width: 80px;
+            accent-color: var(--accent-color);
+            cursor: pointer;
+        }}
+
+        .player-btn-close {{
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.35rem;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }}
+
+        .player-btn-close:hover {{
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.08);
+        }}
     </style>
 </head>
 <body>
@@ -712,11 +919,60 @@ pub async fn root_handler(
         </div>
     </div>
 
+    <!-- Floating Audio Player Bar -->
+    <div id="audio-player-bar" class="audio-player-bar" style="display: none;">
+        <div class="player-container">
+            <audio id="audio-element" style="display: none;"></audio>
+            
+            <div class="player-track-info">
+                <div class="player-icon-wrapper">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+                </div>
+                <div class="player-meta">
+                    <div id="player-title" class="player-title">Track Name</div>
+                    <div id="player-subtitle" class="player-subtitle">Artist — Album</div>
+                </div>
+            </div>
+
+            <div class="player-controls-progress">
+                <div class="player-controls">
+                    <button class="player-btn" onclick="playPrev()" title="Previous Track">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5"></line></svg>
+                    </button>
+                    <button class="player-btn play-main" id="player-play-btn" onclick="togglePlayPause()" title="Play/Pause">
+                        <svg id="play-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                        <svg id="pause-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                    </button>
+                    <button class="player-btn" onclick="playNext()" title="Next Track">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+                    </button>
+                </div>
+                <div class="player-progress-bar">
+                    <span id="player-time-current" class="player-time">0:00</span>
+                    <input type="range" id="player-progress-slider" min="0" max="100" value="0" oninput="onProgressSeek(this.value)">
+                    <span id="player-time-duration" class="player-time">0:00</span>
+                </div>
+            </div>
+
+            <div class="player-extra">
+                <div class="player-volume">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                    <input type="range" id="player-volume-slider" min="0" max="100" value="80" oninput="onVolumeChange(this.value)">
+                </div>
+                <button class="player-btn-close" onclick="closePlayer()" title="Close Player">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let activeNav = 'browse';
         let metricsTimer = null;
         let lastBytes = null;
         let lastTime = null;
+        let playlist = [];
+        let currentTrackIndex = -1;
 
         function switchNav(nav) {{
             activeNav = nav;
@@ -741,6 +997,159 @@ pub async fn root_handler(
                 updateMetrics();
                 metricsTimer = setInterval(updateMetrics, 5000);
             }}
+        }}
+
+        function playAudioFile(fileOrId) {{
+            let targetFile = null;
+            if (typeof fileOrId === 'string' || typeof fileOrId === 'number') {{
+                targetFile = filesData.find(f => f.id.toString() === fileOrId.toString());
+            }} else {{
+                targetFile = fileOrId;
+            }}
+
+            if (!targetFile) return;
+
+            // Generate a playlist of all audio files matching the current tab/filter
+            let filteredAudio = filesData.filter(f => f.cat === 'audio');
+            
+            // If currently in a path/folder, filter playlist to the current path
+            if (currentPath.length > 0 && searchQuery === '') {{
+                filteredAudio = filteredAudio.filter(f => {{
+                    const comps = getRelativeComponents(f.path);
+                    if (comps.length <= currentPath.length) return false;
+                    for (let i = 0; i < currentPath.length; i++) {{
+                        if (comps[i] !== currentPath[i]) return false;
+                    }}
+                    return true;
+                }});
+            }} else if (searchQuery !== '') {{
+                filteredAudio = filteredAudio.filter(f => f.name.toLowerCase().includes(searchQuery));
+            }}
+
+            // Sort playlist by name
+            filteredAudio.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            
+            playlist = filteredAudio;
+            currentTrackIndex = playlist.findIndex(f => f.id.toString() === targetFile.id.toString());
+            if (currentTrackIndex === -1) {{
+                playlist = [targetFile];
+                currentTrackIndex = 0;
+            }}
+
+            loadAndPlayTrack();
+        }}
+
+        function playFolder(folderName) {{
+            const targetPath = [...currentPath, folderName];
+            
+            // Filter all audio files that reside in targetPath or any subdirectory
+            let folderAudio = filesData.filter(file => {{
+                if (file.cat !== 'audio') return false;
+                const comps = getRelativeComponents(file.path);
+                if (comps.length <= targetPath.length) return false;
+                for (let i = 0; i < targetPath.length; i++) {{
+                    if (comps[i] !== targetPath[i]) return false;
+                }}
+                return true;
+            }});
+
+            if (folderAudio.length === 0) return;
+
+            // Sort playlist alphabetically by name
+            folderAudio.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+            playlist = folderAudio;
+            currentTrackIndex = 0;
+            loadAndPlayTrack();
+        }}
+
+        function loadAndPlayTrack() {{
+            if (currentTrackIndex < 0 || currentTrackIndex >= playlist.length) return;
+            const file = playlist[currentTrackIndex];
+
+            const playerBar = document.getElementById('audio-player-bar');
+            playerBar.style.display = 'flex';
+
+            document.getElementById('player-title').textContent = file.title || file.name;
+            let metaText = 'Unknown Artist';
+            if (file.artist) {{
+                metaText = file.artist;
+                if (file.album) {{
+                    metaText += ' — ' + file.album;
+                }}
+            }} else if (file.album) {{
+                metaText = file.album;
+            }}
+            document.getElementById('player-subtitle').textContent = metaText;
+
+            const audioEl = document.getElementById('audio-element');
+            audioEl.src = '/media/' + file.id;
+            audioEl.play().then(() => {{
+                updatePlayPauseUI(true);
+            }}).catch(err => {{
+                console.error("Audio playback error:", err);
+            }});
+        }}
+
+        function togglePlayPause() {{
+            const audioEl = document.getElementById('audio-element');
+            if (audioEl.paused) {{
+                audioEl.play();
+                updatePlayPauseUI(true);
+            }} else {{
+                audioEl.pause();
+                updatePlayPauseUI(false);
+            }}
+        }}
+
+        function updatePlayPauseUI(isPlaying) {{
+            const playIcon = document.getElementById('play-icon');
+            const pauseIcon = document.getElementById('pause-icon');
+            if (isPlaying) {{
+                playIcon.style.display = 'none';
+                pauseIcon.style.display = 'block';
+            }} else {{
+                playIcon.style.display = 'block';
+                pauseIcon.style.display = 'none';
+            }}
+        }}
+
+        function playNext() {{
+            if (playlist.length === 0) return;
+            currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
+            loadAndPlayTrack();
+        }}
+
+        function playPrev() {{
+            if (playlist.length === 0) return;
+            currentTrackIndex = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+            loadAndPlayTrack();
+        }}
+
+        function onProgressSeek(percent) {{
+            const audioEl = document.getElementById('audio-element');
+            if (audioEl.duration) {{
+                audioEl.currentTime = (percent / 100) * audioEl.duration;
+            }}
+        }}
+
+        // Helper function to format time (e.g. 125 -> 2:05)
+        function formatPlayerTime(t) {{
+            const m = Math.floor(t / 60);
+            const s = Math.floor(t % 60).toString().padStart(2, '0');
+            return m + ':' + s;
+        }}
+
+        function onVolumeChange(vol) {{
+            const audioEl = document.getElementById('audio-element');
+            audioEl.volume = vol / 100;
+        }}
+
+        function closePlayer() {{
+            const audioEl = document.getElementById('audio-element');
+            audioEl.pause();
+            audioEl.src = '';
+            document.getElementById('audio-player-bar').style.display = 'none';
         }}
 
         function formatBytes(bytes) {{
@@ -935,6 +1344,18 @@ pub async fn root_handler(
                 folderCard.className = 'media-card folder-card';
                 folderCard.style.cursor = 'pointer';
                 folderCard.onclick = () => enterFolder(folderName);
+
+                let actionAreaHtml = '';
+                if (currentTab === 'audio') {{
+                    actionAreaHtml = `
+                        <div class="action-area" onclick="event.stopPropagation(); playFolder('${{folderName}}')">
+                            <button class="btn-action" title="Play Folder Content">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            </button>
+                        </div>
+                    `;
+                }}
+
                 folderCard.innerHTML = `
                     <div class="media-info">
                         <div class="media-icon-wrapper">
@@ -945,6 +1366,7 @@ pub async fn root_handler(
                             <div class="media-meta">Folder</div>
                         </div>
                     </div>
+                    ${{actionAreaHtml}}
                 `;
                 fileListContainer.appendChild(folderCard);
             }});
@@ -964,7 +1386,11 @@ pub async fn root_handler(
             const card = document.createElement('div');
             card.className = 'media-card';
             card.style.cursor = 'pointer';
-            card.onclick = () => playMedia(file.id);
+            if (file.cat === 'audio') {{
+                card.onclick = () => playAudioFile(file);
+            }} else {{
+                card.onclick = () => playMedia(file.id);
+            }}
             
             let iconSvg = '';
             if (file.cat === 'video') {{
@@ -985,6 +1411,15 @@ pub async fn root_handler(
                 detailsHtml += `<div class="media-artist-album" style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.1rem;">${{metaParts.join(' &mdash; ')}}</div>`;
             }}
 
+            let playBtnHtml = '';
+            if (file.cat === 'audio') {{
+                playBtnHtml = `
+                    <button class="btn-action" onclick="event.stopPropagation(); playAudioFile('${{file.id}}')" title="Play File" style="margin-right: 0.35rem;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                    </button>
+                `;
+            }}
+
             card.innerHTML = `
                 <div class="media-info">
                     <div class="media-icon-wrapper">
@@ -1000,6 +1435,7 @@ pub async fn root_handler(
                     </div>
                 </div>
                 <div class="action-area">
+                    ${{playBtnHtml}}
                     <a href="/media/${{file.id}}" download="${{file.name}}" onclick="event.stopPropagation()" class="btn-action" title="Download File">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
                     </a>
@@ -1057,6 +1493,26 @@ pub async fn root_handler(
                 </div>
             `;
         }}
+
+        // Setup Audio Element event listeners
+        const audioEl = document.getElementById('audio-element');
+        const slider = document.getElementById('player-progress-slider');
+        const currentEl = document.getElementById('player-time-current');
+        const durationEl = document.getElementById('player-time-duration');
+
+        audioEl.addEventListener('timeupdate', () => {{
+            if (audioEl.duration) {{
+                const curTime = audioEl.currentTime;
+                const durTime = audioEl.duration;
+                slider.value = (curTime / durTime) * 100;
+                currentEl.textContent = formatPlayerTime(curTime);
+                durationEl.textContent = formatPlayerTime(durTime);
+            }}
+        }});
+
+        audioEl.addEventListener('ended', () => {{
+            playNext();
+        }});
 
         // Initial render
         render();
