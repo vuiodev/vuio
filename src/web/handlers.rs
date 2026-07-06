@@ -177,6 +177,7 @@ pub async fn root_handler(
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{server_name}</title>
+    <link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="25" fill="url(#g)"/><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00f0ff"/><stop offset="100%" stop-color="#7000ff"/></linearGradient><polygon points="40,30 70,50 40,70" fill="white"/></svg>'>
     <style>
         :root {{
             --bg-color: #0c0f12;
@@ -218,7 +219,7 @@ pub async fn root_handler(
 
         .container {{
             width: 100%;
-            max-width: 800px;
+            max-width: 100%;
             display: flex;
             flex-direction: column;
             gap: 1.25rem;
@@ -577,6 +578,235 @@ pub async fn root_handler(
             color: var(--text-secondary);
         }}
 
+        /* Photos Image Grid and Lightbox Styles */
+        .image-grid {{
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            padding: 0.5rem 0;
+        }}
+
+        .image-card {{
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: 1 / 1;
+            background: #181f2a;
+            border: 1px solid var(--card-border);
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+        }}
+
+        .image-card:hover {{
+            transform: scale(1.02);
+            border-color: var(--accent-color);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+        }}
+
+        .image-card img {{
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.3s ease;
+        }}
+
+        .image-card:hover img {{
+            transform: scale(1.05);
+        }}
+
+        .image-card-overlay {{
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0) 100%);
+            padding: 1.5rem 0.75rem 0.75rem;
+            color: white;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }}
+
+        .image-card:hover .image-card-overlay {{
+            opacity: 1;
+        }}
+
+        .image-card-name {{
+            font-size: 0.75rem;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-right: 0.5rem;
+            flex: 1;
+        }}
+
+        .image-card-download {{
+            color: rgba(255,255,255,0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s;
+        }}
+
+        .image-card-download:hover {{
+            color: var(--accent-color);
+        }}
+
+        .image-grid .folder-card {{
+            aspect-ratio: 1 / 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            gap: 0.75rem;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px dashed var(--card-border);
+        }}
+
+        .image-grid .folder-card .media-info {{
+            flex-direction: column;
+            gap: 0.5rem;
+            align-items: center;
+            width: 100%;
+        }}
+
+        .image-grid .folder-card .media-details {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            width: 100%;
+        }}
+
+        .image-grid .folder-card .action-area {{
+            margin-top: 0.5rem;
+        }}
+
+        /* Lightbox modal styles */
+        .lightbox-modal {{
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 14, 20, 0.95);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            animation: fadeIn 0.25s ease-out;
+        }}
+
+        @keyframes fadeIn {{
+            from {{ opacity: 0; }}
+            to {{ opacity: 1; }}
+        }}
+
+        .lightbox-close {{
+            position: absolute;
+            top: 1.5rem;
+            right: 2rem;
+            color: var(--text-secondary);
+            font-size: 2.5rem;
+            font-weight: 300;
+            cursor: pointer;
+            transition: color 0.2s;
+            line-height: 1;
+            z-index: 2010;
+        }}
+
+        .lightbox-close:hover {{
+            color: #ef4444;
+        }}
+
+        .lightbox-nav {{
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            color: var(--text-secondary);
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            z-index: 2010;
+        }}
+
+        .lightbox-nav:hover {{
+            background: var(--accent-gradient);
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.4);
+        }}
+
+        .lightbox-prev {{ left: 2rem; }}
+        .lightbox-next {{ right: 2rem; }}
+
+        @media (max-width: 600px) {{
+            .lightbox-prev {{ left: 0.5rem; }}
+            .lightbox-next {{ right: 0.5rem; }}
+            .lightbox-nav {{
+                width: 38px;
+                height: 38px;
+            }}
+        }}
+
+        .lightbox-content-wrapper {{
+            max-width: 85%;
+            max-height: 85%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }}
+
+        .lightbox-content-wrapper img {{
+            max-width: 100%;
+            max-height: 80vh;
+            object-fit: contain;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }}
+
+        .lightbox-meta {{
+            margin-top: 1rem;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            width: 100%;
+            justify-content: center;
+        }}
+
+        .lightbox-download-btn {{
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.25rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }}
+
+        .lightbox-download-btn:hover {{
+            color: var(--accent-color);
+            background: rgba(255, 255, 255, 0.05);
+        }}
+
         /* Floating Audio Player Bar Styles */
         .audio-player-bar {{
             position: fixed;
@@ -603,7 +833,7 @@ pub async fn root_handler(
 
         .player-container {{
             width: 100%;
-            max-width: 1200px;
+            max-width: 100%;
             margin: 0 auto;
             display: grid;
             grid-template-columns: 280px 1fr 220px;
@@ -795,7 +1025,6 @@ pub async fn root_handler(
                 <div class="brand-logo">▶</div>
                 <div class="brand-info">
                     <h1>{server_name}</h1>
-                    <p>VuIO Media Streamer</p>
                 </div>
             </div>
         </header>
@@ -929,7 +1158,10 @@ pub async fn root_handler(
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
                 </div>
                 <div class="player-meta">
-                    <div id="player-title" class="player-title">Track Name</div>
+                    <div style="display: flex; align-items: center; gap: 0.5rem; min-width: 0;">
+                        <div id="player-title" class="player-title">Track Name</div>
+                        <span id="player-track-count" style="font-size: 0.75rem; color: var(--accent-color); font-weight: 600; white-space: nowrap;"></span>
+                    </div>
                     <div id="player-subtitle" class="player-subtitle">Artist — Album</div>
                 </div>
             </div>
@@ -966,6 +1198,26 @@ pub async fn root_handler(
         </div>
     </div>
 
+    <!-- Lightbox Modal for Images -->
+    <div id="image-lightbox" class="lightbox-modal" style="display: none;" onclick="closeLightbox()">
+        <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
+        <button class="lightbox-nav lightbox-prev" onclick="event.stopPropagation(); showPrevImage()" title="Previous Image">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </button>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()">
+            <img id="lightbox-img" src="" alt="Full view">
+            <div class="lightbox-meta">
+                <span id="lightbox-title">Image Name</span>
+                <a id="lightbox-download" href="" download="" class="lightbox-download-btn" title="Download High Res">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </a>
+            </div>
+        </div>
+        <button class="lightbox-nav lightbox-next" onclick="event.stopPropagation(); showNextImage()" title="Next Image">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        </button>
+    </div>
+
     <script>
         let activeNav = 'browse';
         let metricsTimer = null;
@@ -973,6 +1225,8 @@ pub async fn root_handler(
         let lastTime = null;
         let playlist = [];
         let currentTrackIndex = -1;
+        let imageList = [];
+        let currentImageIndex = -1;
 
         function switchNav(nav) {{
             activeNav = nav;
@@ -1081,6 +1335,7 @@ pub async fn root_handler(
                 metaText = file.album;
             }}
             document.getElementById('player-subtitle').textContent = metaText;
+            document.getElementById('player-track-count').textContent = (currentTrackIndex + 1) + '/' + playlist.length;
 
             const audioEl = document.getElementById('audio-element');
             audioEl.src = '/media/' + file.id;
@@ -1150,6 +1405,106 @@ pub async fn root_handler(
             audioEl.pause();
             audioEl.src = '';
             document.getElementById('audio-player-bar').style.display = 'none';
+        }}
+
+        function createImageCard(file) {{
+            const card = document.createElement('div');
+            card.className = 'image-card';
+            card.onclick = () => openLightbox(file.id);
+
+            card.innerHTML = `
+                <img src="/media/${{file.id}}" alt="${{file.name}}" loading="lazy">
+                <div class="image-card-overlay">
+                    <div class="image-card-name" title="${{file.name}}">${{file.name}}</div>
+                    <a href="/media/${{file.id}}" download="${{file.name}}" onclick="event.stopPropagation()" class="image-card-download" title="Download">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </a>
+                </div>
+            `;
+            return card;
+        }}
+
+        function openLightbox(fileId) {{
+            // Construct a list of images matching current browse state
+            let filteredImages = filesData.filter(f => f.cat === 'image');
+            if (currentPath.length > 0 && searchQuery === '') {{
+                filteredImages = filteredImages.filter(f => {{
+                    const comps = getRelativeComponents(f.path);
+                    if (comps.length <= currentPath.length) return false;
+                    for (let i = 0; i < currentPath.length; i++) {{
+                        if (comps[i] !== currentPath[i]) return false;
+                    }}
+                    return true;
+                }});
+            }} else if (searchQuery !== '') {{
+                filteredImages = filteredImages.filter(f => f.name.toLowerCase().includes(searchQuery));
+            }}
+
+            // Sort alphabetically
+            filteredImages.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+            imageList = filteredImages;
+            currentImageIndex = imageList.findIndex(f => f.id.toString() === fileId.toString());
+            if (currentImageIndex === -1) {{
+                // fallback
+                const file = filesData.find(f => f.id.toString() === fileId.toString());
+                if (file) {{
+                    imageList = [file];
+                    currentImageIndex = 0;
+                }} else {{
+                    return;
+                }}
+            }}
+
+            showLightboxImage();
+        }}
+
+        function showLightboxImage() {{
+            if (currentImageIndex < 0 || currentImageIndex >= imageList.length) return;
+            const file = imageList[currentImageIndex];
+
+            const lightbox = document.getElementById('image-lightbox');
+            const img = document.getElementById('lightbox-img');
+            const title = document.getElementById('lightbox-title');
+            const dl = document.getElementById('lightbox-download');
+
+            img.src = '/media/' + file.id;
+            title.textContent = file.name;
+            dl.href = '/media/' + file.id;
+            dl.download = file.name;
+
+            lightbox.style.display = 'flex';
+
+            // Add keyboard navigation event listener if not already added
+            document.removeEventListener('keydown', handleLightboxKeydown);
+            document.addEventListener('keydown', handleLightboxKeydown);
+        }}
+
+        function handleLightboxKeydown(e) {{
+            if (e.key === 'ArrowRight') {{
+                showNextImage();
+            }} else if (e.key === 'ArrowLeft') {{
+                showPrevImage();
+            }} else if (e.key === 'Escape') {{
+                closeLightbox();
+            }}
+        }}
+
+        function showNextImage() {{
+            if (imageList.length === 0) return;
+            currentImageIndex = (currentImageIndex + 1) % imageList.length;
+            showLightboxImage();
+        }}
+
+        function showPrevImage() {{
+            if (imageList.length === 0) return;
+            currentImageIndex = (currentImageIndex - 1 + imageList.length) % imageList.length;
+            showLightboxImage();
+        }}
+
+        function closeLightbox() {{
+            document.getElementById('image-lightbox').style.display = 'none';
+            document.removeEventListener('keydown', handleLightboxKeydown);
         }}
 
         function formatBytes(bytes) {{
@@ -1263,6 +1618,12 @@ pub async fn root_handler(
             const fileListContainer = document.getElementById('file-list');
             fileListContainer.innerHTML = '';
 
+            if (currentTab === 'image') {{
+                fileListContainer.className = 'image-grid';
+            }} else {{
+                fileListContainer.className = 'file-list';
+            }}
+
             // Filter files by tab and search
             let filteredFiles = filesData.filter(file => {{
                 const matchesTab = currentTab === 'all' || file.cat === currentTab;
@@ -1280,7 +1641,11 @@ pub async fn root_handler(
                 }}
                 
                 filteredFiles.forEach(file => {{
-                    fileListContainer.appendChild(createFileCard(file));
+                    if (file.cat === 'image') {{
+                        fileListContainer.appendChild(createImageCard(file));
+                    }} else {{
+                        fileListContainer.appendChild(createFileCard(file));
+                    }}
                 }});
                 return;
             }}
@@ -1374,7 +1739,11 @@ pub async fn root_handler(
             // Render Files
             const sortedFiles = activeNode.files.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
             sortedFiles.forEach(file => {{
-                fileListContainer.appendChild(createFileCard(file));
+                if (file.cat === 'image') {{
+                    fileListContainer.appendChild(createImageCard(file));
+                }} else {{
+                    fileListContainer.appendChild(createFileCard(file));
+                }}
             }});
 
             if (sortedFolders.length === 0 && sortedFiles.length === 0) {{
@@ -3175,4 +3544,15 @@ pub async fn get_logs_handler(
             )
         }
     }
+}
+
+pub async fn serve_logo() -> impl IntoResponse {
+    let logo_bytes = include_bytes!("../../logo.png");
+    (
+        [
+            (header::CONTENT_TYPE, "image/png"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        logo_bytes.as_slice(),
+    )
 }

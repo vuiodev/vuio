@@ -44,5 +44,6 @@ pub fn create_router(state: AppState) -> Router {
         .route("/healthz", get(handlers::healthz_handler))
         .route("/readyz", get(handlers::readyz_handler))
         .route("/logs", get(handlers::get_logs_handler))
+        .route("/logo.png", get(handlers::serve_logo))
         .with_state(state)
 }
