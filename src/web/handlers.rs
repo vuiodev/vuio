@@ -1590,110 +1590,21 @@ impl ContentDirectoryHandler {
         state: &AppState,
         audio_path: &str,
     ) -> Response {
-        use crate::web::xml::generate_browse_response;
-        
-        let start_time = Instant::now();
-        let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
-        
-        if path_parts.len() == 1 {
-            // List all artists using ZeroCopy atomic operations
-            match state.database.get_artists().await {
-                Ok(artists) => {
-                    let has_data = !artists.is_empty();
-                    let subdirectories: Vec<crate::database::MediaDirectory> = artists
-                        .into_iter()
-                        .map(|artist| crate::database::MediaDirectory {
-                            path: std::path::PathBuf::from(format!("audio/artists/{}", artist.name)),
-                            name: format!("{} ({})", artist.name, artist.count),
-                        })
-                        .collect();
-                    
-                    // Record atomic performance metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, has_data);
-                    
-                    debug!("ZeroCopy retrieved {} artists in {}ms", subdirectories.len(), response_time);
-                        
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                    (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    error!("ZeroCopy error getting artists: {}", e);
-                    
-                    // Record atomic error metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_error();
-                    state.web_metrics.record_browse_request(response_time, false);
-                    
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing artists".to_string(),
-                    )
-                        .into_response()
-                }
-            }
-        } else if path_parts.len() == 2 {
-            // List tracks by specific artist using ZeroCopy atomic operations
-            let artist_name = path_parts[1];
-            match state.database.get_music_by_artist(artist_name).await {
-                Ok(files) => {
-                    // Record atomic performance metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
-                    
-                    debug!("ZeroCopy retrieved {} tracks for artist '{}' in {}ms", files.len(), artist_name, response_time);
-                    
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                    (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    error!("ZeroCopy error getting music by artist {}: {}", artist_name, e);
-                    
-                    // Record atomic error metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_error();
-                    state.web_metrics.record_browse_request(response_time, false);
-                    
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing artist tracks".to_string(),
-                    )
-                        .into_response()
-                }
-            }
-        } else {
-            // Record atomic error metrics for invalid path
-            let response_time = start_time.elapsed().as_millis() as u64;
-            state.web_metrics.record_error();
-            state.web_metrics.record_browse_request(response_time, false);
-            
-            (
-                StatusCode::NOT_FOUND,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                "Invalid artist path".to_string(),
-            )
-                .into_response()
-        }
+        let db1 = state.database.clone();
+        let db2 = state.database.clone();
+        handle_generic_category_browse(
+            params,
+            state,
+            audio_path,
+            "audio/artists",
+            "artists",
+            move || async move { db1.get_artists().await },
+            |artist| crate::database::MediaDirectory {
+                path: std::path::PathBuf::from(format!("audio/artists/{}", artist.name)),
+                name: format!("{} ({})", artist.name, artist.count),
+            },
+            move |artist_name| async move { db2.get_music_by_artist(&artist_name).await },
+        ).await
     }
 
     /// Handle album browse requests with atomic performance tracking and ZeroCopy operations
@@ -1702,109 +1613,23 @@ impl ContentDirectoryHandler {
         state: &AppState,
         audio_path: &str,
     ) -> Response {
-        use crate::web::xml::generate_browse_response;
-        
-        let start_time = Instant::now();
-        let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
-        
-        if path_parts.len() == 1 {
-            // List all albums using ZeroCopy atomic operations
-            match state.database.get_albums(None).await {
-                Ok(albums) => {
-                    let has_data = !albums.is_empty();
-                    let subdirectories: Vec<crate::database::MediaDirectory> = albums
-                        .into_iter()
-                        .map(|album| crate::database::MediaDirectory {
-                            path: std::path::PathBuf::from(format!("audio/albums/{}", album.name)),
-                            name: format!("{} ({})", album.name, album.count),
-                        })
-                        .collect();
-                    
-                    // Record atomic performance metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, has_data);
-                    
-                    debug!("ZeroCopy retrieved {} albums in {}ms", subdirectories.len(), response_time);
-                        
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                    (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    error!("ZeroCopy error getting albums: {}", e);
-                    
-                    // Record atomic error metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_error();
-                    state.web_metrics.record_browse_request(response_time, false);
-                    
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing albums".to_string(),
-                    )
-                        .into_response()
-                }
-            }
-        } else if path_parts.len() == 2 {
-            // List tracks by specific album using ZeroCopy atomic operations
-            let album_name = path_parts[1];
-            match state.database.get_music_by_album(album_name, None).await {
-                Ok(files) => {
-                    // Record atomic performance metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
-                    
-                    debug!("ZeroCopy retrieved {} tracks for album '{}' in {}ms", files.len(), album_name, response_time);
-                    
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                    (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    error!("ZeroCopy error getting music by album {}: {}", album_name, e);
-                    
-                    // Record atomic error metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_error();
-                    state.web_metrics.record_browse_request(response_time, false);
-                    
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing album tracks".to_string(),
-                    )
-                        .into_response()
-                }
-            }
-        } else {
-            (
-                StatusCode::NOT_FOUND,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                "Invalid album path".to_string(),
-            )
-                .into_response()
-        }
+        let db1 = state.database.clone();
+        let db2 = state.database.clone();
+        handle_generic_category_browse(
+            params,
+            state,
+            audio_path,
+            "audio/albums",
+            "albums",
+            move || async move { db1.get_albums(None).await },
+            |album| crate::database::MediaDirectory {
+                path: std::path::PathBuf::from(format!("audio/albums/{}", album.name)),
+                name: format!("{} ({})", album.name, album.count),
+            },
+            move |album_name| async move { db2.get_music_by_album(&album_name, None).await },
+        ).await
     }
 }
-
-
 
 /// Handle browsing genres with atomic performance tracking and ZeroCopy operations
 async fn handle_genres_browse(
@@ -1812,29 +1637,116 @@ async fn handle_genres_browse(
     state: &AppState,
     audio_path: &str,
 ) -> Response {
+    let db1 = state.database.clone();
+    let db2 = state.database.clone();
+    handle_generic_category_browse(
+        params,
+        state,
+        audio_path,
+        "audio/genres",
+        "genres",
+        move || async move { db1.get_genres().await },
+        |genre| crate::database::MediaDirectory {
+            path: std::path::PathBuf::from(format!("audio/genres/{}", genre.name)),
+            name: format!("{} ({})", genre.name, genre.count),
+        },
+        move |genre_name| async move { db2.get_music_by_genre(&genre_name).await },
+    ).await
+}
+
+/// Handle browsing years with atomic performance tracking and ZeroCopy operations
+async fn handle_years_browse(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+) -> Response {
+    let db1 = state.database.clone();
+    let db2 = state.database.clone();
+    handle_generic_category_browse(
+        params,
+        state,
+        audio_path,
+        "audio/years",
+        "years",
+        move || async move { db1.get_years().await },
+        |year| crate::database::MediaDirectory {
+            path: std::path::PathBuf::from(format!("audio/years/{}", year.name)),
+            name: format!("{} ({})", year.name, year.count),
+        },
+        move |year_str| async move {
+            if let Ok(year) = year_str.parse::<u32>() {
+                db2.get_music_by_year(year).await
+            } else {
+                Err(anyhow::anyhow!("Invalid year format"))
+            }
+        },
+    ).await
+}
+
+/// Handle browsing playlists with atomic performance tracking and ZeroCopy operations
+async fn handle_playlists_browse(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+) -> Response {
+    let db1 = state.database.clone();
+    let db2 = state.database.clone();
+    handle_generic_category_browse(
+        params,
+        state,
+        audio_path,
+        "audio/playlists",
+        "playlists",
+        move || async move { db1.get_playlists().await },
+        |playlist| crate::database::MediaDirectory {
+            path: std::path::PathBuf::from(format!("audio/playlists/{}", playlist.id.unwrap_or(0))),
+            name: playlist.name,
+        },
+        move |playlist_id_str| async move {
+            if let Ok(playlist_id) = playlist_id_str.parse::<i64>() {
+                db2.get_playlist_tracks(playlist_id).await
+            } else {
+                Err(anyhow::anyhow!("Invalid playlist ID format"))
+            }
+        },
+    ).await
+}
+
+/// Helper function to perform generic music category browsing
+async fn handle_generic_category_browse<C, F, FFuture, G, GFuture>(
+    params: &BrowseParams,
+    state: &AppState,
+    audio_path: &str,
+    _category_prefix: &str,
+    category_name: &str,
+    list_categories_fn: F,
+    map_category_fn: impl Fn(C) -> crate::database::MediaDirectory,
+    list_items_fn: G,
+) -> Response
+where
+    F: FnOnce() -> FFuture,
+    FFuture: std::future::Future<Output = Result<Vec<C>, anyhow::Error>>,
+    G: FnOnce(String) -> GFuture,
+    GFuture: std::future::Future<Output = Result<Vec<crate::database::MediaFile>, anyhow::Error>>,
+{
     use crate::web::xml::generate_browse_response;
     
     let start_time = Instant::now();
     let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
     
     if path_parts.len() == 1 {
-        // List all genres using ZeroCopy atomic operations
-        match state.database.get_genres().await {
-            Ok(genres) => {
-                let has_data = !genres.is_empty();
-                let subdirectories: Vec<crate::database::MediaDirectory> = genres
+        match list_categories_fn().await {
+            Ok(categories) => {
+                let has_data = !categories.is_empty();
+                let subdirectories: Vec<crate::database::MediaDirectory> = categories
                     .into_iter()
-                    .map(|genre| crate::database::MediaDirectory {
-                        path: std::path::PathBuf::from(format!("audio/genres/{}", genre.name)),
-                        name: format!("{} ({})", genre.name, genre.count),
-                    })
+                    .map(map_category_fn)
                     .collect();
                 
-                // Record atomic performance metrics
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_browse_request(response_time, has_data);
                 
-                debug!("ZeroCopy retrieved {} genres in {}ms", subdirectories.len(), response_time);
+                debug!("ZeroCopy retrieved {} {} in {}ms", subdirectories.len(), category_name, response_time);
                     
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
@@ -1849,9 +1761,8 @@ async fn handle_genres_browse(
                     .into_response()
             }
             Err(e) => {
-                error!("ZeroCopy error getting genres: {}", e);
+                error!("ZeroCopy error getting {}: {}", category_name, e);
                 
-                // Record atomic error metrics
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_error();
                 state.web_metrics.record_browse_request(response_time, false);
@@ -1859,21 +1770,21 @@ async fn handle_genres_browse(
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing genres".to_string(),
+                    format!("Error browsing {}", category_name),
                 )
                     .into_response()
             }
         }
     } else if path_parts.len() == 2 {
-        // List tracks by specific genre using ZeroCopy atomic operations
-        let genre_name = path_parts[1];
-        match state.database.get_music_by_genre(genre_name).await {
+        let key_str = percent_encoding::percent_decode_str(path_parts[1])
+            .decode_utf8_lossy()
+            .into_owned();
+        match list_items_fn(key_str.clone()).await {
             Ok(files) => {
-                // Record atomic performance metrics
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_browse_request(response_time, !files.is_empty());
                 
-                debug!("ZeroCopy retrieved {} tracks for genre '{}' in {}ms", files.len(), genre_name, response_time);
+                debug!("ZeroCopy retrieved {} tracks for {} '{}' in {}ms", files.len(), category_name, key_str, response_time);
                 
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
@@ -1888,9 +1799,8 @@ async fn handle_genres_browse(
                     .into_response()
             }
             Err(e) => {
-                error!("ZeroCopy error getting music by genre {}: {}", genre_name, e);
+                error!("ZeroCopy error getting music by {} {}: {}", category_name, key_str, e);
                 
-                // Record atomic error metrics
                 let response_time = start_time.elapsed().as_millis() as u64;
                 state.web_metrics.record_error();
                 state.web_metrics.record_browse_request(response_time, false);
@@ -1898,13 +1808,12 @@ async fn handle_genres_browse(
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing genre tracks".to_string(),
+                    format!("Error browsing {} tracks", category_name),
                 )
                     .into_response()
             }
         }
     } else {
-        // Record atomic error metrics for invalid path
         let response_time = start_time.elapsed().as_millis() as u64;
         state.web_metrics.record_error();
         state.web_metrics.record_browse_request(response_time, false);
@@ -1912,259 +1821,7 @@ async fn handle_genres_browse(
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Invalid genre path".to_string(),
-        )
-            .into_response()
-    }
-}
-
-/// Handle browsing years with atomic performance tracking and ZeroCopy operations
-async fn handle_years_browse(
-    params: &BrowseParams,
-    state: &AppState,
-    audio_path: &str,
-) -> Response {
-    use crate::web::xml::generate_browse_response;
-    
-    let start_time = Instant::now();
-    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
-    
-    if path_parts.len() == 1 {
-        // List all years using ZeroCopy atomic operations
-        match state.database.get_years().await {
-            Ok(years) => {
-                let has_data = !years.is_empty();
-                let subdirectories: Vec<crate::database::MediaDirectory> = years
-                    .into_iter()
-                    .map(|year| crate::database::MediaDirectory {
-                        path: std::path::PathBuf::from(format!("audio/years/{}", year.name)),
-                        name: format!("{} ({})", year.name, year.count),
-                    })
-                    .collect();
-                
-                // Record atomic performance metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_browse_request(response_time, has_data);
-                
-                debug!("ZeroCopy retrieved {} years in {}ms", subdirectories.len(), response_time);
-                    
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                error!("ZeroCopy error getting years: {}", e);
-                
-                // Record atomic error metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_error();
-                state.web_metrics.record_browse_request(response_time, false);
-                
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing years".to_string(),
-                )
-                    .into_response()
-            }
-        }
-    } else if path_parts.len() == 2 {
-        // List tracks by specific year using ZeroCopy atomic operations
-        let year_str = path_parts[1];
-        if let Ok(year) = year_str.parse::<u32>() {
-            match state.database.get_music_by_year(year).await {
-                Ok(files) => {
-                    // Record atomic performance metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
-                    
-                    debug!("ZeroCopy retrieved {} tracks for year {} in {}ms", files.len(), year, response_time);
-                    
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                    (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    error!("ZeroCopy error getting music by year {}: {}", year, e);
-                    
-                    // Record atomic error metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_error();
-                    state.web_metrics.record_browse_request(response_time, false);
-                    
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing year tracks".to_string(),
-                    )
-                        .into_response()
-                }
-            }
-        } else {
-            // Record atomic error metrics for invalid year format
-            let response_time = start_time.elapsed().as_millis() as u64;
-            state.web_metrics.record_error();
-            state.web_metrics.record_browse_request(response_time, false);
-            
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                "Invalid year format".to_string(),
-            )
-                .into_response()
-        }
-    } else {
-        // Record atomic error metrics for invalid path
-        let response_time = start_time.elapsed().as_millis() as u64;
-        state.web_metrics.record_error();
-        state.web_metrics.record_browse_request(response_time, false);
-        
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Invalid year path".to_string(),
-        )
-            .into_response()
-    }
-}
-
-/// Handle browsing playlists with atomic performance tracking and ZeroCopy operations
-async fn handle_playlists_browse(
-    params: &BrowseParams,
-    state: &AppState,
-    audio_path: &str,
-) -> Response {
-    use crate::web::xml::generate_browse_response;
-    
-    let start_time = Instant::now();
-    let path_parts: Vec<&str> = audio_path.split('/').filter(|s| !s.is_empty()).collect();
-    
-    if path_parts.len() == 1 {
-        // List all playlists using ZeroCopy atomic operations
-        match state.database.get_playlists().await {
-            Ok(playlists) => {
-                let has_data = !playlists.is_empty();
-                let subdirectories: Vec<crate::database::MediaDirectory> = playlists
-                    .into_iter()
-                    .map(|playlist| crate::database::MediaDirectory {
-                        path: std::path::PathBuf::from(format!("audio/playlists/{}", playlist.id.unwrap_or(0))),
-                        name: playlist.name,
-                    })
-                    .collect();
-                
-                // Record atomic performance metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_browse_request(response_time, has_data);
-                
-                debug!("ZeroCopy retrieved {} playlists in {}ms", subdirectories.len(), response_time);
-                    
-                let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                (
-                    StatusCode::OK,
-                    [
-                        (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                        (header::HeaderName::from_static("ext"), ""),
-                    ],
-                    response,
-                )
-                    .into_response()
-            }
-            Err(e) => {
-                error!("ZeroCopy error getting playlists: {}", e);
-                
-                // Record atomic error metrics
-                let response_time = start_time.elapsed().as_millis() as u64;
-                state.web_metrics.record_error();
-                state.web_metrics.record_browse_request(response_time, false);
-                
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    "Error browsing playlists".to_string(),
-                )
-                    .into_response()
-            }
-        }
-    } else if path_parts.len() == 2 {
-        // List tracks in specific playlist using ZeroCopy atomic operations
-        let playlist_id_str = path_parts[1];
-        if let Ok(playlist_id) = playlist_id_str.parse::<i64>() {
-            match state.database.get_playlist_tracks(playlist_id).await {
-                Ok(files) => {
-                    // Record atomic performance metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_browse_request(response_time, !files.is_empty());
-                    
-                    debug!("ZeroCopy retrieved {} tracks for playlist {} in {}ms", files.len(), playlist_id, response_time);
-                    
-                    let server_ip = state.get_server_ip();
-                    let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                    (
-                        StatusCode::OK,
-                        [
-                            (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                            (header::HeaderName::from_static("ext"), ""),
-                        ],
-                        response,
-                    )
-                        .into_response()
-                }
-                Err(e) => {
-                    error!("ZeroCopy error getting playlist tracks for {}: {}", playlist_id, e);
-                    
-                    // Record atomic error metrics
-                    let response_time = start_time.elapsed().as_millis() as u64;
-                    state.web_metrics.record_error();
-                    state.web_metrics.record_browse_request(response_time, false);
-                    
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing playlist tracks".to_string(),
-                    )
-                        .into_response()
-                }
-            }
-        } else {
-            // Record atomic error metrics for invalid playlist ID
-            let response_time = start_time.elapsed().as_millis() as u64;
-            state.web_metrics.record_error();
-            state.web_metrics.record_browse_request(response_time, false);
-            
-            (
-                StatusCode::BAD_REQUEST,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                "Invalid playlist ID format".to_string(),
-            )
-                .into_response()
-        }
-    } else {
-        // Record atomic error metrics for invalid path
-        let response_time = start_time.elapsed().as_millis() as u64;
-        state.web_metrics.record_error();
-        state.web_metrics.record_browse_request(response_time, false);
-        
-        (
-            StatusCode::NOT_FOUND,
-            [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "Invalid playlist path".to_string(),
+            format!("Invalid {} path", category_name),
         )
             .into_response()
     }
@@ -2202,19 +1859,24 @@ fn parse_dir_index_prefix(path_prefix_str: &str) -> (Option<usize>, &str) {
 }
 
 fn build_soap_response(action: &str, service_type: &str, content: &str) -> Response {
-    let xml = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-    <s:Body>
-        <u:{action}Response xmlns:u="{service_type}">
-            {content}
-        </u:{action}Response>
-    </s:Body>
-</s:Envelope>"#,
-        action = action,
-        service_type = service_type,
-        content = content
-    );
+    let mut xml = String::with_capacity(300 + action.len() * 2 + service_type.len() + content.len());
+    xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
+    xml.push_str("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n");
+    xml.push_str("    <s:Body>\n");
+    xml.push_str("        <u:");
+    xml.push_str(action);
+    xml.push_str("Response xmlns:u=\"");
+    xml.push_str(service_type);
+    xml.push_str("\">\n");
+    xml.push_str("            ");
+    xml.push_str(content);
+    xml.push_str("\n");
+    xml.push_str("        </u:");
+    xml.push_str(action);
+    xml.push_str("Response>\n");
+    xml.push_str("    </s:Body>\n");
+    xml.push_str("</s:Envelope>");
+    
     (
         StatusCode::OK,
         [

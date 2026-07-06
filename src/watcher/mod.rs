@@ -51,7 +51,6 @@ pub struct CrossPlatformWatcher {
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
     watched_paths: Arc<RwLock<HashSet<PathBuf>>>,
-    media_extensions: HashSet<String>,
     debounce_duration: Duration,
 }
 
@@ -60,155 +59,134 @@ impl CrossPlatformWatcher {
     pub fn new() -> Self {
         let (event_sender, event_receiver) = mpsc::channel(256); // Reduced buffer size for memory efficiency
         
-        // Define supported media file extensions with pre-allocated capacity
-        let mut media_extensions = HashSet::with_capacity(32);
-        let extensions = [
-            // Video formats
-            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpg", "mpeg",
-            // Audio formats  
-            "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "aiff",
-            // Image formats
-            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp", "svg",
-        ];
-        for ext in &extensions {
-            media_extensions.insert(ext.to_lowercase());
-        }
-
         Self {
             debouncer: Arc::new(RwLock::new(None)),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
             watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))), // Pre-allocate capacity
-            media_extensions,
             debounce_duration: Duration::from_millis(250), // 250ms debounce for reduced event frequency
         }
     }
 
     /// Check if a file is a supported media file based on its extension
-    fn is_media_file(&self, path: &Path) -> bool {
-        if let Some(extension) = path.extension() {
-            if let Some(ext_str) = extension.to_str() {
-                return self.media_extensions.contains(&ext_str.to_lowercase());
-            }
-        }
-        false
+    pub fn is_media_file(&self, path: &Path) -> bool {
+        is_media_file(path)
     }
+}
 
-    /// Convert notify events to our FileSystemEvent enum
-    fn convert_events(&self, events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
-        let mut fs_events = Vec::with_capacity(events.len()); // Pre-allocate capacity
-        
-        for event in events {
-            match event.event.kind {
-                notify::EventKind::Create(_) => {
-                    for path in &event.event.paths {
-                        if path.is_dir() {
-                            // Handle directory creation - scan for media files
-                            info!("Directory created (detected by watcher): {}", path.display());
-                            fs_events.push(FileSystemEvent::Created(path.clone()));
-                        } else if self.is_media_file(path) {
-                            info!("Media file created (detected by watcher): {}", path.display());
-                            fs_events.push(FileSystemEvent::Created(path.clone()));
-                        } else {
-                            debug!("Non-media file created, ignoring: {}", path.display());
-                        }
+/// Check if a file is a supported media file based on its extension (helper)
+fn is_media_file(path: &Path) -> bool {
+    if let Some(extension) = path.extension() {
+        if let Some(ext_str) = extension.to_str() {
+            return crate::platform::filesystem::is_supported_media_extension(ext_str);
+        }
+    }
+    false
+}
+
+/// Convert notify events to our FileSystemEvent enum (helper)
+fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
+    let mut fs_events = Vec::with_capacity(events.len()); // Pre-allocate capacity
+    
+    for event in events {
+        match event.event.kind {
+            notify::EventKind::Create(_) => {
+                for path in &event.event.paths {
+                    if path.is_dir() {
+                        // Handle directory creation - scan for media files
+                        debug!("Directory created (detected by watcher): {}", path.display());
+                        fs_events.push(FileSystemEvent::Created(path.clone()));
+                    } else if is_media_file(path) {
+                        debug!("Media file created (detected by watcher): {}", path.display());
+                        fs_events.push(FileSystemEvent::Created(path.clone()));
+                    } else {
+                        debug!("Non-media file created, ignoring: {}", path.display());
                     }
                 }
-                notify::EventKind::Modify(modify_kind) => {
-                    match modify_kind {
-                        notify::event::ModifyKind::Name(_) => {
-                            if event.event.paths.len() >= 2 {
-                                let from = event.event.paths[0].clone();
-                                let to = event.event.paths[1].clone();
-                                info!("Path renamed (detected by watcher): {} -> {}", from.display(), to.display());
-                                fs_events.push(FileSystemEvent::Renamed { from, to });
-                            } else {
-                                for path in &event.event.paths {
-                                    if path.exists() {
-                                        if path.is_dir() || self.is_media_file(path) {
-                                            fs_events.push(FileSystemEvent::Created(path.clone()));
-                                        }
-                                    } else {
-                                        fs_events.push(FileSystemEvent::Deleted(path.clone()));
+            }
+            notify::EventKind::Modify(modify_kind) => {
+                match modify_kind {
+                    notify::event::ModifyKind::Name(_) => {
+                        if event.event.paths.len() >= 2 {
+                            let from = event.event.paths[0].clone();
+                            let to = event.event.paths[1].clone();
+                            debug!("Path renamed (detected by watcher): {} -> {}", from.display(), to.display());
+                            fs_events.push(FileSystemEvent::Renamed { from, to });
+                        } else {
+                            for path in &event.event.paths {
+                                if path.exists() {
+                                    if path.is_dir() || is_media_file(path) {
+                                        fs_events.push(FileSystemEvent::Created(path.clone()));
                                     }
+                                } else {
+                                    fs_events.push(FileSystemEvent::Deleted(path.clone()));
                                 }
                             }
                         }
-                        _ => {
-                            // Only process modify events for media files
-                            let media_paths: Vec<_> = event.event.paths.iter()
-                                .filter(|path| self.is_media_file(path))
-                                .collect();
-                            
-                            for path in media_paths {
-                                debug!("Media file modified: {}", path.display());
-                                fs_events.push(FileSystemEvent::Modified(path.clone()));
-                            }
+                    }
+                    _ => {
+                        // Only process modify events for media files
+                        let media_paths: Vec<_> = event.event.paths.iter()
+                            .filter(|path| is_media_file(path))
+                            .collect();
+                        
+                        for path in media_paths {
+                            debug!("Media file modified: {}", path.display());
+                            fs_events.push(FileSystemEvent::Modified(path.clone()));
                         }
                     }
                 }
-                notify::EventKind::Remove(_) => {
-                    for path in &event.event.paths {
-                        // Since the path is deleted, we can't check if it was a directory
-                        // We'll send all deletion events and let the handler figure it out
-                        info!("Path deleted (detected by watcher): {}", path.display());
-                        fs_events.push(FileSystemEvent::Deleted(path.clone()));
-                    }
+            }
+            notify::EventKind::Remove(_) => {
+                for path in &event.event.paths {
+                    // Since the path is deleted, we can't check if it was a directory
+                    // We'll send all deletion events and let the handler figure it out
+                    debug!("Path deleted (detected by watcher): {}", path.display());
+                    fs_events.push(FileSystemEvent::Deleted(path.clone()));
                 }
-                notify::EventKind::Other => {
-                    // Handle platform-specific events for media files only
-                    let media_paths: Vec<_> = event.event.paths.iter()
-                        .filter(|path| self.is_media_file(path))
-                        .collect();
-                    
-                    for path in media_paths {
-                        debug!("Media file other event: {}", path.display());
-                        fs_events.push(FileSystemEvent::Modified(path.clone()));
-                    }
+            }
+            notify::EventKind::Other => {
+                // Handle platform-specific events for media files only
+                let media_paths: Vec<_> = event.event.paths.iter()
+                    .filter(|path| is_media_file(path))
+                    .collect();
+                
+                for path in media_paths {
+                    debug!("Media file other event: {}", path.display());
+                    fs_events.push(FileSystemEvent::Modified(path.clone()));
                 }
-                _ => {
-                    // Handle other event types as modifications for media files only
-                    let media_paths: Vec<_> = event.event.paths.iter()
-                        .filter(|path| self.is_media_file(path))
-                        .collect();
-                    
-                    for path in media_paths {
-                        debug!("Media file generic event: {}", path.display());
-                        fs_events.push(FileSystemEvent::Modified(path.clone()));
-                    }
+            }
+            _ => {
+                // Handle other event types as modifications for media files only
+                let media_paths: Vec<_> = event.event.paths.iter()
+                    .filter(|path| is_media_file(path))
+                    .collect();
+                
+                for path in media_paths {
+                    debug!("Media file generic event: {}", path.display());
+                    fs_events.push(FileSystemEvent::Modified(path.clone()));
                 }
             }
         }
-        
-        fs_events
     }
-
+    
+    fs_events
+}
+impl CrossPlatformWatcher {
     /// Initialize the debounced watcher
     async fn initialize_watcher(&self) -> Result<()> {
         let event_sender = self.event_sender.clone();
-        let media_extensions = self.media_extensions.clone();
         
-        // Create a weak reference to self to avoid circular references in the closure
-        let watcher_weak = Arc::downgrade(&self.debouncer);
-
         let debouncer = new_debouncer_opt(
             self.debounce_duration,
             None, // Use default tick rate
             move |result: DebounceEventResult| {
-                // Upgrade the weak reference to an Arc
-                let watcher_arc = if let Some(arc) = watcher_weak.upgrade() {
-                    arc
-                } else {
-                    // The watcher has been dropped, so we can't process events
-                    warn!("Watcher has been dropped, cannot process file events.");
-                    return;
-                };
                 match result {
                     Ok(events) => {
                         if !events.is_empty() {
-                            info!("Watcher callback triggered with {} events", events.len());
+                            debug!("Watcher callback triggered with {} events", events.len());
                             for event in &events {
-                                info!("  Raw event: {:?} for paths: {:?}", event.event.kind, event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+                                debug!("  Raw event: {:?} for paths: {:?}", event.event.kind, event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
                             }
                         }
                         
@@ -219,21 +197,21 @@ impl CrossPlatformWatcher {
                                     // If the path does not exist, it was deleted or renamed/moved.
                                     // We must include it so the database can be cleaned up.
                                     if !path.exists() {
-                                        info!("Including non-existent path (deleted or renamed): {}", path.display());
+                                        debug!("Including non-existent path (deleted or renamed): {}", path.display());
                                         return true;
                                     }
                                     
                                     // Include directories and media files for other events
                                     if path.is_dir() {
-                                        info!("Including directory event for path: {}", path.display());
+                                        debug!("Including directory event for path: {}", path.display());
                                         return true;
                                     }
                                     
                                     // Include media files
                                     if let Some(extension) = path.extension() {
                                         if let Some(ext_str) = extension.to_str() {
-                                            if media_extensions.contains(&ext_str.to_lowercase()) {
-                                                info!("Including media file event for path: {}", path.display());
+                                            if crate::platform::filesystem::is_supported_media_extension(ext_str) {
+                                                debug!("Including media file event for path: {}", path.display());
                                                 return true;
                                             }
                                         }
@@ -246,18 +224,9 @@ impl CrossPlatformWatcher {
                             .collect();
 
                         if !relevant_events.is_empty() {
-                            info!("Processing {} relevant events", relevant_events.len());
+                            debug!("Processing {} relevant events", relevant_events.len());
                             
-                            // Create a temporary watcher instance for event conversion
-                            let temp_watcher = CrossPlatformWatcher {
-                                debouncer: watcher_arc.clone(),
-                                event_sender: event_sender.clone(),
-                                event_receiver: Arc::new(RwLock::new(None)),
-                                watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))),
-                                media_extensions: media_extensions.clone(),
-                                debounce_duration: Duration::from_millis(250),
-                            };
-                            let fs_events = temp_watcher.convert_events(relevant_events);
+                            let fs_events = convert_watcher_events(relevant_events);
                             for fs_event in fs_events {
                                 if let Err(e) = event_sender.try_send(fs_event) {
                                     error!("Failed to send file system event: {}", e);

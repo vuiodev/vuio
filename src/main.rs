@@ -1090,7 +1090,8 @@ async fn handle_file_system_event(
                 
                 // Create MediaFile record
                 let metadata = tokio::fs::metadata(&path).await?;
-                let mime_type = media::get_mime_type(&path);
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
                 let mut media_file = database::MediaFile::new(path.clone(), metadata.len(), mime_type);
                 media_file.modified = metadata.modified().unwrap_or(std::time::SystemTime::now());
                 
@@ -1261,7 +1262,8 @@ async fn handle_file_system_event(
                 if removed_count > 0 {
                     // Create MediaFile record for new location
                     let metadata = tokio::fs::metadata(&to).await?;
-                    let mime_type = media::get_mime_type(&to);
+                    let ext = to.extension().and_then(|e| e.to_str()).unwrap_or("");
+                    let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
                     let media_file = database::MediaFile::new(to.clone(), metadata.len(), mime_type);
                     
                     // Store in database using ZeroCopy bulk operation

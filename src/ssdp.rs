@@ -43,15 +43,15 @@ impl UnifiedSsdpService {
     pub fn new(state: AppState) -> Self {
         let network_manager = Arc::new(PlatformNetworkManager::new());
         let platform_adapter: Box<dyn SsdpPlatformAdapter> = if AppConfig::is_running_in_docker() {
-            Box::new(DockerSsdpAdapter::new())
+            Box::new(DefaultSsdpAdapter::new(vec![], false))
         } else {
             #[cfg(target_os = "windows")]
             {
-                Box::new(WindowsSsdpAdapter::new())
+                Box::new(DefaultSsdpAdapter::new(vec![], true))
             }
             #[cfg(not(target_os = "windows"))]
             {
-                Box::new(UnixSsdpAdapter::new())
+                Box::new(DefaultSsdpAdapter::new(vec![8080, 8081, 8082, 9090], true))
             }
         };
 
@@ -375,74 +375,24 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
     Ok(())
 }
 
-/// Windows-specific SSDP platform adapter
-#[cfg(target_os = "windows")]
-pub struct WindowsSsdpAdapter;
-
-#[cfg(target_os = "windows")]
-impl WindowsSsdpAdapter {
-    pub fn new() -> Self {
-        Self
-    }
+/// Default, parameterized platform adapter for SSDP service behavior
+pub struct DefaultSsdpAdapter {
+    fallback_ports: Vec<u16>,
+    require_multicast_support: bool,
 }
 
-#[cfg(target_os = "windows")]
-#[async_trait]
-impl SsdpPlatformAdapter for WindowsSsdpAdapter {
-    async fn configure_socket(&self, socket: &mut SsdpSocket) -> Result<()> {
-        // Windows-specific socket configuration
-        debug!("Applying Windows-specific socket configuration");
-        // The socket is already configured with Windows-specific options in SsdpSocket::new
-        Ok(())
-    }
-    
-    async fn get_suitable_interfaces(&self, network_manager: &dyn NetworkManager) -> Result<Vec<NetworkInterface>> {
-        let interfaces = network_manager.get_local_interfaces().await
-            .map_err(|e| anyhow::anyhow!("Failed to get interfaces: {}", e))?;
-        
-        // Filter for Windows - prefer Ethernet and WiFi, avoid VPN interfaces
-        let suitable: Vec<_> = interfaces.into_iter()
-            .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
-            .collect();
-            
-        Ok(suitable)
-    }
-    
-    fn should_bind_to_specific_interface(&self) -> bool {
-        false // Windows works better with INADDR_ANY
-    }
-    
-    fn get_server_ip(&self, state: &AppState) -> String {
-        state.get_server_ip()
-    }
-    
-    fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
-        SsdpConfig {
-            primary_port: SSDP_PORT,
-            fallback_ports: vec![], // Don't use fallback ports on Windows
-            multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
-            announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
-            max_retries: 3,
-            interfaces: Vec::new(),
+impl DefaultSsdpAdapter {
+    pub fn new(fallback_ports: Vec<u16>, require_multicast_support: bool) -> Self {
+        Self {
+            fallback_ports,
+            require_multicast_support,
         }
     }
 }
 
-/// Docker-specific SSDP platform adapter
-pub struct DockerSsdpAdapter;
-
-impl DockerSsdpAdapter {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
 #[async_trait]
-impl SsdpPlatformAdapter for DockerSsdpAdapter {
+impl SsdpPlatformAdapter for DefaultSsdpAdapter {
     async fn configure_socket(&self, _socket: &mut SsdpSocket) -> Result<()> {
-        // Docker-specific socket configuration
-        debug!("Applying Docker-specific socket configuration");
-        // Additional Docker-specific options could be set here
         Ok(())
     }
     
@@ -450,16 +400,22 @@ impl SsdpPlatformAdapter for DockerSsdpAdapter {
         let interfaces = network_manager.get_local_interfaces().await
             .map_err(|e| anyhow::anyhow!("Failed to get interfaces: {}", e))?;
         
-        // In Docker, we typically want all non-loopback interfaces
         let suitable: Vec<_> = interfaces.into_iter()
-            .filter(|iface| !iface.is_loopback && iface.is_up)
+            .filter(|iface| {
+                let basic = !iface.is_loopback && iface.is_up;
+                if self.require_multicast_support {
+                    basic && iface.supports_multicast
+                } else {
+                    basic
+                }
+            })
             .collect();
             
         Ok(suitable)
     }
     
     fn should_bind_to_specific_interface(&self) -> bool {
-        false // Docker needs to bind to 0.0.0.0 for multicast
+        false
     }
     
     fn get_server_ip(&self, state: &AppState) -> String {
@@ -469,57 +425,7 @@ impl SsdpPlatformAdapter for DockerSsdpAdapter {
     fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
         SsdpConfig {
             primary_port: SSDP_PORT,
-            fallback_ports: vec![], // Don't use fallback ports in Docker
-            multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
-            announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
-            max_retries: 3,
-            interfaces: Vec::new(),
-        }
-    }
-}
-
-/// Unix/Linux-specific SSDP platform adapter
-pub struct UnixSsdpAdapter;
-
-impl UnixSsdpAdapter {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-#[async_trait]
-impl SsdpPlatformAdapter for UnixSsdpAdapter {
-    async fn configure_socket(&self, _socket: &mut SsdpSocket) -> Result<()> {
-        // Unix-specific socket configuration
-        debug!("Applying Unix-specific socket configuration");
-        // The socket is already configured with Unix-specific options in SsdpSocket::new
-        Ok(())
-    }
-    
-    async fn get_suitable_interfaces(&self, network_manager: &dyn NetworkManager) -> Result<Vec<NetworkInterface>> {
-        let interfaces = network_manager.get_local_interfaces().await
-            .map_err(|e| anyhow::anyhow!("Failed to get interfaces: {}", e))?;
-        
-        // Filter for Unix - prefer Ethernet and WiFi
-        let suitable: Vec<_> = interfaces.into_iter()
-            .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
-            .collect();
-            
-        Ok(suitable)
-    }
-    
-    fn should_bind_to_specific_interface(&self) -> bool {
-        false // Unix works well with INADDR_ANY
-    }
-    
-    fn get_server_ip(&self, state: &AppState) -> String {
-        state.get_server_ip()
-    }
-    
-    fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
-        SsdpConfig {
-            primary_port: SSDP_PORT,
-            fallback_ports: vec![8080, 8081, 8082, 9090], // Use fallback ports on Unix
+            fallback_ports: self.fallback_ports.clone(),
             multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
             announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
             max_retries: 3,

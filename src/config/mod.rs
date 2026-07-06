@@ -368,70 +368,18 @@ impl AppConfig {
     }
 
     /// Get platform-appropriate default interface
-    fn get_platform_default_interface(platform_config: &PlatformConfig) -> String {
-        match platform_config.os_type {
-            crate::platform::OsType::Windows => {
-                // Windows often has issues with 0.0.0.0, prefer specific binding
-                "0.0.0.0".to_string()
-            }
-            crate::platform::OsType::MacOS => {
-                // macOS works well with 0.0.0.0
-                "0.0.0.0".to_string()
-            }
-            crate::platform::OsType::Linux => {
-                // Linux works well with 0.0.0.0
-                "0.0.0.0".to_string()
-            }
-            crate::platform::OsType::Bsd => {
-                // BSD works well with 0.0.0.0
-                "0.0.0.0".to_string()
-            }
-        }
+    fn get_platform_default_interface(_platform_config: &PlatformConfig) -> String {
+        "0.0.0.0".to_string()
     }
 
-
     /// Get platform-appropriate default multicast TTL
-    fn get_platform_default_multicast_ttl(platform_config: &PlatformConfig) -> u8 {
-        match platform_config.os_type {
-            crate::platform::OsType::Windows => {
-                // Windows may need higher TTL for complex network setups
-                4
-            }
-            crate::platform::OsType::MacOS => {
-                // macOS typically works well with standard TTL
-                4
-            }
-            crate::platform::OsType::Linux => {
-                // Linux typically works well with standard TTL
-                4
-            }
-            crate::platform::OsType::Bsd => {
-                // BSD typically works well with standard TTL
-                4
-            }
-        }
+    fn get_platform_default_multicast_ttl(_platform_config: &PlatformConfig) -> u8 {
+        4
     }
 
     /// Get platform-appropriate default announce interval
-    fn get_platform_default_announce_interval(platform_config: &PlatformConfig) -> u64 {
-        match platform_config.os_type {
-            crate::platform::OsType::Windows => {
-                // Windows may benefit from more frequent announcements due to firewall issues
-                30
-            }
-            crate::platform::OsType::MacOS => {
-                // macOS works well with standard interval
-                30
-            }
-            crate::platform::OsType::Linux => {
-                // Linux works well with standard interval
-                30
-            }
-            crate::platform::OsType::Bsd => {
-                // BSD works well with standard interval
-                30
-            }
-        }
+    fn get_platform_default_announce_interval(_platform_config: &PlatformConfig) -> u64 {
+        30
     }
 
     /// Get the database file path, using platform default if not specified
@@ -602,12 +550,12 @@ impl AppConfig {
             self.server.interface = Self::get_platform_default_interface(&platform_config);
         }
         
-        // Update network settings with platform defaults if they're at default values
-        if self.network.multicast_ttl == 4 {
+        // Update network settings with platform defaults if they're uninitialized/zero
+        if self.network.multicast_ttl == 0 {
             self.network.multicast_ttl = Self::get_platform_default_multicast_ttl(&platform_config);
         }
         
-        if self.network.announce_interval_seconds == 30 {
+        if self.network.announce_interval_seconds == 0 {
             self.network.announce_interval_seconds = Self::get_platform_default_announce_interval(&platform_config);
         }
         

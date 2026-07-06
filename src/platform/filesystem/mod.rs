@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use thiserror::Error;
@@ -610,20 +610,41 @@ pub const SUPPORTED_MEDIA_TYPES: &[(&str, &str)] = &[
 
 /// Get MIME type for a file based on its extension
 pub fn get_mime_type_for_extension(extension: &str) -> String {
+    use std::sync::LazyLock;
+    
+    static MIME_MAP: LazyLock<HashMap<String, &'static str>> = LazyLock::new(|| {
+        let mut m = HashMap::with_capacity(SUPPORTED_MEDIA_TYPES.len());
+        for &(ext, mime) in SUPPORTED_MEDIA_TYPES {
+            m.insert(ext.to_string(), mime);
+        }
+        m
+    });
+
     let ext_lower = extension.to_lowercase();
-    SUPPORTED_MEDIA_TYPES
-        .iter()
-        .find(|(ext, _)| *ext == ext_lower)
-        .map(|(_, mime)| mime.to_string())
-        .unwrap_or_else(|| "application/octet-stream".to_string())
+    MIME_MAP.get(&ext_lower).copied().unwrap_or("application/octet-stream").to_string()
 }
 
 /// Check if a file extension is supported for media serving
 pub fn is_supported_media_extension(extension: &str) -> bool {
+    use std::sync::LazyLock;
+
+    static SUPPORTED_EXTENSIONS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        SUPPORTED_MEDIA_TYPES.iter().map(|(ext, _)| ext.to_lowercase()).collect()
+    });
+
     let ext_lower = extension.to_lowercase();
-    SUPPORTED_MEDIA_TYPES
-        .iter()
-        .any(|(ext, _)| *ext == ext_lower)
+    SUPPORTED_EXTENSIONS.contains(&ext_lower)
+}
+
+/// Get all supported media extensions as a set
+pub fn get_supported_extensions() -> &'static HashSet<String> {
+    use std::sync::LazyLock;
+
+    static SUPPORTED_EXTENSIONS: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        SUPPORTED_MEDIA_TYPES.iter().map(|(ext, _)| ext.to_string()).collect()
+    });
+
+    &SUPPORTED_EXTENSIONS
 }
 
 /// Base implementation of FileSystemManager with common functionality

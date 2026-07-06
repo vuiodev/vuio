@@ -28,6 +28,7 @@ path = "src/lib.rs"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1.52", features = ["rt", "net", "fs", "time", "sync", "macros", "io-util", "signal", "process"] }
 serde = { version = "1.0", features = ["derive"] }
+bitcode = { version = "0.6", features = ["serde"] }
 uuid = { version = "1.23", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
 thiserror = "2.0"

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{warn, info, debug};
 
-use crate::database::{DatabaseManager, MediaFile, redb::RedbDatabase};
+use crate::database::{DatabaseManager, MediaFile};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Batch size for database operations during parallel scanning
@@ -19,22 +19,6 @@ pub struct MediaScanner {
 }
 
 impl MediaScanner {
-    /// Create a new media scanner with platform-specific file system manager
-    pub async fn new() -> anyhow::Result<Self> {
-        // Create a temporary Redb database for basic scanning
-        let temp_path = std::env::temp_dir().join("temp_scanner.redb");
-        let redb_db = RedbDatabase::new(temp_path).await?;
-        
-        // Initialize the database
-        redb_db.initialize().await?;
-        
-        let database_manager = Arc::new(redb_db) as Arc<dyn DatabaseManager>;
-        
-        Ok(Self {
-            filesystem_manager: create_platform_filesystem_manager(),
-            database_manager,
-        })
-    }
     
     /// Create a new media scanner with database manager
     pub fn with_database(database_manager: Arc<dyn DatabaseManager>) -> Self {
@@ -84,7 +68,14 @@ impl MediaScanner {
         Ok(fs_files)
     }
 
-    /// Simple recursive directory scan that returns files without database operations
+    /// Simple recursive directory scan that returns files without database operations.
+    ///
+    /// # Difference from `scan_directory_recursive`
+    /// - `scan_directory_recursively_simple` is a slow, sequential, non-database scan. It does not update or query the database and is not optimized for large directories.
+    /// - `scan_directory_recursive` uses parallel file system walk (`jwalk`) and does incremental, ZeroCopy database synchronization.
+    ///
+    /// This function is deprecated in favor of using `scan_directory_recursive`.
+    #[deprecated(note = "Use scan_directory_recursive instead for optimized parallel scanning and database synchronization")]
     pub async fn scan_directory_recursively_simple(&self, directory: &Path) -> Result<Vec<MediaFile>> {
         let mut all_files = Vec::with_capacity(1000); // Pre-allocate capacity
         let mut dirs_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
@@ -227,21 +218,31 @@ impl MediaScanner {
     ) -> Result<ScanResult> {
         let mut result = ScanResult::new();
         
+        // Cache to store resolved canonical paths and prevent redundant syscalls
+        let mut canonical_path_cache: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+        let mut get_cached_canonical = |path: &PathBuf| -> PathBuf {
+            if let Some(canonical) = canonical_path_cache.get(path) {
+                return PathBuf::from(canonical);
+            }
+            match self.filesystem_manager.get_canonical_path(path) {
+                Ok(canonical) => {
+                    canonical_path_cache.insert(path.clone(), canonical.clone());
+                    PathBuf::from(canonical)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to get canonical path for {}: {}", path.display(), e);
+                    self.filesystem_manager.normalize_path(path)
+                }
+            }
+        };
+
         // Create lookup maps for efficient comparison with pre-allocated capacity
         // Use both original and normalized paths to handle legacy database entries
         let mut existing_by_original: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(existing_files.len());
         let mut existing_by_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(existing_files.len());
         
         for existing_file in existing_files {
-            // Use canonical path normalization for database consistency
-            let canonical_path = match self.filesystem_manager.get_canonical_path(&existing_file.path) {
-                Ok(canonical) => PathBuf::from(canonical),
-                Err(e) => {
-                    tracing::warn!("Failed to get canonical path for {}: {}", existing_file.path.display(), e);
-                    self.filesystem_manager.normalize_path(&existing_file.path)
-                }
-            };
-            
+            let canonical_path = get_cached_canonical(&existing_file.path);
             existing_by_original.insert(existing_file.path.clone(), existing_file.clone());
             existing_by_normalized.insert(canonical_path, existing_file);
         }
@@ -249,14 +250,7 @@ impl MediaScanner {
         // Current files paths - normalize for consistent comparison with pre-allocated capacity
         let mut current_normalized: std::collections::HashMap<PathBuf, MediaFile> = std::collections::HashMap::with_capacity(current_files.len());
         for f in &current_files {
-            // Apply canonical path normalization to current files before database operations
-            let canonical_path = match self.filesystem_manager.get_canonical_path(&f.path) {
-                Ok(canonical) => PathBuf::from(canonical),
-                Err(e) => {
-                    tracing::warn!("Failed to get canonical path for {}: {}", f.path.display(), e);
-                    self.filesystem_manager.normalize_path(&f.path)
-                }
-            };
+            let canonical_path = get_cached_canonical(&f.path);
             
             // Create a normalized version of the MediaFile for database storage
             let mut normalized_file = f.clone();
@@ -296,13 +290,7 @@ impl MediaScanner {
                         files_to_update.push(updated_file);
                     } else {
                         // Check if the existing file path needs canonical normalization
-                        let existing_canonical = match self.filesystem_manager.get_canonical_path(&existing_file.path) {
-                            Ok(canonical) => PathBuf::from(canonical),
-                            Err(e) => {
-                                tracing::warn!("Failed to get canonical path for {}: {}", existing_file.path.display(), e);
-                                self.filesystem_manager.normalize_path(&existing_file.path)
-                            }
-                        };
+                        let existing_canonical = get_cached_canonical(&existing_file.path);
                         
                         if existing_file.path != existing_canonical {
                             // Path needs canonical normalization - update it in the database
@@ -476,11 +464,6 @@ impl MediaScanner {
         
         // Use jwalk for parallel directory traversal - runs in a blocking thread pool
         let root_clone = canonical_root.clone();
-        let media_extensions: HashSet<&str> = [
-            "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mpg", "mpeg",
-            "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "aiff",
-            "jpg", "jpeg", "png", "gif", "bmp", "tiff", "webp"
-        ].into_iter().collect();
         
         let file_paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
             WalkDir::new(&root_clone)
@@ -491,7 +474,7 @@ impl MediaScanner {
                 .filter(|entry| {
                     if let Some(ext) = entry.path().extension() {
                         if let Some(ext_str) = ext.to_str() {
-                            return media_extensions.contains(ext_str.to_lowercase().as_str());
+                            return crate::platform::filesystem::is_supported_media_extension(ext_str);
                         }
                     }
                     false
@@ -626,7 +609,8 @@ impl MediaScanner {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let mime_type = crate::media::get_mime_type(path);
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
         let size = metadata.len();
         let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
         
@@ -741,72 +725,7 @@ pub struct ScanError {
     pub error: String,
 }
 
-/// Legacy function for backward compatibility - performs a simple directory scan
-/// 
-/// This function is deprecated in favor of using MediaScanner directly
-#[deprecated(note = "Use MediaScanner::scan_directory instead")]
-pub async fn scan_media_files(dir: &Path) -> Result<Vec<MediaFile>> {
-    let filesystem_manager = create_platform_filesystem_manager();
-    
-    let fs_files = filesystem_manager
-        .scan_media_directory(dir)
-        .await
-        .map_err(|e| anyhow::anyhow!("Scan failed: {}", e))?;
-    
-    Ok(fs_files)
-}
 
-/// Get MIME type for a file based on its extension
-pub fn get_mime_type(path: &std::path::Path) -> String {
-    let extension = path.extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("")
-        .to_lowercase();
-    
-    match extension.as_str() {
-        // Video formats
-        "mp4" => "video/mp4",
-        "mkv" => "video/x-matroska",
-        "avi" => "video/x-msvideo",
-        "mov" => "video/quicktime",
-        "wmv" => "video/x-ms-wmv",
-        "flv" => "video/x-flv",
-        "webm" => "video/webm",
-        "m4v" => "video/x-m4v",
-        "3gp" => "video/3gpp",
-        "mpg" | "mpeg" => "video/mpeg",
-        
-        // Audio formats
-        "mp3" => "audio/mpeg",
-        "flac" => "audio/flac",
-        "wav" => "audio/wav",
-        "aac" => "audio/aac",
-        "ogg" => "audio/ogg",
-        "wma" => "audio/x-ms-wma",
-        "m4a" => "audio/mp4",
-        "opus" => "audio/opus",
-        "aiff" => "audio/aiff",
-        
-        // Image formats
-        "jpg" | "jpeg" => "image/jpeg",
-        "png" => "image/png",
-        "gif" => "image/gif",
-        "bmp" => "image/bmp",
-        "tiff" => "image/tiff",
-        "webp" => "image/webp",
-        "svg" => "image/svg+xml",
-        
-        _ => "application/octet-stream",
-    }.to_string()
-}
-
-/// Get MIME type for a file based on its extension (legacy function)
-/// 
-/// This function is deprecated in favor of using the filesystem module directly
-#[deprecated(note = "Use crate::platform::filesystem::get_mime_type_for_extension instead")]
-pub fn get_mime_type_legacy(path: &std::path::Path) -> String {
-    get_mime_type(path)
-}
 
 #[cfg(test)]
 mod tests {
