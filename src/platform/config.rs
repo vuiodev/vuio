@@ -494,6 +494,9 @@ impl PlatformConfig {
             "webp".to_string(),
             "tiff".to_string(),
             "svg".to_string(),
+            "heif".to_string(),
+            "heic".to_string(),
+            "avif".to_string(),
         ];
 
         // Add platform-specific extensions

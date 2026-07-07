@@ -372,6 +372,12 @@ pub async fn generate_browse_response_with_totals(
                 if let Some(ref album_artist) = file.album_artist {
                     let _ = write!(&mut didl, "<upnp:albumArtist>{}</upnp:albumArtist>", xml_escape(album_artist));
                 }
+                
+                let _ = write!(
+                    &mut didl,
+                    "<upnp:albumArtURI>http://{}:{}/media/{}/cover</upnp:albumArtURI>",
+                    server_ip, state.config.server.port, file_id
+                );
             }
 
             let _ = write!(

@@ -285,6 +285,7 @@ async fn main() -> anyhow::Result<()> {
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Start file system monitoring
@@ -1598,7 +1599,7 @@ async fn start_http_server_task(
     let config = app_state.config.clone();
 
     // Create the Axum web server
-    let app = web::create_router(app_state);
+    let app = web::create_router(app_state.clone());
 
     // Parse server interface address
     let interface_addr =
@@ -1626,11 +1627,38 @@ async fn start_http_server_task(
 
     info!("HTTP server started successfully");
 
+    // Helper to parse IP from location_url
+    fn parse_ip_from_url_helper(url_str: &str) -> Option<String> {
+        let without_scheme = url_str.split("://").nth(1)?;
+        let host_port = without_scheme.split('/').next()?;
+        let host = host_port.split(':').next()?;
+        Some(host.to_string())
+    }
+
+    // Spawn background SSDP TV discovery cache refresher every 60s
+    let state_clone = app_state.clone();
+    tokio::spawn(async move {
+        loop {
+            if let Ok(tvs) = vuio::tv_control::discover_tvs().await {
+                let mut cache = state_clone.discovered_tvs.lock().await;
+                for tv in tvs {
+                    if let Some(ip) = parse_ip_from_url_helper(&tv.location_url) {
+                        cache.insert(ip, tv.friendly_name);
+                    }
+                }
+            }
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        }
+    });
+
     // Spawn the server as a background task
     let handle = tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service())
-            .await
-            .context("HTTP server failed")
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .context("HTTP server failed")
     });
 
     Ok(handle)

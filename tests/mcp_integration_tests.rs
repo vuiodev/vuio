@@ -61,6 +61,7 @@ async fn test_mcp_initialize_and_tools_list() {
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Add a fake client channel so message handler can send back to the SSE receiver

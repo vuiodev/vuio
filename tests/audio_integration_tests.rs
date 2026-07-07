@@ -216,3 +216,110 @@ Version=2
     assert!(rock_titles.contains(&"Back In Black"));
     assert!(rock_titles.contains(&"Time"));
 }
+
+#[tokio::test]
+async fn test_cover_art_retrieval_and_xml() {
+    use std::fs;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use vuio::database::DatabaseManager;
+    use vuio::database::redb::RedbDatabase;
+    use vuio::media::MediaScanner;
+    use vuio::state::AppState;
+    use vuio::config::AppConfig;
+    use vuio::platform::PlatformInfo;
+    use vuio::platform::filesystem::create_platform_filesystem_manager;
+    use vuio::web::handlers::{WebHandlerMetrics, serve_cover};
+    use vuio::web::xml::generate_browse_response;
+    use axum::extract::{State, Path};
+    use axum::response::IntoResponse;
+    use axum::http::StatusCode;
+
+    // 1. Setup temporary directory for media and database
+    let temp_dir = tempdir().unwrap();
+    let raw_media_dir = temp_dir.path().join("media");
+    fs::create_dir_all(&raw_media_dir).unwrap();
+    let media_dir = fs::canonicalize(raw_media_dir).unwrap();
+    
+    let db_path = temp_dir.path().join("test_cover.redb");
+    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    db.initialize().await.unwrap();
+
+    // 2. Generate minimal valid silent MP3 file
+    let silent_mp3_base64 = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU2LjM2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU2LjQxAAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV";
+    let mp3_bytes = decode_base64(silent_mp3_base64);
+
+    let audio_path = media_dir.join("song.mp3");
+    fs::write(&audio_path, &mp3_bytes).unwrap();
+
+    // 3. Write a fake cover.jpg in the same directory
+    let cover_path = media_dir.join("cover.jpg");
+    let fake_cover_data = b"fake image bytes content";
+    fs::write(&cover_path, fake_cover_data).unwrap();
+
+    // 4. Scan the directory with MediaScanner
+    let scanner = MediaScanner::with_database(db.clone());
+    let scan_result = scanner.scan_directory_recursive(&media_dir).await.unwrap();
+    assert_eq!(scan_result.new_files.len(), 2);
+
+    // 5. Get file from DB to find its assigned ID
+    let db_file = db.get_file_by_path(&audio_path).await.unwrap().unwrap();
+    let file_id = db_file.id.unwrap();
+
+    // 6. Setup mock AppState
+    let config = Arc::new(AppConfig::default());
+    let platform_info = Arc::new(PlatformInfo::detect().await.unwrap());
+    let filesystem_manager = Arc::from(create_platform_filesystem_manager());
+    let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+    let web_metrics = Arc::new(WebHandlerMetrics::new());
+    
+    let app_state = AppState {
+        config,
+        database: db.clone(),
+        platform_info,
+        filesystem_manager,
+        content_update_id,
+        web_metrics,
+        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        log_file_path: temp_dir.path().join("vuio.log"),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+    };
+
+    // 7. Verify UPnP XML response generation contains upnp:albumArtURI
+    let xml_response = generate_browse_response(
+        "audio",
+        &[],
+        &[db_file.clone()],
+        &app_state,
+        "127.0.0.1",
+    ).await;
+    
+    let expected_url = format!("http://127.0.0.1:{}/media/{}/cover", app_state.config.server.port, file_id);
+    assert!(
+        xml_response.contains("upnp:albumArtURI"),
+        "XML response did not contain upnp:albumArtURI tag"
+    );
+    assert!(
+        xml_response.contains(&expected_url),
+        "XML response did not contain expected cover URL: {}",
+        xml_response
+    );
+
+    // 8. Test serve_cover endpoint directly
+    let response = serve_cover(
+        State(app_state.clone()),
+        Path(file_id.to_string()),
+    ).await.unwrap().into_response();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    
+    let headers = response.headers();
+    assert_eq!(headers.get("content-type").unwrap(), "image/jpeg");
+
+    let body_bytes = axum::body::to_bytes(response.into_body(), 10000).await.unwrap();
+    assert_eq!(body_bytes.as_ref(), fake_cover_data);
+}

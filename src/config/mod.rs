@@ -198,6 +198,7 @@ impl AppConfig {
                 "aac".to_string(), "ogg".to_string(), "wma".to_string(),
                 "jpg".to_string(), "jpeg".to_string(), "png".to_string(),
                 "gif".to_string(), "bmp".to_string(), "webp".to_string(),
+                "heif".to_string(), "heic".to_string(), "avif".to_string(),
             ],
         };
 

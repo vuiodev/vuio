@@ -39,6 +39,7 @@ pub fn create_router(state: AppState) -> Router {
             get(handlers::media_receiver_registrar_control).post(handlers::media_receiver_registrar_control),
         )
         .route("/media/{id}", get(handlers::serve_media).head(handlers::serve_media))
+        .route("/media/{id}/cover", get(handlers::serve_cover))
         .route("/media/{id}/subtitle", get(handlers::serve_subtitle))
         .route("/metrics", get(handlers::get_prometheus_metrics))
         .route("/metrics/json", get(handlers::get_web_metrics))

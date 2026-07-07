@@ -2757,6 +2757,7 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MetricsTrackingRe
 
 pub async fn serve_media(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(client_addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Path(id): Path<String>,
     method: Method,
     headers: HeaderMap,
@@ -2782,6 +2783,40 @@ pub async fn serve_media(
             state.web_metrics.record_error();
             AppError::NotFound
         })?;
+
+    // Record dynamic client telemetry for GET requests (playing)
+    if method == Method::GET {
+        let client_ip = client_addr.ip().to_string();
+        
+        let device_name = {
+            let cache = state.discovered_tvs.lock().await;
+            if let Some(name) = cache.get(&client_ip) {
+                name.clone()
+            } else if let Some(ua) = headers.get(axum::http::header::USER_AGENT).and_then(|h| h.to_str().ok()) {
+                let ua_lower = ua.to_lowercase();
+                if ua_lower.contains("ipad") {
+                    format!("iPad ({})", client_ip)
+                } else if ua_lower.contains("iphone") {
+                    format!("iPhone ({})", client_ip)
+                } else if ua_lower.contains("android") {
+                    format!("Android ({})", client_ip)
+                } else if ua_lower.contains("macintosh") || ua_lower.contains("mac os x") {
+                    format!("Mac ({})", client_ip)
+                } else if ua_lower.contains("windows") {
+                    format!("Windows PC ({})", client_ip)
+                } else {
+                    format!("Device ({})", client_ip)
+                }
+            } else {
+                format!("Device ({})", client_ip)
+            }
+        };
+
+        {
+            let mut casts = state.active_casts.lock().await;
+            casts.insert(device_name, (file_info.filename.clone(), std::time::Instant::now()));
+        }
+    }
 
     // Enforce read-only access to media files
     let mut file = tokio::fs::OpenOptions::new()
@@ -3563,6 +3598,85 @@ pub async fn serve_subtitle(
         .map_err(|_| AppError::NotFound)
 }
 
+pub async fn serve_cover(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let file_id = id.parse::<i64>().map_err(|_| {
+        state.web_metrics.record_error();
+        AppError::NotFound
+    })?;
+    
+    let file_info = state.database
+        .get_file_by_id(file_id)
+        .await
+        .map_err(|e| {
+            error!("Error getting file by ID for cover {}: {}", file_id, e);
+            state.web_metrics.record_error();
+            AppError::NotFound
+        })?
+        .ok_or_else(|| {
+            state.web_metrics.record_error();
+            AppError::NotFound
+        })?;
+
+    if !file_info.mime_type.starts_with("audio/") {
+        return Err(AppError::NotFound);
+    }
+
+    // 1. Primary: Search parent directory for cover images (fast)
+    if let Some(parent) = file_info.path.parent() {
+        let base_name = file_info.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        
+        let cover_filenames = [
+            "cover", "Cover", "COVER",
+            "folder", "Folder", "FOLDER",
+            "album", "Album", "ALBUM",
+            "artwork", "Artwork", "ARTWORK",
+            base_name,
+        ];
+        
+        let extensions = ["jpg", "jpeg", "png", "webp", "heif", "heic", "avif"];
+        
+        for name in &cover_filenames {
+            for ext in &extensions {
+                let img_path = parent.join(format!("{}.{}", name, ext));
+                if img_path.exists() && img_path.is_file() {
+                    if let Ok(data) = tokio::fs::read(&img_path).await {
+                        let content_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
+                        return Response::builder()
+                            .header(header::CONTENT_TYPE, content_type)
+                            .body(Body::from(data))
+                            .map_err(|_| AppError::NotFound);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Secondary: Extract embedded artwork from audio tags using audiotags (blocking task)
+    let path = file_info.path.clone();
+    let tag_result = tokio::task::spawn_blocking(move || {
+        audiotags::Tag::new().read_from_path(&path)
+    }).await;
+
+    if let Ok(Ok(tag)) = tag_result {
+        if let Some(cover) = tag.album_cover() {
+            let content_type = match cover.mime_type {
+                audiotags::MimeType::Jpeg => "image/jpeg",
+                audiotags::MimeType::Png => "image/png",
+                _ => "image/jpeg",
+            };
+            return Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(cover.data.to_vec()))
+                .map_err(|_| AppError::NotFound);
+        }
+    }
+
+    Err(AppError::NotFound)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3708,7 +3822,17 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
         }
     };
 
-    let active_casts = state.active_casts.lock().await.clone();
+    let active_casts = {
+        let mut casts = state.active_casts.lock().await;
+        // Retain only entries active in the last 3 minutes (180 seconds)
+        casts.retain(|_, (_, last_seen)| last_seen.elapsed() < std::time::Duration::from_secs(180));
+        
+        let map: std::collections::HashMap<String, String> = casts
+            .iter()
+            .map(|(k, (v, _))| (k.clone(), v.clone()))
+            .collect();
+        map
+    };
     
     let metrics_json = serde_json::json!({
         "web_handler_metrics": {

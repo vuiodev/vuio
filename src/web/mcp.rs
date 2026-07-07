@@ -1021,6 +1021,28 @@ async fn tool_get_playlist_tracks(
     }))
 }
 
+pub async fn discover_tvs_and_cache(state: &AppState) -> Result<Vec<tv_control::DiscoveredTv>, String> {
+    let tvs = tv_control::discover_tvs()
+        .await
+        .map_err(|e| format!("TV discovery error: {}", e))?;
+        
+    let mut cache = state.discovered_tvs.lock().await;
+    for tv in &tvs {
+        if let Some(ip) = parse_ip_from_url(&tv.location_url) {
+            cache.insert(ip, tv.friendly_name.clone());
+        }
+    }
+    
+    Ok(tvs)
+}
+
+fn parse_ip_from_url(url_str: &str) -> Option<String> {
+    let without_scheme = url_str.split("://").nth(1)?;
+    let host_port = without_scheme.split('/').next()?;
+    let host = host_port.split(':').next()?;
+    Some(host.to_string())
+}
+
 pub async fn cast_playlist_helper(
     state: &AppState,
     playlist_id: i64,
@@ -1053,9 +1075,7 @@ pub async fn cast_playlist_helper(
     let file_id = selected_track.id.ok_or("Media file is missing an ID")?;
 
     // Discover TVs and find a match
-    let tvs = tv_control::discover_tvs()
-        .await
-        .map_err(|e| format!("TV discovery error: {}", e))?;
+    let tvs = discover_tvs_and_cache(state).await?;
 
     let matched_tv = tvs
         .iter()
@@ -1092,7 +1112,7 @@ pub async fn cast_playlist_helper(
     // Register active cast in global state
     {
         let mut casts = state.active_casts.lock().await;
-        casts.insert(matched_tv.friendly_name.clone(), selected_track.filename.clone());
+        casts.insert(matched_tv.friendly_name.clone(), (selected_track.filename.clone(), std::time::Instant::now()));
     }
 
     // Cancel existing monitor for this TV if any
@@ -1200,7 +1220,7 @@ pub async fn cast_playlist_helper(
                             // Update active cast state with new playing file
                             {
                                 let mut casts = state_clone.active_casts.lock().await;
-                                casts.insert(matched_tv_friendly_name.clone(), track.filename.clone());
+                                casts.insert(matched_tv_friendly_name.clone(), (track.filename.clone(), std::time::Instant::now()));
                             }
 
                             // Queue the next track if available

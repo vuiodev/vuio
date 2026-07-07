@@ -606,6 +606,9 @@ pub const SUPPORTED_MEDIA_TYPES: &[(&str, &str)] = &[
     ("tiff", "image/tiff"),
     ("webp", "image/webp"),
     ("svg", "image/svg+xml"),
+    ("heif", "image/heif"),
+    ("heic", "image/heic"),
+    ("avif", "image/avif"),
 ];
 
 /// Get MIME type for a file based on its extension

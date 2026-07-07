@@ -70,6 +70,9 @@ async fn test_metrics_endpoints_data() {
         log_file_path: temp_dir.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // 3. Test get_web_metrics handler (JSON format)
