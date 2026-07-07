@@ -284,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Start file system monitoring

@@ -1211,11 +1211,22 @@ pub async fn root_handler(
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 0.25rem;">
                         <span style="color: var(--text-secondary);">Status:</span>
-                        <span style="font-size: 1.15rem; font-weight: 700; color: #10b981; display: flex; align-items: center; gap: 0.35rem;">
-                            <span style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; box-shadow: 0 0 8px #10b981;"></span>
-                            Online
+                        <span id="server-status-badge" style="font-size: 1.15rem; font-weight: 700; color: #10b981; display: flex; align-items: center; gap: 0.35rem;">
+                            <span id="server-status-dot" style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; box-shadow: 0 0 8px #10b981;"></span>
+                            <span id="server-status-text">Online</span>
                         </span>
                     </div>
+                </div>
+            </div>
+
+            <!-- Active TV streams / casts -->
+            <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0.05em; color: var(--text-secondary); display: flex; align-items: center; gap: 0.5rem;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                    ACTIVE SMART TV STREAMING QUEUES
+                </h3>
+                <div id="active-tv-casts-container" style="display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.875rem;">
+                    <div style="color: var(--text-secondary); font-style: italic; padding: 0.25rem 0;">No active TV streams.</div>
                 </div>
             </div>
         </div>
@@ -1772,11 +1783,45 @@ pub async fn root_handler(
             return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
         }}
 
+        function updateStatusBadge(isOnline) {{
+            const badge = document.getElementById('server-status-badge');
+            const dot = document.getElementById('server-status-dot');
+            const text = document.getElementById('server-status-text');
+            if (!badge || !dot || !text) return;
+            if (isOnline) {{
+                badge.style.color = '#10b981';
+                dot.style.background = '#10b981';
+                dot.style.boxShadow = '0 0 8px #10b981';
+                text.textContent = 'Online';
+            }} else {{
+                badge.style.color = '#ef4444';
+                dot.style.background = '#ef4444';
+                dot.style.boxShadow = '0 0 8px #ef4444';
+                text.textContent = 'Offline';
+            }}
+        }}
+
+        async function checkServerStatus() {{
+            try {{
+                const res = await fetch('/healthz');
+                updateStatusBadge(res.ok);
+            }} catch (err) {{
+                updateStatusBadge(false);
+            }}
+        }}
+
+        // Run global heartbeat status check every 5 seconds
+        setInterval(checkServerStatus, 5000);
+
         async function updateMetrics() {{
             try {{
                 const res = await fetch('/metrics/json');
-                if (!res.ok) return;
+                if (!res.ok) {{
+                    updateStatusBadge(false);
+                    return;
+                }}
                 const data = await res.json();
+                updateStatusBadge(true);
                 
                 const stats = data.web_handler_metrics;
                 const db = data.database_stats;
@@ -1822,8 +1867,36 @@ pub async fn root_handler(
                 document.getElementById('web-response-time').textContent = stats.average_response_time_ms.toFixed(2) + ' ms';
                 document.getElementById('web-errors').textContent = stats.errors.toLocaleString();
 
+                // Update Active TV Casts
+                const activeCastsContainer = document.getElementById('active-tv-casts-container');
+                if (activeCastsContainer) {{
+                    const casts = data.active_casts || {{}};
+                    const castKeys = Object.keys(casts);
+                    
+                    if (castKeys.length === 0) {{
+                        activeCastsContainer.innerHTML = '<div style="color: var(--text-secondary); font-style: italic; padding: 0.25rem 0;">No active TV streams.</div>';
+                    }} else {{
+                        let castsHtml = '';
+                        castKeys.forEach(tv => {{
+                            castsHtml += `
+                                <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0.85rem; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 10px; margin-bottom: 0.25rem;">
+                                    <div style="display: flex; align-items: center; gap: 0.65rem; font-weight: 600; color: var(--text-primary); min-width: 0; flex: 1;">
+                                        <span style="display: inline-block; width: 6px; height: 6px; background: var(--accent-color); border-radius: 50%; box-shadow: 0 0 6px var(--accent-color); flex-shrink: 0;"></span>
+                                        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${{tv}}</span>
+                                    </div>
+                                    <div style="color: var(--accent-color); font-weight: 600; text-align: right; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 0.75rem;" title="${{casts[tv]}}">
+                                        ${{casts[tv]}}
+                                    </div>
+                                </div>
+                            `;
+                        }});
+                        activeCastsContainer.innerHTML = castsHtml;
+                    }}
+                }}
+
             }} catch (err) {{
                 console.error("Failed to fetch metrics:", err);
+                updateStatusBadge(false);
             }}
         }}
 
@@ -3634,6 +3707,8 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             playlists: 0,
         }
     };
+
+    let active_casts = state.active_casts.lock().await.clone();
     
     let metrics_json = serde_json::json!({
         "web_handler_metrics": {
@@ -3656,7 +3731,8 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             "audio_files": db_stats.audio_files,
             "image_files": db_stats.image_files,
             "playlists": db_stats.playlists,
-        }
+        },
+        "active_casts": active_casts
     });
     
     (

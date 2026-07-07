@@ -1089,6 +1089,12 @@ pub async fn cast_playlist_helper(
         .await
         .map_err(|e| format!("Cast error: {}", e))?;
 
+    // Register active cast in global state
+    {
+        let mut casts = state.active_casts.lock().await;
+        casts.insert(matched_tv.friendly_name.clone(), selected_track.filename.clone());
+    }
+
     // Cancel existing monitor for this TV if any
     {
         let mut monitors = state.active_monitors.lock().await;
@@ -1140,9 +1146,11 @@ pub async fn cast_playlist_helper(
     let state_clone = state.clone();
     let control_url_clone = matched_tv.control_url.clone();
     let server_ip_clone = server_ip.clone();
+    let matched_tv_friendly_name = matched_tv.friendly_name.clone();
     
     tokio::spawn(async move {
         let mut current_idx = track_index;
+        let mut consecutive_stopped = 0;
         
         loop {
             // Check cancellation or sleep 4s
@@ -1189,6 +1197,12 @@ pub async fn cast_playlist_helper(
                             info!("Queue monitor: TV transitioned to track index {} ({})", idx, track.filename);
                             current_idx = idx;
                             
+                            // Update active cast state with new playing file
+                            {
+                                let mut casts = state_clone.active_casts.lock().await;
+                                casts.insert(matched_tv_friendly_name.clone(), track.filename.clone());
+                            }
+
                             // Queue the next track if available
                             if current_idx + 1 < latest_tracks.len() {
                                 let next_track = &latest_tracks[current_idx + 1];
@@ -1213,11 +1227,24 @@ pub async fn cast_playlist_helper(
                 }
             }
             
-            // If TV is stopped and not playing any of our tracks, stop monitoring
-            if !matched_any && transport_state == "STOPPED" {
-                debug!("Queue monitor: TV stopped playing the playlist");
-                break;
+            // If TV is stopped and not playing any of our tracks, increment stop checks count
+            if matched_any {
+                consecutive_stopped = 0;
+            } else if transport_state == "STOPPED" {
+                consecutive_stopped += 1;
+                if consecutive_stopped >= 5 {
+                    info!("Queue monitor: TV stopped playing the playlist (exited after 5 consecutive stopped checks)");
+                    break;
+                }
+            } else {
+                consecutive_stopped = 0;
             }
+        }
+
+        // Cleanup: remove active cast state on exit
+        {
+            let mut casts = state_clone.active_casts.lock().await;
+            casts.remove(&matched_tv_friendly_name);
         }
     });
 
