@@ -412,13 +412,31 @@ impl PlaylistFileManager {
                     }
                 } else if path.is_file() {
                     if PlaylistFormat::from_extension(&path).is_some() {
-                        match Self::import_playlist(database, &path, None).await {
-                            Ok(playlist_id) => {
-                                debug!("Imported playlist: {}", path.display());
-                                imported_playlists.push(playlist_id);
+                        // Check if the playlist is located inside a "radio" or "Radio" directory under the watched root
+                        let is_radio = if let Ok(rel_path) = path.strip_prefix(directory) {
+                            if let Some(first_component) = rel_path.components().next() {
+                                let name = first_component.as_os_str().to_string_lossy().to_lowercase();
+                                name == "radio"
+                            } else {
+                                false
                             }
-                            Err(e) => {
-                                warn!("Failed to import playlist {}: {}", path.display(), e);
+                        } else {
+                            false
+                        };
+
+                        if is_radio {
+                            if let Err(e) = Self::import_radio_playlist(database, &path).await {
+                                warn!("Failed to import radio playlist {}: {}", path.display(), e);
+                            }
+                        } else {
+                            match Self::import_playlist(database, &path, None).await {
+                                Ok(playlist_id) => {
+                                    debug!("Imported playlist: {}", path.display());
+                                    imported_playlists.push(playlist_id);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to import playlist {}: {}", path.display(), e);
+                                }
                             }
                         }
                     }
@@ -428,6 +446,119 @@ impl PlaylistFileManager {
 
         info!("Imported {} playlists from directory tree", imported_playlists.len());
         Ok(imported_playlists)
+    }
+
+    /// Import a radio playlist (e.g. under /radio/ folder) and index its streams as virtual files.
+    pub async fn import_radio_playlist<D: DatabaseManager + ?Sized>(
+        database: &D,
+        file_path: &Path,
+    ) -> Result<()> {
+        use futures_util::StreamExt;
+
+        let format = PlaylistFormat::from_extension(file_path)
+            .ok_or_else(|| anyhow!("Unsupported playlist format for file: {}", file_path.display()))?;
+
+        let file_content = fs::read_to_string(file_path)?;
+        let playlist_path_str = file_path.to_string_lossy().to_string();
+        
+        let mut stations = Vec::new();
+        match format {
+            PlaylistFormat::M3U => {
+                let lines: Vec<&str> = file_content.lines().collect();
+                let mut i = 0;
+                while i < lines.len() {
+                    let line = lines[i].trim();
+                    if line.starts_with("#EXTINF") {
+                        let name = if let Some(comma_pos) = line.find(',') {
+                            line[comma_pos + 1..].trim().to_string()
+                        } else {
+                            "Unknown Radio".to_string()
+                        };
+                        
+                        i += 1;
+                        if i < lines.len() {
+                            let url = lines[i].trim().to_string();
+                            if url.starts_with("http://") || url.starts_with("https://") {
+                                stations.push((name, url));
+                            }
+                        }
+                    } else if !line.starts_with('#') && !line.is_empty() {
+                        if line.starts_with("http://") || line.starts_with("https://") {
+                            stations.push((line.to_string(), line.to_string()));
+                        }
+                    }
+                    i += 1;
+                }
+            }
+            PlaylistFormat::PLS => {
+                let mut urls = std::collections::HashMap::new();
+                let mut titles = std::collections::HashMap::new();
+                
+                for line in file_content.lines() {
+                    let line = line.trim();
+                    if line.starts_with("File") {
+                        if let Some(eq_pos) = line.find('=') {
+                            if let Ok(num) = line[4..eq_pos].parse::<u32>() {
+                                let val = line[eq_pos + 1..].trim().to_string();
+                                if val.starts_with("http://") || val.starts_with("https://") {
+                                    urls.insert(num, val);
+                                }
+                            }
+                        }
+                    } else if line.starts_with("Title") {
+                        if let Some(eq_pos) = line.find('=') {
+                            if let Ok(num) = line[5..eq_pos].parse::<u32>() {
+                                let val = line[eq_pos + 1..].trim().to_string();
+                                titles.insert(num, val);
+                            }
+                        }
+                    }
+                }
+                
+                for (num, url) in urls {
+                    let name = titles.remove(&num).unwrap_or_else(|| url.clone());
+                    stations.push((name, url));
+                }
+            }
+        }
+
+        // Clean up old radio files from this playlist first
+        let mut old_paths = Vec::new();
+        let mut stream = database.stream_all_media_files();
+        while let Some(res) = stream.next().await {
+            if let Ok(file) = res {
+                if file.mime_type == "audio/radio" && file.album.as_deref() == Some(&playlist_path_str) {
+                    old_paths.push(file.path.clone());
+                }
+            }
+        }
+        
+        if !old_paths.is_empty() {
+            debug!("Removing {} old radio streams for playlist {}", old_paths.len(), file_path.display());
+            let _ = database.bulk_remove_media_files(&old_paths).await;
+        }
+
+        // Save new radio stations in the database
+        for (name, url) in stations {
+            let path = PathBuf::from(&url);
+            
+            // Check if this radio URL is already in the database
+            if let Ok(Some(existing_file)) = database.get_file_by_path(&path).await {
+                let mut file = existing_file;
+                file.filename = name.clone();
+                file.title = Some(name);
+                file.album = Some(playlist_path_str.clone());
+                database.store_media_file(&file).await?;
+            } else {
+                let mut file = MediaFile::new(path, 0, "audio/radio".to_string());
+                file.filename = name.clone();
+                file.title = Some(name);
+                file.album = Some(playlist_path_str.clone());
+                database.store_media_file(&file).await?;
+            }
+        }
+        
+        Ok(())
     }
 
     /// Get the appropriate file extension for a playlist export

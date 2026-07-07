@@ -137,7 +137,9 @@ pub async fn root_handler(
             .unwrap_or("")
             .to_lowercase();
             
-        let category = if file.mime_type.starts_with("video/") {
+        let category = if file.mime_type == "audio/radio" {
+            "radio"
+        } else if file.mime_type.starts_with("video/") {
             "video"
         } else if file.mime_type.starts_with("audio/") {
             "audio"
@@ -1122,6 +1124,7 @@ pub async fn root_handler(
                     <button class="tab-btn active" data-tab="video" onclick="setTab('video')">Videos</button>
                     <button class="tab-btn" data-tab="audio" onclick="setTab('audio')">Music</button>
                     <button class="tab-btn" data-tab="image" onclick="setTab('image')">Images</button>
+                    <button class="tab-btn" data-tab="radio" onclick="setTab('radio')">Radio</button>
                 </div>
             </div>
 
@@ -1385,7 +1388,7 @@ pub async fn root_handler(
             if (!targetFile) return;
 
             // Generate a playlist of all audio files matching the current tab/filter
-            let filteredAudio = filesData.filter(f => f.cat === 'audio');
+            let filteredAudio = filesData.filter(f => f.cat === currentTab);
             
             // If currently in a path/folder, filter playlist to the current path
             if (currentPath.length > 0 && searchQuery === '') {{
@@ -1956,10 +1959,28 @@ pub async fn root_handler(
 
             // Filter files by tab and search
             let filteredFiles = filesData.filter(file => {{
+                if (currentTab === 'radio') {{
+                    return file.cat === 'radio' && (searchQuery === '' || file.name.toLowerCase().includes(searchQuery));
+                }}
+                if (file.cat === 'radio') return false;
+                
                 const matchesTab = currentTab === 'all' || file.cat === currentTab;
                 const matchesSearch = searchQuery === '' || file.name.toLowerCase().includes(searchQuery);
                 return matchesTab && matchesSearch;
             }});
+
+            // For radio tab, render a flat list of radio stations directly
+            if (currentTab === 'radio') {{
+                document.getElementById('breadcrumbs').innerHTML = '<span>Internet Radio Stations</span>';
+                if (filteredFiles.length === 0) {{
+                    renderEmptyState("No radio stations configured.");
+                    return;
+                }}
+                filteredFiles.forEach(file => {{
+                    fileListContainer.appendChild(createFileCard(file));
+                }});
+                return;
+            }}
 
             // If searching, show a flat search results view
             if (searchQuery !== '') {{
@@ -2111,7 +2132,7 @@ pub async fn root_handler(
             const card = document.createElement('div');
             card.className = 'media-card';
             card.style.cursor = 'pointer';
-            if (file.cat === 'audio') {{
+            if (file.cat === 'audio' || file.cat === 'radio') {{
                 card.onclick = () => playAudioFile(file);
             }} else if (file.cat === 'image') {{
                 card.onclick = () => openLightbox(file.id);
@@ -2124,6 +2145,8 @@ pub async fn root_handler(
                 iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
             }} else if (file.cat === 'audio') {{
                 iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`;
+            }} else if (file.cat === 'radio') {{
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"></circle><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"></path></svg>`;
             }} else if (file.cat === 'image') {{
                 iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
             }} else {{
@@ -2139,7 +2162,7 @@ pub async fn root_handler(
             }}
 
             let playBtnHtml = '';
-            if (file.cat === 'audio') {{
+            if (file.cat === 'audio' || file.cat === 'radio') {{
                 playBtnHtml = `
                     <button class="btn-action" onclick="event.stopPropagation(); playAudioFile('${{file.id}}')" title="Play File" style="margin-right: 0.35rem;">
                         <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
@@ -2640,6 +2663,34 @@ impl ContentDirectoryHandler {
         )
             .into_response()
     }
+
+    /// Handle radio browse request
+    async fn handle_radio_browse(_params: &BrowseParams, state: &AppState) -> Response {
+        use crate::web::xml::generate_browse_response;
+        use futures_util::StreamExt;
+        
+        let mut stream = state.database.stream_all_media_files();
+        let mut radio_files = Vec::new();
+        while let Some(res) = stream.next().await {
+            if let Ok(file) = res {
+                if file.mime_type == "audio/radio" {
+                    radio_files.push(file);
+                }
+            }
+        }
+        
+        let server_ip = state.get_server_ip();
+        let response = generate_browse_response("radio", &[], &radio_files, state, &server_ip).await;
+        (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                (header::HeaderName::from_static("ext"), ""),
+            ],
+            response,
+        )
+            .into_response()
+    }
 }
 
 pub async fn content_directory_control(
@@ -2691,6 +2742,8 @@ pub async fn content_directory_control(
             } else if params.object_id.starts_with("image") {
                 let path_prefix_str = params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/');
                 return ContentDirectoryHandler::handle_image_browse(&params, &state, path_prefix_str).await;
+            } else if params.object_id.starts_with("radio") {
+                return ContentDirectoryHandler::handle_radio_browse(&params, &state).await;
             } else {
                 // This case might happen for deeper browsing or custom object IDs.
                 // Assume no specific type filter for the database query, and the object_id itself
@@ -2783,6 +2836,10 @@ pub async fn serve_media(
             state.web_metrics.record_error();
             AppError::NotFound
         })?;
+
+    if file_info.mime_type == "audio/radio" {
+        return Ok(axum::response::Redirect::temporary(&file_info.path.to_string_lossy().to_string()).into_response());
+    }
 
     // Record dynamic client telemetry for GET requests (playing)
     if method == Method::GET {

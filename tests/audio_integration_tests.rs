@@ -323,3 +323,125 @@ async fn test_cover_art_retrieval_and_xml() {
     let body_bytes = axum::body::to_bytes(response.into_body(), 10000).await.unwrap();
     assert_eq!(body_bytes.as_ref(), fake_cover_data);
 }
+
+#[tokio::test]
+async fn test_radio_playlist_import() {
+    use std::fs;
+    use std::sync::Arc;
+    use tempfile::tempdir;
+    use vuio::database::DatabaseManager;
+    use vuio::database::redb::RedbDatabase;
+    use vuio::database::playlist_formats::PlaylistFileManager;
+    use vuio::state::AppState;
+    use vuio::config::AppConfig;
+    use vuio::platform::PlatformInfo;
+    use vuio::platform::filesystem::create_platform_filesystem_manager;
+    use vuio::web::xml::generate_browse_response;
+    use vuio::web::handlers::{WebHandlerMetrics, serve_media};
+    use axum::extract::{State, Path, ConnectInfo};
+    use axum::http::{Method, HeaderMap};
+    use axum::response::IntoResponse;
+    use axum::http::StatusCode;
+    use futures_util::StreamExt;
+
+    // 1. Setup temporary directory for media and database
+    let temp_dir = tempdir().unwrap();
+    let media_dir = temp_dir.path().join("media");
+    let db_path = temp_dir.path().join("test_radio.redb");
+    
+    fs::create_dir_all(&media_dir).unwrap();
+
+    // Create radio subdirectory
+    let radio_dir = media_dir.join("radio");
+    fs::create_dir_all(&radio_dir).unwrap();
+
+    // Create radio playlist file
+    let m3u_content = r#"#EXTM3U
+#EXTINF:-1,ABC Chill
+https://cast1.asurahosting.com/proxy/julien/stream
+"#;
+    let m3u_path = radio_dir.join("chill.m3u");
+    fs::write(&m3u_path, m3u_content).unwrap();
+
+    // 2. Initialize RedbDatabase
+    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    db.initialize().await.unwrap();
+
+    // 3. Scan and import playlist files recursively
+    let playlist_ids = PlaylistFileManager::scan_and_import_playlists_recursive(db.as_ref(), &media_dir).await.unwrap();
+    
+    // Virtual radio playlists don't return standard playlist IDs (they add directly to files table)
+    assert_eq!(playlist_ids.len(), 0);
+
+    // Verify radio stream was stored in database
+    let mut stream = db.stream_all_media_files();
+    let mut radio_files = Vec::new();
+    while let Some(res) = stream.next().await {
+        let file = res.unwrap();
+        if file.mime_type == "audio/radio" {
+            radio_files.push(file);
+        }
+    }
+    
+    assert_eq!(radio_files.len(), 1);
+    let radio = &radio_files[0];
+    assert_eq!(radio.filename, "ABC Chill");
+    assert_eq!(radio.title.as_deref().unwrap(), "ABC Chill");
+    assert_eq!(radio.path.to_string_lossy().to_string(), "https://cast1.asurahosting.com/proxy/julien/stream");
+    
+    // 4. Initialize AppState
+    let mut app_config = AppConfig::default();
+    app_config.server.port = 8099;
+    app_config.media.autoplay_enabled = true;
+    let config = Arc::new(app_config);
+    
+    let platform_info = Arc::new(PlatformInfo::detect().await.unwrap());
+    let filesystem_manager = Arc::from(create_platform_filesystem_manager());
+    let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
+    let web_metrics = Arc::new(WebHandlerMetrics::new());
+    
+    let app_state = AppState {
+        config,
+        database: db.clone(),
+        platform_info,
+        filesystem_manager,
+        content_update_id,
+        web_metrics,
+        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        log_file_path: temp_dir.path().join("vuio.log"),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+    };
+
+    // 5. Test UPnP XML Browse response
+    // Root container browse (ObjectID "0")
+    let server_ip = app_state.get_server_ip();
+    let root_xml = generate_browse_response("0", &[], &[], &app_state, &server_ip).await;
+    assert!(root_xml.contains("id=&quot;radio&quot;"), "Root XML did not contain radio container: {}", root_xml);
+
+    // Radio container browse (ObjectID "radio")
+    let radio_xml = generate_browse_response("radio", &[], &radio_files, &app_state, &server_ip).await;
+    assert!(radio_xml.contains("ABC Chill"), "Radio XML did not contain ABC Chill stream: {}", radio_xml);
+    assert!(radio_xml.contains("protocolInfo=&quot;http-get:*:audio/mpeg:"), "Radio XML did not contain correct protocolInfo: {}", radio_xml);
+    assert!(radio_xml.contains("size=&quot;0&quot;"), "Radio XML did not contain size=\"0\": {}", radio_xml);
+    assert!(!radio_xml.contains("duration="), "Radio XML should not contain duration: {}", radio_xml);
+
+    // 6. Test serve_media redirection endpoint
+    let file_id = radio.id.unwrap();
+    let client_addr = "127.0.0.1:12345".parse::<std::net::SocketAddr>().unwrap();
+    let response = serve_media(
+        State(app_state.clone()),
+        ConnectInfo(client_addr),
+        Path(file_id.to_string()),
+        Method::GET,
+        HeaderMap::new(),
+    ).await.unwrap().into_response();
+
+    assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT); // axum::response::Redirect::temporary returns 307 Temporary Redirect
+    let location_header = response.headers().get("location").unwrap().to_str().unwrap();
+    assert_eq!(location_header, "https://cast1.asurahosting.com/proxy/julien/stream");
+}
+

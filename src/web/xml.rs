@@ -258,7 +258,8 @@ pub async fn generate_browse_response_with_totals(
         didl.push_str(r#"<container id="video" parentID="0" restricted="1"><dc:title>Video</dc:title><upnp:class>object.container</upnp:class></container>"#);
         didl.push_str(r#"<container id="audio" parentID="0" restricted="1"><dc:title>Music</dc:title><upnp:class>object.container</upnp:class></container>"#);
         didl.push_str(r#"<container id="image" parentID="0" restricted="1"><dc:title>Pictures</dc:title><upnp:class>object.container</upnp:class></container>"#);
-        3
+        didl.push_str(r#"<container id="radio" parentID="0" restricted="1"><dc:title>Radio</dc:title><upnp:class>object.container</upnp:class></container>"#);
+        4
     } else {
         // Add sub-containers to DIDL
         for (idx, container) in subdirectories.iter().enumerate() {
@@ -387,9 +388,11 @@ pub async fn generate_browse_response_with_totals(
                 upnp_class
             );
             
+            let is_radio = file.mime_type == "audio/radio";
+
             // Create the XML for this item with autoplay attributes
             // Add duration for media files if available
-            let duration_secs = if file.mime_type.starts_with("video/") || file.mime_type.starts_with("audio/") {
+            let duration_secs = if (file.mime_type.starts_with("video/") || file.mime_type.starts_with("audio/")) && !is_radio {
                 file.duration.map(|d| d.as_secs())
             } else {
                 None
@@ -402,20 +405,30 @@ pub async fn generate_browse_response_with_totals(
                 "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
             };
 
-            let mime_override = match client {
-                crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-matroska" => {
-                    "video/x-mkv"
+            let mime_override = if is_radio {
+                "audio/mpeg"
+            } else {
+                match client {
+                    crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-matroska" => {
+                        "video/x-mkv"
+                    }
+                    crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-msvideo" => {
+                        "video/mpeg"
+                    }
+                    crate::web::client::DlnaClientProfile::SonyBdp if file.mime_type == "video/x-matroska" || file.mime_type == "video/mpeg" => {
+                        "video/divx"
+                    }
+                    crate::web::client::DlnaClientProfile::Xbox if file.mime_type == "video/x-msvideo" => {
+                        "video/avi"
+                    }
+                    _ => &file.mime_type,
                 }
-                crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-msvideo" => {
-                    "video/mpeg"
-                }
-                crate::web::client::DlnaClientProfile::SonyBdp if file.mime_type == "video/x-matroska" || file.mime_type == "video/mpeg" => {
-                    "video/divx"
-                }
-                crate::web::client::DlnaClientProfile::Xbox if file.mime_type == "video/x-msvideo" => {
-                    "video/avi"
-                }
-                _ => &file.mime_type,
+            };
+
+            let size_val = if is_radio {
+                "0".to_string()
+            } else {
+                file.size.to_string()
             };
 
             let _ = write!(
@@ -423,7 +436,7 @@ pub async fn generate_browse_response_with_totals(
                 r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
                 mime = mime_override,
                 dlna_flags = dlna_flags,
-                size = file.size
+                size = size_val
             );
 
             if let Some(secs) = duration_secs {
