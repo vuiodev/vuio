@@ -6,8 +6,8 @@
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
-use redb::{Database, ReadableTable, ReadableDatabase, TableDefinition};
-use std::collections::HashSet;
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
@@ -18,8 +18,8 @@ use tracing::{debug, info};
 use crate::platform::DatabaseError;
 
 use super::{
-    DatabaseHealth, DatabaseIssue, DatabaseManager, DatabaseStats, IssueSeverity, MediaDirectory,
-    MediaFile, MusicCategory, MusicCategoryType, Playlist,
+    DatabaseHealth, DatabaseManager, DatabaseStats, MediaDirectory, MediaFile, MusicCategory,
+    MusicCategoryType, Playlist, RemovalSummary,
 };
 
 // Table definitions for redb
@@ -33,6 +33,8 @@ const DIR_INDEX: TableDefinition<&str, &str> = TableDefinition::new("dir_index")
 const PLAYLISTS_TABLE: TableDefinition<i64, &[u8]> = TableDefinition::new("playlists");
 // Playlist entries: (playlist_id, position) -> media_file_id
 const PLAYLIST_ENTRIES: TableDefinition<&str, i64> = TableDefinition::new("playlist_entries");
+const PLAYLIST_SOURCES: TableDefinition<i64, &str> = TableDefinition::new("playlist_sources");
+const METADATA_TABLE: TableDefinition<&str, u64> = TableDefinition::new("metadata");
 
 // Secondary index tables (Value is comma-separated string of file IDs, e.g. "1,2,3")
 const ARTIST_INDEX: TableDefinition<&str, &str> = TableDefinition::new("artist_index");
@@ -49,6 +51,7 @@ pub struct RedbDatabase {
     next_playlist_id: AtomicI64,
     total_files: AtomicU64,
     total_size: AtomicU64,
+    mutation_lock: tokio::sync::Mutex<()>,
 }
 
 impl std::fmt::Debug for RedbDatabase {
@@ -56,12 +59,35 @@ impl std::fmt::Debug for RedbDatabase {
         f.debug_struct("RedbDatabase")
             .field("db_path", &self.db_path)
             .field("next_file_id", &self.next_file_id.load(Ordering::Relaxed))
-            .field("next_playlist_id", &self.next_playlist_id.load(Ordering::Relaxed))
+            .field(
+                "next_playlist_id",
+                &self.next_playlist_id.load(Ordering::Relaxed),
+            )
             .finish()
     }
 }
 
 impl RedbDatabase {
+    fn canonical_path(path: &Path) -> Result<PathBuf> {
+        let raw = path.to_string_lossy();
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            return Ok(path.to_path_buf());
+        }
+        let normalizer = crate::platform::filesystem::create_platform_path_normalizer();
+        Ok(PathBuf::from(normalizer.to_canonical(path)?))
+    }
+
+    fn canonical_file(file: &MediaFile) -> Result<MediaFile> {
+        let mut file = file.clone();
+        file.path = Self::canonical_path(&file.path)?;
+        Ok(file)
+    }
+
+    fn mime_family(mime: &str) -> String {
+        mime.split_once('/')
+            .map(|(v, _)| format!("{v}/"))
+            .unwrap_or_else(|| mime.to_string())
+    }
     /// Create a new RedbDatabase at the specified path
     pub async fn new(path: PathBuf) -> Result<Self> {
         // Ensure parent directory exists
@@ -69,46 +95,10 @@ impl RedbDatabase {
             tokio::fs::create_dir_all(parent).await?;
         }
 
-        // Open database, checking for incompatible/corrupt format
-        let db = match Database::create(&path) {
-            Ok(db) => {
-                let init_res = {
-                    let write_txn = db.begin_write()?;
-                    let res = write_txn.open_table(FILES_TABLE).and_then(|_| {
-                        write_txn.open_table(PATH_INDEX)?;
-                        write_txn.open_table(DIR_INDEX)?;
-                        write_txn.open_table(PLAYLISTS_TABLE)?;
-                        write_txn.open_table(PLAYLIST_ENTRIES)?;
-                        write_txn.open_table(ARTIST_INDEX)?;
-                        write_txn.open_table(ALBUM_INDEX)?;
-                        write_txn.open_table(GENRE_INDEX)?;
-                        write_txn.open_table(YEAR_INDEX)?;
-                        write_txn.open_table(ALBUM_ARTIST_INDEX)?;
-                        Ok(())
-                    });
-                    write_txn.abort()?;
-                    res
-                };
-                if init_res.is_err() {
-                    Err(anyhow!("Database schema mismatch or legacy format detected"))
-                } else {
-                    Ok(db)
-                }
-            }
-            Err(e) => Err(anyhow::Error::from(e)),
-        };
-
-        let db = match db {
-            Ok(db) => db,
-            Err(e) => {
-                info!("Database validation failed: {}. Recreating fresh database at {}", e, path.display());
-                if path.exists() {
-                    let _ = std::fs::remove_file(&path);
-                }
-                Database::create(&path)
-                    .with_context(|| format!("Failed to recreate redb database at {}", path.display()))?
-            }
-        };
+        // Opening or schema initialization failures are returned to the caller.
+        // The application preserves the unusable file before creating a replacement.
+        let db = Database::create(&path)
+            .with_context(|| format!("Failed to open redb database at {}", path.display()))?;
 
         // Initialize tables if they don't exist
         {
@@ -119,6 +109,8 @@ impl RedbDatabase {
                 let _ = write_txn.open_table(DIR_INDEX)?;
                 let _ = write_txn.open_table(PLAYLISTS_TABLE)?;
                 let _ = write_txn.open_table(PLAYLIST_ENTRIES)?;
+                let _ = write_txn.open_table(PLAYLIST_SOURCES)?;
+                let _ = write_txn.open_table(METADATA_TABLE)?;
                 let _ = write_txn.open_table(ARTIST_INDEX)?;
                 let _ = write_txn.open_table(ALBUM_INDEX)?;
                 let _ = write_txn.open_table(GENRE_INDEX)?;
@@ -173,6 +165,7 @@ impl RedbDatabase {
             next_playlist_id: AtomicI64::new(max_playlist_id + 1),
             total_files: AtomicU64::new(total_files_count),
             total_size: AtomicU64::new(total_size_sum),
+            mutation_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -216,15 +209,131 @@ impl RedbDatabase {
             .unwrap_or_default()
     }
 
+    fn remove_file_indexes(
+        dir: &mut redb::Table<&str, &str>,
+        artist: &mut redb::Table<&str, &str>,
+        album: &mut redb::Table<&str, &str>,
+        genre: &mut redb::Table<&str, &str>,
+        year: &mut redb::Table<u32, &str>,
+        album_artist: &mut redb::Table<&str, &str>,
+        id: i64,
+        file: &MediaFile,
+    ) -> Result<()> {
+        let key = Self::get_dir_key(&file.path);
+        let old = dir.get(key.as_str())?.map(|v| v.value().to_string());
+        let new = Self::remove_from_dir_index(old.as_deref(), id);
+        if new.is_empty() {
+            dir.remove(key.as_str())?;
+        } else {
+            dir.insert(key.as_str(), new.as_str())?;
+        }
+        if let Some(v) = &file.artist {
+            Self::update_category_index(artist, v, id, false)?;
+        }
+        if let Some(v) = &file.album {
+            Self::update_category_index(album, v, id, false)?;
+        }
+        if let Some(v) = &file.genre {
+            Self::update_category_index(genre, v, id, false)?;
+        }
+        if let Some(v) = file.year {
+            Self::update_year_index(year, v, id, false)?;
+        }
+        if let Some(v) = &file.album_artist {
+            Self::update_category_index(album_artist, v, id, false)?;
+        }
+        Ok(())
+    }
+
+    fn add_file_indexes(
+        dir: &mut redb::Table<&str, &str>,
+        artist: &mut redb::Table<&str, &str>,
+        album: &mut redb::Table<&str, &str>,
+        genre: &mut redb::Table<&str, &str>,
+        year: &mut redb::Table<u32, &str>,
+        album_artist: &mut redb::Table<&str, &str>,
+        id: i64,
+        file: &MediaFile,
+    ) -> Result<()> {
+        let key = Self::get_dir_key(&file.path);
+        let old = dir.get(key.as_str())?.map(|v| v.value().to_string());
+        let new = Self::add_to_dir_index(old.as_deref(), id);
+        dir.insert(key.as_str(), new.as_str())?;
+        if let Some(v) = &file.artist {
+            Self::update_category_index(artist, v, id, true)?;
+        }
+        if let Some(v) = &file.album {
+            Self::update_category_index(album, v, id, true)?;
+        }
+        if let Some(v) = &file.genre {
+            Self::update_category_index(genre, v, id, true)?;
+        }
+        if let Some(v) = file.year {
+            Self::update_year_index(year, v, id, true)?;
+        }
+        if let Some(v) = &file.album_artist {
+            Self::update_category_index(album_artist, v, id, true)?;
+        }
+        Ok(())
+    }
+
+    fn remove_files_from_transaction(
+        transaction: &redb::WriteTransaction,
+        files: &[(String, i64, MediaFile)],
+    ) -> Result<(usize, u64)> {
+        let mut files_table = transaction.open_table(FILES_TABLE)?;
+        let mut path_index = transaction.open_table(PATH_INDEX)?;
+        let mut dir_index = transaction.open_table(DIR_INDEX)?;
+        let mut artist_index = transaction.open_table(ARTIST_INDEX)?;
+        let mut album_index = transaction.open_table(ALBUM_INDEX)?;
+        let mut genre_index = transaction.open_table(GENRE_INDEX)?;
+        let mut year_index = transaction.open_table(YEAR_INDEX)?;
+        let mut album_artist_index = transaction.open_table(ALBUM_ARTIST_INDEX)?;
+        let mut playlist_entries = transaction.open_table(PLAYLIST_ENTRIES)?;
+
+        let mut removed_size = 0_u64;
+        for (path, id, file) in files {
+            files_table.remove(*id)?;
+            path_index.remove(path.as_str())?;
+            Self::remove_file_indexes(
+                &mut dir_index,
+                &mut artist_index,
+                &mut album_index,
+                &mut genre_index,
+                &mut year_index,
+                &mut album_artist_index,
+                *id,
+                file,
+            )?;
+
+            let dangling = playlist_entries
+                .iter()?
+                .filter_map(|entry| entry.ok())
+                .filter(|(_, value)| value.value() == *id)
+                .map(|(key, _)| key.value().to_string())
+                .collect::<Vec<_>>();
+            for key in dangling {
+                playlist_entries.remove(key.as_str())?;
+            }
+            removed_size = removed_size.saturating_add(file.size);
+        }
+
+        Ok((files.len(), removed_size))
+    }
+
     /// Add a file ID to a directory index
     fn add_to_dir_index(current: Option<&str>, file_id: i64) -> String {
         match current {
             Some(ids) if !ids.is_empty() => {
-                let mut id_set: HashSet<i64> = ids.split(',').filter_map(|s| s.parse().ok()).collect();
+                let mut id_set: HashSet<i64> =
+                    ids.split(',').filter_map(|s| s.parse().ok()).collect();
                 id_set.insert(file_id);
                 let mut v: Vec<_> = id_set.into_iter().collect();
                 v.sort();
-                v.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+                v.iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             }
             _ => file_id.to_string(),
         }
@@ -234,13 +343,15 @@ impl RedbDatabase {
     fn remove_from_dir_index(current: Option<&str>, file_id: i64) -> String {
         match current {
             Some(ids) if !ids.is_empty() => {
-                let mut id_set: HashSet<i64> = ids.split(',')
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
+                let mut id_set: HashSet<i64> =
+                    ids.split(',').filter_map(|s| s.parse().ok()).collect();
                 id_set.remove(&file_id);
                 let mut v: Vec<_> = id_set.into_iter().collect();
                 v.sort();
-                v.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+                v.iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             }
             _ => String::new(),
         }
@@ -248,9 +359,7 @@ impl RedbDatabase {
 
     /// Parse directory index to file IDs
     fn parse_dir_index(ids_str: &str) -> Vec<i64> {
-        ids_str.split(',')
-            .filter_map(|s| s.parse().ok())
-            .collect()
+        ids_str.split(',').filter_map(|s| s.parse().ok()).collect()
     }
 
     fn update_category_index(
@@ -296,11 +405,15 @@ impl RedbDatabase {
     fn add_to_id_list(current: Option<&str>, file_id: i64) -> String {
         match current {
             Some(ids) if !ids.is_empty() => {
-                let mut id_set: HashSet<i64> = ids.split(',').filter_map(|s| s.parse().ok()).collect();
+                let mut id_set: HashSet<i64> =
+                    ids.split(',').filter_map(|s| s.parse().ok()).collect();
                 id_set.insert(file_id);
                 let mut v: Vec<_> = id_set.into_iter().collect();
                 v.sort();
-                v.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+                v.iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             }
             _ => file_id.to_string(),
         }
@@ -309,13 +422,15 @@ impl RedbDatabase {
     fn remove_from_id_list(current: Option<&str>, file_id: i64) -> String {
         match current {
             Some(ids) if !ids.is_empty() => {
-                let mut id_set: HashSet<i64> = ids.split(',')
-                    .filter_map(|s| s.parse().ok())
-                    .collect();
+                let mut id_set: HashSet<i64> =
+                    ids.split(',').filter_map(|s| s.parse().ok()).collect();
                 id_set.remove(&file_id);
                 let mut v: Vec<_> = id_set.into_iter().collect();
                 v.sort();
-                v.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+                v.iter()
+                    .map(|id| id.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
             }
             _ => String::new(),
         }
@@ -350,7 +465,11 @@ impl From<&MediaFile> for MediaFileSerializable {
             path: file.path.to_string_lossy().to_string(),
             filename: file.filename.clone(),
             size: file.size,
-            modified_secs: file.modified.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            modified_secs: file
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
             mime_type: file.mime_type.clone(),
             duration_secs: file.duration.map(|d| d.as_secs_f64()),
             title: file.title.clone(),
@@ -360,8 +479,16 @@ impl From<&MediaFile> for MediaFileSerializable {
             track_number: file.track_number,
             year: file.year,
             album_artist: file.album_artist.clone(),
-            created_at_secs: file.created_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-            updated_at_secs: file.updated_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            created_at_secs: file
+                .created_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            updated_at_secs: file
+                .updated_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         }
     }
 }
@@ -404,8 +531,16 @@ impl From<&Playlist> for PlaylistSerializable {
             id: playlist.id,
             name: playlist.name.clone(),
             description: playlist.description.clone(),
-            created_at_secs: playlist.created_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
-            updated_at_secs: playlist.updated_at.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs(),
+            created_at_secs: playlist
+                .created_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            updated_at_secs: playlist
+                .updated_at
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         }
     }
 }
@@ -430,92 +565,19 @@ impl DatabaseManager for RedbDatabase {
     }
 
     async fn store_media_file(&self, file: &MediaFile) -> Result<i64> {
-        let file_id = file.id.unwrap_or_else(|| self.next_file_id.fetch_add(1, Ordering::SeqCst));
-        let mut file_with_id = file.clone();
-        file_with_id.id = Some(file_id);
-
-        let serialized = Self::serialize_media_file(&file_with_id)?;
-        let path_str = file.path.to_string_lossy().to_string();
-        let dir_key = Self::get_dir_key(&file.path);
-        debug!("store_media_file: storing file '{}' in dir_key '{}'", path_str, dir_key);
-
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut files_table = write_txn.open_table(FILES_TABLE)?;
-            let mut path_index = write_txn.open_table(PATH_INDEX)?;
-            let mut dir_index = write_txn.open_table(DIR_INDEX)?;
-
-            let mut artist_index = write_txn.open_table(ARTIST_INDEX)?;
-            let mut album_index = write_txn.open_table(ALBUM_INDEX)?;
-            let mut genre_index = write_txn.open_table(GENRE_INDEX)?;
-            let mut year_index = write_txn.open_table(YEAR_INDEX)?;
-            let mut album_artist_index = write_txn.open_table(ALBUM_ARTIST_INDEX)?;
-
-            // Check if path already exists (update case)
-            if let Some(existing_id) = path_index.get(path_str.as_str())?.map(|v| v.value()) {
-                if let Some(old_data) = files_table.get(existing_id)? {
-                    if let Ok(old_file) = Self::deserialize_media_file(old_data.value()) {
-                        self.total_size.fetch_sub(old_file.size, Ordering::SeqCst);
-                        self.total_files.fetch_sub(1, Ordering::SeqCst);
-
-                        // Remove old secondary indexes
-                        if let Some(artist) = &old_file.artist {
-                            Self::update_category_index(&mut artist_index, artist, existing_id, false)?;
-                        }
-                        if let Some(album) = &old_file.album {
-                            Self::update_category_index(&mut album_index, album, existing_id, false)?;
-                        }
-                        if let Some(genre) = &old_file.genre {
-                            Self::update_category_index(&mut genre_index, genre, existing_id, false)?;
-                        }
-                        if let Some(year) = old_file.year {
-                            Self::update_year_index(&mut year_index, year, existing_id, false)?;
-                        }
-                        if let Some(album_artist) = &old_file.album_artist {
-                            Self::update_category_index(&mut album_artist_index, album_artist, existing_id, false)?;
-                        }
-                    }
-                }
-                files_table.remove(existing_id)?;
-            }
-
-            files_table.insert(file_id, serialized.as_slice())?;
-            path_index.insert(path_str.as_str(), file_id)?;
-
-            // Update directory index
-            let current_dir_ids = dir_index.get(dir_key.as_str())?.map(|v| v.value().to_string());
-            let new_dir_ids = Self::add_to_dir_index(current_dir_ids.as_deref(), file_id);
-            dir_index.insert(dir_key.as_str(), new_dir_ids.as_str())?;
-
-            // Add new secondary indexes
-            if let Some(artist) = &file.artist {
-                Self::update_category_index(&mut artist_index, artist, file_id, true)?;
-            }
-            if let Some(album) = &file.album {
-                Self::update_category_index(&mut album_index, album, file_id, true)?;
-            }
-            if let Some(genre) = &file.genre {
-                Self::update_category_index(&mut genre_index, genre, file_id, true)?;
-            }
-            if let Some(year) = file.year {
-                Self::update_year_index(&mut year_index, year, file_id, true)?;
-            }
-            if let Some(album_artist) = &file.album_artist {
-                Self::update_category_index(&mut album_artist_index, album_artist, file_id, true)?;
-            }
-
-            self.total_size.fetch_add(file.size, Ordering::SeqCst);
-            self.total_files.fetch_add(1, Ordering::SeqCst);
-        }
-        write_txn.commit()?;
-
-        debug!("Stored media file {} with ID {}", path_str, file_id);
-        Ok(file_id)
+        self.bulk_store_media_files(std::slice::from_ref(file))
+            .await?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("media upsert returned no ID"))
     }
 
-    fn stream_all_media_files(&self) -> Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>> {
+    fn stream_all_media_files(
+        &self,
+    ) -> Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>>
+    {
         let db = self.db.clone();
-        
+
         Box::pin(async_stream::try_stream! {
             let read_txn = db.begin_read().map_err(|e| DatabaseError::QueryFailed { query: "begin_read".into(), reason: e.to_string() })?;
             let files_table = read_txn.open_table(FILES_TABLE).map_err(|e| DatabaseError::QueryFailed { query: "open_table".into(), reason: e.to_string() })?;
@@ -530,154 +592,27 @@ impl DatabaseManager for RedbDatabase {
     }
 
     async fn remove_media_file(&self, path: &Path) -> Result<bool> {
-        let path_str = path.to_string_lossy().to_string();
-        let dir_key = Self::get_dir_key(path);
-
-        let write_txn = self.db.begin_write()?;
-        
-        // First, get the file ID in a separate scope
-        let file_id_opt = {
-            let path_index = write_txn.open_table(PATH_INDEX)?;
-            let guard = path_index.get(path_str.as_str())?;
-            guard.map(|v| v.value())
-        };
-        
-        let removed = if let Some(file_id) = file_id_opt {
-            let mut files_table = write_txn.open_table(FILES_TABLE)?;
-            let mut path_index = write_txn.open_table(PATH_INDEX)?;
-            let mut dir_index = write_txn.open_table(DIR_INDEX)?;
-
-            let mut artist_index = write_txn.open_table(ARTIST_INDEX)?;
-            let mut album_index = write_txn.open_table(ALBUM_INDEX)?;
-            let mut genre_index = write_txn.open_table(GENRE_INDEX)?;
-            let mut year_index = write_txn.open_table(YEAR_INDEX)?;
-            let mut album_artist_index = write_txn.open_table(ALBUM_ARTIST_INDEX)?;
-
-            if let Some(old_data) = files_table.get(file_id)? {
-                if let Ok(old_file) = Self::deserialize_media_file(old_data.value()) {
-                    self.total_size.fetch_sub(old_file.size, Ordering::SeqCst);
-                    self.total_files.fetch_sub(1, Ordering::SeqCst);
-
-                    if let Some(artist) = &old_file.artist {
-                        Self::update_category_index(&mut artist_index, artist, file_id, false)?;
-                    }
-                    if let Some(album) = &old_file.album {
-                        Self::update_category_index(&mut album_index, album, file_id, false)?;
-                    }
-                    if let Some(genre) = &old_file.genre {
-                        Self::update_category_index(&mut genre_index, genre, file_id, false)?;
-                    }
-                    if let Some(year) = old_file.year {
-                        Self::update_year_index(&mut year_index, year, file_id, false)?;
-                    }
-                    if let Some(album_artist) = &old_file.album_artist {
-                        Self::update_category_index(&mut album_artist_index, album_artist, file_id, false)?;
-                    }
-                }
-            }
-
-            files_table.remove(file_id)?;
-            path_index.remove(path_str.as_str())?;
-
-            // Update directory index
-            let current_dir_ids = dir_index.get(dir_key.as_str())?.map(|v| v.value().to_string());
-            let new_dir_ids = Self::remove_from_dir_index(current_dir_ids.as_deref(), file_id);
-            if new_dir_ids.is_empty() {
-                dir_index.remove(dir_key.as_str())?;
-            } else {
-                dir_index.insert(dir_key.as_str(), new_dir_ids.as_str())?;
-            }
-            true
-        } else {
-            false
-        };
-        write_txn.commit()?;
-
-        if removed {
-            debug!("Removed media file: {}", path_str);
-        }
-        Ok(removed)
+        Ok(self.bulk_remove_media_files(&[path.to_path_buf()]).await? > 0)
     }
 
     async fn update_media_file(&self, file: &MediaFile) -> Result<()> {
-        let Some(file_id) = file.id else {
+        if file.id.is_none() {
             return Err(anyhow!("Cannot update file without ID"));
-        };
-
-        let serialized = Self::serialize_media_file(file)?;
-        let path_str = file.path.to_string_lossy().to_string();
-
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut files_table = write_txn.open_table(FILES_TABLE)?;
-            let mut path_index = write_txn.open_table(PATH_INDEX)?;
-            let mut artist_index = write_txn.open_table(ARTIST_INDEX)?;
-            let mut album_index = write_txn.open_table(ALBUM_INDEX)?;
-            let mut genre_index = write_txn.open_table(GENRE_INDEX)?;
-            let mut year_index = write_txn.open_table(YEAR_INDEX)?;
-            let mut album_artist_index = write_txn.open_table(ALBUM_ARTIST_INDEX)?;
-
-            if let Some(old_data) = files_table.get(file_id)? {
-                if let Ok(old_file) = Self::deserialize_media_file(old_data.value()) {
-                    self.total_size.fetch_sub(old_file.size, Ordering::SeqCst);
-                    self.total_files.fetch_sub(1, Ordering::SeqCst);
-
-                    // Remove old secondary indexes
-                    if let Some(artist) = &old_file.artist {
-                        Self::update_category_index(&mut artist_index, artist, file_id, false)?;
-                    }
-                    if let Some(album) = &old_file.album {
-                        Self::update_category_index(&mut album_index, album, file_id, false)?;
-                    }
-                    if let Some(genre) = &old_file.genre {
-                        Self::update_category_index(&mut genre_index, genre, file_id, false)?;
-                    }
-                    if let Some(year) = old_file.year {
-                        Self::update_year_index(&mut year_index, year, file_id, false)?;
-                    }
-                    if let Some(album_artist) = &old_file.album_artist {
-                        Self::update_category_index(&mut album_artist_index, album_artist, file_id, false)?;
-                    }
-                }
-            }
-
-            files_table.insert(file_id, serialized.as_slice())?;
-            path_index.insert(path_str.as_str(), file_id)?;
-
-            // Add secondary indexes
-            if let Some(artist) = &file.artist {
-                Self::update_category_index(&mut artist_index, artist, file_id, true)?;
-            }
-            if let Some(album) = &file.album {
-                Self::update_category_index(&mut album_index, album, file_id, true)?;
-            }
-            if let Some(genre) = &file.genre {
-                Self::update_category_index(&mut genre_index, genre, file_id, true)?;
-            }
-            if let Some(year) = file.year {
-                Self::update_year_index(&mut year_index, year, file_id, true)?;
-            }
-            if let Some(album_artist) = &file.album_artist {
-                Self::update_category_index(&mut album_artist_index, album_artist, file_id, true)?;
-            }
-
-            self.total_size.fetch_add(file.size, Ordering::SeqCst);
-            self.total_files.fetch_add(1, Ordering::SeqCst);
         }
-        write_txn.commit()?;
-
-        debug!("Updated media file {} with ID {}", path_str, file_id);
+        self.bulk_store_media_files(std::slice::from_ref(file))
+            .await?;
         Ok(())
     }
 
     async fn get_files_in_directory(&self, dir: &Path) -> Result<Vec<MediaFile>> {
-        let dir_key = dir.to_string_lossy().to_string();
+        let dir_key = Self::canonical_path(dir)?.to_string_lossy().to_string();
 
         let read_txn = self.db.begin_read()?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
         let dir_index = read_txn.open_table(DIR_INDEX)?;
 
-        let file_ids = dir_index.get(dir_key.as_str())?
+        let file_ids = dir_index
+            .get(dir_key.as_str())?
             .map(|v| Self::parse_dir_index(v.value()))
             .unwrap_or_default();
 
@@ -697,22 +632,30 @@ impl DatabaseManager for RedbDatabase {
         parent_path: &Path,
         media_type_filter: &str,
     ) -> Result<(Vec<MediaDirectory>, Vec<MediaFile>)> {
-        let raw_parent_str = parent_path.to_string_lossy().to_string();
-        
+        let canonical_parent = Self::canonical_path(parent_path)?;
+        let raw_parent_str = canonical_parent.to_string_lossy().to_string();
+
         // Strip trailing slash if present, unless it's the root path "/"
-        let parent_str = if raw_parent_str.len() > 1 && (raw_parent_str.ends_with('/') || raw_parent_str.ends_with('\\')) {
-            raw_parent_str[..raw_parent_str.len()-1].to_string()
+        let parent_str = if raw_parent_str.len() > 1
+            && (raw_parent_str.ends_with('/') || raw_parent_str.ends_with('\\'))
+        {
+            raw_parent_str[..raw_parent_str.len() - 1].to_string()
         } else {
             raw_parent_str
         };
-        
-        debug!("get_directory_listing: querying for parent_path='{}' (raw='{}'), filter='{}'", parent_str, parent_path.to_string_lossy(), media_type_filter);
-        
+
+        debug!(
+            "get_directory_listing: querying for parent_path='{}' (raw='{}'), filter='{}'",
+            parent_str,
+            parent_path.to_string_lossy(),
+            media_type_filter
+        );
+
         // Ensure prefix ends with a slash for subdirectory matching
         let prefix = if parent_str.is_empty() {
-             String::new()
+            String::new()
         } else if parent_str == "/" {
-             "/".to_string()
+            "/".to_string()
         } else if !parent_str.ends_with('/') {
             format!("{}/", parent_str)
         } else {
@@ -727,12 +670,17 @@ impl DatabaseManager for RedbDatabase {
         let mut files = Vec::new();
 
         // Get files in this directory
-        let file_ids = dir_index.get(parent_str.as_str())?
+        let file_ids = dir_index
+            .get(parent_str.as_str())?
             .map(|v| Self::parse_dir_index(v.value()))
             .unwrap_or_default();
-        
-        debug!("get_directory_listing: found {} file IDs for dir '{}'", file_ids.len(), parent_str);
-        
+
+        debug!(
+            "get_directory_listing: found {} file IDs for dir '{}'",
+            file_ids.len(),
+            parent_str
+        );
+
         for file_id in file_ids {
             if let Some(data) = files_table.get(file_id)? {
                 let file = Self::deserialize_media_file(data.value())?;
@@ -752,13 +700,28 @@ impl DatabaseManager for RedbDatabase {
             if key_str == parent_str {
                 continue;
             }
-            
+
             // Skip empty directories
             let value_str = value.value();
             if value_str.trim().is_empty() {
                 continue;
             }
-            
+            let has_matching = Self::parse_dir_index(value_str).into_iter().any(|id| {
+                files_table
+                    .get(id)
+                    .ok()
+                    .flatten()
+                    .and_then(|data| Self::deserialize_media_file(data.value()).ok())
+                    .map(|file| {
+                        media_type_filter.is_empty()
+                            || file.mime_type.starts_with(media_type_filter)
+                    })
+                    .unwrap_or(false)
+            });
+            if !has_matching {
+                continue;
+            }
+
             let relative = &key_str[prefix.len()..];
             if let Some(first_component) = relative.split('/').next() {
                 if !first_component.is_empty() {
@@ -788,13 +751,11 @@ impl DatabaseManager for RedbDatabase {
 
         // Sort subdirectories case-insensitively
         directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        
+
         // Sort files by track number if available, then case-insensitively by filename
-        files.sort_by(|a, b| {
-            match (a.track_number, b.track_number) {
-                (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
-                _ => a.filename.to_lowercase().cmp(&b.filename.to_lowercase()),
-            }
+        files.sort_by(|a, b| match (a.track_number, b.track_number) {
+            (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
+            _ => a.filename.to_lowercase().cmp(&b.filename.to_lowercase()),
         });
 
         Ok((directories, files))
@@ -810,8 +771,9 @@ impl DatabaseManager for RedbDatabase {
         let paths_to_remove: Vec<PathBuf> = {
             let read_txn = self.db.begin_read()?;
             let path_index = read_txn.open_table(PATH_INDEX)?;
-            
-            path_index.iter()?
+
+            path_index
+                .iter()?
                 .filter_map(|r| r.ok())
                 .filter(|(k, _)| !existing_set.contains(k.value()))
                 .map(|(k, _)| PathBuf::from(k.value()))
@@ -823,7 +785,7 @@ impl DatabaseManager for RedbDatabase {
     }
 
     async fn get_file_by_path(&self, path: &Path) -> Result<Option<MediaFile>> {
-        let path_str = path.to_string_lossy().to_string();
+        let path_str = Self::canonical_path(path)?.to_string_lossy().to_string();
 
         let read_txn = self.db.begin_read()?;
         let path_index = read_txn.open_table(PATH_INDEX)?;
@@ -852,7 +814,8 @@ impl DatabaseManager for RedbDatabase {
     async fn get_stats(&self) -> Result<DatabaseStats> {
         let total_files = self.total_files.load(Ordering::SeqCst) as usize;
         let total_size = self.total_size.load(Ordering::SeqCst);
-        let database_size = tokio::fs::metadata(&self.db_path).await
+        let database_size = tokio::fs::metadata(&self.db_path)
+            .await
             .map(|m| m.len())
             .unwrap_or(0);
 
@@ -898,26 +861,7 @@ impl DatabaseManager for RedbDatabase {
     }
 
     async fn check_and_repair(&self) -> Result<DatabaseHealth> {
-        let read_result = self.db.begin_read();
-        let is_healthy = read_result.is_ok();
-        
-        Ok(DatabaseHealth {
-            is_healthy,
-            corruption_detected: !is_healthy,
-            integrity_check_passed: is_healthy,
-            issues: if is_healthy {
-                Vec::new()
-            } else {
-                vec![DatabaseIssue {
-                    severity: IssueSeverity::Critical,
-                    description: "Failed to read database".to_string(),
-                    table_affected: None,
-                    suggested_action: "Restore from backup or reinitialize".to_string(),
-                }]
-            },
-            repair_attempted: false,
-            repair_successful: false,
-        })
+        self.rebuild_derived_indexes().await
     }
 
     async fn create_backup(&self, backup_path: &Path) -> Result<()> {
@@ -940,12 +884,19 @@ impl DatabaseManager for RedbDatabase {
     async fn get_artists(&self) -> Result<Vec<MusicCategory>> {
         let read_txn = self.db.begin_read()?;
         let artist_index = read_txn.open_table(ARTIST_INDEX)?;
-        
+        let files_table = read_txn.open_table(FILES_TABLE)?;
+
         let mut categories = Vec::new();
         for result in artist_index.iter()? {
             let (key, value) = result?;
             let artist_name = key.value().to_string();
-            let count = value.value().split(',').filter(|s| !s.is_empty()).count();
+            let count = Self::parse_dir_index(value.value())
+                .into_iter()
+                .filter(|id| files_table.get(*id).ok().flatten().is_some())
+                .count();
+            if count == 0 {
+                continue;
+            }
             categories.push(MusicCategory {
                 id: artist_name.clone(),
                 name: artist_name,
@@ -960,13 +911,17 @@ impl DatabaseManager for RedbDatabase {
         let read_txn = self.db.begin_read()?;
         let album_index = read_txn.open_table(ALBUM_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
-        
+
         let mut categories = Vec::new();
         for result in album_index.iter()? {
             let (key, value) = result?;
             let album_name = key.value().to_string();
-            let file_ids: Vec<i64> = value.value().split(',').filter_map(|s| s.parse().ok()).collect();
-            
+            let file_ids: Vec<i64> = value
+                .value()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
+
             let count = if let Some(artist) = artist_filter {
                 let mut matched = 0;
                 for fid in file_ids {
@@ -980,9 +935,12 @@ impl DatabaseManager for RedbDatabase {
                 }
                 matched
             } else {
-                file_ids.len()
+                file_ids
+                    .into_iter()
+                    .filter(|id| files_table.get(*id).ok().flatten().is_some())
+                    .count()
             };
-            
+
             if count > 0 {
                 categories.push(MusicCategory {
                     id: album_name.clone(),
@@ -998,12 +956,19 @@ impl DatabaseManager for RedbDatabase {
     async fn get_genres(&self) -> Result<Vec<MusicCategory>> {
         let read_txn = self.db.begin_read()?;
         let genre_index = read_txn.open_table(GENRE_INDEX)?;
-        
+        let files_table = read_txn.open_table(FILES_TABLE)?;
+
         let mut categories = Vec::new();
         for result in genre_index.iter()? {
             let (key, value) = result?;
             let name = key.value().to_string();
-            let count = value.value().split(',').filter(|s| !s.is_empty()).count();
+            let count = Self::parse_dir_index(value.value())
+                .into_iter()
+                .filter(|id| files_table.get(*id).ok().flatten().is_some())
+                .count();
+            if count == 0 {
+                continue;
+            }
             categories.push(MusicCategory {
                 id: name.clone(),
                 name,
@@ -1017,12 +982,19 @@ impl DatabaseManager for RedbDatabase {
     async fn get_years(&self) -> Result<Vec<MusicCategory>> {
         let read_txn = self.db.begin_read()?;
         let year_index = read_txn.open_table(YEAR_INDEX)?;
-        
+        let files_table = read_txn.open_table(FILES_TABLE)?;
+
         let mut categories = Vec::new();
         for result in year_index.iter()? {
             let (key, value) = result?;
             let year = key.value();
-            let count = value.value().split(',').filter(|s| !s.is_empty()).count();
+            let count = Self::parse_dir_index(value.value())
+                .into_iter()
+                .filter(|id| files_table.get(*id).ok().flatten().is_some())
+                .count();
+            if count == 0 {
+                continue;
+            }
             categories.push(MusicCategory {
                 id: year.to_string(),
                 name: year.to_string(),
@@ -1036,12 +1008,19 @@ impl DatabaseManager for RedbDatabase {
     async fn get_album_artists(&self) -> Result<Vec<MusicCategory>> {
         let read_txn = self.db.begin_read()?;
         let album_artist_index = read_txn.open_table(ALBUM_ARTIST_INDEX)?;
-        
+        let files_table = read_txn.open_table(FILES_TABLE)?;
+
         let mut categories = Vec::new();
         for result in album_artist_index.iter()? {
             let (key, value) = result?;
             let name = key.value().to_string();
-            let count = value.value().split(',').filter(|s| !s.is_empty()).count();
+            let count = Self::parse_dir_index(value.value())
+                .into_iter()
+                .filter(|id| files_table.get(*id).ok().flatten().is_some())
+                .count();
+            if count == 0 {
+                continue;
+            }
             categories.push(MusicCategory {
                 id: name.clone(),
                 name,
@@ -1056,10 +1035,14 @@ impl DatabaseManager for RedbDatabase {
         let read_txn = self.db.begin_read()?;
         let artist_index = read_txn.open_table(ARTIST_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
-        
+
         let mut files = Vec::new();
         if let Some(val) = artist_index.get(artist)? {
-            let file_ids: Vec<i64> = val.value().split(',').filter_map(|s| s.parse().ok()).collect();
+            let file_ids: Vec<i64> = val
+                .value()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
             for fid in file_ids {
                 if let Some(data) = files_table.get(fid)? {
                     files.push(Self::deserialize_media_file(data.value())?);
@@ -1069,14 +1052,22 @@ impl DatabaseManager for RedbDatabase {
         Ok(files)
     }
 
-    async fn get_music_by_album(&self, album: &str, artist: Option<&str>) -> Result<Vec<MediaFile>> {
+    async fn get_music_by_album(
+        &self,
+        album: &str,
+        artist: Option<&str>,
+    ) -> Result<Vec<MediaFile>> {
         let read_txn = self.db.begin_read()?;
         let album_index = read_txn.open_table(ALBUM_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
-        
+
         let mut files = Vec::new();
         if let Some(val) = album_index.get(album)? {
-            let file_ids: Vec<i64> = val.value().split(',').filter_map(|s| s.parse().ok()).collect();
+            let file_ids: Vec<i64> = val
+                .value()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
             for fid in file_ids {
                 if let Some(data) = files_table.get(fid)? {
                     let file = Self::deserialize_media_file(data.value())?;
@@ -1096,10 +1087,14 @@ impl DatabaseManager for RedbDatabase {
         let read_txn = self.db.begin_read()?;
         let genre_index = read_txn.open_table(GENRE_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
-        
+
         let mut files = Vec::new();
         if let Some(val) = genre_index.get(genre)? {
-            let file_ids: Vec<i64> = val.value().split(',').filter_map(|s| s.parse().ok()).collect();
+            let file_ids: Vec<i64> = val
+                .value()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
             for fid in file_ids {
                 if let Some(data) = files_table.get(fid)? {
                     files.push(Self::deserialize_media_file(data.value())?);
@@ -1113,10 +1108,14 @@ impl DatabaseManager for RedbDatabase {
         let read_txn = self.db.begin_read()?;
         let year_index = read_txn.open_table(YEAR_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
-        
+
         let mut files = Vec::new();
         if let Some(val) = year_index.get(year)? {
-            let file_ids: Vec<i64> = val.value().split(',').filter_map(|s| s.parse().ok()).collect();
+            let file_ids: Vec<i64> = val
+                .value()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
             for fid in file_ids {
                 if let Some(data) = files_table.get(fid)? {
                     files.push(Self::deserialize_media_file(data.value())?);
@@ -1130,10 +1129,14 @@ impl DatabaseManager for RedbDatabase {
         let read_txn = self.db.begin_read()?;
         let album_artist_index = read_txn.open_table(ALBUM_ARTIST_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
-        
+
         let mut files = Vec::new();
         if let Some(val) = album_artist_index.get(album_artist)? {
-            let file_ids: Vec<i64> = val.value().split(',').filter_map(|s| s.parse().ok()).collect();
+            let file_ids: Vec<i64> = val
+                .value()
+                .split(',')
+                .filter_map(|s| s.parse().ok())
+                .collect();
             for fid in file_ids {
                 if let Some(data) = files_table.get(fid)? {
                     files.push(Self::deserialize_media_file(data.value())?);
@@ -1146,7 +1149,7 @@ impl DatabaseManager for RedbDatabase {
     async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<i64> {
         let playlist_id = self.next_playlist_id.fetch_add(1, Ordering::SeqCst);
         let now = SystemTime::now();
-        
+
         let playlist = Playlist {
             id: Some(playlist_id),
             name: name.to_string(),
@@ -1216,12 +1219,14 @@ impl DatabaseManager for RedbDatabase {
         let removed = {
             let mut playlists_table = write_txn.open_table(PLAYLISTS_TABLE)?;
             let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
+            let mut playlist_sources = write_txn.open_table(PLAYLIST_SOURCES)?;
 
             let existed = playlists_table.remove(playlist_id)?.is_some();
 
             // Remove all entries for this playlist
             let prefix = format!("{}:", playlist_id);
-            let keys_to_remove: Vec<String> = playlist_entries.iter()?
+            let keys_to_remove: Vec<String> = playlist_entries
+                .iter()?
                 .filter_map(|r| r.ok())
                 .filter(|(k, _)| k.value().starts_with(&prefix))
                 .map(|(k, _)| k.value().to_string())
@@ -1230,6 +1235,7 @@ impl DatabaseManager for RedbDatabase {
             for key in keys_to_remove {
                 playlist_entries.remove(key.as_str())?;
             }
+            playlist_sources.remove(playlist_id)?;
 
             existed
         };
@@ -1238,7 +1244,61 @@ impl DatabaseManager for RedbDatabase {
         Ok(removed)
     }
 
-    async fn add_to_playlist(&self, playlist_id: i64, media_file_id: i64, position: Option<u32>) -> Result<i64> {
+    async fn set_playlist_source(&self, playlist_id: i64, source_path: &Path) -> Result<()> {
+        let source = Self::canonical_path(source_path)?
+            .to_string_lossy()
+            .to_string();
+        let txn = self.db.begin_write()?;
+        {
+            txn.open_table(PLAYLIST_SOURCES)?
+                .insert(playlist_id, source.as_str())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    async fn remove_derived_content_by_source(&self, source_path: &Path) -> Result<usize> {
+        let source = Self::canonical_path(source_path)?
+            .to_string_lossy()
+            .to_string();
+        let child_prefix = format!("{}/", source.trim_end_matches('/'));
+        let matches_source =
+            |candidate: &str| candidate == source || candidate.starts_with(&child_prefix);
+        let ids = {
+            let txn = self.db.begin_read()?;
+            let table = txn.open_table(PLAYLIST_SOURCES)?;
+            table
+                .iter()?
+                .filter_map(|e| e.ok())
+                .filter(|(_, value)| matches_source(value.value()))
+                .map(|(k, _)| k.value())
+                .collect::<Vec<_>>()
+        };
+        let mut removed = 0;
+        for id in ids {
+            removed += usize::from(self.delete_playlist(id).await?);
+        }
+        let mut radio_paths = Vec::new();
+        use futures_util::StreamExt;
+        let mut stream = self.stream_all_media_files();
+        while let Some(file) = stream.next().await {
+            let file = file?;
+            if file.mime_type == "audio/radio" && file.album.as_deref().is_some_and(matches_source)
+            {
+                radio_paths.push(file.path);
+            }
+        }
+        drop(stream);
+        removed += self.bulk_remove_media_files(&radio_paths).await?;
+        Ok(removed)
+    }
+
+    async fn add_to_playlist(
+        &self,
+        playlist_id: i64,
+        media_file_id: i64,
+        position: Option<u32>,
+    ) -> Result<i64> {
         let pos = position.unwrap_or(0);
         let key = format!("{}:{}", playlist_id, pos);
 
@@ -1252,7 +1312,11 @@ impl DatabaseManager for RedbDatabase {
         Ok(media_file_id)
     }
 
-    async fn batch_add_to_playlist(&self, playlist_id: i64, media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>> {
+    async fn batch_add_to_playlist(
+        &self,
+        playlist_id: i64,
+        media_file_ids: &[(i64, u32)],
+    ) -> Result<Vec<i64>> {
         let write_txn = self.db.begin_write()?;
         {
             let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
@@ -1274,7 +1338,7 @@ impl DatabaseManager for RedbDatabase {
         let files_table = read_txn.open_table(FILES_TABLE)?;
 
         for path in paths {
-            let path_str = path.to_string_lossy().to_string();
+            let path_str = Self::canonical_path(path)?.to_string_lossy().to_string();
             if let Some(file_id) = path_index.get(path_str.as_str())?.map(|v| v.value()) {
                 if let Some(data) = files_table.get(file_id)? {
                     files.push(Self::deserialize_media_file(data.value())?);
@@ -1286,7 +1350,11 @@ impl DatabaseManager for RedbDatabase {
     }
 
     async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>> {
+        let _mutation_guard = self.mutation_lock.lock().await;
         let mut ids = Vec::with_capacity(files.len());
+        let mut added_files = 0_u64;
+        let mut replaced_size = 0_u64;
+        let mut stored_size = 0_u64;
 
         let write_txn = self.db.begin_write()?;
         {
@@ -1300,290 +1368,366 @@ impl DatabaseManager for RedbDatabase {
             let mut year_index = write_txn.open_table(YEAR_INDEX)?;
             let mut album_artist_index = write_txn.open_table(ALBUM_ARTIST_INDEX)?;
 
-            for file in files {
-                let file_id = file.id.unwrap_or_else(|| self.next_file_id.fetch_add(1, Ordering::SeqCst));
+            for input in files {
+                let file = Self::canonical_file(input)?;
+                let path_str = file.path.to_string_lossy().to_string();
+                let existing_path_id = path_index.get(path_str.as_str())?.map(|v| v.value());
+                let file_id = existing_path_id
+                    .or(file.id)
+                    .unwrap_or_else(|| self.next_file_id.fetch_add(1, Ordering::SeqCst));
                 ids.push(file_id);
 
                 let mut file_with_id = file.clone();
                 file_with_id.id = Some(file_id);
+                let old_file = files_table
+                    .get(file_id)?
+                    .map(|data| Self::deserialize_media_file(data.value()))
+                    .transpose()?;
+                if let Some(old) = &old_file {
+                    Self::remove_file_indexes(
+                        &mut dir_index,
+                        &mut artist_index,
+                        &mut album_index,
+                        &mut genre_index,
+                        &mut year_index,
+                        &mut album_artist_index,
+                        file_id,
+                        old,
+                    )?;
+                    let old_path = old.path.to_string_lossy().to_string();
+                    if old_path != path_str {
+                        path_index.remove(old_path.as_str())?;
+                    }
+                    replaced_size = replaced_size.saturating_add(old.size);
+                } else {
+                    added_files = added_files.saturating_add(1);
+                }
 
                 let serialized = Self::serialize_media_file(&file_with_id)?;
-                let path_str = file.path.to_string_lossy().to_string();
-                let dir_key = Self::get_dir_key(&file.path);
-
-                // Check if path already exists
-                if let Some(existing_id) = path_index.get(path_str.as_str())?.map(|v| v.value()) {
-                    files_table.remove(existing_id)?;
-                }
-
                 files_table.insert(file_id, serialized.as_slice())?;
                 path_index.insert(path_str.as_str(), file_id)?;
-
-                let current_dir_ids = dir_index.get(dir_key.as_str())?.map(|v| v.value().to_string());
-                let new_dir_ids = Self::add_to_dir_index(current_dir_ids.as_deref(), file_id);
-                dir_index.insert(dir_key.as_str(), new_dir_ids.as_str())?;
-
-                // Update secondary indexes
-                if let Some(ref artist) = file.artist {
-                    let current_ids = artist_index.get(artist.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                    artist_index.insert(artist.as_str(), new_ids.as_str())?;
-                }
-                if let Some(ref album) = file.album {
-                    let current_ids = album_index.get(album.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                    album_index.insert(album.as_str(), new_ids.as_str())?;
-                }
-                if let Some(ref genre) = file.genre {
-                    let current_ids = genre_index.get(genre.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                    genre_index.insert(genre.as_str(), new_ids.as_str())?;
-                }
-                if let Some(year) = file.year {
-                    let current_ids = year_index.get(year)?.map(|v| v.value().to_string());
-                    let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                    year_index.insert(year, new_ids.as_str())?;
-                }
-                if let Some(ref album_artist) = file.album_artist {
-                    let current_ids = album_artist_index.get(album_artist.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                    album_artist_index.insert(album_artist.as_str(), new_ids.as_str())?;
-                }
-
-                // Update atomic counters
-                self.total_files.fetch_add(1, Ordering::SeqCst);
-                self.total_size.fetch_add(file.size, Ordering::SeqCst);
+                Self::add_file_indexes(
+                    &mut dir_index,
+                    &mut artist_index,
+                    &mut album_index,
+                    &mut genre_index,
+                    &mut year_index,
+                    &mut album_artist_index,
+                    file_id,
+                    &file_with_id,
+                )?;
+                stored_size = stored_size.saturating_add(file.size);
             }
         }
         write_txn.commit()?;
+        self.total_files.fetch_add(added_files, Ordering::SeqCst);
+        if stored_size >= replaced_size {
+            self.total_size
+                .fetch_add(stored_size - replaced_size, Ordering::SeqCst);
+        } else {
+            let decrease = replaced_size - stored_size;
+            let _ = self
+                .total_size
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                    Some(current.saturating_sub(decrease))
+                });
+        }
 
         debug!("Bulk stored {} media files", ids.len());
         Ok(ids)
     }
 
     async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()> {
-        let write_txn = self.db.begin_write()?;
-        {
-            let mut files_table = write_txn.open_table(FILES_TABLE)?;
-            let mut path_index = write_txn.open_table(PATH_INDEX)?;
-            
-            let mut artist_index = write_txn.open_table(ARTIST_INDEX)?;
-            let mut album_index = write_txn.open_table(ALBUM_INDEX)?;
-            let mut genre_index = write_txn.open_table(GENRE_INDEX)?;
-            let mut year_index = write_txn.open_table(YEAR_INDEX)?;
-            let mut album_artist_index = write_txn.open_table(ALBUM_ARTIST_INDEX)?;
-
-            for file in files {
-                if let Some(file_id) = file.id {
-                    // Fetch existing size to update total_size counter accurately
-                    let old_size = if let Some(old_data) = files_table.get(file_id)? {
-                        if let Ok(old_file) = Self::deserialize_media_file(old_data.value()) {
-                            // Also remove from old indexes if values changed
-                            if old_file.artist != file.artist {
-                                if let Some(ref old_artist) = old_file.artist {
-                                    let current_ids = artist_index.get(old_artist.as_str())?.map(|v| v.value().to_string());
-                                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                                    if new_ids.is_empty() { artist_index.remove(old_artist.as_str())?; }
-                                    else { artist_index.insert(old_artist.as_str(), new_ids.as_str())?; }
-                                }
-                            }
-                            if old_file.album != file.album {
-                                if let Some(ref old_album) = old_file.album {
-                                    let current_ids = album_index.get(old_album.as_str())?.map(|v| v.value().to_string());
-                                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                                    if new_ids.is_empty() { album_index.remove(old_album.as_str())?; }
-                                    else { album_index.insert(old_album.as_str(), new_ids.as_str())?; }
-                                }
-                            }
-                            if old_file.genre != file.genre {
-                                if let Some(ref old_genre) = old_file.genre {
-                                    let current_ids = genre_index.get(old_genre.as_str())?.map(|v| v.value().to_string());
-                                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                                    if new_ids.is_empty() { genre_index.remove(old_genre.as_str())?; }
-                                    else { genre_index.insert(old_genre.as_str(), new_ids.as_str())?; }
-                                }
-                            }
-                            if old_file.year != file.year {
-                                if let Some(old_year) = old_file.year {
-                                    let current_ids = year_index.get(old_year)?.map(|v| v.value().to_string());
-                                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                                    if new_ids.is_empty() { year_index.remove(old_year)?; }
-                                    else { year_index.insert(old_year, new_ids.as_str())?; }
-                                }
-                            }
-                            if old_file.album_artist != file.album_artist {
-                                if let Some(ref old_album_artist) = old_file.album_artist {
-                                    let current_ids = album_artist_index.get(old_album_artist.as_str())?.map(|v| v.value().to_string());
-                                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                                    if new_ids.is_empty() { album_artist_index.remove(old_album_artist.as_str())?; }
-                                    else { album_artist_index.insert(old_album_artist.as_str(), new_ids.as_str())?; }
-                                }
-                            }
-                            old_file.size
-                        } else { 0 }
-                    } else { 0 };
-
-                    let serialized = Self::serialize_media_file(file)?;
-                    let path_str = file.path.to_string_lossy().to_string();
-
-                    files_table.insert(file_id, serialized.as_slice())?;
-                    path_index.insert(path_str.as_str(), file_id)?;
-
-                    // Add to new indexes
-                    if let Some(ref artist) = file.artist {
-                        let current_ids = artist_index.get(artist.as_str())?.map(|v| v.value().to_string());
-                        let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                        artist_index.insert(artist.as_str(), new_ids.as_str())?;
-                    }
-                    if let Some(ref album) = file.album {
-                        let current_ids = album_index.get(album.as_str())?.map(|v| v.value().to_string());
-                        let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                        album_index.insert(album.as_str(), new_ids.as_str())?;
-                    }
-                    if let Some(ref genre) = file.genre {
-                        let current_ids = genre_index.get(genre.as_str())?.map(|v| v.value().to_string());
-                        let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                        genre_index.insert(genre.as_str(), new_ids.as_str())?;
-                    }
-                    if let Some(year) = file.year {
-                        let current_ids = year_index.get(year)?.map(|v| v.value().to_string());
-                        let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                        year_index.insert(year, new_ids.as_str())?;
-                    }
-                    if let Some(ref album_artist) = file.album_artist {
-                        let current_ids = album_artist_index.get(album_artist.as_str())?.map(|v| v.value().to_string());
-                        let new_ids = Self::add_to_dir_index(current_ids.as_deref(), file_id);
-                        album_artist_index.insert(album_artist.as_str(), new_ids.as_str())?;
-                    }
-
-                    // Update total size counter
-                    if file.size >= old_size {
-                        self.total_size.fetch_add(file.size - old_size, Ordering::SeqCst);
-                    } else {
-                        self.total_size.fetch_sub(old_size - file.size, Ordering::SeqCst);
-                    }
-                }
-            }
+        if files.iter().any(|file| file.id.is_none()) {
+            return Err(anyhow!("cannot update a media file without an ID"));
         }
-        write_txn.commit()?;
-
-        debug!("Bulk updated {} media files", files.len());
+        self.bulk_store_media_files(files).await?;
         Ok(())
     }
 
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize> {
-        let mut count = 0;
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let transaction = self.db.begin_write()?;
+        let mut files = Vec::new();
+        let mut orphan_paths = Vec::new();
+        let mut seen_ids = HashSet::new();
 
-        let write_txn = self.db.begin_write()?;
-        
-        // First pass: collect file IDs and info for all paths
-        let file_ids_and_info: Vec<(i64, String, String, Option<String>, Option<String>, Option<String>, Option<u32>, Option<String>, u64)> = {
-            let path_index = write_txn.open_table(PATH_INDEX)?;
-            let files_table = write_txn.open_table(FILES_TABLE)?;
-            let mut result = Vec::new();
-            for path in paths {
-                let path_str = path.to_string_lossy().to_string();
-                let dir_key = Self::get_dir_key(path);
-                let guard = path_index.get(path_str.as_str())?;
-                if let Some(file_id) = guard.map(|v| v.value()) {
-                    let mut artist = None;
-                    let mut album = None;
-                    let mut genre = None;
-                    let mut year = None;
-                    let mut album_artist = None;
-                    let mut size = 0;
-                    if let Some(data) = files_table.get(file_id)? {
-                        if let Ok(file) = Self::deserialize_media_file(data.value()) {
-                            artist = file.artist;
-                            album = file.album;
-                            genre = file.genre;
-                            year = file.year;
-                            album_artist = file.album_artist;
-                            size = file.size;
-                        }
-                    }
-                    result.push((file_id, path_str, dir_key, artist, album, genre, year, album_artist, size));
-                }
-            }
-            result
-        };
-
-        // Second pass: remove all entries
         {
-            let mut files_table = write_txn.open_table(FILES_TABLE)?;
-            let mut path_index = write_txn.open_table(PATH_INDEX)?;
-            let mut dir_index = write_txn.open_table(DIR_INDEX)?;
-
-            let mut artist_index = write_txn.open_table(ARTIST_INDEX)?;
-            let mut album_index = write_txn.open_table(ALBUM_INDEX)?;
-            let mut genre_index = write_txn.open_table(GENRE_INDEX)?;
-            let mut year_index = write_txn.open_table(YEAR_INDEX)?;
-            let mut album_artist_index = write_txn.open_table(ALBUM_ARTIST_INDEX)?;
-
-            for &(file_id, ref path_str, ref dir_key, ref artist, ref album, ref genre, year, ref album_artist, size) in &file_ids_and_info {
-                files_table.remove(file_id)?;
-                path_index.remove(path_str.as_str())?;
-
-                let current_dir_ids = dir_index.get(dir_key.as_str())?.map(|v| v.value().to_string());
-                let new_dir_ids = Self::remove_from_dir_index(current_dir_ids.as_deref(), file_id);
-                if new_dir_ids.is_empty() {
-                    dir_index.remove(dir_key.as_str())?;
+            let path_index = transaction.open_table(PATH_INDEX)?;
+            let files_table = transaction.open_table(FILES_TABLE)?;
+            for input_path in paths {
+                let path = Self::canonical_path(input_path)?;
+                let path_string = path.to_string_lossy().to_string();
+                let Some(id) = path_index
+                    .get(path_string.as_str())?
+                    .map(|value| value.value())
+                else {
+                    continue;
+                };
+                if !seen_ids.insert(id) {
+                    continue;
+                }
+                if let Some(data) = files_table.get(id)? {
+                    let file = Self::canonical_file(&Self::deserialize_media_file(data.value())?)?;
+                    files.push((path_string, id, file));
                 } else {
-                    dir_index.insert(dir_key.as_str(), new_dir_ids.as_str())?;
+                    orphan_paths.push(path_string);
                 }
-
-                // Remove from secondary indexes
-                if let Some(ref art) = artist {
-                    let current_ids = artist_index.get(art.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                    if new_ids.is_empty() { artist_index.remove(art.as_str())?; }
-                    else { artist_index.insert(art.as_str(), new_ids.as_str())?; }
-                }
-                if let Some(ref alb) = album {
-                    let current_ids = album_index.get(alb.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                    if new_ids.is_empty() { album_index.remove(alb.as_str())?; }
-                    else { album_index.insert(alb.as_str(), new_ids.as_str())?; }
-                }
-                if let Some(ref gen) = genre {
-                    let current_ids = genre_index.get(gen.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                    if new_ids.is_empty() { genre_index.remove(gen.as_str())?; }
-                    else { genre_index.insert(gen.as_str(), new_ids.as_str())?; }
-                }
-                if let Some(yr) = year {
-                    let current_ids = year_index.get(yr)?.map(|v| v.value().to_string());
-                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                    if new_ids.is_empty() { year_index.remove(yr)?; }
-                    else { year_index.insert(yr, new_ids.as_str())?; }
-                }
-                if let Some(ref alb_art) = album_artist {
-                    let current_ids = album_artist_index.get(alb_art.as_str())?.map(|v| v.value().to_string());
-                    let new_ids = Self::remove_from_dir_index(current_ids.as_deref(), file_id);
-                    if new_ids.is_empty() { album_artist_index.remove(alb_art.as_str())?; }
-                    else { album_artist_index.insert(alb_art.as_str(), new_ids.as_str())?; }
-                }
-
-                // Update atomic counters
-                self.total_files.fetch_sub(1, Ordering::SeqCst);
-                self.total_size.fetch_sub(size, Ordering::SeqCst);
-
-                count += 1;
             }
         }
-        write_txn.commit()?;
 
-        debug!("Bulk removed {} media files", count);
-        Ok(count)
+        if !orphan_paths.is_empty() {
+            let mut path_index = transaction.open_table(PATH_INDEX)?;
+            for path in orphan_paths {
+                path_index.remove(path.as_str())?;
+            }
+        }
+
+        let (removed, removed_size) = Self::remove_files_from_transaction(&transaction, &files)?;
+        transaction.commit()?;
+        let _ = self
+            .total_files
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_sub(removed as u64))
+            });
+        let _ = self
+            .total_size
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_sub(removed_size))
+            });
+
+        debug!("Bulk removed {} media files", removed);
+        Ok(removed)
+    }
+
+    async fn remove_media_under_path(&self, path: &Path) -> Result<RemovalSummary> {
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let canonical = Self::canonical_path(path)?;
+        let prefix = canonical
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
+        let child_prefix = format!("{prefix}/");
+        let transaction = self.db.begin_write()?;
+        let mut files = Vec::new();
+        let mut orphan_paths = Vec::new();
+        let mut seen_ids = HashSet::new();
+        let mut summary = RemovalSummary::default();
+
+        {
+            let path_index = transaction.open_table(PATH_INDEX)?;
+            let files_table = transaction.open_table(FILES_TABLE)?;
+            for entry in path_index.range(prefix.as_str()..)? {
+                let (path_key, id) = entry?;
+                let path_string = path_key.value();
+                if path_string != prefix && !path_string.starts_with(&child_prefix) {
+                    break;
+                }
+
+                let id = id.value();
+                if !seen_ids.insert(id) {
+                    continue;
+                }
+                if let Some(data) = files_table.get(id)? {
+                    let file = Self::canonical_file(&Self::deserialize_media_file(data.value())?)?;
+                    if let Some(parent) = file.path.parent() {
+                        summary.affected_parents.push(parent.to_path_buf());
+                    }
+                    summary
+                        .mime_families
+                        .insert(Self::mime_family(&file.mime_type));
+                    files.push((path_string.to_string(), id, file));
+                } else {
+                    orphan_paths.push(path_string.to_string());
+                }
+            }
+        }
+
+        if !orphan_paths.is_empty() {
+            let mut path_index = transaction.open_table(PATH_INDEX)?;
+            for path in orphan_paths {
+                path_index.remove(path.as_str())?;
+            }
+        }
+
+        summary.affected_parents.sort();
+        summary.affected_parents.dedup();
+        let (removed, removed_size) = Self::remove_files_from_transaction(&transaction, &files)?;
+        transaction.commit()?;
+
+        let _ = self
+            .total_files
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_sub(removed as u64))
+            });
+        let _ = self
+            .total_size
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {
+                Some(current.saturating_sub(removed_size))
+            });
+        summary.removed_files = removed;
+        Ok(summary)
+    }
+
+    async fn rebuild_derived_indexes(&self) -> Result<DatabaseHealth> {
+        let _mutation_guard = self.mutation_lock.lock().await;
+        let txn = self.db.begin_write()?;
+        let mut winners: HashMap<String, (i64, MediaFile)> = HashMap::new();
+        let mut remap = HashMap::new();
+        {
+            let files = txn.open_table(FILES_TABLE)?;
+            for entry in files.iter()? {
+                let (id, bytes) = entry?;
+                let file = Self::canonical_file(&Self::deserialize_media_file(bytes.value())?)?;
+                let path = file.path.to_string_lossy().to_string();
+                if let Some((old_id, old)) = winners.get(&path) {
+                    if (file.updated_at, id.value()) > (old.updated_at, *old_id) {
+                        remap.insert(*old_id, id.value());
+                        winners.insert(path, (id.value(), file));
+                    } else {
+                        remap.insert(id.value(), *old_id);
+                    }
+                } else {
+                    winners.insert(path, (id.value(), file));
+                }
+            }
+        }
+        {
+            let mut files = txn.open_table(FILES_TABLE)?;
+            let keys = files
+                .iter()?
+                .filter_map(|e| e.ok().map(|(k, _)| k.value()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                files.remove(key)?;
+            }
+            for (id, file) in winners.values_mut() {
+                file.id = Some(*id);
+                let bytes = Self::serialize_media_file(file)?;
+                files.insert(*id, bytes.as_slice())?;
+            }
+        }
+        macro_rules! clear_str {
+            ($def:expr) => {{
+                let mut table = txn.open_table($def)?;
+                let keys = table
+                    .iter()?
+                    .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    table.remove(key.as_str())?;
+                }
+            }};
+        }
+        clear_str!(PATH_INDEX);
+        clear_str!(DIR_INDEX);
+        clear_str!(ARTIST_INDEX);
+        clear_str!(ALBUM_INDEX);
+        clear_str!(GENRE_INDEX);
+        clear_str!(ALBUM_ARTIST_INDEX);
+        {
+            let mut table = txn.open_table(YEAR_INDEX)?;
+            let keys = table
+                .iter()?
+                .filter_map(|e| e.ok().map(|(k, _)| k.value()))
+                .collect::<Vec<_>>();
+            for key in keys {
+                table.remove(key)?;
+            }
+        }
+        {
+            let mut paths = txn.open_table(PATH_INDEX)?;
+            let mut dirs = txn.open_table(DIR_INDEX)?;
+            let mut artists = txn.open_table(ARTIST_INDEX)?;
+            let mut albums = txn.open_table(ALBUM_INDEX)?;
+            let mut genres = txn.open_table(GENRE_INDEX)?;
+            let mut years = txn.open_table(YEAR_INDEX)?;
+            let mut album_artists = txn.open_table(ALBUM_ARTIST_INDEX)?;
+            for (path, (id, file)) in &winners {
+                paths.insert(path.as_str(), *id)?;
+                Self::add_file_indexes(
+                    &mut dirs,
+                    &mut artists,
+                    &mut albums,
+                    &mut genres,
+                    &mut years,
+                    &mut album_artists,
+                    *id,
+                    file,
+                )?;
+            }
+        }
+        let legacy = {
+            let meta = txn.open_table(METADATA_TABLE)?;
+            let v = meta.get("schema_version")?.is_none();
+            v
+        };
+        if legacy {
+            {
+                let mut table = txn.open_table(PLAYLISTS_TABLE)?;
+                let keys = table
+                    .iter()?
+                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    table.remove(key)?;
+                }
+            }
+            clear_str!(PLAYLIST_ENTRIES);
+            {
+                let mut table = txn.open_table(PLAYLIST_SOURCES)?;
+                let keys = table
+                    .iter()?
+                    .filter_map(|e| e.ok().map(|(k, _)| k.value()))
+                    .collect::<Vec<_>>();
+                for key in keys {
+                    table.remove(key)?;
+                }
+            }
+            txn.open_table(METADATA_TABLE)?
+                .insert("schema_version", 1)?;
+        }
+        {
+            let live = winners.values().map(|(id, _)| *id).collect::<HashSet<_>>();
+            let mut entries = txn.open_table(PLAYLIST_ENTRIES)?;
+            let snapshot = entries
+                .iter()?
+                .filter_map(|e| e.ok().map(|(k, v)| (k.value().to_string(), v.value())))
+                .collect::<Vec<_>>();
+            for (key, old) in snapshot {
+                let id = remap.get(&old).copied().unwrap_or(old);
+                if !live.contains(&id) {
+                    entries.remove(key.as_str())?;
+                } else if id != old {
+                    entries.insert(key.as_str(), id)?;
+                }
+            }
+        }
+        txn.commit()?;
+        self.total_files
+            .store(winners.len() as u64, Ordering::SeqCst);
+        self.total_size.store(
+            winners.values().map(|(_, f)| f.size).sum(),
+            Ordering::SeqCst,
+        );
+        Ok(DatabaseHealth {
+            is_healthy: true,
+            corruption_detected: !remap.is_empty(),
+            integrity_check_passed: true,
+            issues: Vec::new(),
+            repair_attempted: true,
+            repair_successful: true,
+        })
     }
 
     async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool> {
         let write_txn = self.db.begin_write()?;
         let removed = {
             let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
-            
+
             let prefix = format!("{}:", playlist_id);
-            let key_to_remove: Option<String> = playlist_entries.iter()?
+            let key_to_remove: Option<String> = playlist_entries
+                .iter()?
                 .filter_map(|r| r.ok())
                 .find(|(k, v)| k.value().starts_with(&prefix) && v.value() == media_file_id)
                 .map(|(k, _)| k.value().to_string());
@@ -1606,7 +1750,8 @@ impl DatabaseManager for RedbDatabase {
         let files_table = read_txn.open_table(FILES_TABLE)?;
 
         let prefix = format!("{}:", playlist_id);
-        let mut entries: Vec<(u32, i64)> = playlist_entries.iter()?
+        let mut entries: Vec<(u32, i64)> = playlist_entries
+            .iter()?
             .filter_map(|r| r.ok())
             .filter(|(k, _)| k.value().starts_with(&prefix))
             .map(|(k, v)| {
@@ -1627,14 +1772,19 @@ impl DatabaseManager for RedbDatabase {
         Ok(files)
     }
 
-    async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()> {
+    async fn reorder_playlist(
+        &self,
+        playlist_id: i64,
+        track_positions: &[(i64, u32)],
+    ) -> Result<()> {
         let write_txn = self.db.begin_write()?;
         {
             let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
-            
+
             // Remove existing entries for this playlist
             let prefix = format!("{}:", playlist_id);
-            let keys_to_remove: Vec<String> = playlist_entries.iter()?
+            let keys_to_remove: Vec<String> = playlist_entries
+                .iter()?
                 .filter_map(|r| r.ok())
                 .filter(|(k, _)| k.value().starts_with(&prefix))
                 .map(|(k, _)| k.value().to_string())
@@ -1657,24 +1807,37 @@ impl DatabaseManager for RedbDatabase {
 
     async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
         let mut files = Vec::new();
+        let canonical = Self::canonical_path(Path::new(canonical_prefix))?;
+        let prefix = canonical
+            .to_string_lossy()
+            .trim_end_matches('/')
+            .to_string();
+        let child = format!("{prefix}/");
 
         let read_txn = self.db.begin_read()?;
         let path_index = read_txn.open_table(PATH_INDEX)?;
         let files_table = read_txn.open_table(FILES_TABLE)?;
 
-        for result in path_index.iter()? {
+        for result in path_index.range(prefix.as_str()..)? {
             let (key, value) = result?;
-            if key.value().starts_with(canonical_prefix) {
+            if key.value() == prefix || key.value().starts_with(&child) {
                 if let Some(data) = files_table.get(value.value())? {
                     files.push(Self::deserialize_media_file(data.value())?);
                 }
+            } else {
+                break;
             }
         }
 
         Ok(files)
     }
 
-    async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>> {
+    async fn get_direct_subdirectories(
+        &self,
+        canonical_parent_path: &str,
+    ) -> Result<Vec<MediaDirectory>> {
+        let canonical = Self::canonical_path(Path::new(canonical_parent_path))?;
+        let canonical_parent_path = canonical.to_string_lossy().to_string();
         let prefix = if canonical_parent_path.is_empty() || canonical_parent_path == "/" {
             String::new()
         } else {
@@ -1683,16 +1846,23 @@ impl DatabaseManager for RedbDatabase {
 
         let read_txn = self.db.begin_read()?;
         let dir_index = read_txn.open_table(DIR_INDEX)?;
+        let files_table = read_txn.open_table(FILES_TABLE)?;
 
         let mut subdirs = HashSet::new();
 
         for result in dir_index.range(prefix.as_str()..)? {
-            let (key, _) = result?;
+            let (key, value) = result?;
             let key_str = key.value();
             if !key_str.starts_with(&prefix) {
                 break;
             }
             if key_str == canonical_parent_path {
+                continue;
+            }
+            if !Self::parse_dir_index(value.value())
+                .into_iter()
+                .any(|id| files_table.get(id).ok().flatten().is_some())
+            {
                 continue;
             }
             let relative = &key_str[prefix.len()..];
@@ -1723,7 +1893,10 @@ impl DatabaseManager for RedbDatabase {
             .collect())
     }
 
-    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize> {
+    async fn batch_cleanup_missing_files(
+        &self,
+        existing_canonical_paths: &HashSet<String>,
+    ) -> Result<usize> {
         let paths_vec: Vec<PathBuf> = existing_canonical_paths
             .iter()
             .map(|s| PathBuf::from(s))
@@ -1740,9 +1913,12 @@ impl DatabaseManager for RedbDatabase {
     async fn get_filtered_direct_subdirectories(
         &self,
         canonical_parent_path: &str,
-        _mime_filter: &str,
+        mime_filter: &str,
     ) -> Result<Vec<MediaDirectory>> {
-        self.get_direct_subdirectories(canonical_parent_path).await
+        Ok(self
+            .get_directory_listing(Path::new(canonical_parent_path), mime_filter)
+            .await?
+            .0)
     }
 }
 
@@ -1769,7 +1945,10 @@ mod tests {
         assert!(id > 0);
 
         // Retrieve by path
-        let retrieved = db.get_file_by_path(&PathBuf::from("/music/test.mp3")).await.unwrap();
+        let retrieved = db
+            .get_file_by_path(&PathBuf::from("/music/test.mp3"))
+            .await
+            .unwrap();
         assert!(retrieved.is_some());
         assert_eq!(retrieved.unwrap().filename, "test.mp3");
 
@@ -1778,11 +1957,28 @@ mod tests {
         assert!(by_id.is_some());
 
         // Remove
-        let removed = db.remove_media_file(&PathBuf::from("/music/test.mp3")).await.unwrap();
+        let removed = db
+            .remove_media_file(&PathBuf::from("/music/test.mp3"))
+            .await
+            .unwrap();
         assert!(removed);
 
-        let removed_check = db.get_file_by_path(&PathBuf::from("/music/test.mp3")).await.unwrap();
+        let removed_check = db
+            .get_file_by_path(&PathBuf::from("/music/test.mp3"))
+            .await
+            .unwrap();
         assert!(removed_check.is_none());
+    }
+
+    #[tokio::test]
+    async fn opening_corrupt_database_does_not_delete_original() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("corrupt.redb");
+        let original = b"not a redb database";
+        std::fs::write(&path, original).unwrap();
+
+        assert!(RedbDatabase::new(path.clone()).await.is_err());
+        assert_eq!(std::fs::read(path).unwrap(), original);
     }
 
     #[tokio::test]
@@ -1794,11 +1990,13 @@ mod tests {
         db.initialize().await.unwrap();
 
         let files: Vec<MediaFile> = (0..100)
-            .map(|i| MediaFile::new(
-                PathBuf::from(format!("/music/song{}.mp3", i)),
-                1024,
-                "audio/mpeg".to_string(),
-            ))
+            .map(|i| {
+                MediaFile::new(
+                    PathBuf::from(format!("/music/song{}.mp3", i)),
+                    1024,
+                    "audio/mpeg".to_string(),
+                )
+            })
             .collect();
 
         let ids = db.bulk_store_media_files(&files).await.unwrap();
@@ -1806,6 +2004,157 @@ mod tests {
 
         let stats = db.get_stats().await.unwrap();
         assert_eq!(stats.total_files, 100);
+    }
+
+    #[tokio::test]
+    async fn duplicate_upsert_then_delete_does_not_leave_ghost_directory() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("ghost.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        let mut file = MediaFile::new(
+            PathBuf::from("/media/deleted/movie.mkv"),
+            1,
+            "video/x-matroska".to_string(),
+        );
+        file.artist = Some("Ghost Artist".to_string());
+        file.album = Some("Ghost Album".to_string());
+        file.genre = Some("Ghost Genre".to_string());
+        file.year = Some(2026);
+        file.album_artist = Some("Ghost Album Artist".to_string());
+        let first = db.store_media_file(&file).await.unwrap();
+        let second = db
+            .bulk_store_media_files(std::slice::from_ref(&file))
+            .await
+            .unwrap();
+        assert_eq!(vec![first], second);
+        assert_eq!(
+            db.remove_media_under_path(Path::new("/media/deleted"))
+                .await
+                .unwrap()
+                .removed_files,
+            1
+        );
+        let (dirs, files) = db
+            .get_directory_listing(Path::new("/media"), "video/")
+            .await
+            .unwrap();
+        assert!(dirs.is_empty(), "ghost directories: {dirs:?}");
+        assert!(files.is_empty());
+        assert!(db.get_artists().await.unwrap().is_empty());
+        assert!(db.get_albums(None).await.unwrap().is_empty());
+        assert!(db.get_genres().await.unwrap().is_empty());
+        assert!(db.get_years().await.unwrap().is_empty());
+        assert!(db.get_album_artists().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_removes_orphan_indexes_and_repairs_counters() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("repair.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        db.rebuild_derived_indexes().await.unwrap();
+
+        let mut file = MediaFile::new(
+            PathBuf::from("/music/orphan/song.mp3"),
+            42,
+            "audio/mpeg".to_string(),
+        );
+        file.artist = Some("Orphan Artist".to_string());
+        let id = db.store_media_file(&file).await.unwrap();
+        let playlist = db.create_playlist("Kept playlist", None).await.unwrap();
+        db.add_to_playlist(playlist, id, Some(0)).await.unwrap();
+
+        let transaction = db.db.begin_write().unwrap();
+        transaction
+            .open_table(FILES_TABLE)
+            .unwrap()
+            .remove(id)
+            .unwrap();
+        transaction.commit().unwrap();
+
+        let health = db.rebuild_derived_indexes().await.unwrap();
+        assert!(health.is_healthy);
+        assert!(db.get_artists().await.unwrap().is_empty());
+        assert!(db
+            .get_directory_listing(Path::new("/music"), "audio/")
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+        assert!(db.get_playlist_tracks(playlist).await.unwrap().is_empty());
+        let stats = db.get_stats().await.unwrap();
+        assert_eq!(stats.total_files, 0);
+        assert_eq!(stats.total_size, 0);
+    }
+
+    #[tokio::test]
+    async fn path_prefix_removal_respects_component_boundaries() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("prefix.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        let a = MediaFile::new(PathBuf::from("/media/Film/a.mkv"), 1, "video/x".to_string());
+        let b = MediaFile::new(
+            PathBuf::from("/media/Films/b.mkv"),
+            1,
+            "video/x".to_string(),
+        );
+        db.bulk_store_media_files(&[a, b.clone()]).await.unwrap();
+        db.remove_media_under_path(Path::new("/media/Film"))
+            .await
+            .unwrap();
+        assert!(db.get_file_by_path(&b.path).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn directory_visibility_respects_mime_family() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("mime-filter.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        let video = MediaFile::new(
+            PathBuf::from("/media/mixed/movie.mkv"),
+            1,
+            "video/x-matroska".to_string(),
+        );
+        let audio = MediaFile::new(
+            PathBuf::from("/media/mixed/song.mp3"),
+            1,
+            "audio/mpeg".to_string(),
+        );
+        db.bulk_store_media_files(&[video.clone(), audio])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            db.get_directory_listing(Path::new("/media"), "video/")
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
+        db.remove_media_file(&video.path).await.unwrap();
+        assert!(db
+            .get_directory_listing(Path::new("/media"), "video/")
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+        assert_eq!(
+            db.get_directory_listing(Path::new("/media"), "audio/")
+                .await
+                .unwrap()
+                .0
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1818,16 +2167,21 @@ mod tests {
 
         // Store some test files
         let files: Vec<MediaFile> = (0..5)
-            .map(|i| MediaFile::new(
-                PathBuf::from(format!("/music/song{}.mp3", i)),
-                1024,
-                "audio/mpeg".to_string(),
-            ))
+            .map(|i| {
+                MediaFile::new(
+                    PathBuf::from(format!("/music/song{}.mp3", i)),
+                    1024,
+                    "audio/mpeg".to_string(),
+                )
+            })
             .collect();
         let file_ids = db.bulk_store_media_files(&files).await.unwrap();
 
         // Create a playlist
-        let playlist_id = db.create_playlist("Test Playlist", Some("A test playlist")).await.unwrap();
+        let playlist_id = db
+            .create_playlist("Test Playlist", Some("A test playlist"))
+            .await
+            .unwrap();
         assert!(playlist_id > 0);
 
         // Verify playlist was created
@@ -1837,7 +2191,9 @@ mod tests {
 
         // Add tracks to playlist
         for (i, file_id) in file_ids.iter().enumerate() {
-            db.add_to_playlist(playlist_id, *file_id, Some(i as u32)).await.unwrap();
+            db.add_to_playlist(playlist_id, *file_id, Some(i as u32))
+                .await
+                .unwrap();
         }
 
         // Get playlist tracks
@@ -1847,7 +2203,10 @@ mod tests {
         assert_eq!(tracks[4].filename, "song4.mp3");
 
         // Remove a track
-        let removed = db.remove_from_playlist(playlist_id, file_ids[2]).await.unwrap();
+        let removed = db
+            .remove_from_playlist(playlist_id, file_ids[2])
+            .await
+            .unwrap();
         assert!(removed);
 
         // Verify track was removed
@@ -1861,5 +2220,40 @@ mod tests {
         // Verify playlist was deleted
         let playlists_after_delete = db.get_playlists().await.unwrap();
         assert_eq!(playlists_after_delete.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn deleting_source_tree_removes_derived_playlist_and_radio() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("playlist-source.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        db.rebuild_derived_indexes().await.unwrap();
+
+        let source = PathBuf::from("/music/playlists/stations.m3u");
+        let playlist = db.create_playlist("Stations", None).await.unwrap();
+        db.set_playlist_source(playlist, &source).await.unwrap();
+        let mut radio = MediaFile::new(
+            PathBuf::from("https://radio.example/stream"),
+            0,
+            "audio/radio".to_string(),
+        );
+        radio.album = Some(
+            RedbDatabase::canonical_path(&source)
+                .unwrap()
+                .to_string_lossy()
+                .to_string(),
+        );
+        let radio_id = db.store_media_file(&radio).await.unwrap();
+
+        assert_eq!(
+            db.remove_derived_content_by_source(Path::new("/music/playlists"))
+                .await
+                .unwrap(),
+            2
+        );
+        assert!(db.get_playlist(playlist).await.unwrap().is_none());
+        assert!(db.get_file_by_id(radio_id).await.unwrap().is_none());
     }
 }

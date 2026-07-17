@@ -7,13 +7,14 @@ use crate::{
 /// XML escape helper with enhanced Unicode support
 fn xml_escape(s: &str) -> std::borrow::Cow<'_, str> {
     fn needs_escaping(c: char) -> bool {
-        matches!(c, '&' | '<' | '>' | '"' | '\'') || ((c as u32) < 32 && c != '\t' && c != '\n' && c != '\r')
+        matches!(c, '&' | '<' | '>' | '"' | '\'')
+            || ((c as u32) < 32 && c != '\t' && c != '\n' && c != '\r')
     }
 
     if !s.chars().any(needs_escaping) {
         return std::borrow::Cow::Borrowed(s);
     }
-    
+
     let mut result = String::with_capacity(s.len() + s.len() / 4);
     for ch in s.chars() {
         match ch {
@@ -26,18 +27,14 @@ fn xml_escape(s: &str) -> std::borrow::Cow<'_, str> {
             c if (c as u32) < 32 && c != '\t' && c != '\n' && c != '\r' => {
                 use std::fmt::Write;
                 let _ = write!(&mut result, "&#{};", c as u32);
-            },
+            }
             // Handle other potentially problematic characters
             c => result.push(c),
         }
     }
-    
+
     std::borrow::Cow::Owned(result)
 }
-
-
-
-
 
 /// Get the appropriate UPnP class for a given MIME type.
 fn get_upnp_class(mime_type: &str) -> &str {
@@ -224,7 +221,8 @@ pub async fn generate_browse_response(
     state: &AppState,
     server_ip: &str,
 ) -> String {
-    generate_browse_response_with_totals(object_id, subdirectories, files, state, server_ip, None).await
+    generate_browse_response_with_totals(object_id, subdirectories, files, state, server_ip, None)
+        .await
 }
 
 pub async fn generate_browse_response_with_totals(
@@ -235,10 +233,11 @@ pub async fn generate_browse_response_with_totals(
     server_ip: &str,
     total_matches: Option<usize>,
 ) -> String {
-    use tracing::{debug, warn};
     use std::fmt::Write;
-    
-    let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
+    use tracing::{debug, warn};
+
+    let client = crate::web::client::CURRENT_CLIENT
+        .try_with(|c| *c)
         .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
 
     debug!(
@@ -248,7 +247,7 @@ pub async fn generate_browse_response_with_totals(
         files.len(),
         client
     );
-    
+
     let estimated_capacity = 250 + subdirectories.len() * 250 + files.len() * 500;
     let mut didl = String::with_capacity(estimated_capacity);
     didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/">"#);
@@ -264,13 +263,25 @@ pub async fn generate_browse_response_with_totals(
         // Add sub-containers to DIDL
         for (idx, container) in subdirectories.iter().enumerate() {
             if idx % 100 == 0 && idx > 0 {
-                debug!("Processing subdirectory {}/{}: {}", idx, subdirectories.len(), container.name);
+                debug!(
+                    "Processing subdirectory {}/{}: {}",
+                    idx,
+                    subdirectories.len(),
+                    container.name
+                );
             }
-            
+
             let path_str = container.path.to_string_lossy();
-            let container_id = if path_str.starts_with("audio/") || path_str.starts_with("video/") || path_str.starts_with("image/") || path_str == "audio" || path_str == "video" || path_str == "image" {
+            let container_id = if path_str.starts_with("audio/")
+                || path_str.starts_with("video/")
+                || path_str.starts_with("image/")
+                || path_str == "audio"
+                || path_str == "video"
+                || path_str == "image"
+            {
                 path_str.into_owned()
-            } else if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit()) {
+            } else if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit())
+            {
                 format!("{}/{}", object_id.trim_end_matches('/'), path_str)
             } else {
                 format!("{}/{}", object_id.trim_end_matches('/'), container.name)
@@ -284,10 +295,12 @@ pub async fn generate_browse_response_with_totals(
                 xml_escape(&container.name)
             );
 
-            if client == crate::web::client::DlnaClientProfile::SonyBdp || 
-               client == crate::web::client::DlnaClientProfile::SonyBravia || 
-               client == crate::web::client::DlnaClientProfile::PlayStation {
-                let class_char = if container_id.contains("audio") || container_id.contains("music") {
+            if client == crate::web::client::DlnaClientProfile::SonyBdp
+                || client == crate::web::client::DlnaClientProfile::SonyBravia
+                || client == crate::web::client::DlnaClientProfile::PlayStation
+            {
+                let class_char = if container_id.contains("audio") || container_id.contains("music")
+                {
                     "A"
                 } else if container_id.contains("image") || container_id.contains("picture") {
                     "P"
@@ -303,7 +316,9 @@ pub async fn generate_browse_response_with_totals(
             didl.push_str("</container>");
         }
 
-        let bookmarks_guard = if client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ {
+        let bookmarks_guard = if client == crate::web::client::DlnaClientProfile::SamsungTv
+            || client == crate::web::client::DlnaClientProfile::SamsungTvQ
+        {
             Some(state.bookmarks.lock().await)
         } else {
             None
@@ -312,25 +327,38 @@ pub async fn generate_browse_response_with_totals(
         // Add items to DIDL with enhanced processing and error handling
         for (idx, file) in files.iter().enumerate() {
             if idx % 100 == 0 && idx > 0 {
-                debug!("Processing file {}/{}: '{}'", idx, files.len(), file.filename);
+                debug!(
+                    "Processing file {}/{}: '{}'",
+                    idx,
+                    files.len(),
+                    file.filename
+                );
             }
-            
+
             // Skip files without valid IDs - they can't be served
             let file_id = match file.id {
                 Some(id) if id > 0 => id,
                 _ => {
-                    debug!("Skipping file without valid ID: '{}' ({})", file.filename, file.path.display());
+                    debug!(
+                        "Skipping file without valid ID: '{}' ({})",
+                        file.filename,
+                        file.path.display()
+                    );
                     continue;
                 }
             };
-            
+
             // Log files with potentially problematic characters
             if file.filename.chars().any(|c| c as u32 > 127) {
-                debug!("Processing file with Unicode characters: '{}' ({})", file.filename, file.path.display());
+                debug!(
+                    "Processing file with Unicode characters: '{}' ({})",
+                    file.filename,
+                    file.path.display()
+                );
             }
-            
+
             let upnp_class = get_upnp_class(&file.mime_type);
-            
+
             let has_srt = file.path.with_extension("srt").exists();
             let mut title = file.title.clone().unwrap_or_else(|| file.filename.clone());
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
@@ -351,29 +379,41 @@ pub async fn generate_browse_response_with_totals(
             // Enhanced metadata for audio items
             if file.mime_type.starts_with("audio/") {
                 if let Some(ref artist) = file.artist {
-                    let _ = write!(&mut didl, "<upnp:artist>{}</upnp:artist>", xml_escape(artist));
+                    let _ = write!(
+                        &mut didl,
+                        "<upnp:artist>{}</upnp:artist>",
+                        xml_escape(artist)
+                    );
                 }
-                
+
                 if let Some(ref album) = file.album {
                     let _ = write!(&mut didl, "<upnp:album>{}</upnp:album>", xml_escape(album));
                 }
-                
+
                 if let Some(ref genre) = file.genre {
                     let _ = write!(&mut didl, "<upnp:genre>{}</upnp:genre>", xml_escape(genre));
                 }
-                
+
                 if let Some(track_num) = file.track_number {
-                    let _ = write!(&mut didl, "<upnp:originalTrackNumber>{}</upnp:originalTrackNumber>", track_num);
+                    let _ = write!(
+                        &mut didl,
+                        "<upnp:originalTrackNumber>{}</upnp:originalTrackNumber>",
+                        track_num
+                    );
                 }
-                
+
                 if let Some(year) = file.year {
                     let _ = write!(&mut didl, "<dc:date>{}-01-01</dc:date>", year);
                 }
-                
+
                 if let Some(ref album_artist) = file.album_artist {
-                    let _ = write!(&mut didl, "<upnp:albumArtist>{}</upnp:albumArtist>", xml_escape(album_artist));
+                    let _ = write!(
+                        &mut didl,
+                        "<upnp:albumArtist>{}</upnp:albumArtist>",
+                        xml_escape(album_artist)
+                    );
                 }
-                
+
                 let _ = write!(
                     &mut didl,
                     "<upnp:albumArtURI>http://{}:{}/media/{}/cover</upnp:albumArtURI>",
@@ -387,12 +427,15 @@ pub async fn generate_browse_response_with_totals(
                 "#,
                 upnp_class
             );
-            
+
             let is_radio = file.mime_type == "audio/radio";
 
             // Create the XML for this item with autoplay attributes
             // Add duration for media files if available
-            let duration_secs = if (file.mime_type.starts_with("video/") || file.mime_type.starts_with("audio/")) && !is_radio {
+            let duration_secs = if (file.mime_type.starts_with("video/")
+                || file.mime_type.starts_with("audio/"))
+                && !is_radio
+            {
                 file.duration.map(|d| d.as_secs())
             } else {
                 None
@@ -409,16 +452,27 @@ pub async fn generate_browse_response_with_totals(
                 "audio/mpeg"
             } else {
                 match client {
-                    crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-matroska" => {
+                    crate::web::client::DlnaClientProfile::SamsungTv
+                    | crate::web::client::DlnaClientProfile::SamsungTvQ
+                        if file.mime_type == "video/x-matroska" =>
+                    {
                         "video/x-mkv"
                     }
-                    crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file.mime_type == "video/x-msvideo" => {
+                    crate::web::client::DlnaClientProfile::SamsungTv
+                    | crate::web::client::DlnaClientProfile::SamsungTvQ
+                        if file.mime_type == "video/x-msvideo" =>
+                    {
                         "video/mpeg"
                     }
-                    crate::web::client::DlnaClientProfile::SonyBdp if file.mime_type == "video/x-matroska" || file.mime_type == "video/mpeg" => {
+                    crate::web::client::DlnaClientProfile::SonyBdp
+                        if file.mime_type == "video/x-matroska"
+                            || file.mime_type == "video/mpeg" =>
+                    {
                         "video/divx"
                     }
-                    crate::web::client::DlnaClientProfile::Xbox if file.mime_type == "video/x-msvideo" => {
+                    crate::web::client::DlnaClientProfile::Xbox
+                        if file.mime_type == "video/x-msvideo" =>
+                    {
                         "video/avi"
                     }
                     _ => &file.mime_type,
@@ -443,22 +497,21 @@ pub async fn generate_browse_response_with_totals(
                 let _ = write!(&mut didl, r#" duration="{}""#, format_duration(secs));
             }
 
-            if (client == crate::web::client::DlnaClientProfile::LgTv || client == crate::web::client::DlnaClientProfile::PanasonicTv) && has_srt {
+            if (client == crate::web::client::DlnaClientProfile::LgTv
+                || client == crate::web::client::DlnaClientProfile::PanasonicTv)
+                && has_srt
+            {
                 let _ = write!(
                     &mut didl,
                     r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
-                    server_ip,
-                    state.config.server.port,
-                    file_id
+                    server_ip, state.config.server.port, file_id
                 );
             }
 
             let _ = write!(
                 &mut didl,
                 r#">http://{}:{}/media/{}</res>"#,
-                server_ip,
-                state.config.server.port,
-                file_id
+                server_ip, state.config.server.port, file_id
             );
 
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
@@ -466,25 +519,29 @@ pub async fn generate_browse_response_with_totals(
                     &mut didl,
                     r#"
                 <res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#,
-                    server_ip,
-                    state.config.server.port,
-                    file_id
+                    server_ip, state.config.server.port, file_id
                 );
             }
 
-            if (client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ) && has_srt {
+            if (client == crate::web::client::DlnaClientProfile::SamsungTv
+                || client == crate::web::client::DlnaClientProfile::SamsungTvQ)
+                && has_srt
+            {
                 let _ = write!(
                     &mut didl,
                     r#"
                 <sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#,
-                    server_ip,
-                    state.config.server.port,
-                    file_id
+                    server_ip, state.config.server.port, file_id
                 );
             }
 
-            if client == crate::web::client::DlnaClientProfile::SamsungTv || client == crate::web::client::DlnaClientProfile::SamsungTvQ {
-                let bookmark_sec = bookmarks_guard.as_ref().and_then(|g| g.get(&file_id).cloned()).unwrap_or(0);
+            if client == crate::web::client::DlnaClientProfile::SamsungTv
+                || client == crate::web::client::DlnaClientProfile::SamsungTvQ
+            {
+                let bookmark_sec = bookmarks_guard
+                    .as_ref()
+                    .and_then(|g| g.get(&file_id).cloned())
+                    .unwrap_or(0);
                 let bookmark_val = if client == crate::web::client::DlnaClientProfile::SamsungTvQ {
                     bookmark_sec * 1000
                 } else {
@@ -504,20 +561,29 @@ pub async fn generate_browse_response_with_totals(
 
         let total_items = subdirectories.len() + files.len();
         if total_items > 1000 {
-            warn!("Large browse response: {} items for object_id: {}", total_items, object_id);
+            warn!(
+                "Large browse response: {} items for object_id: {}",
+                total_items, object_id
+            );
         }
-        
+
         total_items
     };
 
     didl.push_str("</DIDL-Lite>");
     let final_total_matches = total_matches.unwrap_or(number_returned);
 
-    let update_id = state.content_update_id.load(std::sync::atomic::Ordering::Relaxed);
-    
-    debug!("Browse response completed: {} items, DIDL size: {} bytes, total matches: {}", 
-           number_returned, didl.len(), final_total_matches);
-    
+    let update_id = state
+        .content_update_id
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    debug!(
+        "Browse response completed: {} items, DIDL size: {} bytes, total matches: {}",
+        number_returned,
+        didl.len(),
+        final_total_matches
+    );
+
     let final_response = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
@@ -535,7 +601,7 @@ pub async fn generate_browse_response_with_totals(
         final_total_matches,
         update_id
     );
-    
+
     debug!("Final XML response size: {} bytes", final_response.len());
     final_response
 }

@@ -4,7 +4,9 @@ use std::time::SystemTime;
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 use tracing::{debug, error, info, warn};
 use vuio::{
-    config::{AppConfig, ConfigManager, MonitoredDirectoryConfig, ValidationMode},
+    config::{
+        AppConfig, ConfigChangeEvent, ConfigManager, MonitoredDirectoryConfig, ValidationMode,
+    },
     database::{self, DatabaseManager},
     logging, media,
     platform::{
@@ -269,11 +271,11 @@ async fn main() -> anyhow::Result<()> {
     // Create shared application state
     let filesystem_manager: Arc<dyn vuio::platform::filesystem::FileSystemManager> =
         Arc::from(create_platform_filesystem_manager());
-    let resolved_log_file = log_file_path.unwrap_or_else(|| {
-        vuio::config::AppConfig::get_platform_log_file_path()
-    });
+    let resolved_log_file =
+        log_file_path.unwrap_or_else(|| vuio::config::AppConfig::get_platform_log_file_path());
     let app_state = AppState {
         config: config.clone(),
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         database: database.clone(),
         platform_info: platform_info.clone(),
         filesystem_manager,
@@ -286,7 +288,23 @@ async fn main() -> anyhow::Result<()> {
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
+
+    {
+        let subscriptions = app_state.upnp_subscriptions.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                let now = std::time::Instant::now();
+                subscriptions
+                    .lock()
+                    .await
+                    .retain(|_, subscription| subscription.expires_at > now);
+            }
+        });
+    }
 
     // Start file system monitoring
     if let Err(e) = start_file_monitoring(file_watcher.clone(), app_state.clone()).await {
@@ -298,7 +316,8 @@ async fn main() -> anyhow::Result<()> {
     let adaptation_handle = start_platform_adaptation(
         platform_info.clone(),
         config_manager.clone(),
-        database.clone(),
+        file_watcher.clone(),
+        app_state.clone(),
     )
     .await?;
 
@@ -442,13 +461,12 @@ async fn main() -> anyhow::Result<()> {
 async fn start_platform_adaptation(
     _platform_info: Arc<PlatformInfo>,
     config_manager: Arc<ConfigManager>,
-    database: Arc<dyn DatabaseManager>,
+    watcher: Arc<CrossPlatformWatcher>,
+    app_state: AppState,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     info!("Starting platform adaptation services...");
 
     let config_manager_clone = config_manager.clone();
-    let _database_clone = database.clone();
-
     let handle = tokio::spawn(async move {
         // Subscribe to configuration changes from ConfigManager
         let mut config_changes = config_manager_clone.subscribe_to_changes();
@@ -459,8 +477,63 @@ async fn start_platform_adaptation(
                     match config_event {
                         Ok(event) => {
                             info!("Configuration change detected: {:?}", event);
-                            // Handle configuration changes as needed
-                            // For now, just log the changes - specific handling can be added later
+                            match event {
+                                ConfigChangeEvent::Reloaded(new_config) => {
+                                    *app_state.media_directories.write().await =
+                                        new_config.media.directories.clone();
+                                    increment_content_update_id(&app_state).await;
+                                }
+                                ConfigChangeEvent::DirectoriesChanged { added, removed, .. } => {
+                                    for path in &removed {
+                                        if let Err(error) = watcher.remove_watch_path(path).await {
+                                            warn!("Failed to remove watch {}: {}", path.display(), error);
+                                        }
+                                        if let Err(error) = app_state
+                                            .database
+                                            .remove_derived_content_by_source(path)
+                                            .await
+                                        {
+                                            error!("Failed to remove derived content for removed root {}: {}", path.display(), error);
+                                        }
+                                        if let Err(error) = app_state.database.remove_media_under_path(path).await {
+                                            error!("Failed to remove indexed content for removed root {}: {}", path.display(), error);
+                                        }
+                                    }
+                                    for path in &added {
+                                        if path.is_dir() {
+                                            if let Err(error) = watcher.add_watch_path(path).await {
+                                                warn!("Failed to add watch {}: {}", path.display(), error);
+                                            } else {
+                                                let scanner = media::MediaScanner::with_database(app_state.database.clone());
+                                                if let Err(error) = scanner.scan_directory_recursive(path).await {
+                                                    warn!("Failed to scan added root {}: {}", path.display(), error);
+                                                }
+                                            }
+                                        }
+                                    }
+                                    // If a removed parent root contained another root that remains
+                                    // configured, repopulate that nested root immediately.
+                                    let active_roots = app_state
+                                        .media_directories
+                                        .read()
+                                        .await
+                                        .iter()
+                                        .map(|directory| PathBuf::from(&directory.path))
+                                        .collect::<Vec<_>>();
+                                    for root in active_roots {
+                                        if root.is_dir()
+                                            && removed.iter().any(|removed| root.starts_with(removed))
+                                        {
+                                            let scanner = media::MediaScanner::with_database(app_state.database.clone());
+                                            if let Err(error) = scanner.scan_directory_recursive(&root).await {
+                                                warn!("Failed to restore nested root {}: {}", root.display(), error);
+                                            }
+                                        }
+                                    }
+                                    increment_content_update_id(&app_state).await;
+                                }
+                                ConfigChangeEvent::NetworkChanged { .. } => {}
+                            }
                         }
                         Err(e) => {
                             warn!("Configuration change subscription error: {}", e);
@@ -713,6 +786,22 @@ async fn initialize_config_manager(
     Ok(config_manager)
 }
 
+fn preserve_failed_database(db_path: &std::path::Path) -> anyhow::Result<Option<PathBuf>> {
+    if !db_path.exists() {
+        return Ok(None);
+    }
+    let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
+    let backup_path = db_path.with_extension(format!("failed-{timestamp}.redb"));
+    std::fs::rename(db_path, &backup_path).with_context(|| {
+        format!(
+            "Failed to preserve unusable database as {}",
+            backup_path.display()
+        )
+    })?;
+    warn!("Preserved unusable database at {}", backup_path.display());
+    Ok(Some(backup_path))
+}
+
 /// Initialize database manager with health checks and recovery
 async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::redb::RedbDatabase> {
     info!("Initializing Redb database...");
@@ -723,24 +812,51 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
     info!("Database path: {}", db_path.display());
 
     // Create Redb database manager
-    let database = database::redb::RedbDatabase::new(db_path.clone())
-        .await
-        .context("Failed to create Redb database manager")?;
+    let mut database = match database::redb::RedbDatabase::new(db_path.clone()).await {
+        Ok(database) => database,
+        Err(error) => {
+            error!("Failed to open ReDB database: {}", error);
+            preserve_failed_database(&db_path)?;
+            database::redb::RedbDatabase::new(db_path.clone())
+                .await
+                .context("Failed to create replacement ReDB database")?
+        }
+    };
 
     // Initialize database schema
-    database
-        .initialize()
-        .await
-        .context("Failed to initialize database schema")?;
+    if let Err(error) = database.initialize().await {
+        error!("Failed to initialize ReDB schema: {}", error);
+        drop(database);
+        preserve_failed_database(&db_path)?;
+        database = database::redb::RedbDatabase::new(db_path.clone())
+            .await
+            .context("Failed to create replacement ReDB database")?;
+        database
+            .initialize()
+            .await
+            .context("Failed to initialize replacement database schema")?;
+    }
 
     // Perform health check
     info!("Performing database health check...");
-    let health = database
-        .check_and_repair()
-        .await
-        .context("Failed to perform database health check")?;
+    let health = match database.check_and_repair().await {
+        Ok(health) => health,
+        Err(repair_error) => {
+            error!("Database index rebuild failed: {}", repair_error);
+            drop(database);
+            preserve_failed_database(&db_path)?;
+            database = database::redb::RedbDatabase::new(db_path.clone())
+                .await
+                .context("Failed to create replacement ReDB database")?;
+            database.initialize().await?;
+            database
+                .check_and_repair()
+                .await
+                .context("Replacement ReDB database failed initial index construction")?
+        }
+    };
 
-    if !health.is_healthy {
+    if !health.is_healthy || !health.issues.is_empty() {
         warn!("Database health issues detected:");
         for issue in &health.issues {
             match issue.severity {
@@ -832,7 +948,8 @@ async fn initialize_file_watcher(
 /// 2. Drop stream, then bulk delete (write lock)
 async fn validate_and_cleanup_deleted_files(
     database: Arc<dyn DatabaseManager>,
-) -> anyhow::Result<()> {
+    monitored_roots: &[PathBuf],
+) -> anyhow::Result<usize> {
     use futures_util::StreamExt;
 
     info!("Validating cached media files...");
@@ -850,7 +967,10 @@ async fn validate_and_cleanup_deleted_files(
 
             total_checked += 1;
 
-            if !media_file.path.exists() {
+            let unavailable_root = monitored_roots
+                .iter()
+                .any(|root| media_file.path.starts_with(root) && !root.is_dir());
+            if !unavailable_root && !media_file.path.exists() {
                 paths_to_delete.push(media_file.path.clone());
             }
 
@@ -880,7 +1000,22 @@ async fn validate_and_cleanup_deleted_files(
         );
     }
 
-    Ok(())
+    Ok(removed_count)
+}
+
+async fn hide_unavailable_media_roots(
+    database: &Arc<dyn DatabaseManager>,
+    roots: &[PathBuf],
+) -> anyhow::Result<usize> {
+    let mut removed = 0;
+    for root in roots {
+        if root.is_dir() {
+            continue;
+        }
+        removed += database.remove_derived_content_by_source(root).await?;
+        removed += database.remove_media_under_path(root).await?.removed_files;
+    }
+    Ok(removed)
 }
 
 /// Perform initial media scan, using database cache when possible
@@ -890,7 +1025,25 @@ async fn perform_initial_media_scan(
 ) -> anyhow::Result<()> {
     info!("Performing initial media scan...");
 
-    if config.media.scan_on_startup {
+    let configured_roots = config
+        .media
+        .directories
+        .iter()
+        .map(|directory| PathBuf::from(&directory.path))
+        .collect::<Vec<_>>();
+    let hidden = hide_unavailable_media_roots(database, &configured_roots).await?;
+    if hidden > 0 {
+        info!(
+            "Removed {} cached items belonging to unavailable media roots",
+            hidden
+        );
+    }
+
+    let database_is_empty = database.get_stats().await?.total_files == 0;
+    if config.media.scan_on_startup || database_is_empty {
+        if database_is_empty && !config.media.scan_on_startup {
+            warn!("Database is empty; forcing a full media scan despite scan_on_startup=false");
+        }
         info!("Full media scan enabled - scanning all directories");
 
         let scanner = media::MediaScanner::with_database(database.clone());
@@ -943,7 +1096,13 @@ async fn perform_initial_media_scan(
 
         // Validate files to catch any that were deleted while app was offline
         if config.media.cleanup_deleted_files {
-            validate_and_cleanup_deleted_files(database.clone()).await?;
+            let roots: Vec<_> = config
+                .media
+                .directories
+                .iter()
+                .map(|d| PathBuf::from(&d.path))
+                .collect();
+            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
         }
 
         Ok(())
@@ -952,7 +1111,13 @@ async fn perform_initial_media_scan(
 
         // Validate that cached files still exist on disk and remove any that don't (if enabled)
         if config.media.cleanup_deleted_files {
-            validate_and_cleanup_deleted_files(database.clone()).await?;
+            let roots: Vec<_> = config
+                .media
+                .directories
+                .iter()
+                .map(|d| PathBuf::from(&d.path))
+                .collect();
+            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
         }
 
         Ok(())
@@ -1034,18 +1199,21 @@ async fn start_file_monitoring(
     info!("Starting file system monitoring...");
 
     // Get directories to monitor
-    let directories: Vec<std::path::PathBuf> = app_state
+    let all_directories: Vec<std::path::PathBuf> = app_state
         .config
         .media
         .directories
         .iter()
         .map(|dir| std::path::PathBuf::from(&dir.path))
-        .filter(|path| path.exists() && path.is_dir())
+        .collect();
+    let directories: Vec<_> = all_directories
+        .iter()
+        .filter(|path| path.is_dir())
+        .cloned()
         .collect();
 
     if directories.is_empty() {
-        warn!("No valid directories to monitor");
-        return Ok(());
+        warn!("No media roots are currently available; recovery probing remains active");
     }
 
     info!("Starting to monitor {} directories:", directories.len());
@@ -1066,13 +1234,86 @@ async fn start_file_monitoring(
 
     // Spawn task to handle file system events
     let app_state_clone = app_state.clone();
+    let watcher_clone = watcher.clone();
 
     tokio::spawn(async move {
         info!("File system event handler started");
 
-        while let Some(event) = event_receiver.recv().await {
-            if let Err(e) = handle_file_system_event(event, &app_state_clone).await {
-                error!("Failed to handle file system event: {}", e);
+        let mut reconciliation = tokio::time::interval(std::time::Duration::from_secs(300));
+        reconciliation.tick().await;
+        loop {
+            tokio::select! {
+                event = event_receiver.recv() => {
+                    let Some(event) = event else { break; };
+                    if let Err(e) = handle_file_system_event(event, &app_state_clone).await {
+                        error!("Failed to handle file system event; reconciling all roots: {}", e);
+                        let configured_directories = app_state_clone
+                            .media_directories
+                            .read()
+                            .await
+                            .iter()
+                            .map(|directory| PathBuf::from(&directory.path))
+                            .collect::<Vec<_>>();
+                        for root in &configured_directories {
+                            if root.is_dir() {
+                                let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
+                                if scanner.scan_directory_recursive(root).await.is_ok() {
+                                    increment_content_update_id(&app_state_clone).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ = reconciliation.tick() => {
+                    let configured_directories = app_state_clone
+                        .media_directories
+                        .read()
+                        .await
+                        .iter()
+                        .map(|directory| PathBuf::from(&directory.path))
+                        .collect::<Vec<_>>();
+                    match hide_unavailable_media_roots(
+                        &app_state_clone.database,
+                        &configured_directories,
+                    )
+                    .await
+                    {
+                        Ok(removed) if removed > 0 => {
+                            increment_content_update_id(&app_state_clone).await
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            error!("Failed to hide unavailable media roots: {}", error)
+                        }
+                    }
+                    for root in &configured_directories {
+                        if root.is_dir() && !watcher_clone.is_watching(root).await {
+                            if let Err(error) = watcher_clone.add_watch_path(root).await {
+                                error!("Failed to restore watch for {}: {}", root.display(), error);
+                            } else {
+                                let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
+                                if scanner.scan_directory_recursive(root).await.is_ok() {
+                                    increment_content_update_id(&app_state_clone).await;
+                                }
+                            }
+                        }
+                    }
+                    for root in watcher_clone.take_dirty_roots() {
+                        if root.is_dir() {
+                            let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
+                            match scanner.scan_directory_recursive(&root).await {
+                                Ok(result) if result.total_changes() > 0 => increment_content_update_id(&app_state_clone).await,
+                                Ok(_) => {}
+                                Err(error) => error!("Dirty-root reconciliation failed for {}: {}", root.display(), error),
+                            }
+                        }
+                    }
+                    match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
+                        Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
+                        Ok(_) => {}
+                        Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
+                    }
+                }
             }
         }
 
@@ -1087,23 +1328,21 @@ async fn start_file_monitoring(
 }
 
 /// Increment the content update ID to notify DLNA clients of changes
-fn increment_content_update_id(app_state: &AppState) {
+async fn increment_content_update_id(app_state: &AppState) {
     let old_id = app_state
         .content_update_id
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let new_id = old_id + 1;
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let new_id = old_id.wrapping_add(1);
+    app_state.browse_cache.lock().await.clear();
     info!(
         "Content update ID incremented from {} to {}",
         old_id, new_id
     );
 
-    // Send UPnP event notifications to subscribed clients
-    // In a full implementation, we would maintain a list of subscribed clients
-    // For now, we'll just log that an event should be sent
-    info!(
-        "UPnP event notification should be sent with UpdateID: {}",
-        new_id
-    );
+    let state = app_state.clone();
+    tokio::spawn(async move {
+        vuio::web::handlers::notify_content_change(&state, new_id).await;
+    });
 }
 
 /// Atomic application statistics for monitoring
@@ -1217,7 +1456,7 @@ async fn handle_file_system_event(
 
                         // Increment update ID to notify DLNA clients
                         if !scan_result.new_files.is_empty() {
-                            increment_content_update_id(app_state);
+                            increment_content_update_id(app_state).await;
                         }
                     }
                     Err(e) => {
@@ -1266,7 +1505,7 @@ async fn handle_file_system_event(
                 info!("Added new media file to ReDB database: {}", path.display());
 
                 // Increment update ID to notify DLNA clients
-                increment_content_update_id(app_state);
+                increment_content_update_id(app_state).await;
             }
         }
 
@@ -1290,85 +1529,32 @@ async fn handle_file_system_event(
                 info!("Updated media file in ReDB database: {}", path.display());
 
                 // Increment update ID to notify DLNA clients
-                increment_content_update_id(app_state);
+                increment_content_update_id(app_state).await;
             }
         }
 
-        FileSystemEvent::Deleted(path) => {
-            // Since the path no longer exists, we can't check if it was a directory
-            // We'll handle both cases: try to remove as a single file, and also
-            // remove any files that were in this path (in case it was a directory)
-
+        FileSystemEvent::Deleted { path, is_directory } => {
             info!("Path deleted: {}", path.display());
-
-            // Use efficient path prefix query to find all files in the deleted path
-            let path_normalizer = create_platform_path_normalizer();
-            let canonical_prefix = match path_normalizer.to_canonical(&path) {
-                Ok(canonical) => canonical,
-                Err(e) => {
-                    warn!("Error normalizing deleted path {}: {}", path.display(), e);
-                    return Ok(());
-                }
-            };
-
-            let files_in_deleted_path =
-                match database.get_files_with_path_prefix(&canonical_prefix).await {
-                    Ok(files) => files,
-                    Err(e) => {
-                        warn!(
-                            "Error getting files with path prefix '{}': {}",
-                            canonical_prefix, e
-                        );
-                        return Ok(());
-                    }
-                };
-
-            // Collect all paths to remove (including the single file if it exists)
-            let mut paths_to_remove = vec![path.clone()];
-            for file in &files_in_deleted_path {
-                if file.path != path {
-                    paths_to_remove.push(file.path.clone());
-                }
-            }
-
-            if !paths_to_remove.is_empty() {
-                info!(
-                    "Found {} paths to remove for deleted path: {}",
-                    paths_to_remove.len(),
-                    path.display()
-                );
-
-                // Use ReDB bulk removal operation for atomic cleanup
-                let total_removed = match database.bulk_remove_media_files(&paths_to_remove).await {
-                    Ok(removed_count) => {
-                        // Record atomic statistics
-                        stats.record_files_processed(removed_count as u64);
-
-                        info!("ReDB bulk removal completed: {} files removed from database for path: {}", 
-                              removed_count, path.display());
-                        removed_count
-                    }
-                    Err(e) => {
-                        stats.record_error();
-                        error!(
-                            "Error during ReDB bulk removal for path {}: {}",
-                            path.display(),
-                            e
-                        );
-                        0
-                    }
-                };
-
-                if total_removed > 0 {
-                    // Increment update ID to notify DLNA clients
-                    increment_content_update_id(app_state);
-                    info!("Notified DLNA clients of content change after atomic cleanup");
-                }
-            } else {
-                info!(
-                    "No files found to remove for deleted path: {}",
-                    path.display()
-                );
+            let derived_removed = database.remove_derived_content_by_source(&path).await?;
+            let summary = database
+                .remove_media_under_path(&path)
+                .await
+                .map_err(|error| {
+                    stats.record_error();
+                    error
+                })?;
+            stats.record_files_processed(summary.removed_files as u64);
+            info!(
+                "Removed {} indexed files and {} derived items below deleted path {}",
+                summary.removed_files,
+                derived_removed,
+                path.display()
+            );
+            // Publish empty/duplicate directory events because they can retire an
+            // older browse generation. Known unrelated file deletions do not churn
+            // the library revision unless they removed indexed/derived content.
+            if is_directory != Some(false) || summary.removed_files > 0 || derived_removed > 0 {
+                increment_content_update_id(app_state).await;
             }
         }
 
@@ -1417,7 +1603,7 @@ async fn handle_file_system_event(
                             // Files are already stored in database by the scanner using ReDB bulk operations
 
                             // Increment update ID to notify DLNA clients
-                            increment_content_update_id(app_state);
+                            increment_content_update_id(app_state).await;
                         }
                         Err(e) => {
                             error!("Failed to rescan renamed directory {}: {}", to.display(), e);
@@ -1468,7 +1654,7 @@ async fn handle_file_system_event(
                     );
 
                     // Increment update ID to notify DLNA clients
-                    increment_content_update_id(app_state);
+                    increment_content_update_id(app_state).await;
                 } else {
                     warn!(
                         "Original file not found in database for rename: {}",

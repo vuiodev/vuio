@@ -42,37 +42,40 @@ impl WebHandlerMetrics {
             bytes_transferred: AtomicU64::new(0),
         }
     }
-    
+
     pub fn record_browse_request(&self, response_time_us: u64, cache_hit: bool) {
         self.browse_requests.fetch_add(1, Ordering::Relaxed);
-        self.total_response_time_us.fetch_add(response_time_us, Ordering::Relaxed);
+        self.total_response_time_us
+            .fetch_add(response_time_us, Ordering::Relaxed);
         if cache_hit {
             self.cache_hits.fetch_add(1, Ordering::Relaxed);
         } else {
             self.cache_misses.fetch_add(1, Ordering::Relaxed);
         }
     }
-    
+
     pub fn record_directory_listing(&self, response_time_us: u64) {
         self.directory_listings.fetch_add(1, Ordering::Relaxed);
-        self.total_response_time_us.fetch_add(response_time_us, Ordering::Relaxed);
+        self.total_response_time_us
+            .fetch_add(response_time_us, Ordering::Relaxed);
     }
-    
+
     pub fn record_file_serve(&self, response_time_us: u64, is_actual_serve: bool) {
         if is_actual_serve {
             self.file_serves.fetch_add(1, Ordering::Relaxed);
         }
-        self.total_response_time_us.fetch_add(response_time_us, Ordering::Relaxed);
+        self.total_response_time_us
+            .fetch_add(response_time_us, Ordering::Relaxed);
     }
-    
+
     pub fn record_error(&self) {
         self.errors.fetch_add(1, Ordering::Relaxed);
     }
-    
+
     pub fn get_stats(&self) -> WebHandlerStats {
         let browse_requests = self.browse_requests.load(Ordering::Relaxed);
         let total_time_us = self.total_response_time_us.load(Ordering::Relaxed);
-        
+
         WebHandlerStats {
             browse_requests,
             cache_hits: self.cache_hits.load(Ordering::Relaxed),
@@ -80,11 +83,18 @@ impl WebHandlerMetrics {
             directory_listings: self.directory_listings.load(Ordering::Relaxed),
             file_serves: self.file_serves.load(Ordering::Relaxed),
             errors: self.errors.load(Ordering::Relaxed),
-            average_response_time_ms: if browse_requests > 0 { (total_time_us as f64 / browse_requests as f64) / 1000.0 } else { 0.0 },
-            cache_hit_rate: if browse_requests > 0 { 
-                (self.cache_hits.load(Ordering::Relaxed) as f64 / browse_requests as f64) * 100.0 
-            } else { 0.0 },
-            gigabytes_transferred: self.bytes_transferred.load(Ordering::Relaxed) as f64 / 1_073_741_824.0,
+            average_response_time_ms: if browse_requests > 0 {
+                (total_time_us as f64 / browse_requests as f64) / 1000.0
+            } else {
+                0.0
+            },
+            cache_hit_rate: if browse_requests > 0 {
+                (self.cache_hits.load(Ordering::Relaxed) as f64 / browse_requests as f64) * 100.0
+            } else {
+                0.0
+            },
+            gigabytes_transferred: self.bytes_transferred.load(Ordering::Relaxed) as f64
+                / 1_073_741_824.0,
         }
     }
 }
@@ -104,11 +114,9 @@ pub struct WebHandlerStats {
 
 // Web metrics will be stored in AppState for atomic access
 
-pub async fn root_handler(
-    State(state): State<AppState>,
-) -> Result<impl IntoResponse, AppError> {
+pub async fn root_handler(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     use futures_util::StreamExt;
-    
+
     let mut stream = state.database.stream_all_media_files();
     let mut files = Vec::new();
     while let Some(res) = stream.next().await {
@@ -116,7 +124,7 @@ pub async fn root_handler(
             files.push(file);
         }
     }
-    
+
     #[derive(serde::Serialize)]
     struct WebMediaFile {
         id: i64,
@@ -132,11 +140,13 @@ pub async fn root_handler(
 
     let mut web_files = Vec::new();
     for file in &files {
-        let extension = file.path.extension()
+        let extension = file
+            .path
+            .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("")
             .to_lowercase();
-            
+
         let category = if file.mime_type == "audio/radio" {
             "radio"
         } else if file.mime_type.starts_with("video/") {
@@ -148,7 +158,7 @@ pub async fn root_handler(
         } else {
             "file"
         };
-        
+
         web_files.push(WebMediaFile {
             id: file.id.unwrap_or(0),
             path: file.path.to_string_lossy().to_string(),
@@ -163,8 +173,11 @@ pub async fn root_handler(
     }
 
     let files_json = serde_json::to_string(&web_files).unwrap_or_else(|_| "[]".to_string());
-    
-    let monitored_dirs: Vec<String> = state.config.media.directories
+
+    let monitored_dirs: Vec<String> = state
+        .media_directories
+        .read()
+        .await
         .iter()
         .map(|dir| dir.path.clone())
         .collect();
@@ -1135,7 +1148,7 @@ pub async fn root_handler(
         <div id="view-stats" style="display: none; flex-direction: column; gap: 1.25rem;">
             <!-- Stats Dashboard Grid -->
             <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem;">
-                
+
                 <!-- Database stats card -->
                 <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
                     <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -2277,7 +2290,6 @@ pub async fn root_handler(
     ))
 }
 
-
 fn format_size(bytes: u64) -> String {
     if bytes == 0 {
         return "0 Bytes".to_string();
@@ -2333,17 +2345,17 @@ struct BrowseParams {
 fn parse_browse_params(body: &str) -> BrowseParams {
     use quick_xml::events::Event;
     use quick_xml::Reader;
-    
+
     let mut reader = Reader::from_str(body);
     reader.config_mut().trim_text(true);
-    
+
     let mut object_id = "0".to_string();
     let mut starting_index = 0u32;
     let mut requested_count = 0u32;
-    
+
     let mut buf = Vec::new();
     let mut current_element = String::new();
-    
+
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref e)) | Ok(Event::Empty(ref e)) => {
@@ -2382,10 +2394,12 @@ fn parse_browse_params(body: &str) -> BrowseParams {
         }
         buf.clear();
     }
-    
-    debug!("Parsed browse params - ObjectID: '{}', StartingIndex: {}, RequestedCount: {}", 
-           object_id, starting_index, requested_count);
-    
+
+    debug!(
+        "Parsed browse params - ObjectID: '{}', StartingIndex: {}, RequestedCount: {}",
+        object_id, starting_index, requested_count
+    );
+
     BrowseParams {
         object_id,
         starting_index,
@@ -2424,7 +2438,6 @@ impl ContentDirectoryHandler {
         Self::handle_folder_browse(params, state, "image/", path_prefix_str).await
     }
 
-
     /// Handle generic folder-based browse requests with consistent path normalization
     /// Enhanced with atomic performance tracking and cache-friendly operations
     async fn handle_folder_browse(
@@ -2436,11 +2449,12 @@ impl ContentDirectoryHandler {
         use crate::web::xml::generate_browse_response;
 
         let start_time = Instant::now();
-        
-        let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
+
+        let client = crate::web::client::CURRENT_CLIENT
+            .try_with(|c| *c)
             .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
-        
-        let current_update_id = state.content_update_id.load(Ordering::Relaxed);
+
+        let current_update_id = state.content_update_id.load(Ordering::SeqCst);
         let cache_key = crate::state::SoapCacheKey {
             object_id: params.object_id.clone(),
             starting_index: params.starting_index,
@@ -2450,9 +2464,13 @@ impl ContentDirectoryHandler {
         };
 
         // Cache lookup
-        {
+        if state.content_update_id.load(Ordering::SeqCst) == current_update_id {
             let mut cache = state.browse_cache.lock().await;
-            let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+            let needs_clear = cache
+                .keys()
+                .next()
+                .map(|k| k.content_update_id != current_update_id)
+                .unwrap_or(false);
             if needs_clear {
                 cache.clear();
             }
@@ -2460,7 +2478,10 @@ impl ContentDirectoryHandler {
                 let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_browse_request(response_time, true);
                 state.web_metrics.record_directory_listing(response_time);
-                debug!("Browse Cache Hit for Folder ObjectID: {} ({}ms)", params.object_id, response_time);
+                debug!(
+                    "Browse Cache Hit for Folder ObjectID: {} ({}ms)",
+                    params.object_id, response_time
+                );
                 return (
                     StatusCode::OK,
                     [
@@ -2468,14 +2489,15 @@ impl ContentDirectoryHandler {
                         (header::HeaderName::from_static("ext"), ""),
                     ],
                     cached_xml.clone(),
-                ).into_response();
+                )
+                    .into_response();
             }
         }
 
         let cache_hit = false;
 
-        let monitored_dirs = &state.config.media.directories;
-        
+        let monitored_dirs = state.media_directories.read().await.clone();
+
         // Parse directory index prefix (e.g. "d0/movies" -> index 0, relative path "movies")
         let (dir_index_opt, relative_path) = parse_dir_index_prefix(path_prefix_str);
 
@@ -2503,7 +2525,11 @@ impl ContentDirectoryHandler {
             let mut subdirs = Vec::new();
             for (idx, dir) in monitored_dirs.iter().enumerate() {
                 let path = PathBuf::from(&dir.path);
-                let name = path.file_name()
+                if !path.is_dir() {
+                    continue;
+                }
+                let name = path
+                    .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| dir.path.clone());
                 subdirs.push(MediaDirectory {
@@ -2512,9 +2538,16 @@ impl ContentDirectoryHandler {
                 });
             }
             (subdirs, Vec::new())
+        } else if !browse_path.is_dir() {
+            // Configured/removable roots are hidden while unavailable. The watcher
+            // recovery loop will rescan and republish them when they return.
+            (Vec::new(), Vec::new())
         } else {
             // Apply canonical path normalization to match how paths are stored in the database
-            let canonical_browse_path = match state.filesystem_manager.get_canonical_path(&browse_path) {
+            let canonical_browse_path = match state
+                .filesystem_manager
+                .get_canonical_path(&browse_path)
+            {
                 Ok(canonical) => std::path::PathBuf::from(canonical),
                 Err(e) => {
                     warn!("Failed to get canonical path for browse request '{}': {}, using basic normalization", browse_path.display(), e);
@@ -2522,71 +2555,94 @@ impl ContentDirectoryHandler {
                     state.filesystem_manager.normalize_path(&browse_path)
                 }
             };
-            
+
             // Query the ReDB database for the directory listing
-            let query_future = state.database.get_directory_listing(&canonical_browse_path, media_type_filter);
+            let query_future = state
+                .database
+                .get_directory_listing(&canonical_browse_path, media_type_filter);
             let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
-            
+
             match tokio::time::timeout(timeout_duration, query_future).await {
                 Ok(Ok(res)) => res,
                 Ok(Err(e)) => {
-                    error!("ReDB database error getting directory listing for {}: {}", params.object_id, e);
+                    error!(
+                        "ReDB database error getting directory listing for {}: {}",
+                        params.object_id, e
+                    );
                     state.web_metrics.record_error();
                     let response_time = start_time.elapsed().as_micros() as u64;
-                    state.web_metrics.record_browse_request(response_time, false);
+                    state
+                        .web_metrics
+                        .record_browse_request(response_time, false);
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                         "Error browsing content".to_string(),
-                    ).into_response();
+                    )
+                        .into_response();
                 }
                 Err(_) => {
                     error!("Database query timed out for {}", params.object_id);
                     state.web_metrics.record_error();
                     let response_time = start_time.elapsed().as_micros() as u64;
-                    state.web_metrics.record_browse_request(response_time, false);
+                    state
+                        .web_metrics
+                        .record_browse_request(response_time, false);
                     return (
                         StatusCode::REQUEST_TIMEOUT,
                         [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
                         "Request timeout - directory too large".to_string(),
-                    ).into_response();
+                    )
+                        .into_response();
                 }
             }
         };
 
+        debug!(
+            "ReDB browse request for '{}' (filter: '{}') returned {} subdirs, {} files",
+            browse_path.display(),
+            media_type_filter,
+            subdirectories.len(),
+            files.len()
+        );
 
-        
-        debug!("ReDB browse request for '{}' (filter: '{}') returned {} subdirs, {} files", 
-               browse_path.display(), media_type_filter, subdirectories.len(), files.len());
-               
         // Apply pagination if requested
         let starting_index = params.starting_index as usize;
-        let requested_count = if params.requested_count == 0 { 
+        let requested_count = if params.requested_count == 0 {
             // If RequestedCount is 0, return all items (but limit to prevent hanging)
-            2000 
-        } else { 
-            std::cmp::min(params.requested_count as usize, 2000) 
+            2000
+        } else {
+            std::cmp::min(params.requested_count as usize, 2000)
         };
-        
+
         // Combine directories and files for pagination with atomic counting
         let mut all_items = Vec::new();
         for subdir in &subdirectories {
             all_items.push((subdir.clone(), None));
         }
         for file in &files {
-            all_items.push((MediaDirectory { path: file.path.clone(), name: String::new() }, Some(file.clone())));
+            all_items.push((
+                MediaDirectory {
+                    path: file.path.clone(),
+                    name: String::new(),
+                },
+                Some(file.clone()),
+            ));
         }
-        
+
         let total_matches = all_items.len();
         let end_index = std::cmp::min(starting_index + requested_count, total_matches);
-        
+
         if starting_index >= total_matches {
             // Starting index is beyond available items - record metrics and return empty
             let response_time = start_time.elapsed().as_micros() as u64;
-            state.web_metrics.record_browse_request(response_time, cache_hit);
-            
+            state
+                .web_metrics
+                .record_browse_request(response_time, cache_hit);
+
             let server_ip = state.get_server_ip();
-            let response = generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
+            let response =
+                generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
             return (
                 StatusCode::OK,
                 [
@@ -2597,12 +2653,12 @@ impl ContentDirectoryHandler {
             )
                 .into_response();
         }
-        
+
         // Extract paginated items with zero-copy operations
         let paginated_items = &all_items[starting_index..end_index];
         let mut paginated_subdirs = Vec::new();
         let mut paginated_files = Vec::new();
-        
+
         for (item, file_opt) in paginated_items {
             if let Some(file) = file_opt {
                 paginated_files.push(file.clone());
@@ -2610,23 +2666,41 @@ impl ContentDirectoryHandler {
                 paginated_subdirs.push(item.clone());
             }
         }
-        
-        debug!("ReDB returning paginated results: {} subdirs, {} files (index {}-{} of {})",
-               paginated_subdirs.len(), paginated_files.len(), 
-               starting_index, end_index, total_matches);
-        
+
+        debug!(
+            "ReDB returning paginated results: {} subdirs, {} files (index {}-{} of {})",
+            paginated_subdirs.len(),
+            paginated_files.len(),
+            starting_index,
+            end_index,
+            total_matches
+        );
+
         // Record atomic performance metrics
         let response_time = start_time.elapsed().as_micros() as u64;
-        state.web_metrics.record_browse_request(response_time, cache_hit);
+        state
+            .web_metrics
+            .record_browse_request(response_time, cache_hit);
         state.web_metrics.record_directory_listing(response_time);
-        
+
         let server_ip = state.get_server_ip();
-        let response = generate_browse_response(&params.object_id, &paginated_subdirs, &paginated_files, state, &server_ip).await;
-        
+        let response = generate_browse_response(
+            &params.object_id,
+            &paginated_subdirs,
+            &paginated_files,
+            state,
+            &server_ip,
+        )
+        .await;
+
         // Cache insert
         {
             let mut cache = state.browse_cache.lock().await;
-            let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+            let needs_clear = cache
+                .keys()
+                .next()
+                .map(|k| k.content_update_id != current_update_id)
+                .unwrap_or(false);
             if needs_clear {
                 cache.clear();
             }
@@ -2647,7 +2721,7 @@ impl ContentDirectoryHandler {
     /// Handle root browse request (ObjectID "0")
     async fn handle_root_browse(_params: &BrowseParams, state: &AppState) -> Response {
         use crate::web::xml::generate_browse_response;
-        
+
         // For the root, we typically return the top-level containers (Video, Audio, Image).
         // The generate_browse_response function should be smart enough to create these
         // when given an object_id of "0" and empty lists of subdirectories and files.
@@ -2668,7 +2742,7 @@ impl ContentDirectoryHandler {
     async fn handle_radio_browse(_params: &BrowseParams, state: &AppState) -> Response {
         use crate::web::xml::generate_browse_response;
         use futures_util::StreamExt;
-        
+
         let mut stream = state.database.stream_all_media_files();
         let mut radio_files = Vec::new();
         while let Some(res) = stream.next().await {
@@ -2678,9 +2752,10 @@ impl ContentDirectoryHandler {
                 }
             }
         }
-        
+
         let server_ip = state.get_server_ip();
-        let response = generate_browse_response("radio", &[], &radio_files, state, &server_ip).await;
+        let response =
+            generate_browse_response("radio", &[], &radio_files, state, &server_ip).await;
         (
             StatusCode::OK,
             [
@@ -2757,7 +2832,7 @@ pub async fn content_directory_control(
             let content = "<SortCaps>dc:title,dc:date,upnp:class,upnp:album,upnp:originalTrackNumber</SortCaps>";
             build_soap_response("GetSortCapabilities", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
         } else if body.contains("<u:GetSystemUpdateID") {
-            let update_id = state.content_update_id.load(Ordering::Relaxed);
+            let update_id = state.content_update_id.load(Ordering::SeqCst);
             let content = format!("<Id>{}</Id>", update_id);
             build_soap_response("GetSystemUpdateID", "urn:schemas-upnp-org:service:ContentDirectory:1", &content)
         } else if body.contains("<u:X_GetFeatureList") {
@@ -2799,7 +2874,9 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MetricsTrackingRe
                 let after = buf.filled().len();
                 let bytes_read = after - before;
                 if bytes_read > 0 {
-                    self.metrics.bytes_transferred.fetch_add(bytes_read as u64, Ordering::Relaxed);
+                    self.metrics
+                        .bytes_transferred
+                        .fetch_add(bytes_read as u64, Ordering::Relaxed);
                 }
                 std::task::Poll::Ready(Ok(()))
             }
@@ -2816,14 +2893,15 @@ pub async fn serve_media(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let start_time = Instant::now();
-    
+
     let file_id = id.parse::<i64>().map_err(|_| {
         state.web_metrics.record_error();
         AppError::NotFound
     })?;
-    
+
     // Use ReDB database with atomic cache lookup
-    let file_info = state.database
+    let file_info = state
+        .database
         .get_file_by_id(file_id)
         .await
         .map_err(|e| {
@@ -2838,18 +2916,24 @@ pub async fn serve_media(
         })?;
 
     if file_info.mime_type == "audio/radio" {
-        return Ok(axum::response::Redirect::temporary(&file_info.path.to_string_lossy().to_string()).into_response());
+        return Ok(axum::response::Redirect::temporary(
+            &file_info.path.to_string_lossy().to_string(),
+        )
+        .into_response());
     }
 
     // Record dynamic client telemetry for GET requests (playing)
     if method == Method::GET {
         let client_ip = client_addr.ip().to_string();
-        
+
         let device_name = {
             let cache = state.discovered_tvs.lock().await;
             if let Some(name) = cache.get(&client_ip) {
                 name.clone()
-            } else if let Some(ua) = headers.get(axum::http::header::USER_AGENT).and_then(|h| h.to_str().ok()) {
+            } else if let Some(ua) = headers
+                .get(axum::http::header::USER_AGENT)
+                .and_then(|h| h.to_str().ok())
+            {
                 let ua_lower = ua.to_lowercase();
                 if ua_lower.contains("ipad") {
                     format!("iPad ({})", client_ip)
@@ -2871,7 +2955,10 @@ pub async fn serve_media(
 
         {
             let mut casts = state.active_casts.lock().await;
-            casts.insert(device_name, (file_info.filename.clone(), std::time::Instant::now()));
+            casts.insert(
+                device_name,
+                (file_info.filename.clone(), std::time::Instant::now()),
+            );
         }
     }
 
@@ -2890,13 +2977,21 @@ pub async fn serve_media(
     let client = crate::web::client::detect_client(&headers);
 
     let mime_override = match client {
-        crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file_info.mime_type == "video/x-matroska" => {
+        crate::web::client::DlnaClientProfile::SamsungTv
+        | crate::web::client::DlnaClientProfile::SamsungTvQ
+            if file_info.mime_type == "video/x-matroska" =>
+        {
             "video/x-mkv".to_string()
         }
-        crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ if file_info.mime_type == "video/x-msvideo" => {
+        crate::web::client::DlnaClientProfile::SamsungTv
+        | crate::web::client::DlnaClientProfile::SamsungTvQ
+            if file_info.mime_type == "video/x-msvideo" =>
+        {
             "video/mpeg".to_string()
         }
-        crate::web::client::DlnaClientProfile::SonyBdp if file_info.mime_type == "video/x-matroska" || file_info.mime_type == "video/mpeg" => {
+        crate::web::client::DlnaClientProfile::SonyBdp
+            if file_info.mime_type == "video/x-matroska" || file_info.mime_type == "video/mpeg" =>
+        {
             "video/divx".to_string()
         }
         crate::web::client::DlnaClientProfile::Xbox if file_info.mime_type == "video/x-msvideo" => {
@@ -2905,32 +3000,48 @@ pub async fn serve_media(
         _ => file_info.mime_type.clone(),
     };
 
-    let encoded_filename = percent_encoding::utf8_percent_encode(&file_info.filename, percent_encoding::NON_ALPHANUMERIC).to_string();
-    let content_disposition = format!("inline; filename=\"{}\"; filename*=UTF-8''{}", file_info.filename.replace('"', "\\\""), encoded_filename);
+    let encoded_filename = percent_encoding::utf8_percent_encode(
+        &file_info.filename,
+        percent_encoding::NON_ALPHANUMERIC,
+    )
+    .to_string();
+    let content_disposition = format!(
+        "inline; filename=\"{}\"; filename*=UTF-8''{}",
+        file_info.filename.replace('"', "\\\""),
+        encoded_filename
+    );
 
     let mut response_builder = Response::builder()
         .header(header::CONTENT_TYPE, &mime_override)
         .header(header::ACCEPT_RANGES, "bytes")
         .header(header::CONTENT_DISPOSITION, &content_disposition)
         .header("transferMode.dlna.org", "Streaming")
-        .header("contentFeatures.dlna.org", "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000");
+        .header(
+            "contentFeatures.dlna.org",
+            "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+        );
 
     // CaptionInfo.sec injection for Samsung TVs when subtitles exist
-    if let Some(caption_req) = headers.get("getcaptioninfo.sec").and_then(|h| h.to_str().ok()) {
+    if let Some(caption_req) = headers
+        .get("getcaptioninfo.sec")
+        .and_then(|h| h.to_str().ok())
+    {
         if caption_req == "1" {
             let srt_path = std::path::PathBuf::from(&file_info.path).with_extension("srt");
             if srt_path.exists() {
-                let server_ip = headers.get(header::HOST)
+                let server_ip = headers
+                    .get(header::HOST)
                     .and_then(|h| h.to_str().ok())
                     .and_then(|h| h.split(':').next())
                     .unwrap_or("127.0.0.1");
                 let srt_url = format!(
                     "http://{}:{}/media/{}/subtitle",
-                    server_ip,
-                    state.config.server.port,
-                    file_id
+                    server_ip, state.config.server.port, file_id
                 );
-                debug!("Injecting Samsung subtitle header CaptionInfo.sec: {}", srt_url);
+                debug!(
+                    "Injecting Samsung subtitle header CaptionInfo.sec: {}",
+                    srt_url
+                );
                 response_builder = response_builder.header("CaptionInfo.sec", srt_url);
             }
         }
@@ -2939,11 +3050,11 @@ pub async fn serve_media(
     let (start, end, is_range_request) = if let Some(range_header) = headers.get(header::RANGE) {
         let range_str = range_header.to_str().map_err(|_| AppError::InvalidRange)?;
         debug!("Received range request: {}", range_str);
-        
+
         if file_size == 0 {
             return Err(AppError::InvalidRange);
         }
-        
+
         // Parse the range header manually to avoid enum variant issues
         let (start, end) = parse_range_header(range_str, file_size)?;
         (start, end, true)
@@ -2952,11 +3063,7 @@ pub async fn serve_media(
         (0, file_size.saturating_sub(1), false)
     };
 
-    let len = if file_size == 0 {
-        0
-    } else {
-        end - start + 1
-    };
+    let len = if file_size == 0 { 0 } else { end - start + 1 };
 
     let response_status = if is_range_request {
         response_builder = response_builder.header(
@@ -2972,10 +3079,15 @@ pub async fn serve_media(
 
     // For HEAD requests, return headers only without streaming the body
     if method == Method::HEAD {
-        debug!("HEAD request for media file ID {} (size: {})", file_id, file_size);
+        debug!(
+            "HEAD request for media file ID {} (size: {})",
+            file_id, file_size
+        );
         let response_time = start_time.elapsed().as_micros() as u64;
         state.web_metrics.record_file_serve(response_time, false);
-        return Ok(response_builder.status(response_status).body(Body::empty())?);
+        return Ok(response_builder
+            .status(response_status)
+            .body(Body::empty())?);
     }
 
     file.seek(std::io::SeekFrom::Start(start)).await?;
@@ -2989,9 +3101,14 @@ pub async fn serve_media(
     // Record atomic performance metrics for file serving
     let response_time = start_time.elapsed().as_micros() as u64;
     let is_actual_serve = method == Method::GET && start == 0 && (len > 2 || len == file_size);
-    state.web_metrics.record_file_serve(response_time, is_actual_serve);
-    
-    debug!("Served media file ID {} ({} bytes from offset {}) in {}ms", file_id, len, start, response_time);
+    state
+        .web_metrics
+        .record_file_serve(response_time, is_actual_serve);
+
+    debug!(
+        "Served media file ID {} ({} bytes from offset {}) in {}ms",
+        file_id, len, start, response_time
+    );
 
     Ok(response_builder.status(response_status).body(body)?)
 }
@@ -3000,16 +3117,23 @@ pub async fn serve_media(
 fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
     let range_str = range_str.trim();
     // Remove "bytes=" prefix
-    let range_part = range_str.strip_prefix("bytes=").ok_or(AppError::InvalidRange)?.trim();
-    
+    let range_part = range_str
+        .strip_prefix("bytes=")
+        .ok_or(AppError::InvalidRange)?
+        .trim();
+
     // Split on comma to get individual ranges (we'll just handle the first one)
-    let first_range = range_part.split(',').next().ok_or(AppError::InvalidRange)?.trim();
-    
+    let first_range = range_part
+        .split(',')
+        .next()
+        .ok_or(AppError::InvalidRange)?
+        .trim();
+
     // Parse the range
     if let Some((start_str, end_str)) = first_range.split_once('-') {
         let start_str = start_str.trim();
         let end_str = end_str.trim();
-        
+
         let start = if start_str.is_empty() {
             // Suffix range like "-500" (last 500 bytes)
             let suffix_len: u64 = end_str.parse().map_err(|_| AppError::InvalidRange)?;
@@ -3017,7 +3141,7 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
         } else {
             start_str.parse().map_err(|_| AppError::InvalidRange)?
         };
-        
+
         let end = if end_str.is_empty() {
             // Range like "500-" (from 500 to end)
             file_size - 1
@@ -3025,12 +3149,12 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
             let parsed_end: u64 = end_str.parse().map_err(|_| AppError::InvalidRange)?;
             parsed_end.min(file_size - 1)
         };
-        
+
         // Validate range
         if start > end || start >= file_size {
             return Err(AppError::InvalidRange);
         }
-        
+
         Ok((start, end))
     } else {
         Err(AppError::InvalidRange)
@@ -3043,67 +3167,114 @@ pub async fn content_directory_subscribe(
     headers: HeaderMap,
     method: Method,
 ) -> impl IntoResponse {
-    // Handle SUBSCRIBE method (which might come as GET or a custom method)
-    if method == Method::GET || headers.get("CALLBACK").is_some() {
-        // Handle subscription request
-        if let Some(callback) = headers.get("CALLBACK") {
-            let callback_url = callback.to_str().unwrap_or("");
-            info!("UPnP subscription request from: {}", callback_url);
-            
-            // Generate a subscription ID (in a real implementation, this should be stored)
-            let subscription_id = format!("uuid:{}", uuid::Uuid::new_v4());
-            let timeout = "Second-1800"; // 30 minutes
-            
-            // Get current update ID
-            let update_id = state.content_update_id.load(std::sync::atomic::Ordering::Relaxed);
-            
-            // Send initial event notification
-            tokio::spawn(send_initial_event_notification(callback_url.to_string(), update_id));
-            
-            (
-                StatusCode::OK,
-                [
-                    (header::HeaderName::from_static("sid"), subscription_id.as_str()),
-                    (header::HeaderName::from_static("timeout"), timeout),
-                    (header::CONTENT_LENGTH, "0"),
-                ],
-                "",
-            ).into_response()
-        } else {
-            warn!("UPnP subscription request missing CALLBACK header");
-            (
-                StatusCode::BAD_REQUEST,
-                [
-                    (header::CONTENT_TYPE, "text/plain"),
-                    (header::CONTENT_LENGTH, "0"),
-                ],
-                "",
-            ).into_response()
-        }
-    } else if headers.get("SID").is_some() {
-        // Handle unsubscription request (UNSUBSCRIBE method)
-        let subscription_id = headers.get("SID").unwrap().to_str().unwrap_or("");
-        info!("UPnP unsubscription request for: {}", subscription_id);
-        
-        (
+    let timeout_seconds = headers
+        .get("TIMEOUT")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Second-"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1800)
+        .min(1800);
+    let timeout_header = format!("Second-{timeout_seconds}");
+
+    if method.as_str() == "UNSUBSCRIBE" {
+        let Some(sid) = headers.get("SID").and_then(|value| value.to_str().ok()) else {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        };
+        state.upnp_subscriptions.lock().await.remove(sid);
+        return (StatusCode::OK, [(header::CONTENT_LENGTH, "0")], "").into_response();
+    }
+
+    if method.as_str() != "SUBSCRIBE" && method != Method::GET {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    if let Some(sid) = headers.get("SID").and_then(|value| value.to_str().ok()) {
+        let mut subscriptions = state.upnp_subscriptions.lock().await;
+        let Some(subscription) = subscriptions.get_mut(sid) else {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        };
+        subscription.expires_at =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+        return (
             StatusCode::OK,
-            [(header::CONTENT_LENGTH, "0")],
-            "",
-        ).into_response()
-    } else {
-        (
-            StatusCode::METHOD_NOT_ALLOWED,
             [
-                (header::CONTENT_TYPE, "text/plain"),
+                (header::HeaderName::from_static("sid"), sid),
+                (
+                    header::HeaderName::from_static("timeout"),
+                    timeout_header.as_str(),
+                ),
                 (header::CONTENT_LENGTH, "0"),
             ],
             "",
-        ).into_response()
+        )
+            .into_response();
     }
+
+    let Some(raw_callback) = headers
+        .get("CALLBACK")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(callback_url) = validate_upnp_callback(raw_callback) else {
+        warn!("Rejected unsafe UPnP callback URL: {}", raw_callback);
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let sid = format!("uuid:{}", uuid::Uuid::new_v4());
+    state.upnp_subscriptions.lock().await.insert(
+        sid.clone(),
+        crate::state::UpnpSubscription {
+            callback_url: callback_url.clone(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds),
+            next_sequence: 1,
+            consecutive_failures: 0,
+        },
+    );
+    let update_id = state.content_update_id.load(Ordering::SeqCst);
+    let initial_sid = sid.clone();
+    tokio::spawn(async move {
+        let _ = send_event_notification(&callback_url, &initial_sid, 0, update_id).await;
+    });
+    (
+        StatusCode::OK,
+        [
+            (header::HeaderName::from_static("sid"), sid.as_str()),
+            (
+                header::HeaderName::from_static("timeout"),
+                timeout_header.as_str(),
+            ),
+            (header::CONTENT_LENGTH, "0"),
+        ],
+        "",
+    )
+        .into_response()
 }
 
-/// Send initial event notification to a subscribed client
-async fn send_initial_event_notification(callback_url: String, update_id: u32) {
+fn validate_upnp_callback(raw: &str) -> Option<String> {
+    let candidate = raw
+        .split('>')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_start_matches('<');
+    let url = reqwest::Url::parse(candidate).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let address = url.host_str()?.parse::<std::net::IpAddr>().ok()?;
+    let allowed = match address {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+    };
+    (allowed && !address.is_loopback() && !address.is_unspecified()).then(|| url.to_string())
+}
+
+async fn send_event_notification(
+    callback_url: &str,
+    sid: &str,
+    sequence: u32,
+    update_id: u32,
+) -> bool {
     let event_body = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">
@@ -3111,56 +3282,111 @@ async fn send_initial_event_notification(callback_url: String, update_id: u32) {
         <SystemUpdateID>{}</SystemUpdateID>
     </e:property>
     <e:property>
-        <ContainerUpdateIDs></ContainerUpdateIDs>
+        <ContainerUpdateIDs>video,{0},audio,{0},image,{0}</ContainerUpdateIDs>
     </e:property>
 </e:propertyset>"#,
         update_id
     );
-    
-    // Extract the actual URL from the callback (remove angle brackets if present)
-    let url = callback_url.trim_start_matches('<').trim_end_matches('>');
-    
-    let client = reqwest::Client::new();
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
     match client
-        .request(reqwest::Method::from_bytes(b"NOTIFY").unwrap(), url)
-        .header("HOST", "")
+        .request(
+            reqwest::Method::from_bytes(b"NOTIFY").unwrap(),
+            callback_url,
+        )
         .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
         .header("NT", "upnp:event")
         .header("NTS", "upnp:propchange")
-        .header("SID", "uuid:dummy") // In real implementation, use actual subscription ID
-        .header("SEQ", "0")
+        .header("SID", sid)
+        .header("SEQ", sequence.to_string())
         .body(event_body)
         .send()
         .await
     {
+        Ok(response) if response.status().is_success() => true,
         Ok(response) => {
-            debug!("Event notification sent successfully, status: {}", response.status());
+            warn!(
+                "UPnP event callback {} returned {}",
+                callback_url,
+                response.status()
+            );
+            false
         }
         Err(e) => {
-            warn!("Failed to send event notification to {}: {}", url, e);
+            warn!(
+                "Failed to send event notification to {}: {}",
+                callback_url, e
+            );
+            false
         }
     }
+}
+
+pub async fn notify_content_change(state: &AppState, _published_update_id: u32) {
+    use futures_util::{stream, StreamExt};
+
+    let now = std::time::Instant::now();
+    // Keep notification batches serialized so subscribers observe monotonically
+    // increasing SEQ values even when content changes are published concurrently.
+    let mut subscriptions = state.upnp_subscriptions.lock().await;
+    subscriptions.retain(|_, subscription| subscription.expires_at > now);
+    let update_id = state.content_update_id.load(Ordering::SeqCst);
+    let notifications = subscriptions
+        .iter_mut()
+        .map(|(sid, subscription)| {
+            let sequence = subscription.next_sequence;
+            subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
+            (sid.clone(), subscription.callback_url.clone(), sequence)
+        })
+        .collect::<Vec<_>>();
+
+    let results = stream::iter(
+        notifications
+            .into_iter()
+            .map(|(sid, url, sequence)| async move {
+                let success = send_event_notification(&url, &sid, sequence, update_id).await;
+                (sid, success)
+            }),
+    )
+    .buffer_unordered(8)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (sid, success) in results {
+        if let Some(subscription) = subscriptions.get_mut(&sid) {
+            if success {
+                subscription.consecutive_failures = 0;
+            } else {
+                subscription.consecutive_failures =
+                    subscription.consecutive_failures.saturating_add(1);
+            }
+        }
+    }
+    subscriptions.retain(|_, subscription| subscription.consecutive_failures < 3);
 }
 
 // Music categorization handlers
 
 /// Handle browsing the root audio container with music categorization
-async fn handle_audio_root_browse(
-    params: &BrowseParams,
-    state: &AppState,
-) -> Response {
+async fn handle_audio_root_browse(params: &BrowseParams, state: &AppState) -> Response {
     use crate::web::xml::generate_browse_response;
-    
+
     // Create virtual categorization containers
     let virtual_containers = vec![
         ("audio/artists", "Artists"),
-        ("audio/albums", "Albums"), 
+        ("audio/albums", "Albums"),
         ("audio/genres", "Genres"),
         ("audio/years", "Years"),
         ("audio/playlists", "Playlists"),
         ("audio/folders", "Folders"),
     ];
-    
+
     // Convert to MediaDirectory for XML generation
     let subdirectories: Vec<crate::database::MediaDirectory> = virtual_containers
         .into_iter()
@@ -3169,9 +3395,10 @@ async fn handle_audio_root_browse(
             name: name.to_string(),
         })
         .collect();
-    
+
     let server_ip = state.get_server_ip();
-    let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
+    let response =
+        generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
     (
         StatusCode::OK,
         [
@@ -3182,7 +3409,7 @@ async fn handle_audio_root_browse(
     )
         .into_response()
 }
-    
+
 impl ContentDirectoryHandler {
     /// Handle artist browse requests with atomic performance tracking and ReDB operations
     async fn handle_artist_browse(
@@ -3204,7 +3431,8 @@ impl ContentDirectoryHandler {
                 name: format!("{} ({})", artist.name, artist.count),
             },
             move |artist_name| async move { db2.get_music_by_artist(&artist_name).await },
-        ).await
+        )
+        .await
     }
 
     /// Handle album browse requests with atomic performance tracking and ReDB operations
@@ -3227,7 +3455,8 @@ impl ContentDirectoryHandler {
                 name: format!("{} ({})", album.name, album.count),
             },
             move |album_name| async move { db2.get_music_by_album(&album_name, None).await },
-        ).await
+        )
+        .await
     }
 }
 
@@ -3251,7 +3480,8 @@ async fn handle_genres_browse(
             name: format!("{} ({})", genre.name, genre.count),
         },
         move |genre_name| async move { db2.get_music_by_genre(&genre_name).await },
-    ).await
+    )
+    .await
 }
 
 /// Handle browsing years with atomic performance tracking and ReDB operations
@@ -3280,7 +3510,8 @@ async fn handle_years_browse(
                 Err(anyhow::anyhow!("Invalid year format"))
             }
         },
-    ).await
+    )
+    .await
 }
 
 /// Handle browsing playlists with atomic performance tracking and ReDB operations
@@ -3309,7 +3540,8 @@ async fn handle_playlists_browse(
                 Err(anyhow::anyhow!("Invalid playlist ID format"))
             }
         },
-    ).await
+    )
+    .await
 }
 
 /// Helper function to perform generic music category browsing
@@ -3330,13 +3562,14 @@ where
     GFuture: std::future::Future<Output = Result<Vec<crate::database::MediaFile>, anyhow::Error>>,
 {
     use crate::web::xml::generate_browse_response;
-    
+
     let start_time = Instant::now();
-    
-    let client = crate::web::client::CURRENT_CLIENT.try_with(|c| *c)
+
+    let client = crate::web::client::CURRENT_CLIENT
+        .try_with(|c| *c)
         .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
-    
-    let current_update_id = state.content_update_id.load(Ordering::Relaxed);
+
+    let current_update_id = state.content_update_id.load(Ordering::SeqCst);
     let cache_key = crate::state::SoapCacheKey {
         object_id: params.object_id.clone(),
         starting_index: params.starting_index,
@@ -3348,14 +3581,21 @@ where
     // Cache lookup
     {
         let mut cache = state.browse_cache.lock().await;
-        let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+        let needs_clear = cache
+            .keys()
+            .next()
+            .map(|k| k.content_update_id != current_update_id)
+            .unwrap_or(false);
         if needs_clear {
             cache.clear();
         }
         if let Some(cached_xml) = cache.get(&cache_key) {
             let response_time = start_time.elapsed().as_micros() as u64;
             state.web_metrics.record_browse_request(response_time, true);
-            debug!("Browse Cache Hit for Category ObjectID: {} ({}ms)", params.object_id, response_time);
+            debug!(
+                "Browse Cache Hit for Category ObjectID: {} ({}ms)",
+                params.object_id, response_time
+            );
             return (
                 StatusCode::OK,
                 [
@@ -3363,7 +3603,8 @@ where
                     (header::HeaderName::from_static("ext"), ""),
                 ],
                 cached_xml.clone(),
-            ).into_response();
+            )
+                .into_response();
         }
     }
 
@@ -3377,28 +3618,44 @@ where
     } else {
         (true, None)
     };
-    
+
     if is_category_list {
         match list_categories_fn().await {
             Ok(categories) => {
                 let has_data = !categories.is_empty();
-                let subdirectories: Vec<crate::database::MediaDirectory> = categories
-                    .into_iter()
-                    .map(map_category_fn)
-                    .collect();
-                
+                let subdirectories: Vec<crate::database::MediaDirectory> =
+                    categories.into_iter().map(map_category_fn).collect();
+
                 let response_time = start_time.elapsed().as_micros() as u64;
-                state.web_metrics.record_browse_request(response_time, has_data);
-                
-                debug!("ReDB retrieved {} {} in {}ms", subdirectories.len(), category_name, response_time);
-                    
+                state
+                    .web_metrics
+                    .record_browse_request(response_time, has_data);
+
+                debug!(
+                    "ReDB retrieved {} {} in {}ms",
+                    subdirectories.len(),
+                    category_name,
+                    response_time
+                );
+
                 let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
-                
+                let response = generate_browse_response(
+                    &params.object_id,
+                    &subdirectories,
+                    &[],
+                    state,
+                    &server_ip,
+                )
+                .await;
+
                 // Cache insert
-                {
+                if state.content_update_id.load(Ordering::SeqCst) == current_update_id {
                     let mut cache = state.browse_cache.lock().await;
-                    let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+                    let needs_clear = cache
+                        .keys()
+                        .next()
+                        .map(|k| k.content_update_id != current_update_id)
+                        .unwrap_or(false);
                     if needs_clear {
                         cache.clear();
                     }
@@ -3417,11 +3674,13 @@ where
             }
             Err(e) => {
                 error!("ReDB error getting {}: {}", category_name, e);
-                
+
                 let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_error();
-                state.web_metrics.record_browse_request(response_time, false);
-                
+                state
+                    .web_metrics
+                    .record_browse_request(response_time, false);
+
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -3434,17 +3693,31 @@ where
         match list_items_fn(key_str.clone()).await {
             Ok(files) => {
                 let response_time = start_time.elapsed().as_micros() as u64;
-                state.web_metrics.record_browse_request(response_time, !files.is_empty());
-                
-                debug!("ReDB retrieved {} tracks for {} '{}' in {}ms", files.len(), category_name, key_str, response_time);
-                
+                state
+                    .web_metrics
+                    .record_browse_request(response_time, !files.is_empty());
+
+                debug!(
+                    "ReDB retrieved {} tracks for {} '{}' in {}ms",
+                    files.len(),
+                    category_name,
+                    key_str,
+                    response_time
+                );
+
                 let server_ip = state.get_server_ip();
-                let response = generate_browse_response(&params.object_id, &[], &files, state, &server_ip).await;
-                
+                let response =
+                    generate_browse_response(&params.object_id, &[], &files, state, &server_ip)
+                        .await;
+
                 // Cache insert
-                {
+                if state.content_update_id.load(Ordering::SeqCst) == current_update_id {
                     let mut cache = state.browse_cache.lock().await;
-                    let needs_clear = cache.keys().next().map(|k| k.content_update_id != current_update_id).unwrap_or(false);
+                    let needs_clear = cache
+                        .keys()
+                        .next()
+                        .map(|k| k.content_update_id != current_update_id)
+                        .unwrap_or(false);
                     if needs_clear {
                         cache.clear();
                     }
@@ -3462,12 +3735,17 @@ where
                     .into_response()
             }
             Err(e) => {
-                error!("ReDB error getting music by {} {}: {}", category_name, key_str, e);
-                
+                error!(
+                    "ReDB error getting music by {} {}: {}",
+                    category_name, key_str, e
+                );
+
                 let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_error();
-                state.web_metrics.record_browse_request(response_time, false);
-                
+                state
+                    .web_metrics
+                    .record_browse_request(response_time, false);
+
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -3479,8 +3757,10 @@ where
     } else {
         let response_time = start_time.elapsed().as_micros() as u64;
         state.web_metrics.record_error();
-        state.web_metrics.record_browse_request(response_time, false);
-        
+        state
+            .web_metrics
+            .record_browse_request(response_time, false);
+
         (
             StatusCode::NOT_FOUND,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
@@ -3522,7 +3802,8 @@ fn parse_dir_index_prefix(path_prefix_str: &str) -> (Option<usize>, &str) {
 }
 
 fn build_soap_response(action: &str, service_type: &str, content: &str) -> Response {
-    let mut xml = String::with_capacity(300 + action.len() * 2 + service_type.len() + content.len());
+    let mut xml =
+        String::with_capacity(300 + action.len() * 2 + service_type.len() + content.len());
     xml.push_str("<?xml version=\"1.0\" encoding=\"utf-8\"?>\n");
     xml.push_str("<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\" s:encodingStyle=\"http://schemas.xmlsoap.org/soap/encoding/\">\n");
     xml.push_str("    <s:Body>\n");
@@ -3539,7 +3820,7 @@ fn build_soap_response(action: &str, service_type: &str, content: &str) -> Respo
     xml.push_str("Response>\n");
     xml.push_str("    </s:Body>\n");
     xml.push_str("</s:Envelope>");
-    
+
     (
         StatusCode::OK,
         [
@@ -3569,19 +3850,28 @@ pub async fn media_receiver_registrar_scpd() -> impl IntoResponse {
     )
 }
 
-pub async fn connection_manager_control(
-    State(_state): State<AppState>,
-    body: String,
-) -> Response {
+pub async fn connection_manager_control(State(_state): State<AppState>, body: String) -> Response {
     if body.contains("<u:GetProtocolInfo") {
         let content = r#"<Source>http-get:*:video/x-msvideo:*,http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-mkv:*,http-get:*:video/mpeg:*,http-get:*:video/divx:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,http-get:*:audio/mp4:*,http-get:*:image/jpeg:*,http-get:*:image/png:*,http-get:*:image/gif:*</Source><Sink></Sink>"#;
-        build_soap_response("GetProtocolInfo", "urn:schemas-upnp-org:service:ConnectionManager:1", content)
+        build_soap_response(
+            "GetProtocolInfo",
+            "urn:schemas-upnp-org:service:ConnectionManager:1",
+            content,
+        )
     } else if body.contains("<u:GetCurrentConnectionIDs") {
         let content = "<ConnectionIDs>0</ConnectionIDs>";
-        build_soap_response("GetCurrentConnectionIDs", "urn:schemas-upnp-org:service:ConnectionManager:1", content)
+        build_soap_response(
+            "GetCurrentConnectionIDs",
+            "urn:schemas-upnp-org:service:ConnectionManager:1",
+            content,
+        )
     } else if body.contains("<u:GetCurrentConnectionInfo") {
         let content = r#"<RcsID>-1</RcsID><AVTransportID>-1</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Output</Direction><Status>Unknown</Status>"#;
-        build_soap_response("GetCurrentConnectionInfo", "urn:schemas-upnp-org:service:ConnectionManager:1", content)
+        build_soap_response(
+            "GetCurrentConnectionInfo",
+            "urn:schemas-upnp-org:service:ConnectionManager:1",
+            content,
+        )
     } else {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -3598,10 +3888,18 @@ pub async fn media_receiver_registrar_control(
 ) -> Response {
     if body.contains("<u:IsAuthorized") {
         let content = "<Result>1</Result>";
-        build_soap_response("IsAuthorized", "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1", content)
+        build_soap_response(
+            "IsAuthorized",
+            "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1",
+            content,
+        )
     } else if body.contains("<u:RegisterDevice") {
         let content = "<RegistrationRespMsg></RegistrationRespMsg>";
-        build_soap_response("RegisterDevice", "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1", content)
+        build_soap_response(
+            "RegisterDevice",
+            "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1",
+            content,
+        )
     } else {
         (
             StatusCode::NOT_IMPLEMENTED,
@@ -3620,8 +3918,9 @@ pub async fn serve_subtitle(
         state.web_metrics.record_error();
         AppError::NotFound
     })?;
-    
-    let file_info = state.database
+
+    let file_info = state
+        .database
         .get_file_by_id(file_id)
         .await
         .map_err(|e| {
@@ -3663,8 +3962,9 @@ pub async fn serve_cover(
         state.web_metrics.record_error();
         AppError::NotFound
     })?;
-    
-    let file_info = state.database
+
+    let file_info = state
+        .database
         .get_file_by_id(file_id)
         .await
         .map_err(|e| {
@@ -3683,24 +3983,26 @@ pub async fn serve_cover(
 
     // 1. Primary: Search parent directory for cover images (fast)
     if let Some(parent) = file_info.path.parent() {
-        let base_name = file_info.path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        
+        let base_name = file_info
+            .path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("");
+
         let cover_filenames = [
-            "cover", "Cover", "COVER",
-            "folder", "Folder", "FOLDER",
-            "album", "Album", "ALBUM",
-            "artwork", "Artwork", "ARTWORK",
-            base_name,
+            "cover", "Cover", "COVER", "folder", "Folder", "FOLDER", "album", "Album", "ALBUM",
+            "artwork", "Artwork", "ARTWORK", base_name,
         ];
-        
+
         let extensions = ["jpg", "jpeg", "png", "webp", "heif", "heic", "avif"];
-        
+
         for name in &cover_filenames {
             for ext in &extensions {
                 let img_path = parent.join(format!("{}.{}", name, ext));
                 if img_path.exists() && img_path.is_file() {
                     if let Ok(data) = tokio::fs::read(&img_path).await {
-                        let content_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
+                        let content_type =
+                            crate::platform::filesystem::get_mime_type_for_extension(ext);
                         return Response::builder()
                             .header(header::CONTENT_TYPE, content_type)
                             .body(Body::from(data))
@@ -3713,9 +4015,8 @@ pub async fn serve_cover(
 
     // 2. Secondary: Extract embedded artwork from audio tags using audiotags (blocking task)
     let path = file_info.path.clone();
-    let tag_result = tokio::task::spawn_blocking(move || {
-        audiotags::Tag::new().read_from_path(&path)
-    }).await;
+    let tag_result =
+        tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
 
     if let Ok(Ok(tag)) = tag_result {
         if let Some(cover) = tag.album_cover() {
@@ -3802,7 +4103,8 @@ mod tests {
 
     #[test]
     fn test_parse_browse_params_malformed_xml() {
-        let xml_body = r#"<ObjectID>test</ObjectID><StartingIndex>5<RequestedCount>10</RequestedCount>"#;
+        let xml_body =
+            r#"<ObjectID>test</ObjectID><StartingIndex>5<RequestedCount>10</RequestedCount>"#;
 
         let params = parse_browse_params(xml_body);
         // Should handle malformed XML gracefully and extract what it can
@@ -3853,7 +4155,10 @@ mod tests {
     fn test_parse_dir_index_prefix() {
         assert_eq!(parse_dir_index_prefix("d0"), (Some(0), ""));
         assert_eq!(parse_dir_index_prefix("d0/movies"), (Some(0), "movies"));
-        assert_eq!(parse_dir_index_prefix("d12/movies/action"), (Some(12), "movies/action"));
+        assert_eq!(
+            parse_dir_index_prefix("d12/movies/action"),
+            (Some(12), "movies/action")
+        );
         assert_eq!(parse_dir_index_prefix("d0/"), (Some(0), ""));
         assert_eq!(parse_dir_index_prefix("movies"), (None, "movies"));
         assert_eq!(parse_dir_index_prefix("d"), (None, "d"));
@@ -3861,11 +4166,21 @@ mod tests {
         assert_eq!(parse_dir_index_prefix(""), (None, ""));
     }
 
-}/// 
+    #[test]
+    fn upnp_callback_policy_accepts_lan_and_rejects_ssrf_targets() {
+        assert!(validate_upnp_callback("<http://192.168.1.25:1234/events>").is_some());
+        assert!(validate_upnp_callback("<http://169.254.10.2/events>").is_some());
+        assert!(validate_upnp_callback("http://127.0.0.1/events").is_none());
+        assert!(validate_upnp_callback("https://192.168.1.25/events").is_none());
+        assert!(validate_upnp_callback("http://example.com/events").is_none());
+        assert!(validate_upnp_callback("http://8.8.8.8/events").is_none());
+    }
+}
+///
 /// Get web handler performance metrics for monitoring
 pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
-    
+
     let db_stats = match state.database.get_stats().await {
         Ok(s) => s,
         Err(_) => crate::database::DatabaseStats {
@@ -3876,21 +4191,21 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             audio_files: 0,
             image_files: 0,
             playlists: 0,
-        }
+        },
     };
 
     let active_casts = {
         let mut casts = state.active_casts.lock().await;
         // Retain only entries active in the last 3 minutes (180 seconds)
         casts.retain(|_, (_, last_seen)| last_seen.elapsed() < std::time::Duration::from_secs(180));
-        
+
         let map: std::collections::HashMap<String, String> = casts
             .iter()
             .map(|(k, (v, _))| (k.clone(), v.clone()))
             .collect();
         map
     };
-    
+
     let metrics_json = serde_json::json!({
         "web_handler_metrics": {
             "browse_requests": stats.browse_requests,
@@ -3915,7 +4230,7 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
         },
         "active_casts": active_casts
     });
-    
+
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/json")],
@@ -3924,22 +4239,25 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
 }
 
 /// Helper to read the last N lines of the log file using a ring buffer
-async fn read_last_log_lines(path: &std::path::Path, limit: usize) -> Result<String, std::io::Error> {
+async fn read_last_log_lines(
+    path: &std::path::Path,
+    limit: usize,
+) -> Result<String, std::io::Error> {
     use tokio::fs::File;
-    use tokio::io::{BufReader, AsyncBufReadExt};
-    
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
     let file = File::open(path).await?;
     let reader = BufReader::new(file);
     let mut queue = std::collections::VecDeque::with_capacity(limit + 1);
     let mut lines_stream = reader.lines();
-    
+
     while let Some(line) = lines_stream.next_line().await? {
         queue.push_back(line);
         if queue.len() > limit {
             queue.pop_front();
         }
     }
-    
+
     let mut result = String::new();
     for line in queue {
         result.push_str(&line);
@@ -3970,7 +4288,10 @@ pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse 
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::CONTENT_TYPE, "application/json")],
-                format!(r#"{{"status":"unhealthy","error":{}}}"#, serde_json::to_string(&e.to_string()).unwrap_or_default()),
+                format!(
+                    r#"{{"status":"unhealthy","error":{}}}"#,
+                    serde_json::to_string(&e.to_string()).unwrap_or_default()
+                ),
             )
         }
     }
@@ -3979,53 +4300,94 @@ pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse 
 /// Serve metrics in standard Prometheus Exposition Format (plain text)
 pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
-    
-    let (db_files, db_total_size, db_size, db_video, db_audio, db_image, db_playlists) = match state.database.get_stats().await {
-        Ok(s) => (s.total_files, s.total_size, s.database_size, s.video_files, s.audio_files, s.image_files, s.playlists),
-        Err(_) => (0, 0, 0, 0, 0, 0, 0),
-    };
+
+    let (db_files, db_total_size, db_size, db_video, db_audio, db_image, db_playlists) =
+        match state.database.get_stats().await {
+            Ok(s) => (
+                s.total_files,
+                s.total_size,
+                s.database_size,
+                s.video_files,
+                s.audio_files,
+                s.image_files,
+                s.playlists,
+            ),
+            Err(_) => (0, 0, 0, 0, 0, 0, 0),
+        };
 
     let mut body = String::new();
-    
+
     body.push_str("# HELP vuio_web_browse_requests_total Total number of media browse requests\n");
     body.push_str("# TYPE vuio_web_browse_requests_total counter\n");
-    body.push_str(&format!("vuio_web_browse_requests_total {}\n\n", stats.browse_requests));
-    
+    body.push_str(&format!(
+        "vuio_web_browse_requests_total {}\n\n",
+        stats.browse_requests
+    ));
+
     body.push_str("# HELP vuio_web_cache_hits_total Total number of browse cache hits\n");
     body.push_str("# TYPE vuio_web_cache_hits_total counter\n");
-    body.push_str(&format!("vuio_web_cache_hits_total {}\n\n", stats.cache_hits));
-    
+    body.push_str(&format!(
+        "vuio_web_cache_hits_total {}\n\n",
+        stats.cache_hits
+    ));
+
     body.push_str("# HELP vuio_web_cache_misses_total Total number of browse cache misses\n");
     body.push_str("# TYPE vuio_web_cache_misses_total counter\n");
-    body.push_str(&format!("vuio_web_cache_misses_total {}\n\n", stats.cache_misses));
-    
-    body.push_str("# HELP vuio_web_directory_listings_total Total number of directory listing requests\n");
+    body.push_str(&format!(
+        "vuio_web_cache_misses_total {}\n\n",
+        stats.cache_misses
+    ));
+
+    body.push_str(
+        "# HELP vuio_web_directory_listings_total Total number of directory listing requests\n",
+    );
     body.push_str("# TYPE vuio_web_directory_listings_total counter\n");
-    body.push_str(&format!("vuio_web_directory_listings_total {}\n\n", stats.directory_listings));
-    
+    body.push_str(&format!(
+        "vuio_web_directory_listings_total {}\n\n",
+        stats.directory_listings
+    ));
+
     body.push_str("# HELP vuio_web_file_serves_total Total number of files served\n");
     body.push_str("# TYPE vuio_web_file_serves_total counter\n");
-    body.push_str(&format!("vuio_web_file_serves_total {}\n\n", stats.file_serves));
+    body.push_str(&format!(
+        "vuio_web_file_serves_total {}\n\n",
+        stats.file_serves
+    ));
 
-    body.push_str("# HELP vuio_web_gigabytes_transferred_total Total gigabytes of media transferred\n");
+    body.push_str(
+        "# HELP vuio_web_gigabytes_transferred_total Total gigabytes of media transferred\n",
+    );
     body.push_str("# TYPE vuio_web_gigabytes_transferred_total counter\n");
-    body.push_str(&format!("vuio_web_gigabytes_transferred_total {}\n\n", stats.gigabytes_transferred));
-    
+    body.push_str(&format!(
+        "vuio_web_gigabytes_transferred_total {}\n\n",
+        stats.gigabytes_transferred
+    ));
+
     body.push_str("# HELP vuio_web_errors_total Total number of web handler errors\n");
     body.push_str("# TYPE vuio_web_errors_total counter\n");
     body.push_str(&format!("vuio_web_errors_total {}\n\n", stats.errors));
-    
-    body.push_str("# HELP vuio_web_average_response_time_ms Average response time in milliseconds\n");
+
+    body.push_str(
+        "# HELP vuio_web_average_response_time_ms Average response time in milliseconds\n",
+    );
     body.push_str("# TYPE vuio_web_average_response_time_ms gauge\n");
-    body.push_str(&format!("vuio_web_average_response_time_ms {}\n\n", stats.average_response_time_ms));
+    body.push_str(&format!(
+        "vuio_web_average_response_time_ms {}\n\n",
+        stats.average_response_time_ms
+    ));
 
     body.push_str("# HELP vuio_database_files Total media files indexed in database\n");
     body.push_str("# TYPE vuio_database_files gauge\n");
     body.push_str(&format!("vuio_database_files {}\n\n", db_files));
 
-    body.push_str("# HELP vuio_database_total_size_bytes Cumulative size of all media files in bytes\n");
+    body.push_str(
+        "# HELP vuio_database_total_size_bytes Cumulative size of all media files in bytes\n",
+    );
     body.push_str("# TYPE vuio_database_total_size_bytes gauge\n");
-    body.push_str(&format!("vuio_database_total_size_bytes {}\n\n", db_total_size));
+    body.push_str(&format!(
+        "vuio_database_total_size_bytes {}\n\n",
+        db_total_size
+    ));
 
     body.push_str("# HELP vuio_database_size_bytes Size of the database file on disk in bytes\n");
     body.push_str("# TYPE vuio_database_size_bytes gauge\n");
@@ -4039,7 +4401,9 @@ pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoR
     body.push_str("# TYPE vuio_database_audio_files gauge\n");
     body.push_str(&format!("vuio_database_audio_files {}\n\n", db_audio));
 
-    body.push_str("# HELP vuio_database_image_files Total image/picture files indexed in database\n");
+    body.push_str(
+        "# HELP vuio_database_image_files Total image/picture files indexed in database\n",
+    );
     body.push_str("# TYPE vuio_database_image_files gauge\n");
     body.push_str(&format!("vuio_database_image_files {}\n\n", db_image));
 
@@ -4049,7 +4413,10 @@ pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoR
 
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "text/plain; version=0.0.4; charset=utf-8",
+        )],
         body,
     )
 }
@@ -4065,7 +4432,7 @@ pub async fn get_logs_handler(
     axum::extract::Query(query): axum::extract::Query<LogsQuery>,
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(100).min(5000); // Caps limit at 5000 lines to prevent memory issues
-    
+
     match read_last_log_lines(&state.log_file_path, limit).await {
         Ok(content) => (
             StatusCode::OK,
@@ -4117,10 +4484,12 @@ pub async fn api_cast_playlist(
     // 1. List playlists to find and delete old "Web Cast - " playlists
     let playlists = match state.database.get_playlists().await {
         Ok(list) => list,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
-        ),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+            )
+        }
     };
 
     for pl in playlists {
@@ -4135,10 +4504,14 @@ pub async fn api_cast_playlist(
     let playlist_name = format!("Web Cast - {}", payload.folder_name);
     let playlist_id = match state.database.create_playlist(&playlist_name, None).await {
         Ok(id) => id,
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": format!("Failed to create playlist: {}", e) })),
-        ),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(
+                    serde_json::json!({ "error": format!("Failed to create playlist: {}", e) }),
+                ),
+            )
+        }
     };
 
     // 3. Add file IDs to the playlist (batch add)
@@ -4149,7 +4522,11 @@ pub async fn api_cast_playlist(
         .map(|(idx, &id)| (id, idx as u32))
         .collect();
 
-    if let Err(e) = state.database.batch_add_to_playlist(playlist_id, &tracks_to_add).await {
+    if let Err(e) = state
+        .database
+        .batch_add_to_playlist(playlist_id, &tracks_to_add)
+        .await
+    {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             axum::Json(serde_json::json!({ "error": format!("Failed to add tracks: {}", e) })),

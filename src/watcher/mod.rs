@@ -1,6 +1,8 @@
 use async_trait::async_trait;
-use notify::{RecommendedWatcher, RecursiveMode, Config};
-use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap};
+use notify::{Config, RecommendedWatcher, RecursiveMode};
+use notify_debouncer_full::{
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -17,8 +19,12 @@ pub enum FileSystemEvent {
     Created(PathBuf),
     /// An existing file was modified
     Modified(PathBuf),
-    /// A file was deleted
-    Deleted(PathBuf),
+    /// A path was deleted. `is_directory` is unknown on watcher backends that
+    /// do not preserve the remove kind.
+    Deleted {
+        path: PathBuf,
+        is_directory: Option<bool>,
+    },
     /// A file was renamed/moved
     Renamed { from: PathBuf, to: PathBuf },
 }
@@ -28,19 +34,19 @@ pub enum FileSystemEvent {
 pub trait FileSystemWatcher: Send + Sync {
     /// Start watching the specified directories for changes
     async fn start_watching(&self, directories: &[PathBuf]) -> Result<()>;
-    
+
     /// Stop watching all directories
     async fn stop_watching(&self) -> Result<()>;
-    
+
     /// Get a receiver for file system events
     fn get_event_receiver(&self) -> mpsc::Receiver<FileSystemEvent>;
-    
+
     /// Add a new path to watch
     async fn add_watch_path(&self, path: &Path) -> Result<()>;
-    
+
     /// Remove a path from watching
     async fn remove_watch_path(&self, path: &Path) -> Result<()>;
-    
+
     /// Check if a path is currently being watched
     async fn is_watching(&self, path: &Path) -> bool;
 }
@@ -51,6 +57,8 @@ pub struct CrossPlatformWatcher {
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
     watched_paths: Arc<RwLock<HashSet<PathBuf>>>,
+    watched_paths_sync: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
+    dirty_roots: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
     debounce_duration: Duration,
 }
 
@@ -58,12 +66,14 @@ impl CrossPlatformWatcher {
     /// Create a new cross-platform file system watcher
     pub fn new() -> Self {
         let (event_sender, event_receiver) = mpsc::channel(256); // Reduced buffer size for memory efficiency
-        
+
         Self {
             debouncer: Arc::new(RwLock::new(None)),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
             watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))), // Pre-allocate capacity
+            watched_paths_sync: Arc::new(std::sync::Mutex::new(HashSet::with_capacity(16))),
+            dirty_roots: Arc::new(std::sync::Mutex::new(HashSet::with_capacity(16))),
             debounce_duration: Duration::from_millis(250), // 250ms debounce for reduced event frequency
         }
     }
@@ -71,6 +81,11 @@ impl CrossPlatformWatcher {
     /// Check if a file is a supported media file based on its extension
     pub fn is_media_file(&self, path: &Path) -> bool {
         is_media_file(path)
+    }
+
+    pub fn take_dirty_roots(&self) -> Vec<PathBuf> {
+        let mut roots = self.dirty_roots.lock().unwrap_or_else(|e| e.into_inner());
+        roots.drain().collect()
     }
 }
 
@@ -87,17 +102,23 @@ fn is_media_file(path: &Path) -> bool {
 /// Convert notify events to our FileSystemEvent enum (helper)
 fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
     let mut fs_events = Vec::with_capacity(events.len()); // Pre-allocate capacity
-    
+
     for event in events {
         match event.event.kind {
             notify::EventKind::Create(_) => {
                 for path in &event.event.paths {
                     if path.is_dir() {
                         // Handle directory creation - scan for media files
-                        debug!("Directory created (detected by watcher): {}", path.display());
+                        debug!(
+                            "Directory created (detected by watcher): {}",
+                            path.display()
+                        );
                         fs_events.push(FileSystemEvent::Created(path.clone()));
                     } else if is_media_file(path) {
-                        debug!("Media file created (detected by watcher): {}", path.display());
+                        debug!(
+                            "Media file created (detected by watcher): {}",
+                            path.display()
+                        );
                         fs_events.push(FileSystemEvent::Created(path.clone()));
                     } else {
                         debug!("Non-media file created, ignoring: {}", path.display());
@@ -110,7 +131,11 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                         if event.event.paths.len() >= 2 {
                             let from = event.event.paths[0].clone();
                             let to = event.event.paths[1].clone();
-                            debug!("Path renamed (detected by watcher): {} -> {}", from.display(), to.display());
+                            debug!(
+                                "Path renamed (detected by watcher): {} -> {}",
+                                from.display(),
+                                to.display()
+                            );
                             fs_events.push(FileSystemEvent::Renamed { from, to });
                         } else {
                             for path in &event.event.paths {
@@ -119,17 +144,23 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                                         fs_events.push(FileSystemEvent::Created(path.clone()));
                                     }
                                 } else {
-                                    fs_events.push(FileSystemEvent::Deleted(path.clone()));
+                                    fs_events.push(FileSystemEvent::Deleted {
+                                        path: path.clone(),
+                                        is_directory: None,
+                                    });
                                 }
                             }
                         }
                     }
                     _ => {
                         // Only process modify events for media files
-                        let media_paths: Vec<_> = event.event.paths.iter()
+                        let media_paths: Vec<_> = event
+                            .event
+                            .paths
+                            .iter()
                             .filter(|path| is_media_file(path))
                             .collect();
-                        
+
                         for path in media_paths {
                             debug!("Media file modified: {}", path.display());
                             fs_events.push(FileSystemEvent::Modified(path.clone()));
@@ -137,20 +168,29 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                     }
                 }
             }
-            notify::EventKind::Remove(_) => {
+            notify::EventKind::Remove(remove_kind) => {
+                let is_directory = match remove_kind {
+                    notify::event::RemoveKind::File => Some(false),
+                    notify::event::RemoveKind::Folder => Some(true),
+                    _ => None,
+                };
                 for path in &event.event.paths {
-                    // Since the path is deleted, we can't check if it was a directory
-                    // We'll send all deletion events and let the handler figure it out
                     debug!("Path deleted (detected by watcher): {}", path.display());
-                    fs_events.push(FileSystemEvent::Deleted(path.clone()));
+                    fs_events.push(FileSystemEvent::Deleted {
+                        path: path.clone(),
+                        is_directory,
+                    });
                 }
             }
             notify::EventKind::Other => {
                 // Handle platform-specific events for media files only
-                let media_paths: Vec<_> = event.event.paths.iter()
+                let media_paths: Vec<_> = event
+                    .event
+                    .paths
+                    .iter()
                     .filter(|path| is_media_file(path))
                     .collect();
-                
+
                 for path in media_paths {
                     debug!("Media file other event: {}", path.display());
                     fs_events.push(FileSystemEvent::Modified(path.clone()));
@@ -158,10 +198,13 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
             }
             _ => {
                 // Handle other event types as modifications for media files only
-                let media_paths: Vec<_> = event.event.paths.iter()
+                let media_paths: Vec<_> = event
+                    .event
+                    .paths
+                    .iter()
                     .filter(|path| is_media_file(path))
                     .collect();
-                
+
                 for path in media_paths {
                     debug!("Media file generic event: {}", path.display());
                     fs_events.push(FileSystemEvent::Modified(path.clone()));
@@ -169,14 +212,35 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
             }
         }
     }
-    
+
+    let deleted_paths = fs_events
+        .iter()
+        .filter_map(|event| match event {
+            FileSystemEvent::Deleted { path, .. } => Some(path.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let mut emitted_deletions = HashSet::new();
+    fs_events.retain(|event| match event {
+        FileSystemEvent::Deleted { path, .. } => {
+            emitted_deletions.insert(path.clone())
+                && !deleted_paths
+                    .iter()
+                    .any(|parent| parent != path && path.starts_with(parent))
+        }
+        _ => true,
+    });
+
     fs_events
 }
+
 impl CrossPlatformWatcher {
     /// Initialize the debounced watcher
     async fn initialize_watcher(&self) -> Result<()> {
         let event_sender = self.event_sender.clone();
-        
+        let dirty_roots = self.dirty_roots.clone();
+        let watched_paths_sync = self.watched_paths_sync.clone();
+
         let debouncer = new_debouncer_opt(
             self.debounce_duration,
             None, // Use default tick rate
@@ -186,10 +250,18 @@ impl CrossPlatformWatcher {
                         if !events.is_empty() {
                             debug!("Watcher callback triggered with {} events", events.len());
                             for event in &events {
-                                debug!("  Raw event: {:?} for paths: {:?}", event.event.kind, event.paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>());
+                                debug!(
+                                    "  Raw event: {:?} for paths: {:?}",
+                                    event.event.kind,
+                                    event
+                                        .paths
+                                        .iter()
+                                        .map(|p| p.display().to_string())
+                                        .collect::<Vec<_>>()
+                                );
                             }
                         }
-                        
+
                         // Filter events for media files OR directories
                         let relevant_events: Vec<_> = events.into_iter()
                             .filter(|event| {
@@ -200,13 +272,13 @@ impl CrossPlatformWatcher {
                                         debug!("Including non-existent path (deleted or renamed): {}", path.display());
                                         return true;
                                     }
-                                    
+
                                     // Include directories and media files for other events
                                     if path.is_dir() {
                                         debug!("Including directory event for path: {}", path.display());
                                         return true;
                                     }
-                                    
+
                                     // Include media files
                                     if let Some(extension) = path.extension() {
                                         if let Some(ext_str) = extension.to_str() {
@@ -216,7 +288,7 @@ impl CrossPlatformWatcher {
                                             }
                                         }
                                     }
-                                    
+
                                     debug!("Excluding non-media file event for path: {}", path.display());
                                     false
                                 })
@@ -225,11 +297,27 @@ impl CrossPlatformWatcher {
 
                         if !relevant_events.is_empty() {
                             debug!("Processing {} relevant events", relevant_events.len());
-                            
+
                             let fs_events = convert_watcher_events(relevant_events);
                             for fs_event in fs_events {
                                 if let Err(e) = event_sender.try_send(fs_event) {
                                     error!("Failed to send file system event: {}", e);
+                                    let failed_path = match e.into_inner() {
+                                        FileSystemEvent::Created(path)
+                                        | FileSystemEvent::Modified(path)
+                                        | FileSystemEvent::Deleted { path, .. } => path,
+                                        FileSystemEvent::Renamed { from, .. } => from,
+                                    };
+                                    let watched = watched_paths_sync
+                                        .lock()
+                                        .unwrap_or_else(|p| p.into_inner());
+                                    let mut dirty =
+                                        dirty_roots.lock().unwrap_or_else(|p| p.into_inner());
+                                    if let Some(root) =
+                                        watched.iter().find(|root| failed_path.starts_with(root))
+                                    {
+                                        dirty.insert(root.clone());
+                                    }
                                 }
                             }
                         }
@@ -238,6 +326,11 @@ impl CrossPlatformWatcher {
                         for error in errors {
                             error!("File watcher error: {:?}", error);
                         }
+                        let watched = watched_paths_sync.lock().unwrap_or_else(|p| p.into_inner());
+                        dirty_roots
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .extend(watched.iter().cloned());
                     }
                 }
             },
@@ -247,8 +340,11 @@ impl CrossPlatformWatcher {
 
         let mut debouncer_guard = self.debouncer.write().await;
         *debouncer_guard = Some(debouncer);
-        
-        info!("File system watcher initialized with {}ms debounce", self.debounce_duration.as_millis());
+
+        info!(
+            "File system watcher initialized with {}ms debounce",
+            self.debounce_duration.as_millis()
+        );
         info!("Watcher callback registered and ready to receive events");
         Ok(())
     }
@@ -257,8 +353,11 @@ impl CrossPlatformWatcher {
 #[async_trait]
 impl FileSystemWatcher for CrossPlatformWatcher {
     async fn start_watching(&self, directories: &[PathBuf]) -> Result<()> {
-        info!("Starting file system watcher for {} directories", directories.len());
-        
+        info!(
+            "Starting file system watcher for {} directories",
+            directories.len()
+        );
+
         // Initialize the watcher if not already done
         if self.debouncer.read().await.is_none() {
             self.initialize_watcher().await?;
@@ -267,13 +366,16 @@ impl FileSystemWatcher for CrossPlatformWatcher {
         let mut debouncer_guard = self.debouncer.write().await;
         if let Some(ref mut debouncer) = *debouncer_guard {
             let mut watched_paths = self.watched_paths.write().await;
-            
+
             for directory in directories {
                 if !directory.exists() {
-                    warn!("Directory does not exist, skipping: {}", directory.display());
+                    warn!(
+                        "Directory does not exist, skipping: {}",
+                        directory.display()
+                    );
                     continue;
                 }
-                
+
                 if !directory.is_dir() {
                     warn!("Path is not a directory, skipping: {}", directory.display());
                     continue;
@@ -282,11 +384,18 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 match debouncer.watch(directory, RecursiveMode::Recursive) {
                     Ok(()) => {
                         watched_paths.insert(directory.clone());
+                        self.watched_paths_sync
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(directory.clone());
                         info!("Started watching directory: {}", directory.display());
-                        
+
                         // Test if directory is accessible
                         if directory.exists() && directory.is_dir() {
-                            info!("Directory exists and is accessible: {}", directory.display());
+                            info!(
+                                "Directory exists and is accessible: {}",
+                                directory.display()
+                            );
                         } else {
                             warn!("Directory may not be accessible: {}", directory.display());
                         }
@@ -304,16 +413,20 @@ impl FileSystemWatcher for CrossPlatformWatcher {
 
     async fn stop_watching(&self) -> Result<()> {
         info!("Stopping file system watcher");
-        
+
         let mut debouncer_guard = self.debouncer.write().await;
         if let Some(debouncer) = debouncer_guard.take() {
             // The debouncer will be dropped here, stopping the watcher
             drop(debouncer);
         }
-        
+
         let mut watched_paths = self.watched_paths.write().await;
         watched_paths.clear();
-        
+        self.watched_paths_sync
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
+
         info!("File system watcher stopped");
         Ok(())
     }
@@ -327,7 +440,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 return receiver;
             }
         }
-        
+
         // If we can't get the original receiver, create a new channel
         // This shouldn't happen in normal usage
         warn!("Creating new event receiver - original may have been consumed");
@@ -344,7 +457,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
         let mut debouncer_guard = self.debouncer.write().await;
         if let Some(ref mut debouncer) = *debouncer_guard {
             let mut watched_paths = self.watched_paths.write().await;
-            
+
             if watched_paths.contains(path) {
                 debug!("Path already being watched: {}", path.display());
                 return Ok(());
@@ -353,6 +466,10 @@ impl FileSystemWatcher for CrossPlatformWatcher {
             match debouncer.watch(path, RecursiveMode::Recursive) {
                 Ok(()) => {
                     watched_paths.insert(path.to_path_buf());
+                    self.watched_paths_sync
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(path.to_path_buf());
                     info!("Added watch path: {}", path.display());
                     Ok(())
                 }
@@ -362,7 +479,10 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 }
             }
         } else {
-            warn!("Watcher not initialized, cannot add path: {}", path.display());
+            warn!(
+                "Watcher not initialized, cannot add path: {}",
+                path.display()
+            );
             Ok(())
         }
     }
@@ -371,7 +491,7 @@ impl FileSystemWatcher for CrossPlatformWatcher {
         let mut debouncer_guard = self.debouncer.write().await;
         if let Some(ref mut debouncer) = *debouncer_guard {
             let mut watched_paths = self.watched_paths.write().await;
-            
+
             if !watched_paths.contains(path) {
                 debug!("Path not being watched: {}", path.display());
                 return Ok(());
@@ -380,6 +500,10 @@ impl FileSystemWatcher for CrossPlatformWatcher {
             match debouncer.unwatch(path) {
                 Ok(()) => {
                     watched_paths.remove(path);
+                    self.watched_paths_sync
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .remove(path);
                     info!("Removed watch path: {}", path.display());
                     Ok(())
                 }
@@ -389,7 +513,10 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 }
             }
         } else {
-            warn!("Watcher not initialized, cannot remove path: {}", path.display());
+            warn!(
+                "Watcher not initialized, cannot remove path: {}",
+                path.display()
+            );
             Ok(())
         }
     }
@@ -422,7 +549,7 @@ mod tests {
     #[tokio::test]
     async fn test_media_file_detection() {
         let watcher = CrossPlatformWatcher::new();
-        
+
         assert!(watcher.is_media_file(Path::new("test.mp4")));
         assert!(watcher.is_media_file(Path::new("test.MP3")));
         assert!(watcher.is_media_file(Path::new("test.jpg")));
@@ -433,7 +560,9 @@ mod tests {
     #[tokio::test]
     async fn test_watch_nonexistent_directory() {
         let watcher = CrossPlatformWatcher::new();
-        let result = watcher.start_watching(&[PathBuf::from("/nonexistent/path")]).await;
+        let result = watcher
+            .start_watching(&[PathBuf::from("/nonexistent/path")])
+            .await;
         // Should not fail, just log a warning
         assert!(result.is_ok());
     }
@@ -442,18 +571,20 @@ mod tests {
     async fn test_watch_and_unwatch() {
         let temp_dir = TempDir::new().unwrap();
         let watcher = CrossPlatformWatcher::new();
-        
+
         // Start watching
-        let result = watcher.start_watching(&[temp_dir.path().to_path_buf()]).await;
+        let result = watcher
+            .start_watching(&[temp_dir.path().to_path_buf()])
+            .await;
         assert!(result.is_ok());
-        
+
         // Check if watching
         assert!(watcher.is_watching(temp_dir.path()).await);
-        
+
         // Stop watching
         let result = watcher.stop_watching().await;
         assert!(result.is_ok());
-        
+
         // Should no longer be watching
         assert!(!watcher.is_watching(temp_dir.path()).await);
     }
@@ -462,20 +593,23 @@ mod tests {
     async fn test_file_events() {
         let temp_dir = TempDir::new().unwrap();
         let watcher = CrossPlatformWatcher::new();
-        
+
         // Get event receiver before starting watcher
         let mut receiver = watcher.get_event_receiver();
-        
+
         // Start watching
-        watcher.start_watching(&[temp_dir.path().to_path_buf()]).await.unwrap();
-        
+        watcher
+            .start_watching(&[temp_dir.path().to_path_buf()])
+            .await
+            .unwrap();
+
         // Give the watcher time to initialize
         sleep(Duration::from_millis(200)).await;
-        
+
         // Create a media file
         let test_file = temp_dir.path().join("test.mp4");
         fs::write(&test_file, b"test content").unwrap();
-        
+
         // Wait for the correct event with timeout, ignoring directory creation events
         let timeout_duration = Duration::from_secs(5);
         let correct_event_result = timeout(timeout_duration, async {
@@ -483,9 +617,12 @@ mod tests {
                 let event = receiver.recv().await;
                 match event {
                     Some(FileSystemEvent::Created(path)) => {
-                        let canonical_received = path.canonicalize().unwrap_or_else(|_| path.clone());
-                        let canonical_expected = test_file.canonicalize().unwrap_or_else(|_| test_file.clone());
-                        
+                        let canonical_received =
+                            path.canonicalize().unwrap_or_else(|_| path.clone());
+                        let canonical_expected = test_file
+                            .canonicalize()
+                            .unwrap_or_else(|_| test_file.clone());
+
                         if canonical_received == canonical_expected {
                             // This is the event we are looking for
                             return Some(FileSystemEvent::Created(path));
@@ -504,7 +641,8 @@ mod tests {
                     }
                 }
             }
-        }).await;
+        })
+        .await;
 
         if let Ok(Some(event)) = correct_event_result {
             match event {
@@ -519,7 +657,7 @@ mod tests {
             // Events might be flaky in test environments, so we don't fail the test
             warn!("No specific file creation event received within {:?}. This can sometimes happen in test environments.", timeout_duration);
         }
-        
+
         watcher.stop_watching().await.unwrap();
     }
 }

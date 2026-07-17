@@ -1,11 +1,11 @@
+use audiotags::Tag;
 use std::fs;
 use std::sync::Arc;
 use tempfile::tempdir;
-use audiotags::Tag;
 
-use vuio::database::DatabaseManager;
-use vuio::database::redb::RedbDatabase;
 use vuio::database::playlist_formats::PlaylistFileManager;
+use vuio::database::redb::RedbDatabase;
+use vuio::database::DatabaseManager;
 use vuio::media::MediaScanner;
 
 fn decode_base64(s: &str) -> Vec<u8> {
@@ -13,9 +13,11 @@ fn decode_base64(s: &str) -> Vec<u8> {
     let mut bytes = Vec::new();
     let mut buffer = 0u32;
     let mut bits = 0;
-    
+
     for c in s.chars() {
-        if c == '=' { break; }
+        if c == '=' {
+            break;
+        }
         if let Some(pos) = CHARSET.iter().position(|&x| x == c as u8) {
             buffer = (buffer << 6) | pos as u32;
             bits += 6;
@@ -35,7 +37,7 @@ async fn test_audio_implementation_and_features() {
     let raw_media_dir = temp_dir.path().join("media");
     fs::create_dir_all(&raw_media_dir).unwrap();
     let media_dir = fs::canonicalize(raw_media_dir).unwrap();
-    
+
     let db_path = temp_dir.path().join("test_media.redb");
     let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
@@ -139,7 +141,10 @@ async fn test_audio_implementation_and_features() {
 
     let back_in_black_tracks = db.get_music_by_album("Back In Black", None).await.unwrap();
     assert_eq!(back_in_black_tracks.len(), 1);
-    assert_eq!(back_in_black_tracks[0].title.as_deref(), Some("Back In Black"));
+    assert_eq!(
+        back_in_black_tracks[0].title.as_deref(),
+        Some("Back In Black")
+    );
 
     // Verify querying genres and tracks by genre
     let genres = db.get_genres().await.unwrap();
@@ -153,7 +158,10 @@ async fn test_audio_implementation_and_features() {
 
     // Verify querying years and tracks by year
     let years = db.get_years().await.unwrap();
-    let year_values: Vec<u32> = years.iter().map(|c| c.name.parse::<u32>().unwrap()).collect();
+    let year_values: Vec<u32> = years
+        .iter()
+        .map(|c| c.name.parse::<u32>().unwrap())
+        .collect();
     assert!(year_values.contains(&1980));
     assert!(year_values.contains(&1991));
 
@@ -189,58 +197,77 @@ Version=2
     fs::write(&pls_path, pls_content).unwrap();
 
     // Import playlists recursively
-    let playlist_ids = PlaylistFileManager::scan_and_import_playlists_recursive(db.as_ref(), &media_dir).await.unwrap();
+    let playlist_ids =
+        PlaylistFileManager::scan_and_import_playlists_recursive(db.as_ref(), &media_dir)
+            .await
+            .unwrap();
     assert_eq!(playlist_ids.len(), 2);
 
     let playlists = db.get_playlists().await.unwrap();
     assert_eq!(playlists.len(), 2);
-    
+
     let playlist_names: Vec<&str> = playlists.iter().map(|p| p.name.as_str()).collect();
     assert!(playlist_names.contains(&"favorites"));
     assert!(playlist_names.contains(&"rock"));
 
     // Verify favorites tracks
-    let favorites_id = playlists.iter().find(|p| p.name == "favorites").unwrap().id.unwrap();
+    let favorites_id = playlists
+        .iter()
+        .find(|p| p.name == "favorites")
+        .unwrap()
+        .id
+        .unwrap();
     let favorites_tracks = db.get_playlist_tracks(favorites_id).await.unwrap();
     assert_eq!(favorites_tracks.len(), 3);
-    let fav_titles: Vec<&str> = favorites_tracks.iter().map(|t| t.title.as_deref().unwrap()).collect();
+    let fav_titles: Vec<&str> = favorites_tracks
+        .iter()
+        .map(|t| t.title.as_deref().unwrap())
+        .collect();
     assert!(fav_titles.contains(&"Back In Black"));
     assert!(fav_titles.contains(&"Enter Sandman"));
     assert!(fav_titles.contains(&"Stairway to Heaven"));
 
     // Verify rock tracks
-    let rock_id = playlists.iter().find(|p| p.name == "rock").unwrap().id.unwrap();
+    let rock_id = playlists
+        .iter()
+        .find(|p| p.name == "rock")
+        .unwrap()
+        .id
+        .unwrap();
     let rock_tracks = db.get_playlist_tracks(rock_id).await.unwrap();
     assert_eq!(rock_tracks.len(), 2);
-    let rock_titles: Vec<&str> = rock_tracks.iter().map(|t| t.title.as_deref().unwrap()).collect();
+    let rock_titles: Vec<&str> = rock_tracks
+        .iter()
+        .map(|t| t.title.as_deref().unwrap())
+        .collect();
     assert!(rock_titles.contains(&"Back In Black"));
     assert!(rock_titles.contains(&"Time"));
 }
 
 #[tokio::test]
 async fn test_cover_art_retrieval_and_xml() {
+    use axum::extract::{Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
     use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use vuio::database::DatabaseManager;
-    use vuio::database::redb::RedbDatabase;
-    use vuio::media::MediaScanner;
-    use vuio::state::AppState;
     use vuio::config::AppConfig;
-    use vuio::platform::PlatformInfo;
+    use vuio::database::redb::RedbDatabase;
+    use vuio::database::DatabaseManager;
+    use vuio::media::MediaScanner;
     use vuio::platform::filesystem::create_platform_filesystem_manager;
-    use vuio::web::handlers::{WebHandlerMetrics, serve_cover};
+    use vuio::platform::PlatformInfo;
+    use vuio::state::AppState;
+    use vuio::web::handlers::{serve_cover, WebHandlerMetrics};
     use vuio::web::xml::generate_browse_response;
-    use axum::extract::{State, Path};
-    use axum::response::IntoResponse;
-    use axum::http::StatusCode;
 
     // 1. Setup temporary directory for media and database
     let temp_dir = tempdir().unwrap();
     let raw_media_dir = temp_dir.path().join("media");
     fs::create_dir_all(&raw_media_dir).unwrap();
     let media_dir = fs::canonicalize(raw_media_dir).unwrap();
-    
+
     let db_path = temp_dir.path().join("test_cover.redb");
     let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
@@ -272,8 +299,9 @@ async fn test_cover_art_retrieval_and_xml() {
     let filesystem_manager = Arc::from(create_platform_filesystem_manager());
     let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
     let web_metrics = Arc::new(WebHandlerMetrics::new());
-    
+
     let app_state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         config,
         database: db.clone(),
         platform_info,
@@ -287,18 +315,17 @@ async fn test_cover_art_retrieval_and_xml() {
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // 7. Verify UPnP XML response generation contains upnp:albumArtURI
-    let xml_response = generate_browse_response(
-        "audio",
-        &[],
-        &[db_file.clone()],
-        &app_state,
-        "127.0.0.1",
-    ).await;
-    
-    let expected_url = format!("http://127.0.0.1:{}/media/{}/cover", app_state.config.server.port, file_id);
+    let xml_response =
+        generate_browse_response("audio", &[], &[db_file.clone()], &app_state, "127.0.0.1").await;
+
+    let expected_url = format!(
+        "http://127.0.0.1:{}/media/{}/cover",
+        app_state.config.server.port, file_id
+    );
     assert!(
         xml_response.contains("upnp:albumArtURI"),
         "XML response did not contain upnp:albumArtURI tag"
@@ -310,45 +337,47 @@ async fn test_cover_art_retrieval_and_xml() {
     );
 
     // 8. Test serve_cover endpoint directly
-    let response = serve_cover(
-        State(app_state.clone()),
-        Path(file_id.to_string()),
-    ).await.unwrap().into_response();
+    let response = serve_cover(State(app_state.clone()), Path(file_id.to_string()))
+        .await
+        .unwrap()
+        .into_response();
 
     assert_eq!(response.status(), StatusCode::OK);
-    
+
     let headers = response.headers();
     assert_eq!(headers.get("content-type").unwrap(), "image/jpeg");
 
-    let body_bytes = axum::body::to_bytes(response.into_body(), 10000).await.unwrap();
+    let body_bytes = axum::body::to_bytes(response.into_body(), 10000)
+        .await
+        .unwrap();
     assert_eq!(body_bytes.as_ref(), fake_cover_data);
 }
 
 #[tokio::test]
 async fn test_radio_playlist_import() {
+    use axum::extract::{ConnectInfo, Path, State};
+    use axum::http::StatusCode;
+    use axum::http::{HeaderMap, Method};
+    use axum::response::IntoResponse;
+    use futures_util::StreamExt;
     use std::fs;
     use std::sync::Arc;
     use tempfile::tempdir;
-    use vuio::database::DatabaseManager;
-    use vuio::database::redb::RedbDatabase;
-    use vuio::database::playlist_formats::PlaylistFileManager;
-    use vuio::state::AppState;
     use vuio::config::AppConfig;
-    use vuio::platform::PlatformInfo;
+    use vuio::database::playlist_formats::PlaylistFileManager;
+    use vuio::database::redb::RedbDatabase;
+    use vuio::database::DatabaseManager;
     use vuio::platform::filesystem::create_platform_filesystem_manager;
+    use vuio::platform::PlatformInfo;
+    use vuio::state::AppState;
+    use vuio::web::handlers::{serve_media, WebHandlerMetrics};
     use vuio::web::xml::generate_browse_response;
-    use vuio::web::handlers::{WebHandlerMetrics, serve_media};
-    use axum::extract::{State, Path, ConnectInfo};
-    use axum::http::{Method, HeaderMap};
-    use axum::response::IntoResponse;
-    use axum::http::StatusCode;
-    use futures_util::StreamExt;
 
     // 1. Setup temporary directory for media and database
     let temp_dir = tempdir().unwrap();
     let media_dir = temp_dir.path().join("media");
     let db_path = temp_dir.path().join("test_radio.redb");
-    
+
     fs::create_dir_all(&media_dir).unwrap();
 
     // Create radio subdirectory
@@ -368,8 +397,11 @@ https://cast1.asurahosting.com/proxy/julien/stream
     db.initialize().await.unwrap();
 
     // 3. Scan and import playlist files recursively
-    let playlist_ids = PlaylistFileManager::scan_and_import_playlists_recursive(db.as_ref(), &media_dir).await.unwrap();
-    
+    let playlist_ids =
+        PlaylistFileManager::scan_and_import_playlists_recursive(db.as_ref(), &media_dir)
+            .await
+            .unwrap();
+
     // Virtual radio playlists don't return standard playlist IDs (they add directly to files table)
     assert_eq!(playlist_ids.len(), 0);
 
@@ -382,25 +414,29 @@ https://cast1.asurahosting.com/proxy/julien/stream
             radio_files.push(file);
         }
     }
-    
+
     assert_eq!(radio_files.len(), 1);
     let radio = &radio_files[0];
     assert_eq!(radio.filename, "ABC Chill");
     assert_eq!(radio.title.as_deref().unwrap(), "ABC Chill");
-    assert_eq!(radio.path.to_string_lossy().to_string(), "https://cast1.asurahosting.com/proxy/julien/stream");
-    
+    assert_eq!(
+        radio.path.to_string_lossy().to_string(),
+        "https://cast1.asurahosting.com/proxy/julien/stream"
+    );
+
     // 4. Initialize AppState
     let mut app_config = AppConfig::default();
     app_config.server.port = 8099;
     app_config.media.autoplay_enabled = true;
     let config = Arc::new(app_config);
-    
+
     let platform_info = Arc::new(PlatformInfo::detect().await.unwrap());
     let filesystem_manager = Arc::from(create_platform_filesystem_manager());
     let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
     let web_metrics = Arc::new(WebHandlerMetrics::new());
-    
+
     let app_state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         config,
         database: db.clone(),
         platform_info,
@@ -414,20 +450,42 @@ https://cast1.asurahosting.com/proxy/julien/stream
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // 5. Test UPnP XML Browse response
     // Root container browse (ObjectID "0")
     let server_ip = app_state.get_server_ip();
     let root_xml = generate_browse_response("0", &[], &[], &app_state, &server_ip).await;
-    assert!(root_xml.contains("id=&quot;radio&quot;"), "Root XML did not contain radio container: {}", root_xml);
+    assert!(
+        root_xml.contains("id=&quot;radio&quot;"),
+        "Root XML did not contain radio container: {}",
+        root_xml
+    );
 
     // Radio container browse (ObjectID "radio")
-    let radio_xml = generate_browse_response("radio", &[], &radio_files, &app_state, &server_ip).await;
-    assert!(radio_xml.contains("ABC Chill"), "Radio XML did not contain ABC Chill stream: {}", radio_xml);
-    assert!(radio_xml.contains("protocolInfo=&quot;http-get:*:audio/mpeg:"), "Radio XML did not contain correct protocolInfo: {}", radio_xml);
-    assert!(radio_xml.contains("size=&quot;0&quot;"), "Radio XML did not contain size=\"0\": {}", radio_xml);
-    assert!(!radio_xml.contains("duration="), "Radio XML should not contain duration: {}", radio_xml);
+    let radio_xml =
+        generate_browse_response("radio", &[], &radio_files, &app_state, &server_ip).await;
+    assert!(
+        radio_xml.contains("ABC Chill"),
+        "Radio XML did not contain ABC Chill stream: {}",
+        radio_xml
+    );
+    assert!(
+        radio_xml.contains("protocolInfo=&quot;http-get:*:audio/mpeg:"),
+        "Radio XML did not contain correct protocolInfo: {}",
+        radio_xml
+    );
+    assert!(
+        radio_xml.contains("size=&quot;0&quot;"),
+        "Radio XML did not contain size=\"0\": {}",
+        radio_xml
+    );
+    assert!(
+        !radio_xml.contains("duration="),
+        "Radio XML should not contain duration: {}",
+        radio_xml
+    );
 
     // 6. Test serve_media redirection endpoint
     let file_id = radio.id.unwrap();
@@ -438,10 +496,20 @@ https://cast1.asurahosting.com/proxy/julien/stream
         Path(file_id.to_string()),
         Method::GET,
         HeaderMap::new(),
-    ).await.unwrap().into_response();
+    )
+    .await
+    .unwrap()
+    .into_response();
 
     assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT); // axum::response::Redirect::temporary returns 307 Temporary Redirect
-    let location_header = response.headers().get("location").unwrap().to_str().unwrap();
-    assert_eq!(location_header, "https://cast1.asurahosting.com/proxy/julien/stream");
+    let location_header = response
+        .headers()
+        .get("location")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert_eq!(
+        location_header,
+        "https://cast1.asurahosting.com/proxy/julien/stream"
+    );
 }
-

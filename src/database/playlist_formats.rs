@@ -42,8 +42,12 @@ impl PlaylistFileManager {
         file_path: &Path,
         playlist_name: Option<String>,
     ) -> Result<i64> {
-        let format = PlaylistFormat::from_extension(file_path)
-            .ok_or_else(|| anyhow!("Unsupported playlist format for file: {}", file_path.display()))?;
+        let format = PlaylistFormat::from_extension(file_path).ok_or_else(|| {
+            anyhow!(
+                "Unsupported playlist format for file: {}",
+                file_path.display()
+            )
+        })?;
 
         let file_content = fs::read_to_string(file_path)?;
         let playlist_name = playlist_name.unwrap_or_else(|| {
@@ -56,10 +60,16 @@ impl PlaylistFileManager {
 
         let base_dir = file_path.parent().unwrap_or_else(|| Path::new(""));
 
-        match format {
-            PlaylistFormat::M3U => Self::import_m3u(database, &file_content, &playlist_name, base_dir).await,
-            PlaylistFormat::PLS => Self::import_pls(database, &file_content, &playlist_name, base_dir).await,
-        }
+        let playlist_id = match format {
+            PlaylistFormat::M3U => {
+                Self::import_m3u(database, &file_content, &playlist_name, base_dir).await
+            }
+            PlaylistFormat::PLS => {
+                Self::import_pls(database, &file_content, &playlist_name, base_dir).await
+            }
+        }?;
+        database.set_playlist_source(playlist_id, file_path).await?;
+        Ok(playlist_id)
     }
 
     /// Export a playlist to a file
@@ -134,13 +144,14 @@ impl PlaylistFileManager {
             .collect();
 
         // Add all tracks to playlist in batch operation
-        let added_count = Self::batch_add_tracks_to_playlist(
-            database,
-            playlist_id,
-            &file_paths_with_positions,
-        ).await?;
+        let added_count =
+            Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions)
+                .await?;
 
-        debug!("Imported {} tracks to playlist '{}'", added_count, playlist_name);
+        debug!(
+            "Imported {} tracks to playlist '{}'",
+            added_count, playlist_name
+        );
         Ok(playlist_id)
     }
 
@@ -185,13 +196,14 @@ impl PlaylistFileManager {
             .collect();
 
         // Add all tracks to playlist in batch operation
-        let added_count = Self::batch_add_tracks_to_playlist(
-            database,
-            playlist_id,
-            &file_paths_with_positions,
-        ).await?;
+        let added_count =
+            Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions)
+                .await?;
 
-        debug!("Imported {} tracks to playlist '{}'", added_count, playlist_name);
+        debug!(
+            "Imported {} tracks to playlist '{}'",
+            added_count, playlist_name
+        );
         Ok(playlist_id)
     }
 
@@ -201,26 +213,34 @@ impl PlaylistFileManager {
         tracks: &[MediaFile],
         output_path: &Path,
     ) -> Result<()> {
-        debug!("Exporting playlist '{}' to M3U format: {}", playlist.name, output_path.display());
+        debug!(
+            "Exporting playlist '{}' to M3U format: {}",
+            playlist.name,
+            output_path.display()
+        );
 
         let mut file = fs::File::create(output_path)?;
-        
+
         // Write M3U header
         writeln!(file, "#EXTM3U")?;
-        
+
         for track in tracks {
             // Write extended info if available
-            let duration = track.duration
-                .map(|d| d.as_secs() as i32)
-                .unwrap_or(-1);
-            
-            let title = track.title.as_deref()
-                .or(track.filename.strip_suffix(&format!(".{}", 
-                    track.path.extension()
+            let duration = track.duration.map(|d| d.as_secs() as i32).unwrap_or(-1);
+
+            let title = track
+                .title
+                .as_deref()
+                .or(track.filename.strip_suffix(&format!(
+                    ".{}",
+                    track
+                        .path
+                        .extension()
                         .and_then(|ext| ext.to_str())
-                        .unwrap_or(""))))
+                        .unwrap_or("")
+                )))
                 .unwrap_or(&track.filename);
-            
+
             let artist = track.artist.as_deref().unwrap_or("Unknown Artist");
             
             writeln!(file, "#EXTINF:{},{} - {}", duration, artist, title)?;
@@ -237,10 +257,14 @@ impl PlaylistFileManager {
         tracks: &[MediaFile],
         output_path: &Path,
     ) -> Result<()> {
-        debug!("Exporting playlist '{}' to PLS format: {}", playlist.name, output_path.display());
+        debug!(
+            "Exporting playlist '{}' to PLS format: {}",
+            playlist.name,
+            output_path.display()
+        );
 
         let mut file = fs::File::create(output_path)?;
-        
+
         // Write PLS header
         writeln!(file, "[playlist]")?;
         writeln!(file, "NumberOfEntries={}", tracks.len())?;
@@ -317,8 +341,13 @@ impl PlaylistFileManager {
 
         // Add all found tracks to playlist in a single transaction
         if !media_file_entries.is_empty() {
-            database.batch_add_to_playlist(playlist_id, &media_file_entries).await?;
-            debug!("Added {} tracks to playlist in batch operation", media_file_entries.len());
+            database
+                .batch_add_to_playlist(playlist_id, &media_file_entries)
+                .await?;
+            debug!(
+                "Added {} tracks to playlist in batch operation",
+                media_file_entries.len()
+            );
         }
 
         Ok(added_count)
@@ -333,7 +362,8 @@ impl PlaylistFileManager {
     ) -> Result<()> {
         // Use batch method for single track
         let file_paths_with_positions = vec![(file_path_str.to_string(), position)];
-        Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions).await?;
+        Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions)
+            .await?;
         Ok(())
     }
 
@@ -342,10 +372,13 @@ impl PlaylistFileManager {
         database: &D,
         directory: &Path,
     ) -> Result<Vec<i64>> {
-        debug!("Scanning directory for playlist files: {}", directory.display());
-        
+        debug!(
+            "Scanning directory for playlist files: {}",
+            directory.display()
+        );
+
         let mut imported_playlists = Vec::new();
-        
+
         if !directory.is_dir() {
             return Err(anyhow!("Path is not a directory: {}", directory.display()));
         }
@@ -370,8 +403,11 @@ impl PlaylistFileManager {
                 }
             }
         }
-        
-        debug!("Imported {} playlists from directory", imported_playlists.len());
+
+        debug!(
+            "Imported {} playlists from directory",
+            imported_playlists.len()
+        );
         Ok(imported_playlists)
     }
 
@@ -382,7 +418,10 @@ impl PlaylistFileManager {
     ) -> Result<Vec<i64>> {
         use tracing::info;
 
-        info!("Recursively scanning for playlist files: {}", directory.display());
+        info!(
+            "Recursively scanning for playlist files: {}",
+            directory.display()
+        );
 
         let mut imported_playlists = Vec::new();
         let mut dirs_to_scan = vec![directory.to_path_buf()];
@@ -415,7 +454,8 @@ impl PlaylistFileManager {
                         // Check if the playlist is located inside a "radio" or "Radio" directory under the watched root
                         let is_radio = if let Ok(rel_path) = path.strip_prefix(directory) {
                             if let Some(first_component) = rel_path.components().next() {
-                                let name = first_component.as_os_str().to_string_lossy().to_lowercase();
+                                let name =
+                                    first_component.as_os_str().to_string_lossy().to_lowercase();
                                 name == "radio"
                             } else {
                                 false
@@ -444,7 +484,10 @@ impl PlaylistFileManager {
             }
         }
 
-        info!("Imported {} playlists from directory tree", imported_playlists.len());
+        info!(
+            "Imported {} playlists from directory tree",
+            imported_playlists.len()
+        );
         Ok(imported_playlists)
     }
 
@@ -455,12 +498,18 @@ impl PlaylistFileManager {
     ) -> Result<()> {
         use futures_util::StreamExt;
 
-        let format = PlaylistFormat::from_extension(file_path)
-            .ok_or_else(|| anyhow!("Unsupported playlist format for file: {}", file_path.display()))?;
+        let format = PlaylistFormat::from_extension(file_path).ok_or_else(|| {
+            anyhow!(
+                "Unsupported playlist format for file: {}",
+                file_path.display()
+            )
+        })?;
 
         let file_content = fs::read_to_string(file_path)?;
-        let playlist_path_str = file_path.to_string_lossy().to_string();
-        
+        let playlist_path_str = crate::platform::filesystem::create_platform_path_normalizer()
+            .to_canonical(file_path)
+            .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
+
         let mut stations = Vec::new();
         match format {
             PlaylistFormat::M3U => {
@@ -527,14 +576,20 @@ impl PlaylistFileManager {
         let mut stream = database.stream_all_media_files();
         while let Some(res) = stream.next().await {
             if let Ok(file) = res {
-                if file.mime_type == "audio/radio" && file.album.as_deref() == Some(&playlist_path_str) {
+                if file.mime_type == "audio/radio"
+                    && file.album.as_deref() == Some(&playlist_path_str)
+                {
                     old_paths.push(file.path.clone());
                 }
             }
         }
-        
+
         if !old_paths.is_empty() {
-            debug!("Removing {} old radio streams for playlist {}", old_paths.len(), file_path.display());
+            debug!(
+                "Removing {} old radio streams for playlist {}",
+                old_paths.len(),
+                file_path.display()
+            );
             let _ = database.bulk_remove_media_files(&old_paths).await;
         }
 
@@ -566,7 +621,13 @@ impl PlaylistFileManager {
         // Sanitize the playlist name for use as filename
         let safe_name = playlist_name
             .chars()
-            .map(|c| if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' { c } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim()
             .replace("  ", " ");
@@ -601,7 +662,6 @@ fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -610,11 +670,26 @@ mod tests {
 
     #[test]
     fn test_format_detection() {
-        assert_eq!(PlaylistFormat::from_extension(Path::new("test.m3u")), Some(PlaylistFormat::M3U));
-        assert_eq!(PlaylistFormat::from_extension(Path::new("test.M3U")), Some(PlaylistFormat::M3U));
-        assert_eq!(PlaylistFormat::from_extension(Path::new("test.m3u8")), Some(PlaylistFormat::M3U));
-        assert_eq!(PlaylistFormat::from_extension(Path::new("test.pls")), Some(PlaylistFormat::PLS));
-        assert_eq!(PlaylistFormat::from_extension(Path::new("test.PLS")), Some(PlaylistFormat::PLS));
+        assert_eq!(
+            PlaylistFormat::from_extension(Path::new("test.m3u")),
+            Some(PlaylistFormat::M3U)
+        );
+        assert_eq!(
+            PlaylistFormat::from_extension(Path::new("test.M3U")),
+            Some(PlaylistFormat::M3U)
+        );
+        assert_eq!(
+            PlaylistFormat::from_extension(Path::new("test.m3u8")),
+            Some(PlaylistFormat::M3U)
+        );
+        assert_eq!(
+            PlaylistFormat::from_extension(Path::new("test.pls")),
+            Some(PlaylistFormat::PLS)
+        );
+        assert_eq!(
+            PlaylistFormat::from_extension(Path::new("test.PLS")),
+            Some(PlaylistFormat::PLS)
+        );
         assert_eq!(PlaylistFormat::from_extension(Path::new("test.txt")), None);
     }
 
@@ -692,8 +767,9 @@ Version=2
         // Basic parsing test
         let lines: Vec<&str> = pls_content.lines().collect();
         assert!(lines[0] == "[playlist]");
-        
-        let file_lines: Vec<&str> = lines.iter()
+
+        let file_lines: Vec<&str> = lines
+            .iter()
             .filter(|line| line.starts_with("File"))
             .cloned()
             .collect();
@@ -710,11 +786,10 @@ Version=2
             updated_at: std::time::SystemTime::now(),
         };
 
-        let tracks = vec![
-            MediaFile {
-                id: Some(1),
-                path: PathBuf::from("/test/song1.mp3"),
-                filename: "song1.mp3".to_string(),
+        let tracks = vec![MediaFile {
+            id: Some(1),
+            path: PathBuf::from("/test/song1.mp3"),
+            filename: "song1.mp3".to_string(),
                 size: 1000,
                 modified: std::time::SystemTime::now(),
                 mime_type: "audio/mpeg".to_string(),
@@ -725,11 +800,10 @@ Version=2
                 genre: Some("Rock".to_string()),
                 track_number: Some(1),
                 year: Some(2023),
-                album_artist: Some("Test Artist".to_string()),
-                created_at: std::time::SystemTime::now(),
-                updated_at: std::time::SystemTime::now(),
-            }
-        ];
+            album_artist: Some("Test Artist".to_string()),
+            created_at: std::time::SystemTime::now(),
+            updated_at: std::time::SystemTime::now(),
+        }];
 
         let mut temp_file = NamedTempFile::new().unwrap();
         temp_file.write_all(b"").unwrap(); // Ensure file exists

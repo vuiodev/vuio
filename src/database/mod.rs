@@ -12,12 +12,19 @@ use crate::platform::DatabaseError;
 pub mod playlist_formats;
 pub mod redb;
 
-
 /// Represents a subdirectory in the media library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MediaDirectory {
     pub path: PathBuf,
     pub name: String,
+}
+
+/// Result of removing one file or a complete directory subtree.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RemovalSummary {
+    pub removed_files: usize,
+    pub affected_parents: Vec<PathBuf>,
+    pub mime_families: HashSet<String>,
 }
 
 /// Represents a playlist
@@ -144,10 +151,12 @@ pub trait DatabaseManager: Send + Sync {
     ///     }
     /// }
     /// ```
-    fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>>;
+    fn stream_all_media_files(
+        &self,
+    ) -> Pin<Box<dyn Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>>;
 
     /// Collect all media files from the stream (helper for tests)
-    /// 
+    ///
     /// This is a convenience method that collects all files from the stream into a Vec.
     /// Use this only for testing or when you need all files at once.
     async fn collect_all_media_files(&self) -> Result<Vec<MediaFile>> {
@@ -223,7 +232,8 @@ pub trait DatabaseManager: Send + Sync {
     async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>>;
 
     /// Get music files by album
-    async fn get_music_by_album(&self, album: &str, artist: Option<&str>) -> Result<Vec<MediaFile>>;
+    async fn get_music_by_album(&self, album: &str, artist: Option<&str>)
+        -> Result<Vec<MediaFile>>;
 
     /// Get music files by genre
     async fn get_music_by_genre(&self, genre: &str) -> Result<Vec<MediaFile>>;
@@ -250,11 +260,26 @@ pub trait DatabaseManager: Send + Sync {
     /// Delete a playlist
     async fn delete_playlist(&self, playlist_id: i64) -> Result<bool>;
 
+    /// Mark a playlist as derived from an on-disk source file.
+    async fn set_playlist_source(&self, playlist_id: i64, source_path: &Path) -> Result<()>;
+
+    /// Delete playlists/radio records derived from an on-disk source file.
+    async fn remove_derived_content_by_source(&self, source_path: &Path) -> Result<usize>;
+
     /// Add a track to a playlist
-    async fn add_to_playlist(&self, playlist_id: i64, media_file_id: i64, position: Option<u32>) -> Result<i64>;
+    async fn add_to_playlist(
+        &self,
+        playlist_id: i64,
+        media_file_id: i64,
+        position: Option<u32>,
+    ) -> Result<i64>;
 
     /// Add multiple tracks to a playlist in a single transaction (batch operation)
-    async fn batch_add_to_playlist(&self, playlist_id: i64, media_file_ids: &[(i64, u32)]) -> Result<Vec<i64>>;
+    async fn batch_add_to_playlist(
+        &self,
+        playlist_id: i64,
+        media_file_ids: &[(i64, u32)],
+    ) -> Result<Vec<i64>>;
 
     /// Get multiple files by their paths in a single query
     async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
@@ -269,6 +294,12 @@ pub trait DatabaseManager: Send + Sync {
     /// Remove multiple media files by paths in a single batch operation
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
 
+    /// Atomically remove every media file at or below a path component boundary.
+    async fn remove_media_under_path(&self, path: &Path) -> Result<RemovalSummary>;
+
+    /// Rebuild all derived indexes from the live file table.
+    async fn rebuild_derived_indexes(&self) -> Result<DatabaseHealth>;
+
     /// Get multiple files by their paths in a single batch query (alias for get_files_by_paths)
     async fn bulk_get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
         self.get_files_by_paths(paths).await
@@ -281,17 +312,36 @@ pub trait DatabaseManager: Send + Sync {
     async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>>;
 
     /// Reorder tracks in a playlist
-    async fn reorder_playlist(&self, playlist_id: i64, track_positions: &[(i64, u32)]) -> Result<()>;
+    async fn reorder_playlist(
+        &self,
+        playlist_id: i64,
+        track_positions: &[(i64, u32)],
+    ) -> Result<()>;
 
     // Playlist file format operations
     /// Import a playlist from a file (.m3u or .pls)
-    async fn import_playlist_file(&self, file_path: &Path, playlist_name: Option<String>) -> Result<i64> {
+    async fn import_playlist_file(
+        &self,
+        file_path: &Path,
+        playlist_name: Option<String>,
+    ) -> Result<i64> {
         playlist_formats::PlaylistFileManager::import_playlist(self, file_path, playlist_name).await
     }
 
     /// Export a playlist to a file
-    async fn export_playlist_file(&self, playlist_id: i64, output_path: &Path, format: playlist_formats::PlaylistFormat) -> Result<()> {
-        playlist_formats::PlaylistFileManager::export_playlist(self, playlist_id, output_path, format).await
+    async fn export_playlist_file(
+        &self,
+        playlist_id: i64,
+        output_path: &Path,
+        format: playlist_formats::PlaylistFormat,
+    ) -> Result<()> {
+        playlist_formats::PlaylistFileManager::export_playlist(
+            self,
+            playlist_id,
+            output_path,
+            format,
+        )
+        .await
     }
 
     /// Scan directory for playlist files and import them
@@ -301,7 +351,8 @@ pub trait DatabaseManager: Send + Sync {
 
     /// Recursively scan directory tree for playlist files and import them
     async fn scan_and_import_playlists_recursive(&self, directory: &Path) -> Result<Vec<i64>> {
-        playlist_formats::PlaylistFileManager::scan_and_import_playlists_recursive(self, directory).await
+        playlist_formats::PlaylistFileManager::scan_and_import_playlists_recursive(self, directory)
+            .await
     }
 
     // New methods for efficient path-based queries using canonical paths
@@ -310,10 +361,16 @@ pub trait DatabaseManager: Send + Sync {
     async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>>;
 
     /// Get direct subdirectories using canonical paths (optimized two-query approach)
-    async fn get_direct_subdirectories(&self, canonical_parent_path: &str) -> Result<Vec<MediaDirectory>>;
+    async fn get_direct_subdirectories(
+        &self,
+        canonical_parent_path: &str,
+    ) -> Result<Vec<MediaDirectory>>;
 
     /// Batch cleanup missing files using canonical paths and HashSet difference logic
-    async fn batch_cleanup_missing_files(&self, existing_canonical_paths: &HashSet<String>) -> Result<usize>;
+    async fn batch_cleanup_missing_files(
+        &self,
+        existing_canonical_paths: &HashSet<String>,
+    ) -> Result<usize>;
 
     /// Database-native file cleanup that performs cleanup entirely in SQL
     /// This method accepts existing paths and performs cleanup using temporary tables

@@ -1,23 +1,23 @@
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
-use std::path::PathBuf;
-use axum::extract::State;
-use axum::response::IntoResponse;
-use axum::http::StatusCode;
 
-use vuio::database::{DatabaseManager, MediaFile};
-use vuio::database::redb::RedbDatabase;
-use vuio::web::handlers::{get_prometheus_metrics, get_web_metrics, WebHandlerMetrics};
 use vuio::config::AppConfig;
+use vuio::database::redb::RedbDatabase;
+use vuio::database::{DatabaseManager, MediaFile};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
 use vuio::state::AppState;
+use vuio::web::handlers::{get_prometheus_metrics, get_web_metrics, WebHandlerMetrics};
 
 #[tokio::test]
 async fn test_metrics_endpoints_data() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test_metrics.redb");
-    
+
     // 1. Initialize DB and insert files of different types
     let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
@@ -52,14 +52,17 @@ async fn test_metrics_endpoints_data() {
     let filesystem_manager = Arc::from(create_platform_filesystem_manager());
     let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
     let web_metrics = Arc::new(WebHandlerMetrics::new());
-    
+
     // Record some mock web events to verify web metrics
     web_metrics.record_browse_request(15000, true); // Cache hit
     web_metrics.record_browse_request(30000, false); // Cache miss
     web_metrics.record_file_serve(50000, true); // 1 file served
-    web_metrics.bytes_transferred.fetch_add(1024 * 1024 * 100, std::sync::atomic::Ordering::Relaxed); // 100MB served
+    web_metrics
+        .bytes_transferred
+        .fetch_add(1024 * 1024 * 100, std::sync::atomic::Ordering::Relaxed); // 100MB served
 
     let app_state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         config,
         database: db,
         platform_info,
@@ -73,13 +76,18 @@ async fn test_metrics_endpoints_data() {
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // 3. Test get_web_metrics handler (JSON format)
-    let json_resp = get_web_metrics(State(app_state.clone())).await.into_response();
+    let json_resp = get_web_metrics(State(app_state.clone()))
+        .await
+        .into_response();
     assert_eq!(json_resp.status(), StatusCode::OK);
 
-    let body_bytes = axum::body::to_bytes(json_resp.into_body(), 10000).await.unwrap();
+    let body_bytes = axum::body::to_bytes(json_resp.into_body(), 10000)
+        .await
+        .unwrap();
     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
     let json_val: serde_json::Value = serde_json::from_str(&body_str).unwrap();
 
@@ -98,10 +106,14 @@ async fn test_metrics_endpoints_data() {
     assert_eq!(web_stats["cache_misses"], 1);
 
     // 4. Test get_prometheus_metrics handler (exposition text format)
-    let prom_resp = get_prometheus_metrics(State(app_state)).await.into_response();
+    let prom_resp = get_prometheus_metrics(State(app_state))
+        .await
+        .into_response();
     assert_eq!(prom_resp.status(), StatusCode::OK);
 
-    let prom_bytes = axum::body::to_bytes(prom_resp.into_body(), 10000).await.unwrap();
+    let prom_bytes = axum::body::to_bytes(prom_resp.into_body(), 10000)
+        .await
+        .unwrap();
     let prom_str = String::from_utf8(prom_bytes.to_vec()).unwrap();
 
     // Verify custom Prometheus gauges exist and have correct values

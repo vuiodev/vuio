@@ -1,22 +1,22 @@
+use axum::extract::{Query, State};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
-use std::path::PathBuf;
-use axum::extract::{State, Query};
 
-use vuio::database::{DatabaseManager, MediaFile};
-use vuio::database::redb::RedbDatabase;
 use vuio::config::AppConfig;
+use vuio::database::redb::RedbDatabase;
+use vuio::database::{DatabaseManager, MediaFile};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
 use vuio::state::AppState;
-use vuio::web::mcp::{message_handler, MessageQuery};
 use vuio::web::handlers::WebHandlerMetrics;
+use vuio::web::mcp::{message_handler, MessageQuery};
 
 #[tokio::test]
 async fn test_mcp_initialize_and_tools_list() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test_mcp.redb");
-    
+
     // 1. Initialize DB and insert some sample files
     let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
@@ -49,6 +49,7 @@ async fn test_mcp_initialize_and_tools_list() {
     let web_metrics = Arc::new(WebHandlerMetrics::new());
 
     let app_state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         config,
         database: db,
         platform_info,
@@ -62,12 +63,17 @@ async fn test_mcp_initialize_and_tools_list() {
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     };
 
     // Add a fake client channel so message handler can send back to the SSE receiver
     let client_id = "test-client-123".to_string();
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10);
-    app_state.mcp_clients.lock().await.insert(client_id.clone(), tx);
+    app_state
+        .mcp_clients
+        .lock()
+        .await
+        .insert(client_id.clone(), tx);
 
     // 3. Test `initialize` method
     let init_req = serde_json::json!({
@@ -78,9 +84,12 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        init_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        init_req.to_string(),
+    )
+    .await;
 
     // Check message sent through channel
     let response_str = rx.recv().await.unwrap();
@@ -98,9 +107,12 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        list_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        list_req.to_string(),
+    )
+    .await;
 
     let response_str2 = rx.recv().await.unwrap();
     let list_res: serde_json::Value = serde_json::from_str(&response_str2).unwrap();
@@ -124,14 +136,17 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        search_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        search_req.to_string(),
+    )
+    .await;
 
     let response_str3 = rx.recv().await.unwrap();
     let search_res: serde_json::Value = serde_json::from_str(&response_str3).unwrap();
     assert_eq!(search_res["id"], 3);
-    
+
     // Parse the inner text block from tool response
     let text = search_res["result"]["content"][0]["text"].as_str().unwrap();
     let search_data: serde_json::Value = serde_json::from_str(text).unwrap();
@@ -155,15 +170,20 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        list_media_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        list_media_req.to_string(),
+    )
+    .await;
 
     let response_str4 = rx.recv().await.unwrap();
     let list_media_res: serde_json::Value = serde_json::from_str(&response_str4).unwrap();
     assert_eq!(list_media_res["id"], 4);
 
-    let text_list = list_media_res["result"]["content"][0]["text"].as_str().unwrap();
+    let text_list = list_media_res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let list_data: serde_json::Value = serde_json::from_str(text_list).unwrap();
     assert_eq!(list_data["total_files"], 1);
     assert_eq!(list_data["files"][0]["filename"], "song.mp3");
@@ -184,15 +204,20 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        create_pl_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        create_pl_req.to_string(),
+    )
+    .await;
 
     let response_str5 = rx.recv().await.unwrap();
     let create_pl_res: serde_json::Value = serde_json::from_str(&response_str5).unwrap();
     assert_eq!(create_pl_res["id"], 5);
 
-    let create_text = create_pl_res["result"]["content"][0]["text"].as_str().unwrap();
+    let create_text = create_pl_res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let create_data: serde_json::Value = serde_json::from_str(create_text).unwrap();
     let playlist_id = create_data["playlist_id"].as_i64().unwrap();
     assert!(playlist_id > 0);
@@ -213,9 +238,12 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        add_track_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        add_track_req.to_string(),
+    )
+    .await;
 
     let response_str6 = rx.recv().await.unwrap();
     let add_track_res: serde_json::Value = serde_json::from_str(&response_str6).unwrap();
@@ -236,15 +264,20 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let _resp = message_handler(
         State(app_state.clone()),
-        Query(MessageQuery { client_id: client_id.clone() }),
-        get_tracks_req.to_string()
-    ).await;
+        Query(MessageQuery {
+            client_id: client_id.clone(),
+        }),
+        get_tracks_req.to_string(),
+    )
+    .await;
 
     let response_str7 = rx.recv().await.unwrap();
     let get_tracks_res: serde_json::Value = serde_json::from_str(&response_str7).unwrap();
     assert_eq!(get_tracks_res["id"], 7);
 
-    let tracks_text = get_tracks_res["result"]["content"][0]["text"].as_str().unwrap();
+    let tracks_text = get_tracks_res["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap();
     let tracks_data: serde_json::Value = serde_json::from_str(tracks_text).unwrap();
     assert_eq!(tracks_data["tracks_count"], 1);
     assert_eq!(tracks_data["tracks"][0]["filename"], "song.mp3");

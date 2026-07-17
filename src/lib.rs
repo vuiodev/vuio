@@ -27,8 +27,18 @@ pub mod state {
     }
 
     #[derive(Clone)]
+    pub struct UpnpSubscription {
+        pub callback_url: String,
+        pub expires_at: std::time::Instant,
+        pub next_sequence: u32,
+        pub consecutive_failures: u8,
+    }
+
+    #[derive(Clone)]
     pub struct AppState {
         pub config: Arc<AppConfig>,
+        pub media_directories:
+            Arc<tokio::sync::RwLock<Vec<crate::config::MonitoredDirectoryConfig>>>,
         pub database: Arc<dyn DatabaseManager>,
         pub platform_info: Arc<PlatformInfo>,
         pub filesystem_manager: Arc<dyn FileSystemManager>,
@@ -37,10 +47,20 @@ pub mod state {
         pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
         pub log_file_path: std::path::PathBuf,
         pub browse_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, String>>>,
-        pub mcp_clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>>>,
-        pub active_monitors: Arc<tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>>,
-        pub active_casts: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>>,
+        pub mcp_clients: Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>,
+            >,
+        >,
+        pub active_monitors: Arc<
+            tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>,
+        >,
+        pub active_casts: Arc<
+            tokio::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
+        >,
         pub discovered_tvs: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+        pub upnp_subscriptions:
+            Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
     }
 
     impl AppState {
@@ -52,7 +72,7 @@ pub mod state {
                     return server_ip.clone();
                 }
             }
-            
+
             // Use the SSDP interface from config if it's a specific IP address
             match &self.config.network.interface_selection {
                 crate::config::NetworkInterfaceConfig::Specific(ip) => {
@@ -60,24 +80,26 @@ pub mod state {
                 }
                 _ => {
                     // For Auto or All, fallback to server interface if it's not 0.0.0.0
-                    if self.config.server.interface != "0.0.0.0" && !self.config.server.interface.is_empty() {
+                    if self.config.server.interface != "0.0.0.0"
+                        && !self.config.server.interface.is_empty()
+                    {
                         return self.config.server.interface.clone();
                     }
                 }
             }
-            
+
             // Use the primary interface detected at startup instead of re-detecting
             if let Some(primary_interface) = self.platform_info.get_primary_interface() {
                 return primary_interface.ip_address.to_string();
             }
-            
+
             // Check if host IP is overridden via environment variable (for containers)
             if let Ok(host_ip) = std::env::var("VUIO_IP") {
                 if !host_ip.is_empty() {
                     return host_ip;
                 }
             }
-            
+
             // Last resort
             tracing::warn!("Could not auto-detect IP, falling back to 127.0.0.1");
             "127.0.0.1".to_string()
