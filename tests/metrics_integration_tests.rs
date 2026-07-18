@@ -11,7 +11,7 @@ use vuio::database::{DatabaseManager, MediaFile};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
 use vuio::state::AppState;
-use vuio::web::handlers::{get_prometheus_metrics, get_web_metrics, WebHandlerMetrics};
+use vuio::web::diagnostics::{get_prometheus_metrics, get_web_metrics, WebHandlerMetrics};
 
 #[tokio::test]
 async fn test_metrics_endpoints_data() {

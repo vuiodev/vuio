@@ -259,8 +259,8 @@ async fn test_cover_art_retrieval_and_xml() {
     use vuio::platform::filesystem::create_platform_filesystem_manager;
     use vuio::platform::PlatformInfo;
     use vuio::state::AppState;
-    use vuio::web::handlers::{serve_cover, WebHandlerMetrics};
     use vuio::web::xml::generate_browse_response;
+    use vuio::web::{diagnostics::WebHandlerMetrics, streaming::serve_cover};
 
     // 1. Setup temporary directory for media and database
     let temp_dir = tempdir().unwrap();
@@ -370,8 +370,8 @@ async fn test_radio_playlist_import() {
     use vuio::platform::filesystem::create_platform_filesystem_manager;
     use vuio::platform::PlatformInfo;
     use vuio::state::AppState;
-    use vuio::web::handlers::{serve_media, WebHandlerMetrics};
     use vuio::web::xml::generate_browse_response;
+    use vuio::web::{diagnostics::WebHandlerMetrics, streaming::serve_media};
 
     // 1. Setup temporary directory for media and database
     let temp_dir = tempdir().unwrap();

@@ -9,7 +9,7 @@ use vuio::database::{DatabaseManager, MediaFile};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
 use vuio::state::AppState;
-use vuio::web::handlers::WebHandlerMetrics;
+use vuio::web::diagnostics::WebHandlerMetrics;
 use vuio::web::mcp::{message_handler, MessageQuery};
 
 #[tokio::test]

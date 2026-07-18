@@ -1,0 +1,235 @@
+//! UPnP ContentDirectory subscription and change-notification handling.
+
+use crate::state::AppState;
+use axum::{
+    extract::State,
+    http::{header, HeaderMap, Method, StatusCode},
+    response::IntoResponse,
+};
+use std::sync::atomic::Ordering;
+use tracing::warn;
+
+/// Handle UPnP eventing subscription requests for ContentDirectory service
+pub async fn content_directory_subscribe(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    method: Method,
+) -> impl IntoResponse {
+    let timeout_seconds = headers
+        .get("TIMEOUT")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Second-"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(1800)
+        .min(1800);
+    let timeout_header = format!("Second-{timeout_seconds}");
+
+    if method.as_str() == "UNSUBSCRIBE" {
+        let Some(sid) = headers.get("SID").and_then(|value| value.to_str().ok()) else {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        };
+        state.upnp_subscriptions.lock().await.remove(sid);
+        return (StatusCode::OK, [(header::CONTENT_LENGTH, "0")], "").into_response();
+    }
+
+    if method.as_str() != "SUBSCRIBE" && method != Method::GET {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    if let Some(sid) = headers.get("SID").and_then(|value| value.to_str().ok()) {
+        let mut subscriptions = state.upnp_subscriptions.lock().await;
+        let Some(subscription) = subscriptions.get_mut(sid) else {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        };
+        subscription.expires_at =
+            std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
+        return (
+            StatusCode::OK,
+            [
+                (header::HeaderName::from_static("sid"), sid),
+                (
+                    header::HeaderName::from_static("timeout"),
+                    timeout_header.as_str(),
+                ),
+                (header::CONTENT_LENGTH, "0"),
+            ],
+            "",
+        )
+            .into_response();
+    }
+
+    let Some(raw_callback) = headers
+        .get("CALLBACK")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let Some(callback_url) = validate_upnp_callback(raw_callback) else {
+        warn!("Rejected unsafe UPnP callback URL: {}", raw_callback);
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let sid = format!("uuid:{}", uuid::Uuid::new_v4());
+    state.upnp_subscriptions.lock().await.insert(
+        sid.clone(),
+        crate::state::UpnpSubscription {
+            callback_url: callback_url.clone(),
+            expires_at: std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds),
+            next_sequence: 1,
+            consecutive_failures: 0,
+        },
+    );
+    let update_id = state.content_update_id.load(Ordering::SeqCst);
+    let initial_sid = sid.clone();
+    tokio::spawn(async move {
+        let _ = send_event_notification(&callback_url, &initial_sid, 0, update_id).await;
+    });
+    (
+        StatusCode::OK,
+        [
+            (header::HeaderName::from_static("sid"), sid.as_str()),
+            (
+                header::HeaderName::from_static("timeout"),
+                timeout_header.as_str(),
+            ),
+            (header::CONTENT_LENGTH, "0"),
+        ],
+        "",
+    )
+        .into_response()
+}
+
+fn validate_upnp_callback(raw: &str) -> Option<String> {
+    let candidate = raw
+        .split('>')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .trim_start_matches('<');
+    let url = reqwest::Url::parse(candidate).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    let address = url.host_str()?.parse::<std::net::IpAddr>().ok()?;
+    let allowed = match address {
+        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
+        std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
+    };
+    (allowed && !address.is_loopback() && !address.is_unspecified()).then(|| url.to_string())
+}
+
+async fn send_event_notification(
+    callback_url: &str,
+    sid: &str,
+    sequence: u32,
+    update_id: u32,
+) -> bool {
+    let event_body = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<e:propertyset xmlns:e="urn:schemas-upnp-org:event-1-0">
+    <e:property>
+        <SystemUpdateID>{}</SystemUpdateID>
+    </e:property>
+    <e:property>
+        <ContainerUpdateIDs>video,{0},audio,{0},image,{0}</ContainerUpdateIDs>
+    </e:property>
+</e:propertyset>"#,
+        update_id
+    );
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    match client
+        .request(
+            reqwest::Method::from_bytes(b"NOTIFY").unwrap(),
+            callback_url,
+        )
+        .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
+        .header("NT", "upnp:event")
+        .header("NTS", "upnp:propchange")
+        .header("SID", sid)
+        .header("SEQ", sequence.to_string())
+        .body(event_body)
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => true,
+        Ok(response) => {
+            warn!(
+                "UPnP event callback {} returned {}",
+                callback_url,
+                response.status()
+            );
+            false
+        }
+        Err(e) => {
+            warn!(
+                "Failed to send event notification to {}: {}",
+                callback_url, e
+            );
+            false
+        }
+    }
+}
+
+pub async fn notify_content_change(state: &AppState, _published_update_id: u32) {
+    use futures_util::{stream, StreamExt};
+
+    let now = std::time::Instant::now();
+    // Keep notification batches serialized so subscribers observe monotonically
+    // increasing SEQ values even when content changes are published concurrently.
+    let mut subscriptions = state.upnp_subscriptions.lock().await;
+    subscriptions.retain(|_, subscription| subscription.expires_at > now);
+    let update_id = state.content_update_id.load(Ordering::SeqCst);
+    let notifications = subscriptions
+        .iter_mut()
+        .map(|(sid, subscription)| {
+            let sequence = subscription.next_sequence;
+            subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
+            (sid.clone(), subscription.callback_url.clone(), sequence)
+        })
+        .collect::<Vec<_>>();
+
+    let results = stream::iter(
+        notifications
+            .into_iter()
+            .map(|(sid, url, sequence)| async move {
+                let success = send_event_notification(&url, &sid, sequence, update_id).await;
+                (sid, success)
+            }),
+    )
+    .buffer_unordered(8)
+    .collect::<Vec<_>>()
+    .await;
+
+    for (sid, success) in results {
+        if let Some(subscription) = subscriptions.get_mut(&sid) {
+            if success {
+                subscription.consecutive_failures = 0;
+            } else {
+                subscription.consecutive_failures =
+                    subscription.consecutive_failures.saturating_add(1);
+            }
+        }
+    }
+    subscriptions.retain(|_, subscription| subscription.consecutive_failures < 3);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn upnp_callback_policy_accepts_lan_and_rejects_ssrf_targets() {
+        assert!(validate_upnp_callback("<http://192.168.1.25:1234/events>").is_some());
+        assert!(validate_upnp_callback("<http://169.254.10.2/events>").is_some());
+        assert!(validate_upnp_callback("http://127.0.0.1/events").is_none());
+        assert!(validate_upnp_callback("https://192.168.1.25/events").is_none());
+        assert!(validate_upnp_callback("http://example.com/events").is_none());
+        assert!(validate_upnp_callback("http://8.8.8.8/events").is_none());
+    }
+}

@@ -1,0 +1,2096 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>__VUIO_SERVER_NAME__</title>
+    <link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="25" fill="url(#g)"/><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00f0ff"/><stop offset="100%" stop-color="#7000ff"/></linearGradient><polygon points="40,30 70,50 40,70" fill="white"/></svg>'>
+    <style>
+        :root {
+            --bg-color: #0c0f12;
+            --card-bg: rgba(22, 28, 36, 0.6);
+            --card-border: rgba(255, 255, 255, 0.06);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-color: #00f0ff;
+            --accent-gradient: linear-gradient(135deg, #00f0ff 0%, #7000ff 100%);
+            --accent-hover: #00d8e6;
+            --focus-ring: rgba(0, 240, 255, 0.2);
+            --folder-color: #ffb300;
+            --folder-bg: rgba(255, 179, 0, 0.06);
+        }
+        
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.5;
+            padding: 1rem;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        @media (min-width: 640px) {
+            body {
+                padding: 2rem;
+            }
+        }
+
+        .container {
+            width: 100%;
+            max-width: 100%;
+            display: flex;
+            flex-direction: column;
+            gap: 1.25rem;
+        }
+
+        .main-nav {
+            display: flex;
+            gap: 0.5rem;
+            border-bottom: 1px solid var(--card-border);
+            padding-bottom: 0.75rem;
+            margin-bottom: 0.5rem;
+            width: 100%;
+        }
+
+        .nav-tab {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0.5rem 1.25rem;
+            cursor: pointer;
+            font-size: 0.95rem;
+            font-weight: 600;
+            transition: all 0.2s ease;
+            border-radius: 8px;
+            outline: none;
+        }
+
+        .nav-tab.active {
+            background: var(--accent-gradient);
+            color: white;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+        }
+
+        .nav-tab:hover:not(.active) {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        header {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 16px;
+            padding: 1.25rem;
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .brand-section {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .brand-logo {
+            width: 40px;
+            height: 40px;
+            background: var(--accent-gradient);
+            border-radius: 10px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: bold;
+            font-size: 1.25rem;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
+        }
+
+        .brand-info h1 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            background: var(--accent-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .brand-info p {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        /* Breadcrumbs navigation */
+        .breadcrumbs {
+            display: flex;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 0.25rem;
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+            padding: 0 0.5rem;
+        }
+
+        .breadcrumb-item {
+            cursor: pointer;
+            transition: color 0.2s ease;
+            font-weight: 500;
+        }
+
+        .breadcrumb-item:hover {
+            color: var(--accent-color);
+            text-decoration: underline;
+        }
+
+        .breadcrumb-separator {
+            color: rgba(255, 255, 255, 0.2);
+            user-select: none;
+        }
+
+        /* Controls: Search & Tabs */
+        .controls {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+
+        @media (min-width: 640px) {
+            .controls {
+                flex-direction: row;
+                align-items: center;
+            }
+        }
+
+        .search-box {
+            position: relative;
+            flex: 1;
+        }
+
+        .search-box input {
+            width: 100%;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.75rem 1rem 0.75rem 2.5rem;
+            color: var(--text-primary);
+            font-size: 0.9375rem;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        .search-box input:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 3px var(--focus-ring);
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 0.875rem;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 16px;
+            height: 16px;
+            color: var(--text-secondary);
+            pointer-events: none;
+        }
+
+        .tabs {
+            display: flex;
+            background: rgba(22, 28, 36, 0.4);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.25rem;
+            gap: 0.25rem;
+            align-self: flex-start;
+        }
+
+        @media (max-width: 639px) {
+            .tabs {
+                width: 100%;
+                justify-content: stretch;
+            }
+            .tab-btn {
+                flex: 1;
+            }
+        }
+
+        .tab-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 0.875rem;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            text-align: center;
+        }
+
+        .tab-btn.active {
+            background: var(--card-border);
+            color: var(--text-primary);
+        }
+
+        .tab-btn:hover:not(.active) {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* File List Container */
+        .file-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.65rem;
+        }
+
+        .media-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 12px;
+            padding: 0.875rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            transition: all 0.2s ease;
+            text-decoration: none;
+            color: inherit;
+        }
+
+        .media-card:hover {
+            border-color: rgba(0, 240, 255, 0.25);
+            background: rgba(22, 28, 36, 0.85);
+            transform: translateY(-1px);
+        }
+
+        .media-info {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            min-width: 0;
+            flex: 1;
+        }
+
+        .media-icon-wrapper {
+            width: 40px;
+            height: 40px;
+            border-radius: 8px;
+            background: rgba(255, 255, 255, 0.03);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            color: var(--text-secondary);
+        }
+
+        .media-card:hover .media-icon-wrapper {
+            color: var(--accent-color);
+            background: rgba(0, 240, 255, 0.06);
+        }
+
+        /* Folder Specific Styles */
+        .folder-card .media-icon-wrapper {
+            color: var(--folder-color);
+            background: var(--folder-bg);
+        }
+
+        .folder-card:hover .media-icon-wrapper {
+            color: #ffe082;
+            background: rgba(255, 179, 0, 0.12);
+        }
+
+        .media-details {
+            min-width: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 0.125rem;
+        }
+
+        .media-name {
+            font-size: 0.9rem;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .media-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.725rem;
+            color: var(--text-secondary);
+        }
+
+        .media-meta-dot {
+            width: 3px;
+            height: 3px;
+            border-radius: 50%;
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .action-area {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            flex-shrink: 0;
+        }
+
+        .btn-action {
+            width: 38px;
+            height: 38px;
+            border-radius: 8px;
+            border: 1px solid var(--card-border);
+            background: rgba(255, 255, 255, 0.01);
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .media-card:hover .btn-action {
+            border-color: rgba(0, 240, 255, 0.15);
+            background: rgba(0, 240, 255, 0.04);
+            color: var(--accent-color);
+        }
+
+        .btn-action:hover {
+            background: var(--accent-gradient) !important;
+            color: white !important;
+            border-color: transparent !important;
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.3);
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1.5rem;
+            background: var(--card-bg);
+            border: 1px dashed var(--card-border);
+            border-radius: 14px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .empty-icon {
+            width: 40px;
+            height: 40px;
+            color: var(--text-secondary);
+        }
+
+        .empty-state h3 {
+            font-size: 1.05rem;
+            font-weight: 600;
+        }
+
+        .empty-state p {
+            font-size: 0.85rem;
+            color: var(--text-secondary);
+        }
+
+        /* Photos Image Grid and Lightbox Styles */
+        .image-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 12px;
+            padding: 0.5rem 0;
+        }
+
+        .image-card {
+            position: relative;
+            border-radius: 12px;
+            overflow: hidden;
+            aspect-ratio: 1 / 1;
+            background: #181f2a;
+            border: 1px solid var(--card-border);
+            cursor: pointer;
+            transition: all 0.2s ease-in-out;
+        }
+
+        .image-card:hover {
+            transform: scale(1.02);
+            border-color: var(--accent-color);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+        }
+
+        .image-card img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transition: transform 0.3s ease;
+        }
+
+        .image-card:hover img {
+            transform: scale(1.05);
+        }
+
+        .image-card-overlay {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0) 100%);
+            padding: 1.5rem 0.75rem 0.75rem;
+            color: white;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-end;
+        }
+
+        .image-card:hover .image-card-overlay {
+            opacity: 1;
+        }
+
+        .image-card-name {
+            font-size: 0.75rem;
+            font-weight: 500;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-right: 0.5rem;
+            flex: 1;
+        }
+
+        .image-card-download {
+            color: rgba(255,255,255,0.7);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: color 0.2s;
+        }
+
+        .image-card-download:hover {
+            color: var(--accent-color);
+        }
+
+        .image-grid .folder-card {
+            aspect-ratio: 1 / 1;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            text-align: center;
+            gap: 0.75rem;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px dashed var(--card-border);
+        }
+
+        .image-grid .folder-card .media-info {
+            flex-direction: column;
+            gap: 0.5rem;
+            align-items: center;
+            width: 100%;
+        }
+
+        .image-grid .folder-card .media-details {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            width: 100%;
+        }
+
+        .image-grid .folder-card .action-area {
+            margin-top: 0.5rem;
+        }
+
+        /* Lightbox modal styles */
+        .lightbox-modal {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(10, 14, 20, 0.95);
+            z-index: 2000;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            backdrop-filter: blur(15px);
+            -webkit-backdrop-filter: blur(15px);
+            animation: fadeIn 0.25s ease-out;
+        }
+
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+
+        .lightbox-close {
+            position: absolute;
+            top: 1.5rem;
+            right: 2rem;
+            color: var(--text-secondary);
+            font-size: 2.5rem;
+            font-weight: 300;
+            cursor: pointer;
+            transition: color 0.2s;
+            line-height: 1;
+            z-index: 2010;
+        }
+
+        .lightbox-close:hover {
+            color: #ef4444;
+        }
+
+        .lightbox-nav {
+            position: absolute;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            color: var(--text-secondary);
+            width: 48px;
+            height: 48px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            z-index: 2010;
+        }
+
+        .lightbox-nav:hover {
+            background: var(--accent-gradient);
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 0 15px rgba(0, 240, 255, 0.4);
+        }
+
+        .lightbox-prev { left: 2rem; }
+        .lightbox-next { right: 2rem; }
+
+        @media (max-width: 600px) {
+            .lightbox-prev { left: 0.5rem; }
+            .lightbox-next { right: 0.5rem; }
+            .lightbox-nav {
+                width: 38px;
+                height: 38px;
+            }
+        }
+
+        .lightbox-content-wrapper {
+            max-width: 85%;
+            max-height: 85%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }
+
+        .lightbox-content-wrapper img {
+            max-width: 100%;
+            max-height: 80vh;
+            object-fit: contain;
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .lightbox-meta {
+            margin-top: 1rem;
+            color: var(--text-primary);
+            font-size: 0.95rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+            width: 100%;
+            justify-content: center;
+        }
+
+        .lightbox-download-btn {
+            color: var(--text-secondary);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0.25rem;
+            border-radius: 6px;
+            transition: all 0.2s;
+        }
+
+        .lightbox-download-btn:hover {
+            color: var(--accent-color);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        /* Floating Audio Player Bar Styles */
+        .audio-player-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 90px;
+            background: rgba(18, 22, 28, 0.85);
+            border-top: 1px solid var(--card-border);
+            backdrop-filter: blur(20px);
+            -webkit-backdrop-filter: blur(20px);
+            z-index: 1000;
+            display: flex;
+            align-items: center;
+            padding: 0 1.5rem;
+            box-shadow: 0 -10px 30px rgba(0, 0, 0, 0.5);
+            animation: slideUp 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+
+        @keyframes slideUp {
+            from { transform: translateY(100%); }
+            to { transform: translateY(0); }
+        }
+
+        .player-container {
+            width: 100%;
+            max-width: 100%;
+            margin: 0 auto;
+            display: grid;
+            grid-template-columns: 280px 1fr 220px;
+            align-items: center;
+            gap: 1.5rem;
+        }
+
+        @media (max-width: 768px) {
+            .audio-player-bar {
+                height: 140px;
+                padding: 0.75rem 1rem;
+            }
+            .player-container {
+                grid-template-columns: 1fr;
+                grid-template-rows: auto auto auto;
+                gap: 0.5rem;
+            }
+            .player-extra {
+                justify-content: flex-end;
+            }
+        }
+
+        .player-track-info {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            min-width: 0;
+        }
+
+        .player-icon-wrapper {
+            width: 42px;
+            height: 42px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+        }
+
+        .player-meta {
+            min-width: 0;
+        }
+
+        .player-title {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .player-subtitle {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 0.15rem;
+        }
+
+        .player-controls-progress {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.4rem;
+        }
+
+        .player-controls {
+            display: flex;
+            align-items: center;
+            gap: 1.25rem;
+        }
+
+        .player-btn {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.35rem;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .player-btn:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .player-btn.play-main {
+            width: 38px;
+            height: 38px;
+            background: var(--accent-gradient);
+            color: white;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
+        }
+
+        .player-btn.play-main:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 16px rgba(0, 240, 255, 0.4);
+        }
+
+        .player-progress-bar {
+            width: 100%;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .player-time {
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            font-variant-numeric: tabular-nums;
+            width: 32px;
+        }
+
+        #player-time-current {
+            text-align: right;
+        }
+
+        .player-progress-bar input[type="range"] {
+            flex: 1;
+            -webkit-appearance: none;
+            appearance: none;
+            height: 24px;
+            background: transparent;
+            margin: 0;
+            padding: 0;
+            outline: none;
+            cursor: pointer;
+        }
+
+        /* Webkit (Chrome, Safari, Edge) */
+        .player-progress-bar input[type="range"]::-webkit-slider-runnable-track {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 3px;
+            border: none;
+        }
+
+        .player-progress-bar input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            height: 14px;
+            width: 14px;
+            border-radius: 50%;
+            background: #ffffff;
+            margin-top: -4px;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            transition: transform 0.1s ease, background-color 0.1s ease;
+        }
+
+        .player-progress-bar input[type="range"]:active::-webkit-slider-thumb {
+            transform: scale(1.3);
+            background: var(--accent-color);
+        }
+
+        /* Firefox */
+        .player-progress-bar input[type="range"]::-moz-range-track {
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.12);
+            border-radius: 3px;
+            border: none;
+        }
+
+        .player-progress-bar input[type="range"]::-moz-range-thumb {
+            height: 14px;
+            width: 14px;
+            border: none;
+            border-radius: 50%;
+            background: #ffffff;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            transition: transform 0.1s ease, background-color 0.1s ease;
+        }
+
+        .player-progress-bar input[type="range"]:active::-moz-range-thumb {
+            transform: scale(1.3);
+            background: var(--accent-color);
+        }
+
+        .player-extra {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 1.25rem;
+        }
+
+        .player-volume {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-secondary);
+        }
+
+        .player-volume input[type="range"] {
+            width: 80px;
+            accent-color: var(--accent-color);
+            cursor: pointer;
+        }
+
+        .player-btn-close {
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            cursor: pointer;
+            padding: 0.35rem;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: all 0.2s ease;
+        }
+
+        .player-btn-close:hover {
+            color: #ef4444;
+            background: rgba(239, 68, 68, 0.08);
+        }
+
+        /* TV Selection Modal Styles */
+        .tv-select-btn {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--card-border);
+            color: var(--text-primary);
+            padding: 0.85rem 1.15rem;
+            border-radius: 12px;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            transition: all 0.2s ease;
+            font-weight: 600;
+            outline: none;
+            width: 100%;
+            font-size: 0.95rem;
+        }
+        .tv-select-btn:hover {
+            border-color: var(--accent-color);
+            background: rgba(0, 240, 255, 0.06);
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
+            transform: translateY(-1px);
+        }
+        .tv-icon-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 0.85rem;
+        }
+    </style>
+</head>
+<body>
+    <div id="files-data" style="display: none;">__VUIO_FILES_JSON__</div>
+    <div id="dirs-data" style="display: none;">__VUIO_DIRS_JSON__</div>
+
+    <div class="container">
+        <header>
+            <div class="brand-section">
+                <div class="brand-logo">▶</div>
+                <div class="brand-info">
+                    <h1>__VUIO_SERVER_NAME__</h1>
+                </div>
+            </div>
+        </header>
+
+        <!-- Main Navigation Tab Bar -->
+        <div class="main-nav">
+            <button id="nav-browse" class="nav-tab active" onclick="switchNav('browse')">Browse Files</button>
+            <button id="nav-stats" class="nav-tab" onclick="switchNav('stats')">System Stats</button>
+        </div>
+
+        <!-- Browse View -->
+        <div id="view-browse">
+            <div class="breadcrumbs" id="breadcrumbs"></div>
+
+            <div class="controls">
+                <div class="search-box">
+                    <svg class="search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+                    <input type="text" id="search-input" placeholder="Search files..." oninput="onSearch()">
+                </div>
+                <div class="tabs">
+                    <button class="tab-btn" data-tab="all" onclick="setTab('all')">All</button>
+                    <button class="tab-btn active" data-tab="video" onclick="setTab('video')">Videos</button>
+                    <button class="tab-btn" data-tab="audio" onclick="setTab('audio')">Music</button>
+                    <button class="tab-btn" data-tab="image" onclick="setTab('image')">Images</button>
+                    <button class="tab-btn" data-tab="radio" onclick="setTab('radio')">Radio</button>
+                </div>
+            </div>
+
+            <div class="file-list" id="file-list"></div>
+        </div>
+
+        <!-- System Stats View -->
+        <div id="view-stats" style="display: none; flex-direction: column; gap: 1.25rem;">
+            <!-- Stats Dashboard Grid -->
+            <div class="stats-grid" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.25rem;">
+
+                <!-- Database stats card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">DATABASE INFO</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22c5.523 0 10-2.239 10-5V7c0-2.761-4.477-5-10-5S2 4.239 2 7v10c0 2.761 4.477 5 10 5z"></path><path d="M2 7c0 2.761 4.477 5 10 5s10-2.239 10-5"></path><path d="M2 12c0 2.761 4.477 5 10 5s10-2.239 10-5"></path></svg>
+                    </div>
+                    <div id="db-total-files" style="font-size: 1.75rem; font-weight: 700; background: var(--accent-gradient); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">0</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                        Total media size: <span id="db-total-size" style="color: var(--text-primary); font-weight: 600;">0 B</span><br>
+                        DB File Size: <span id="db-file-size" style="color: var(--text-primary); font-weight: 600;">0 B</span>
+                    </div>
+                </div>
+
+                <!-- Media breakdown card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.65rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">MEDIA BREAKDOWN</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20v-6M6 20V10M18 20V4M3 20h18"></path></svg>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.35rem; font-size: 0.85rem; color: var(--text-secondary);">
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Videos:</span> <span id="db-video-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Music:</span> <span id="db-audio-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between;">
+                            <span>Images:</span> <span id="db-image-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; border-top: 1px solid rgba(255,255,255,0.05); padding-top: 0.3rem;">
+                            <span>Playlists:</span> <span id="db-playlist-count" style="color: var(--text-primary); font-weight: 600;">0</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Web Traffic stats card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">WEB TRAFFIC</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f59e0b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.2 15c.7-1.2 1-2.5.7-3.9-.3-2-1.5-3.8-3.2-4.5M2.8 9c-.7 1.2-1 2.5-.7 3.9.3 2 1.5 3.8 3.2 4.5M16 12a4 4 0 10-8 0 4 4 0 008 0z"></path></svg>
+                    </div>
+                    <div id="web-gigabytes" style="font-size: 1.75rem; font-weight: 700; color: #f59e0b;">0.00 GB</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                        File Serves: <span id="web-file-serves" style="color: var(--text-primary); font-weight: 600;">0</span><br>
+                        Dir Listings: <span id="web-dir-listings" style="color: var(--text-primary); font-weight: 600;">0</span><br>
+                        Current Speed: <span id="web-speed" style="color: var(--text-primary); font-weight: 600;">0 Mbps</span>
+                    </div>
+                </div>
+
+                <!-- Cache metrics card -->
+                <div class="stats-card" style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.5rem;">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <span style="font-size: 0.85rem; color: var(--text-secondary); font-weight: 500;">CACHE HIT RATE</span>
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><path d="M12 6v6l4 2"></path></svg>
+                    </div>
+                    <div id="web-cache-rate" style="font-size: 1.75rem; font-weight: 700; color: #3b82f6;">0.0%</div>
+                    <div style="font-size: 0.8rem; color: var(--text-secondary);">
+                        Hits: <span id="web-cache-hits" style="color: var(--text-primary); font-weight: 600;">0</span><br>
+                        Misses: <span id="web-cache-misses" style="color: var(--text-primary); font-weight: 600;">0</span>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- Server Performance Info -->
+            <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0.05em; color: var(--text-secondary);">SERVER HEALTH & PERFORMANCE</h3>
+                <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; font-size: 0.875rem;">
+                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <span style="color: var(--text-secondary);">Avg Response Time:</span>
+                        <span id="web-response-time" style="font-size: 1.15rem; font-weight: 700; color: var(--accent-color);">0 ms</span>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <span style="color: var(--text-secondary);">Errors Logged:</span>
+                        <span id="web-errors" style="font-size: 1.15rem; font-weight: 700; color: #ef4444;">0</span>
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 0.25rem;">
+                        <span style="color: var(--text-secondary);">Status:</span>
+                        <span id="server-status-badge" style="font-size: 1.15rem; font-weight: 700; color: #10b981; display: flex; align-items: center; gap: 0.35rem;">
+                            <span id="server-status-dot" style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 50%; box-shadow: 0 0 8px #10b981;"></span>
+                            <span id="server-status-text">Online</span>
+                        </span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Active TV streams / casts -->
+            <div style="background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; display: flex; flex-direction: column; gap: 0.75rem;">
+                <h3 style="font-size: 0.95rem; font-weight: 600; letter-spacing: 0.05em; color: var(--text-secondary); display: flex; align-items: center; gap: 0.5rem;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                    ACTIVE SMART TV STREAMING QUEUES
+                </h3>
+                <div id="active-tv-casts-container" style="display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.875rem;">
+                    <div style="color: var(--text-secondary); font-style: italic; padding: 0.25rem 0;">No active TV streams.</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Floating Audio Player Bar -->
+    <div id="audio-player-bar" class="audio-player-bar" style="display: none;">
+        <div class="player-container">
+            <audio id="audio-element" style="display: none;"></audio>
+            
+            <div class="player-track-info">
+                <div class="player-icon-wrapper">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>
+                </div>
+                <div class="player-meta">
+                    <div style="display: flex; align-items: center; gap: 0.5rem; min-width: 0;">
+                        <div id="player-title" class="player-title">Track Name</div>
+                        <span id="player-track-count" style="font-size: 0.75rem; color: var(--accent-color); font-weight: 600; white-space: nowrap;"></span>
+                    </div>
+                    <div id="player-subtitle" class="player-subtitle">Artist — Album</div>
+                </div>
+            </div>
+
+            <div class="player-controls-progress">
+                <div class="player-controls">
+                    <button class="player-btn" onclick="playPrev()" title="Previous Track">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="19 20 9 12 19 4 19 20"></polygon><line x1="5" y1="19" x2="5" y2="5"></line></svg>
+                    </button>
+                    <button class="player-btn play-main" id="player-play-btn" onclick="togglePlayPause()" title="Play/Pause">
+                        <svg id="play-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                        <svg id="pause-icon" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="display: none;"><rect x="6" y="4" width="4" height="16"></rect><rect x="14" y="4" width="4" height="16"></rect></svg>
+                    </button>
+                    <button class="player-btn" onclick="playNext()" title="Next Track">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
+                    </button>
+                </div>
+                <div class="player-progress-bar">
+                    <span id="player-time-current" class="player-time">0:00</span>
+                    <input type="range" id="player-progress-slider" min="0" max="100" value="0" oninput="onProgressSeek(this.value)">
+                    <span id="player-time-duration" class="player-time">0:00</span>
+                </div>
+            </div>
+
+            <div class="player-extra">
+                <div class="player-volume">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                    <input type="range" id="player-volume-slider" min="0" max="100" value="80" oninput="onVolumeChange(this.value)">
+                </div>
+                <button class="player-btn-close" onclick="closePlayer()" title="Close Player">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Lightbox Modal for Images -->
+    <div id="image-lightbox" class="lightbox-modal" style="display: none;" onclick="closeLightbox()">
+        <span class="lightbox-close" onclick="closeLightbox()">&times;</span>
+        <button class="lightbox-nav lightbox-prev" onclick="event.stopPropagation(); showPrevImage()" title="Previous Image">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+        </button>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()">
+            <img id="lightbox-img" src="" alt="Full view">
+            <div class="lightbox-meta">
+                <span id="lightbox-title">Image Name</span>
+                <a id="lightbox-download" href="" download="" class="lightbox-download-btn" title="Download High Res">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </a>
+            </div>
+        </div>
+        <button class="lightbox-nav lightbox-next" onclick="event.stopPropagation(); showNextImage()" title="Next Image">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+        </button>
+    </div>
+
+    <!-- Video Player Modal -->
+    <div id="video-modal" class="lightbox-modal" style="display: none;" onclick="closeVideoPlayer()">
+        <span class="lightbox-close" onclick="closeVideoPlayer()">&times;</span>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()" style="max-width: 90%; max-height: 90%; width: 800px;">
+            <video id="video-player-element" controls autoplay style="width: 100%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.05);">
+                <track id="video-subtitle-track" kind="subtitles" srclang="en" label="English">
+            </video>
+            <div class="lightbox-meta" style="justify-content: space-between; padding: 0.5rem 0.25rem; display: flex; align-items: center; width: 100%;">
+                <div style="display: flex; align-items: center; gap: 1rem; min-width: 0; flex: 1;">
+                    <span id="video-player-title" style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Video Name</span>
+                    <select id="video-audio-tracks" style="display: none; background: rgba(255,255,255,0.06); border: 1px solid var(--card-border); color: var(--text-primary); border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.8rem; cursor: pointer; outline: none;"></select>
+                </div>
+                <a id="video-player-download" href="" download="" class="lightbox-download-btn" title="Download Video">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                </a>
+            </div>
+        </div>
+    </div>
+
+    <!-- TV Selection Modal -->
+    <div id="tv-modal" class="lightbox-modal" style="display: none;" onclick="closeTvModal()">
+        <span class="lightbox-close" onclick="closeTvModal()">&times;</span>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()" style="max-width: 420px; background: #0f172a; border: 1px solid var(--card-border); border-radius: 16px; padding: 1.75rem; display: flex; flex-direction: column; gap: 1.25rem; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);">
+            <div style="display: flex; flex-direction: column; gap: 0.35rem;">
+                <h3 style="font-size: 1.3rem; font-weight: 700; color: var(--text-primary); display: flex; align-items: center; gap: 0.5rem;">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                    Play on TV
+                </h3>
+                <p id="tv-modal-subtitle" style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.4;">Select the destination TV screen to play folder "<span id="tv-modal-folder-name" style="color: var(--text-primary); font-weight: 600;"></span>"</p>
+            </div>
+            <div id="tv-list-container" style="display: flex; flex-direction: column; gap: 0.75rem; margin: 0.25rem 0; max-height: 250px; overflow-y: auto; padding-right: 4px;">
+                <!-- TV buttons will be dynamically generated here -->
+            </div>
+            <button onclick="closeTvModal()" style="background: rgba(255, 255, 255, 0.04); border: 1px solid var(--card-border); color: var(--text-secondary); border-radius: 10px; padding: 0.7rem; cursor: pointer; transition: all 0.2s; font-weight: 600;" onmouseover="this.style.background='rgba(255,255,255,0.08)'; this.style.color='var(--text-primary)';" onmouseout="this.style.background='rgba(255,255,255,0.04)'; this.style.color='var(--text-secondary)';">Cancel</button>
+        </div>
+    </div>
+
+    <script>
+        let activeNav = 'browse';
+        let metricsTimer = null;
+        let lastBytes = null;
+        let lastTime = null;
+        let playlist = [];
+        let currentTrackIndex = -1;
+        let imageList = [];
+        let currentImageIndex = -1;
+
+        function switchNav(nav) {
+            activeNav = nav;
+            document.querySelectorAll('.nav-tab').forEach(btn => {
+                if (btn.id === 'nav-' + nav) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+
+            if (nav === 'browse') {
+                document.getElementById('view-browse').style.display = 'block';
+                document.getElementById('view-stats').style.display = 'none';
+                if (metricsTimer) {
+                    clearInterval(metricsTimer);
+                    metricsTimer = null;
+                }
+            } else {
+                document.getElementById('view-browse').style.display = 'none';
+                document.getElementById('view-stats').style.display = 'flex';
+                updateMetrics();
+                metricsTimer = setInterval(updateMetrics, 5000);
+            }
+        }
+
+        function playAudioFile(fileOrId) {
+            let targetFile = null;
+            if (typeof fileOrId === 'string' || typeof fileOrId === 'number') {
+                targetFile = filesData.find(f => f.id.toString() === fileOrId.toString());
+            } else {
+                targetFile = fileOrId;
+            }
+
+            if (!targetFile) return;
+
+            // Generate a playlist of all audio files matching the current tab/filter
+            let filteredAudio = filesData.filter(f => f.cat === currentTab);
+            
+            // If currently in a path/folder, filter playlist to the current path
+            if (currentPath.length > 0 && searchQuery === '') {
+                filteredAudio = filteredAudio.filter(f => {
+                    const comps = getRelativeComponents(f.path);
+                    if (comps.length <= currentPath.length) return false;
+                    for (let i = 0; i < currentPath.length; i++) {
+                        if (comps[i] !== currentPath[i]) return false;
+                    }
+                    return true;
+                });
+            } else if (searchQuery !== '') {
+                filteredAudio = filteredAudio.filter(f => f.name.toLowerCase().includes(searchQuery));
+            }
+
+            // Sort playlist by name
+            filteredAudio.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            
+            playlist = filteredAudio;
+            currentTrackIndex = playlist.findIndex(f => f.id.toString() === targetFile.id.toString());
+            if (currentTrackIndex === -1) {
+                playlist = [targetFile];
+                currentTrackIndex = 0;
+            }
+
+            loadAndPlayTrack();
+        }
+
+        function playFolder(folderName) {
+            const targetPath = [...currentPath, folderName];
+            
+            // Filter all audio files that reside in targetPath or any subdirectory
+            let folderAudio = filesData.filter(file => {
+                if (file.cat !== 'audio') return false;
+                const comps = getRelativeComponents(file.path);
+                if (comps.length <= targetPath.length) return false;
+                for (let i = 0; i < targetPath.length; i++) {
+                    if (comps[i] !== targetPath[i]) return false;
+                }
+                return true;
+            });
+
+            if (folderAudio.length === 0) return;
+
+            // Sort playlist alphabetically by name
+            folderAudio.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+            playlist = folderAudio;
+            currentTrackIndex = 0;
+            loadAndPlayTrack();
+        }
+
+        function playVideoFolderOnTv(folderName) {
+            const targetPath = [...currentPath, folderName];
+            
+            // Filter all video files that reside in targetPath or any subdirectory
+            let folderVideos = filesData.filter(file => {
+                if (file.cat !== 'video') return false;
+                const comps = getRelativeComponents(file.path);
+                if (comps.length <= targetPath.length) return false;
+                for (let i = 0; i < targetPath.length; i++) {
+                    if (comps[i] !== targetPath[i]) return false;
+                }
+                return true;
+            });
+
+            if (folderVideos.length === 0) {
+                showToast("No video files found in this folder.", "error");
+                return;
+            }
+
+            // Sort playlist alphabetically by name
+            folderVideos.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            const fileIds = folderVideos.map(v => v.id);
+
+            showToast("Discovering TVs on local network...", "info");
+            
+            fetch('/api/tvs')
+                .then(res => res.json())
+                .then(tvs => {
+                    if (!Array.isArray(tvs) || tvs.length === 0) {
+                        showToast("No TVs found on your local network.", "error");
+                        return;
+                    }
+                    
+                    if (tvs.length === 1) {
+                        // Only one TV found, cast immediately!
+                        castPlaylistToTv(tvs[0], folderName, fileIds);
+                    } else {
+                        // Multiple TVs found, show selection modal
+                        showTvSelectionModal(tvs, folderName, fileIds);
+                    }
+                })
+                .catch(err => {
+                    console.error("TV discovery failed", err);
+                    showToast("Failed to discover TVs: " + err, "error");
+                });
+        }
+
+        function showTvSelectionModal(tvs, folderName, fileIds) {
+            document.getElementById('tv-modal-folder-name').textContent = folderName;
+            const container = document.getElementById('tv-list-container');
+            container.innerHTML = '';
+            
+            tvs.forEach(tvName => {
+                const btn = document.createElement('button');
+                btn.className = 'tv-select-btn';
+                btn.onclick = () => {
+                    closeTvModal();
+                    castPlaylistToTv(tvName, folderName, fileIds);
+                };
+                btn.innerHTML = `
+                    <div class="tv-icon-wrapper">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                        <span>${tvName}</span>
+                    </div>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                `;
+                container.appendChild(btn);
+            });
+            
+            document.getElementById('tv-modal').style.display = 'flex';
+        }
+
+        function closeTvModal() {
+            document.getElementById('tv-modal').style.display = 'none';
+        }
+
+        function castPlaylistToTv(tvName, folderName, fileIds) {
+            showToast("Casting playlist to " + tvName + "...", "info");
+            
+            fetch('/api/cast/playlist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    tv_name: tvName,
+                    folder_name: folderName,
+                    file_ids: fileIds
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast("Cast error: " + data.error, "error");
+                } else {
+                    showToast("Successfully playing on " + tvName + "!", "success");
+                }
+            })
+            .catch(err => {
+                console.error("Cast request failed", err);
+                showToast("Failed to cast to TV: " + err, "error");
+            });
+        }
+
+        function showToast(message, type = 'info') {
+            let container = document.getElementById('toast-container');
+            if (!container) {
+                container = document.createElement('div');
+                container.id = 'toast-container';
+                container.style.position = 'fixed';
+                container.style.bottom = '1.5rem';
+                container.style.right = '1.5rem';
+                container.style.display = 'flex';
+                container.style.flexDirection = 'column';
+                container.style.gap = '0.5rem';
+                container.style.zIndex = '9999';
+                document.body.appendChild(container);
+            }
+
+            const toast = document.createElement('div');
+            toast.style.background = '#1e293b';
+            toast.style.border = '1px solid ' + (type === 'error' ? '#ef4444' : type === 'success' ? '#10b981' : 'var(--accent-color)');
+            toast.style.color = '#fff';
+            toast.style.padding = '0.8rem 1.4rem';
+            toast.style.borderRadius = '12px';
+            toast.style.fontSize = '0.9rem';
+            toast.style.fontWeight = '600';
+            toast.style.boxShadow = '0 15px 30px rgba(0,0,0,0.3)';
+            toast.style.opacity = '0';
+            toast.style.transform = 'translateY(15px)';
+            toast.style.transition = 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
+            
+            toast.textContent = message;
+            container.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.opacity = '1';
+                toast.style.transform = 'translateY(0)';
+            }, 15);
+            
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                toast.style.transform = 'translateY(-15px)';
+                setTimeout(() => {
+                    toast.remove();
+                }, 300);
+            }, 4500);
+        }
+
+        function loadAndPlayTrack() {
+            if (currentTrackIndex < 0 || currentTrackIndex >= playlist.length) return;
+            const file = playlist[currentTrackIndex];
+
+            const playerBar = document.getElementById('audio-player-bar');
+            playerBar.style.display = 'flex';
+
+            document.getElementById('player-title').textContent = file.title || file.name;
+            let metaText = 'Unknown Artist';
+            if (file.artist) {
+                metaText = file.artist;
+                if (file.album) {
+                    metaText += ' — ' + file.album;
+                }
+            } else if (file.album) {
+                metaText = file.album;
+            }
+            document.getElementById('player-subtitle').textContent = metaText;
+            document.getElementById('player-track-count').textContent = (currentTrackIndex + 1) + '/' + playlist.length;
+
+            const audioEl = document.getElementById('audio-element');
+            audioEl.src = '/media/' + file.id;
+            audioEl.play().then(() => {
+                updatePlayPauseUI(true);
+            }).catch(err => {
+                console.error("Audio playback error:", err);
+            });
+        }
+
+        function togglePlayPause() {
+            const audioEl = document.getElementById('audio-element');
+            if (audioEl.paused) {
+                audioEl.play();
+                updatePlayPauseUI(true);
+            } else {
+                audioEl.pause();
+                updatePlayPauseUI(false);
+            }
+        }
+
+        function updatePlayPauseUI(isPlaying) {
+            const playIcon = document.getElementById('play-icon');
+            const pauseIcon = document.getElementById('pause-icon');
+            if (isPlaying) {
+                playIcon.style.display = 'none';
+                pauseIcon.style.display = 'block';
+            } else {
+                playIcon.style.display = 'block';
+                pauseIcon.style.display = 'none';
+            }
+        }
+
+        function playNext() {
+            if (playlist.length === 0) return;
+            currentTrackIndex = (currentTrackIndex + 1) % playlist.length;
+            loadAndPlayTrack();
+        }
+
+        function playPrev() {
+            if (playlist.length === 0) return;
+            currentTrackIndex = (currentTrackIndex - 1 + playlist.length) % playlist.length;
+            loadAndPlayTrack();
+        }
+
+        function onProgressSeek(percent) {
+            const audioEl = document.getElementById('audio-element');
+            if (audioEl.duration) {
+                audioEl.currentTime = (percent / 100) * audioEl.duration;
+            }
+        }
+
+        // Helper function to format time (e.g. 125 -> 2:05)
+        function formatPlayerTime(t) {
+            const m = Math.floor(t / 60);
+            const s = Math.floor(t % 60).toString().padStart(2, '0');
+            return m + ':' + s;
+        }
+
+        function onVolumeChange(vol) {
+            const audioEl = document.getElementById('audio-element');
+            audioEl.volume = vol / 100;
+        }
+
+        function closePlayer() {
+            const audioEl = document.getElementById('audio-element');
+            audioEl.pause();
+            audioEl.src = '';
+            document.getElementById('audio-player-bar').style.display = 'none';
+        }
+
+        function createImageCard(file) {
+            const card = document.createElement('div');
+            card.className = 'image-card';
+            card.onclick = () => openLightbox(file.id);
+
+            card.innerHTML = `
+                <img src="/media/${file.id}" alt="${file.name}" loading="lazy">
+                <div class="image-card-overlay">
+                    <div class="image-card-name" title="${file.name}">${file.name}</div>
+                    <a href="/media/${file.id}" download="${file.name}" onclick="event.stopPropagation()" class="image-card-download" title="Download">
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </a>
+                </div>
+            `;
+            return card;
+        }
+
+        function openLightbox(fileId) {
+            // Construct a list of images matching current browse state
+            let filteredImages = filesData.filter(f => f.cat === 'image');
+            if (currentPath.length > 0 && searchQuery === '') {
+                filteredImages = filteredImages.filter(f => {
+                    const comps = getRelativeComponents(f.path);
+                    if (comps.length <= currentPath.length) return false;
+                    for (let i = 0; i < currentPath.length; i++) {
+                        if (comps[i] !== currentPath[i]) return false;
+                    }
+                    return true;
+                });
+            } else if (searchQuery !== '') {
+                filteredImages = filteredImages.filter(f => f.name.toLowerCase().includes(searchQuery));
+            }
+
+            // Sort alphabetically
+            filteredImages.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+
+            imageList = filteredImages;
+            currentImageIndex = imageList.findIndex(f => f.id.toString() === fileId.toString());
+            if (currentImageIndex === -1) {
+                // fallback
+                const file = filesData.find(f => f.id.toString() === fileId.toString());
+                if (file) {
+                    imageList = [file];
+                    currentImageIndex = 0;
+                } else {
+                    return;
+                }
+            }
+
+            showLightboxImage();
+        }
+
+        function showLightboxImage() {
+            if (currentImageIndex < 0 || currentImageIndex >= imageList.length) return;
+            const file = imageList[currentImageIndex];
+
+            const lightbox = document.getElementById('image-lightbox');
+            const img = document.getElementById('lightbox-img');
+            const title = document.getElementById('lightbox-title');
+            const dl = document.getElementById('lightbox-download');
+
+            img.src = '/media/' + file.id;
+            title.textContent = file.name;
+            dl.href = '/media/' + file.id;
+            dl.download = file.name;
+
+            lightbox.style.display = 'flex';
+
+            // Add keyboard navigation event listener if not already added
+            document.removeEventListener('keydown', handleLightboxKeydown);
+            document.addEventListener('keydown', handleLightboxKeydown);
+        }
+
+        function handleLightboxKeydown(e) {
+            if (e.key === 'ArrowRight') {
+                showNextImage();
+            } else if (e.key === 'ArrowLeft') {
+                showPrevImage();
+            } else if (e.key === 'Escape') {
+                closeLightbox();
+            }
+        }
+
+        function showNextImage() {
+            if (imageList.length === 0) return;
+            currentImageIndex = (currentImageIndex + 1) % imageList.length;
+            showLightboxImage();
+        }
+
+        function showPrevImage() {
+            if (imageList.length === 0) return;
+            currentImageIndex = (currentImageIndex - 1 + imageList.length) % imageList.length;
+            showLightboxImage();
+        }
+
+        function closeLightbox() {
+            document.getElementById('image-lightbox').style.display = 'none';
+            document.removeEventListener('keydown', handleLightboxKeydown);
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        function updateStatusBadge(isOnline) {
+            const badge = document.getElementById('server-status-badge');
+            const dot = document.getElementById('server-status-dot');
+            const text = document.getElementById('server-status-text');
+            if (!badge || !dot || !text) return;
+            if (isOnline) {
+                badge.style.color = '#10b981';
+                dot.style.background = '#10b981';
+                dot.style.boxShadow = '0 0 8px #10b981';
+                text.textContent = 'Online';
+            } else {
+                badge.style.color = '#ef4444';
+                dot.style.background = '#ef4444';
+                dot.style.boxShadow = '0 0 8px #ef4444';
+                text.textContent = 'Offline';
+            }
+        }
+
+        async function checkServerStatus() {
+            try {
+                const res = await fetch('/healthz');
+                updateStatusBadge(res.ok);
+            } catch (err) {
+                updateStatusBadge(false);
+            }
+        }
+
+        // Run global heartbeat status check every 5 seconds
+        setInterval(checkServerStatus, 5000);
+
+        async function updateMetrics() {
+            try {
+                const res = await fetch('/metrics/json');
+                if (!res.ok) {
+                    updateStatusBadge(false);
+                    return;
+                }
+                const data = await res.json();
+                updateStatusBadge(true);
+                
+                const stats = data.web_handler_metrics;
+                const db = data.database_stats;
+
+                // Update Database
+                document.getElementById('db-total-files').textContent = db.total_files.toLocaleString();
+                document.getElementById('db-total-size').textContent = formatBytes(db.total_size_bytes);
+                document.getElementById('db-file-size').textContent = formatBytes(db.database_size_bytes);
+                
+                document.getElementById('db-video-count').textContent = db.video_files.toLocaleString();
+                document.getElementById('db-audio-count').textContent = db.audio_files.toLocaleString();
+                document.getElementById('db-image-count').textContent = db.image_files.toLocaleString();
+                document.getElementById('db-playlist-count').textContent = db.playlists.toLocaleString();
+
+                // Update Web Traffic
+                document.getElementById('web-gigabytes').textContent = stats.gigabytes_transferred.toFixed(3) + ' GB';
+                document.getElementById('web-file-serves').textContent = stats.file_serves.toLocaleString();
+                document.getElementById('web-dir-listings').textContent = stats.directory_listings.toLocaleString();
+
+                // Calculate network usage speed in Mbps
+                const currentBytes = stats.gigabytes_transferred * 1073741824;
+                const currentTime = Date.now();
+                if (lastBytes !== null && lastTime !== null) {
+                    const deltaBytes = currentBytes - lastBytes;
+                    const deltaTimeSeconds = (currentTime - lastTime) / 1000.0;
+                    if (deltaTimeSeconds > 0) {
+                        const speedBps = (deltaBytes * 8) / deltaTimeSeconds;
+                        const speedMbps = speedBps / 1000000.0;
+                        document.getElementById('web-speed').textContent = Math.round(speedMbps) + ' Mbps';
+                    }
+                } else {
+                    document.getElementById('web-speed').textContent = '0 Mbps';
+                }
+                lastBytes = currentBytes;
+                lastTime = currentTime;
+
+                // Update Cache
+                document.getElementById('web-cache-rate').textContent = stats.cache_hit_rate_percent.toFixed(1) + '%';
+                document.getElementById('web-cache-hits').textContent = stats.cache_hits.toLocaleString();
+                document.getElementById('web-cache-misses').textContent = stats.cache_misses.toLocaleString();
+
+                // Update Server Health
+                document.getElementById('web-response-time').textContent = stats.average_response_time_ms.toFixed(2) + ' ms';
+                document.getElementById('web-errors').textContent = stats.errors.toLocaleString();
+
+                // Update Active TV Casts
+                const activeCastsContainer = document.getElementById('active-tv-casts-container');
+                if (activeCastsContainer) {
+                    const casts = data.active_casts || {};
+                    const castKeys = Object.keys(casts);
+                    
+                    if (castKeys.length === 0) {
+                        activeCastsContainer.innerHTML = '<div style="color: var(--text-secondary); font-style: italic; padding: 0.25rem 0;">No active TV streams.</div>';
+                    } else {
+                        let castsHtml = '';
+                        castKeys.forEach(tv => {
+                            castsHtml += `
+                                <div style="display: flex; align-items: center; justify-content: space-between; padding: 0.6rem 0.85rem; background: rgba(255,255,255,0.02); border: 1px solid var(--card-border); border-radius: 10px; margin-bottom: 0.25rem;">
+                                    <div style="display: flex; align-items: center; gap: 0.65rem; font-weight: 600; color: var(--text-primary); min-width: 0; flex: 1;">
+                                        <span style="display: inline-block; width: 6px; height: 6px; background: var(--accent-color); border-radius: 50%; box-shadow: 0 0 6px var(--accent-color); flex-shrink: 0;"></span>
+                                        <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${tv}</span>
+                                    </div>
+                                    <div style="color: var(--accent-color); font-weight: 600; text-align: right; max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-left: 0.75rem;" title="${casts[tv]}">
+                                        ${casts[tv]}
+                                    </div>
+                                </div>
+                            `;
+                        });
+                        activeCastsContainer.innerHTML = castsHtml;
+                    }
+                }
+
+            } catch (err) {
+                console.error("Failed to fetch metrics:", err);
+                updateStatusBadge(false);
+            }
+        }
+
+        const filesData = JSON.parse(document.getElementById('files-data').textContent);
+        const monitoredDirs = JSON.parse(document.getElementById('dirs-data').textContent);
+
+        let currentTab = 'video'; // Videos active by default!
+        let currentPath = [];
+        let searchQuery = '';
+
+        function setTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                if (btn.dataset.tab === tab) {
+                    btn.classList.add('active');
+                } else {
+                    btn.classList.remove('active');
+                }
+            });
+            currentPath = [];
+            render();
+        }
+
+        function onSearch() {
+            searchQuery = document.getElementById('search-input').value.toLowerCase();
+            render();
+        }
+
+        function playMedia(id) {
+            window.location.href = '/media/' + id;
+        }
+
+        function getRelativeComponents(filePath) {
+            let path = filePath.replace(/\\/g, '/');
+            for (const dir of monitoredDirs) {
+                let dirNorm = dir.replace(/\\/g, '/');
+                if (!dirNorm.endsWith('/')) {
+                    dirNorm += '/';
+                }
+                if (path.startsWith(dirNorm)) {
+                    return path.substring(dirNorm.length).split('/').filter(p => p.length > 0);
+                }
+            }
+            const parts = path.split('/').filter(p => p.length > 0);
+            return parts.slice(-1);
+        }
+
+        function render() {
+            const fileListContainer = document.getElementById('file-list');
+            fileListContainer.innerHTML = '';
+
+            if (currentTab === 'image') {
+                fileListContainer.className = 'image-grid';
+            } else {
+                fileListContainer.className = 'file-list';
+            }
+
+            // Filter files by tab and search
+            let filteredFiles = filesData.filter(file => {
+                if (currentTab === 'radio') {
+                    return file.cat === 'radio' && (searchQuery === '' || file.name.toLowerCase().includes(searchQuery));
+                }
+                if (file.cat === 'radio') return false;
+                
+                const matchesTab = currentTab === 'all' || file.cat === currentTab;
+                const matchesSearch = searchQuery === '' || file.name.toLowerCase().includes(searchQuery);
+                return matchesTab && matchesSearch;
+            });
+
+            // For radio tab, render a flat list of radio stations directly
+            if (currentTab === 'radio') {
+                document.getElementById('breadcrumbs').innerHTML = '<span>Internet Radio Stations</span>';
+                if (filteredFiles.length === 0) {
+                    renderEmptyState("No radio stations configured.");
+                    return;
+                }
+                filteredFiles.forEach(file => {
+                    fileListContainer.appendChild(createFileCard(file));
+                });
+                return;
+            }
+
+            // If searching, show a flat search results view
+            if (searchQuery !== '') {
+                document.getElementById('breadcrumbs').innerHTML = '<span>Search Results</span>';
+                
+                if (filteredFiles.length === 0) {
+                    renderEmptyState("No matching files found.");
+                    return;
+                }
+                
+                filteredFiles.forEach(file => {
+                    if (currentTab === 'image' && file.cat === 'image') {
+                        fileListContainer.appendChild(createImageCard(file));
+                    } else {
+                        fileListContainer.appendChild(createFileCard(file));
+                    }
+                });
+                return;
+            }
+
+            // Build directory tree
+            const tree = { folders: {}, files: [] };
+            
+            filteredFiles.forEach(file => {
+                const components = getRelativeComponents(file.path);
+                let curr = tree;
+                
+                for (let i = 0; i < components.length - 1; i++) {
+                    const folderName = components[i];
+                    if (!curr.folders[folderName]) {
+                        curr.folders[folderName] = { folders: {}, files: [] };
+                    }
+                    curr = curr.folders[folderName];
+                }
+                
+                curr.files.push(file);
+            });
+
+            // Navigate tree to currentPath
+            let activeNode = tree;
+            for (const folder of currentPath) {
+                if (activeNode.folders[folder]) {
+                    activeNode = activeNode.folders[folder];
+                } else {
+                    currentPath = [];
+                    activeNode = tree;
+                    break;
+                }
+            }
+
+            renderBreadcrumbs();
+
+            // Parent Folder row
+            if (currentPath.length > 0) {
+                const parentCard = document.createElement('div');
+                parentCard.className = 'media-card';
+                parentCard.style.cursor = 'pointer';
+                parentCard.onclick = goBack;
+                parentCard.innerHTML = `
+                    <div class="media-info">
+                        <div class="media-icon-wrapper">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </div>
+                        <div class="media-details">
+                            <div class="media-name">..</div>
+                            <div class="media-meta">Parent Directory</div>
+                        </div>
+                    </div>
+                `;
+                fileListContainer.appendChild(parentCard);
+            }
+
+            // Render Subfolders
+            const sortedFolders = Object.keys(activeNode.folders).sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+            sortedFolders.forEach(folderName => {
+                const folderCard = document.createElement('div');
+                folderCard.className = 'media-card folder-card';
+                folderCard.style.cursor = 'pointer';
+                folderCard.onclick = () => enterFolder(folderName);
+
+                let actionAreaHtml = '';
+                if (currentTab === 'audio' || currentTab === 'all') {
+                    actionAreaHtml = `
+                        <div class="action-area" onclick="event.stopPropagation(); playFolder('${folderName}')">
+                            <button class="btn-action" title="Play Folder Content">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            </button>
+                        </div>
+                    `;
+                }
+
+                // Calculate video files in this folder to see if "Play on TV" is applicable
+                const targetPath = [...currentPath, folderName];
+                const folderVideos = filesData.filter(file => {
+                    if (file.cat !== 'video') return false;
+                    const comps = getRelativeComponents(file.path);
+                    if (comps.length <= targetPath.length) return false;
+                    for (let i = 0; i < targetPath.length; i++) {
+                        if (comps[i] !== targetPath[i]) return false;
+                    }
+                    return true;
+                });
+
+                let tvActionHtml = '';
+                if ((currentTab === 'video' || currentTab === 'all') && folderVideos.length > 0) {
+                    tvActionHtml = `
+                        <div class="action-area" onclick="event.stopPropagation(); playVideoFolderOnTv('${folderName}')">
+                            <button class="btn-action" title="Play on TV" style="color: var(--accent-color);">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                            </button>
+                        </div>
+                    `;
+                }
+
+                folderCard.innerHTML = `
+                    <div class="media-info">
+                        <div class="media-icon-wrapper">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                        </div>
+                        <div class="media-details">
+                            <div class="media-name" title="${folderName}">${folderName}</div>
+                            <div class="media-meta">Folder</div>
+                        </div>
+                    </div>
+                    <div style="display: flex; gap: 0.5rem;">
+                        ${actionAreaHtml}
+                        ${tvActionHtml}
+                    </div>
+                `;
+                fileListContainer.appendChild(folderCard);
+            });
+
+            // Render Files
+            const sortedFiles = activeNode.files.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+            sortedFiles.forEach(file => {
+                if (currentTab === 'image' && file.cat === 'image') {
+                    fileListContainer.appendChild(createImageCard(file));
+                } else {
+                    fileListContainer.appendChild(createFileCard(file));
+                }
+            });
+
+            if (sortedFolders.length === 0 && sortedFiles.length === 0) {
+                renderEmptyState("This folder contains no items matching the active filter.");
+            }
+        }
+
+        function createFileCard(file) {
+            const card = document.createElement('div');
+            card.className = 'media-card';
+            card.style.cursor = 'pointer';
+            if (file.cat === 'audio' || file.cat === 'radio') {
+                card.onclick = () => playAudioFile(file);
+            } else if (file.cat === 'image') {
+                card.onclick = () => openLightbox(file.id);
+            } else {
+                card.onclick = () => playMedia(file.id);
+            }
+            
+            let iconSvg = '';
+            if (file.cat === 'video') {
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>`;
+            } else if (file.cat === 'audio') {
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"></path><circle cx="6" cy="18" r="3"></circle><circle cx="18" cy="16" r="3"></circle></svg>`;
+            } else if (file.cat === 'radio') {
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="2"></circle><path d="M16.24 7.76a6 6 0 0 1 0 8.49m-8.48-.01a6 6 0 0 1 0-8.49m11.31-2.82a10 10 0 0 1 0 14.14m-14.14 0a10 10 0 0 1 0-14.14"></path></svg>`;
+            } else if (file.cat === 'image') {
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
+            } else {
+                iconSvg = `<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline></svg>`;
+            }
+
+            let detailsHtml = `<div class="media-name" title="${file.name}">${file.title || file.name}</div>`;
+            if (file.artist || file.album) {
+                let metaParts = [];
+                if (file.artist) { metaParts.push(file.artist); }
+                if (file.album) { metaParts.push(file.album); }
+                detailsHtml += `<div class="media-artist-album" style="font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.1rem;">${metaParts.join(' &mdash; ')}</div>`;
+            }
+
+            let playBtnHtml = '';
+            if (file.cat === 'audio' || file.cat === 'radio') {
+                playBtnHtml = `
+                    <button class="btn-action" onclick="event.stopPropagation(); playAudioFile('${file.id}')" title="Play File" style="margin-right: 0.35rem;">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                    </button>
+                `;
+            }
+
+            card.innerHTML = `
+                <div class="media-info">
+                    <div class="media-icon-wrapper">
+                        ${iconSvg}
+                    </div>
+                    <div class="media-details">
+                        ${detailsHtml}
+                        <div class="media-meta" style="margin-top: 0.25rem;">
+                            <span>${file.size_str}</span>
+                            <span class="media-meta-dot"></span>
+                            <span style="text-transform: uppercase;">${file.ext}</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="action-area">
+                    ${playBtnHtml}
+                    <a href="/media/${file.id}" download="${file.name}" onclick="event.stopPropagation()" class="btn-action" title="Download File">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                    </a>
+                </div>
+            `;
+            return card;
+        }
+
+        function renderBreadcrumbs() {
+            const container = document.getElementById('breadcrumbs');
+            container.innerHTML = '';
+            
+            const rootSpan = document.createElement('span');
+            rootSpan.className = 'breadcrumb-item';
+            rootSpan.onclick = () => jumpToBreadcrumb(-1);
+            rootSpan.textContent = 'Home';
+            container.appendChild(rootSpan);
+            
+            currentPath.forEach((folder, idx) => {
+                const separator = document.createElement('span');
+                separator.className = 'breadcrumb-separator';
+                separator.textContent = ' / ';
+                container.appendChild(separator);
+                
+                const folderSpan = document.createElement('span');
+                folderSpan.className = 'breadcrumb-item';
+                folderSpan.onclick = () => jumpToBreadcrumb(idx);
+                folderSpan.textContent = folder;
+                container.appendChild(folderSpan);
+            });
+        }
+
+        function jumpToBreadcrumb(idx) {
+            currentPath = currentPath.slice(0, idx + 1);
+            render();
+        }
+
+        function enterFolder(folderName) {
+            currentPath.push(folderName);
+            render();
+        }
+
+        function goBack() {
+            currentPath.pop();
+            render();
+        }
+
+        function renderEmptyState(message) {
+            const container = document.getElementById('file-list');
+            container.innerHTML = `
+                <div class="empty-state">
+                    <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
+                    <h3>No items found</h3>
+                    <p>${message}</p>
+                </div>
+            `;
+        }
+
+        // Setup Audio Element event listeners
+        const audioEl = document.getElementById('audio-element');
+        const slider = document.getElementById('player-progress-slider');
+        const currentEl = document.getElementById('player-time-current');
+        const durationEl = document.getElementById('player-time-duration');
+
+        audioEl.addEventListener('timeupdate', () => {
+            if (audioEl.duration) {
+                const curTime = audioEl.currentTime;
+                const durTime = audioEl.duration;
+                slider.value = (curTime / durTime) * 100;
+                currentEl.textContent = formatPlayerTime(curTime);
+                durationEl.textContent = formatPlayerTime(durTime);
+            }
+        });
+
+        audioEl.addEventListener('ended', () => {
+            playNext();
+        });
+
+        // Initial render
+        render();
+    </script>
+</body>
+</html>

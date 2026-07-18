@@ -275,7 +275,7 @@ async fn main() -> anyhow::Result<()> {
         platform_info: platform_info.clone(),
         filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
-        web_metrics: Arc::new(vuio::web::handlers::WebHandlerMetrics::new()),
+        web_metrics: Arc::new(vuio::web::diagnostics::WebHandlerMetrics::new()),
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         log_file_path: resolved_log_file,
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -1375,7 +1375,7 @@ async fn increment_content_update_id(app_state: &AppState) {
 
     let state = app_state.clone();
     tokio::spawn(async move {
-        vuio::web::handlers::notify_content_change(&state, new_id).await;
+        vuio::web::eventing::notify_content_change(&state, new_id).await;
     });
 }
 

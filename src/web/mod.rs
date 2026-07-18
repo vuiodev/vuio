@@ -1,53 +1,59 @@
-pub mod handlers;
-pub mod mcp;
-pub mod xml;
+pub mod casting;
 pub mod client;
+pub mod diagnostics;
+pub mod eventing;
+pub mod mcp;
+pub mod soap;
+pub mod streaming;
+pub mod ui;
+pub mod xml;
 
 use crate::state::AppState;
-use axum::{routing::{get, post}, Router};
+use axum::{
+    routing::{get, post},
+    Router,
+};
 
 pub fn create_router(state: AppState) -> Router {
     Router::new()
-        .route("/", get(handlers::root_handler))
-        .route("/description.xml", get(handlers::description_handler))
-        .route(
-            "/ContentDirectory.xml",
-            get(handlers::content_directory_scpd),
-        )
+        .route("/", get(ui::root_handler))
+        .route("/description.xml", get(soap::description_handler))
+        .route("/ContentDirectory.xml", get(soap::content_directory_scpd))
         .route(
             "/control/ContentDirectory",
-            get(handlers::content_directory_control).post(handlers::content_directory_control),
+            get(soap::content_directory_control).post(soap::content_directory_control),
         )
         .route(
             "/event/ContentDirectory",
-            axum::routing::any(handlers::content_directory_subscribe),
+            axum::routing::any(eventing::content_directory_subscribe),
         )
-        .route(
-            "/ConnectionManager.xml",
-            get(handlers::connection_manager_scpd),
-        )
+        .route("/ConnectionManager.xml", get(soap::connection_manager_scpd))
         .route(
             "/control/ConnectionManager",
-            get(handlers::connection_manager_control).post(handlers::connection_manager_control),
+            get(soap::connection_manager_control).post(soap::connection_manager_control),
         )
         .route(
             "/X_MS_MediaReceiverRegistrar.xml",
-            get(handlers::media_receiver_registrar_scpd),
+            get(soap::media_receiver_registrar_scpd),
         )
         .route(
             "/control/X_MS_MediaReceiverRegistrar",
-            get(handlers::media_receiver_registrar_control).post(handlers::media_receiver_registrar_control),
+            get(soap::media_receiver_registrar_control)
+                .post(soap::media_receiver_registrar_control),
         )
-        .route("/media/{id}", get(handlers::serve_media).head(handlers::serve_media))
-        .route("/media/{id}/cover", get(handlers::serve_cover))
-        .route("/media/{id}/subtitle", get(handlers::serve_subtitle))
-        .route("/metrics", get(handlers::get_prometheus_metrics))
-        .route("/metrics/json", get(handlers::get_web_metrics))
-        .route("/healthz", get(handlers::healthz_handler))
-        .route("/readyz", get(handlers::readyz_handler))
-        .route("/logs", get(handlers::get_logs_handler))
-        .route("/api/tvs", get(handlers::api_list_tvs))
-        .route("/api/cast/playlist", post(handlers::api_cast_playlist))
+        .route(
+            "/media/{id}",
+            get(streaming::serve_media).head(streaming::serve_media),
+        )
+        .route("/media/{id}/cover", get(streaming::serve_cover))
+        .route("/media/{id}/subtitle", get(streaming::serve_subtitle))
+        .route("/metrics", get(diagnostics::get_prometheus_metrics))
+        .route("/metrics/json", get(diagnostics::get_web_metrics))
+        .route("/healthz", get(diagnostics::healthz_handler))
+        .route("/readyz", get(diagnostics::readyz_handler))
+        .route("/logs", get(diagnostics::get_logs_handler))
+        .route("/api/tvs", get(casting::api_list_tvs))
+        .route("/api/cast/playlist", post(casting::api_cast_playlist))
         .route("/sse", get(mcp::sse_handler))
         .route("/mcp/message", post(mcp::message_handler))
         .with_state(state)
