@@ -9,6 +9,7 @@ use tracing::{debug, warn};
 /// A discovered UPnP MediaRenderer (TV/speaker/player) on the network
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct DiscoveredTv {
+    pub id: String,
     pub friendly_name: String,
     pub control_url: String,
     pub location_url: String,
@@ -30,7 +31,7 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
     let target: SocketAddr = "239.255.255.250:1900".parse()?;
     socket.send_to(search_request.as_bytes(), target).await?;
 
-    let mut locations = Vec::new();
+    let mut locations: Vec<(String, String)> = Vec::new();
     let mut buf = vec![0u8; 2048];
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -40,14 +41,19 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
         match tokio::time::timeout_at(deadline, recv_future).await {
             Ok(Ok((len, _addr))) => {
                 let response = String::from_utf8_lossy(&buf[..len]);
-                // Extract LOCATION header
+                let mut location = None;
+                let mut usn = None;
                 for line in response.lines() {
                     let lower = line.to_lowercase();
                     if lower.starts_with("location:") {
-                        let url = line[9..].trim().to_string();
-                        if !locations.contains(&url) {
-                            locations.push(url);
-                        }
+                        location = Some(line[9..].trim().to_string());
+                    } else if lower.starts_with("usn:") {
+                        usn = Some(line[4..].trim().to_string());
+                    }
+                }
+                if let Some(location) = location {
+                    if !locations.iter().any(|(existing, _)| existing == &location) {
+                        locations.push((location, usn.unwrap_or_default()));
                     }
                 }
             }
@@ -66,8 +72,8 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
         .timeout(Duration::from_secs(5))
         .build()?;
 
-    for location in locations {
-        match fetch_tv_info(&client, &location).await {
+    for (location, usn) in locations {
+        match fetch_tv_info(&client, &location, &usn).await {
             Ok(Some(tv)) => {
                 debug!("Discovered TV: {} at {}", tv.friendly_name, tv.control_url);
                 tvs.push(tv);
@@ -85,7 +91,11 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
 }
 
 /// Fetch and parse a UPnP device descriptor XML to extract TV info
-async fn fetch_tv_info(client: &reqwest::Client, location: &str) -> Result<Option<DiscoveredTv>> {
+async fn fetch_tv_info(
+    client: &reqwest::Client,
+    location: &str,
+    discovery_usn: &str,
+) -> Result<Option<DiscoveredTv>> {
     let body = client.get(location).send().await?.text().await?;
 
     let mut reader = Reader::from_str(&body);
@@ -93,6 +103,7 @@ async fn fetch_tv_info(client: &reqwest::Client, location: &str) -> Result<Optio
     let mut friendly_name = String::new();
     let mut model_name = String::new();
     let mut control_url = String::new();
+    let mut udn = String::new();
     let mut in_av_transport_service = false;
     let mut current_element = String::new();
     let mut current_service_type = String::new();
@@ -111,6 +122,9 @@ async fn fetch_tv_info(client: &reqwest::Client, location: &str) -> Result<Optio
                     }
                     "modelName" if model_name.is_empty() => {
                         model_name = text;
+                    }
+                    "UDN" if udn.is_empty() => {
+                        udn = text;
                     }
                     "serviceType" => {
                         current_service_type = text.clone();
@@ -159,6 +173,16 @@ async fn fetch_tv_info(client: &reqwest::Client, location: &str) -> Result<Optio
     };
 
     Ok(Some(DiscoveredTv {
+        id: if udn.is_empty() {
+            discovery_usn
+                .split("::")
+                .next()
+                .filter(|value| !value.is_empty())
+                .unwrap_or(location)
+                .to_string()
+        } else {
+            udn
+        },
         friendly_name,
         control_url: full_control_url,
         location_url: location.to_string(),

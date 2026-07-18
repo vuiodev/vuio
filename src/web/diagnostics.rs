@@ -123,14 +123,7 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
 
     let active_casts = {
         let mut casts = state.active_casts.lock().await;
-        // Retain only entries active in the last 3 minutes (180 seconds)
-        casts.retain(|_, (_, last_seen)| last_seen.elapsed() < std::time::Duration::from_secs(180));
-
-        let map: std::collections::HashMap<String, String> = casts
-            .iter()
-            .map(|(k, (v, _))| (k.clone(), v.clone()))
-            .collect();
-        map
+        casts.snapshot()
     };
 
     let metrics_json = serde_json::json!({

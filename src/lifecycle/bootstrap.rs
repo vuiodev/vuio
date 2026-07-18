@@ -162,6 +162,8 @@ async fn initialize_config_manager(
     _platform_info: &PlatformInfo,
     config_file_path: Option<String>,
     config_override: Option<AppConfig>,
+    cancellation: CancellationToken,
+    background_tasks: tokio_util::task::TaskTracker,
 ) -> anyhow::Result<ConfigManager> {
     info!("Initializing configuration...");
 
@@ -271,7 +273,11 @@ async fn initialize_config_manager(
             "Loading existing configuration from: {}",
             config_path.display()
         );
-        ConfigManager::new_with_watching(&config_path)
+        ConfigManager::new_with_watching(
+            &config_path,
+            cancellation.clone(),
+            background_tasks.clone(),
+        )
             .await
             .context("Failed to create ConfigManager with file watching")?
     } else {
@@ -302,7 +308,7 @@ async fn initialize_config_manager(
         );
 
         // Create ConfigManager with file watching
-        ConfigManager::new_with_watching(&config_path)
+        ConfigManager::new_with_watching(&config_path, cancellation, background_tasks)
             .await
             .context("Failed to create ConfigManager with file watching")?
     };

@@ -288,7 +288,10 @@ async fn start_file_monitoring(
     info!("File system watcher successfully started for all directories");
 
     // Get event receiver
-    let mut event_receiver = watcher.get_event_receiver();
+    let mut event_receiver = watcher
+        .take_event_receiver()
+        .await
+        .context("File-system event receiver was already consumed")?;
 
     // Spawn task to handle file system events
     let app_state_clone = app_state.clone();
@@ -425,8 +428,12 @@ async fn increment_content_update_id(app_state: &AppState) {
     );
 
     let state = app_state.clone();
-    tokio::spawn(async move {
-        crate::web::eventing::notify_content_change(&state, new_id).await;
+    let cancellation = app_state.cancellation.clone();
+    app_state.background_tasks.spawn(async move {
+        tokio::select! {
+            _ = cancellation.cancelled() => {}
+            _ = crate::web::eventing::notify_content_change(&state, new_id) => {}
+        }
     });
 }
 

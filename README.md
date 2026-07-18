@@ -501,9 +501,9 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
 | `browse_folder` | `path` (string), `category` (optional string) | Browse files and directories in a specific folder path |
 | `get_media_info` | `file_id` (integer) | Fetch detailed metadata for a file by its ID |
 | `get_server_stats` | None | Retrieve media counts, library size, and server URL info |
-| `list_tvs` | None | Scan the local network for DLNA/UPnP MediaRenderer TVs |
-| `cast_media_to_tv` | `file_id` (integer), `tv_name` (string) | Start playing a media file on a discovered smart TV |
-| `control_tv` | `tv_name` (string), `action` ("play"\|"pause"\|"stop") | Send playback control commands to a smart TV |
+| `list_renderers` | None | List DLNA/UPnP MediaRenderers with stable IDs |
+| `cast_media_to_renderer` | `file_id` (integer), `renderer_id` (string) | Start playing a media file on a discovered renderer |
+| `control_renderer` | `renderer_id` (string), `action` ("play"\|"pause"\|"stop") | Send playback control commands to a renderer |
 | `list_media` | `category` (optional string), `limit` (optional integer) | Retrieve a flat list of indexed media files (all, audio, video, image) |
 | `list_playlists` | None | List all playlists stored on the server |
 | `create_playlist` | `name` (string), `description` (optional string) | Create a new media playlist |
@@ -511,7 +511,7 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
 | `add_to_playlist` | `playlist_id` (integer), `media_file_ids` (integer[]) | Add multiple tracks in bulk to a playlist |
 | `remove_from_playlist` | `playlist_id` (integer), `media_file_id` (integer) | Remove a specific track from a playlist |
 | `get_playlist_tracks` | `playlist_id` (integer) | Retrieve all media files/tracks in a specific playlist |
-| `cast_playlist_to_tv` | `playlist_id` (integer), `tv_name` (string) | Cast a playlist to a local smart TV and start playing it |
+| `cast_playlist_to_renderer` | `playlist_id` (integer), `renderer_id` (string) | Cast a playlist to a local renderer and start playing it |
 
 ### Example Usage
 
@@ -519,7 +519,7 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
    ```bash
    curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
      -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"list_tvs","arguments":{}}}'
+     -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"list_renderers","arguments":{}}}'
    ```
 
 2. **Search for Media**:
@@ -533,7 +533,7 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
    ```bash
    curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
      -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"cast_media_to_tv","arguments":{"file_id":42,"tv_name":"bedroom"}}}'
+     -d '{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"cast_media_to_renderer","arguments":{"file_id":42,"renderer_id":"uuid:renderer-id"}}}'
    ```
 
 ---

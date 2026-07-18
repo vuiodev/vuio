@@ -70,14 +70,16 @@ async fn test_metrics_endpoints_data() {
         content_update_id,
         web_metrics,
         lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES))),
         log_file_path: temp_dir.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BrowseResponseCache::new())),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::ActiveCastRegistry::new())),
+        discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        background_tasks: tokio_util::task::TaskTracker::new(),
     };
 
     // 3. Test get_web_metrics handler (JSON format)

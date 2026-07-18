@@ -114,12 +114,6 @@ impl UnifiedSsdpService {
         Ok((responder, announcer))
     }
 
-    /// Start the unified SSDP service using the legacy detached-task API.
-    pub async fn start(&self) -> Result<()> {
-        let _ = self.spawn_tasks().await?;
-        Ok(())
-    }
-
     /// Run SSDP until cancellation while retaining ownership of both worker tasks.
     pub async fn run_until_cancelled(self, cancellation: CancellationToken) -> Result<()> {
         let (mut responder, mut announcer) = self.spawn_tasks().await?;
@@ -388,21 +382,6 @@ impl UnifiedSsdpService {
     fn get_server_ip(state: &AppState) -> String {
         state.get_server_ip()
     }
-}
-
-/// Main entry point for SSDP service - now uses unified implementation
-pub fn run_ssdp_service(state: AppState) -> Result<()> {
-    info!("Starting unified SSDP service");
-    
-    let service = UnifiedSsdpService::new(state);
-    
-    tokio::spawn(async move {
-        if let Err(e) = service.start().await {
-            error!("Unified SSDP service failed: {}", e);
-        }
-    });
-    
-    Ok(())
 }
 
 /// Run SSDP as an owned lifecycle service until cancellation.

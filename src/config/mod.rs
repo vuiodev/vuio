@@ -1031,7 +1031,11 @@ impl ConfigManager {
     }
 
     /// Create a new configuration manager with file watching enabled
-    pub async fn new_with_watching<P: AsRef<Path>>(config_path: P) -> Result<Self> {
+    pub async fn new_with_watching<P: AsRef<Path>>(
+        config_path: P,
+        cancellation: tokio_util::sync::CancellationToken,
+        background_tasks: tokio_util::task::TaskTracker,
+    ) -> Result<Self> {
         let config_path = config_path.as_ref().to_path_buf();
         let config = AppConfig::load_or_create(&config_path)?;
         let (change_sender, _) = broadcast::channel(100);
@@ -1042,7 +1046,14 @@ impl ConfigManager {
         let config_clone = config_arc.clone();
         
         // Set up file watcher
-        let debouncer = Self::setup_file_watcher(path_clone, config_clone, sender_clone).await?;
+        let debouncer = Self::setup_file_watcher(
+            path_clone,
+            config_clone,
+            sender_clone,
+            cancellation,
+            background_tasks,
+        )
+        .await?;
         
         Ok(Self {
             config: config_arc,
@@ -1057,6 +1068,8 @@ impl ConfigManager {
         config_path: PathBuf,
         config: Arc<RwLock<AppConfig>>,
         sender: broadcast::Sender<ConfigChangeEvent>,
+        cancellation: tokio_util::sync::CancellationToken,
+        background_tasks: tokio_util::task::TaskTracker,
     ) -> Result<notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::FileIdMap>> {
         use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
         use tokio::sync::mpsc;
@@ -1080,8 +1093,15 @@ impl ConfigManager {
         }
         
         // Spawn task to handle debounced file events
-        tokio::spawn(async move {
-            while let Some(result) = rx.recv().await {
+        background_tasks.spawn(async move {
+            loop {
+                let result = tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    result = rx.recv() => match result {
+                        Some(result) => result,
+                        None => break,
+                    },
+                };
                 match result {
                     Ok(events) => {
                         // Check if any event is for our config file

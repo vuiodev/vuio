@@ -57,8 +57,8 @@ pub trait FileSystemWatcher: Send + Sync {
     /// Stop watching all directories
     async fn stop_watching(&self) -> Result<()>;
 
-    /// Get a receiver for file system events
-    fn get_event_receiver(&self) -> mpsc::Receiver<FileSystemEvent>;
+    /// Take the sole receiver for file system events.
+    async fn take_event_receiver(&self) -> Result<mpsc::Receiver<FileSystemEvent>>;
 
     /// Add a new path to watch
     async fn add_watch_path(&self, path: &Path) -> Result<()>;
@@ -458,21 +458,16 @@ impl FileSystemWatcher for CrossPlatformWatcher {
         Ok(())
     }
 
-    fn get_event_receiver(&self) -> mpsc::Receiver<FileSystemEvent> {
-        // This is a bit tricky - we need to return the receiver but can only do it once
-        // In practice, this should be called once during application startup
-        let receiver_guard = self.event_receiver.try_write();
-        if let Ok(mut guard) = receiver_guard {
-            if let Some(receiver) = guard.take() {
-                return receiver;
-            }
-        }
-
-        // If we can't get the original receiver, create a new channel
-        // This shouldn't happen in normal usage
-        warn!("Creating new event receiver - original may have been consumed");
-        let (_, receiver) = mpsc::channel(256); // Reduced buffer size
-        receiver
+    async fn take_event_receiver(&self) -> Result<mpsc::Receiver<FileSystemEvent>> {
+        self.event_receiver
+            .write()
+            .await
+            .take()
+            .ok_or_else(|| {
+                crate::error::AppError::Internal(anyhow::anyhow!(
+                    "file-system event receiver has already been taken"
+                ))
+            })
     }
 
     async fn add_watch_path(&self, path: &Path) -> Result<()> {
@@ -660,7 +655,7 @@ mod tests {
         let watcher = CrossPlatformWatcher::new();
 
         // Get event receiver before starting watcher
-        let mut receiver = watcher.get_event_receiver();
+        let mut receiver = watcher.take_event_receiver().await.unwrap();
 
         // Start watching
         watcher

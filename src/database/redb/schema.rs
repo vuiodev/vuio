@@ -380,6 +380,45 @@ impl DatabaseReadSession for RedbReadSession {
                     emit_id!(id.value());
                 }
             }
+            MediaFileQuery::Filtered {
+                after_id,
+                mime_family,
+                text,
+            } => {
+                let first_id = after_id.unwrap_or(i64::MIN).saturating_add(1);
+                for entry in files.range(first_id..)? {
+                    let (_, bytes) = entry?;
+                    let view = Self::view(bytes.value())?;
+                    if mime_family
+                        .as_deref()
+                        .is_some_and(|family| !view.mime_type().starts_with(family))
+                    {
+                        continue;
+                    }
+                    if text.as_deref().is_some_and(|needle| {
+                        !contains_ignore_ascii_case(view.filename(), needle)
+                            && !view
+                                .title()
+                                .is_some_and(|value| contains_ignore_ascii_case(value, needle))
+                            && !view
+                                .artist()
+                                .is_some_and(|value| contains_ignore_ascii_case(value, needle))
+                            && !view
+                                .album()
+                                .is_some_and(|value| contains_ignore_ascii_case(value, needle))
+                    }) {
+                        continue;
+                    }
+                    summary.matched += 1;
+                    if summary.matched > offset && summary.visited < limit {
+                        visitor(view)?;
+                        summary.visited += 1;
+                    }
+                    if summary.visited >= limit {
+                        break;
+                    }
+                }
+            }
         }
 
         Ok(summary)
@@ -448,5 +487,19 @@ impl DatabaseReadSession for RedbReadSession {
             summary.visited += 1;
         }
         Ok(summary)
+    }
+}
+
+fn contains_ignore_ascii_case(value: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if value.is_ascii() && needle.is_ascii() {
+        value
+            .as_bytes()
+            .windows(needle.len())
+            .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+    } else {
+        value.to_lowercase().contains(&needle.to_lowercase())
     }
 }

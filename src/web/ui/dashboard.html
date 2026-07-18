@@ -1291,20 +1291,20 @@
 
             showToast("Discovering TVs on local network...", "info");
             
-            fetch('/api/tvs')
+            fetch('/api/renderers')
                 .then(res => res.json())
-                .then(tvs => {
-                    if (!Array.isArray(tvs) || tvs.length === 0) {
+                .then(renderers => {
+                    if (!Array.isArray(renderers) || renderers.length === 0) {
                         showToast("No TVs found on your local network.", "error");
                         return;
                     }
                     
-                    if (tvs.length === 1) {
+                    if (renderers.length === 1) {
                         // Only one TV found, cast immediately!
-                        castPlaylistToTv(tvs[0], folderName, fileIds);
+                        castPlaylistToRenderer(renderers[0], folderName, fileIds);
                     } else {
                         // Multiple TVs found, show selection modal
-                        showTvSelectionModal(tvs, folderName, fileIds);
+                        showRendererSelectionModal(renderers, folderName, fileIds);
                     }
                 })
                 .catch(err => {
@@ -1313,22 +1313,22 @@
                 });
         }
 
-        function showTvSelectionModal(tvs, folderName, fileIds) {
+        function showRendererSelectionModal(renderers, folderName, fileIds) {
             document.getElementById('tv-modal-folder-name').textContent = folderName;
             const container = document.getElementById('tv-list-container');
             container.innerHTML = '';
             
-            tvs.forEach(tvName => {
+            renderers.forEach(renderer => {
                 const btn = document.createElement('button');
                 btn.className = 'tv-select-btn';
                 btn.onclick = () => {
                     closeTvModal();
-                    castPlaylistToTv(tvName, folderName, fileIds);
+                    castPlaylistToRenderer(renderer, folderName, fileIds);
                 };
                 btn.innerHTML = `
                     <div class="tv-icon-wrapper">
                         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
-                        <span>${tvName}</span>
+                        <span>${renderer.friendly_name}</span>
                     </div>
                     <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
                 `;
@@ -1342,14 +1342,14 @@
             document.getElementById('tv-modal').style.display = 'none';
         }
 
-        function castPlaylistToTv(tvName, folderName, fileIds) {
-            showToast("Casting playlist to " + tvName + "...", "info");
+        function castPlaylistToRenderer(renderer, folderName, fileIds) {
+            showToast("Casting playlist to " + renderer.friendly_name + "...", "info");
             
             fetch('/api/cast/playlist', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    tv_name: tvName,
+                    renderer_id: renderer.id,
                     folder_name: folderName,
                     file_ids: fileIds
                 })
@@ -1359,7 +1359,7 @@
                 if (data.error) {
                     showToast("Cast error: " + data.error, "error");
                 } else {
-                    showToast("Successfully playing on " + tvName + "!", "success");
+                    showToast("Successfully playing on " + renderer.friendly_name + "!", "success");
                 }
             })
             .catch(err => {
@@ -1728,8 +1728,12 @@
             }
         }
 
-        const filesData = JSON.parse(document.getElementById('files-data').textContent);
+        let filesData = JSON.parse(document.getElementById('files-data').textContent);
         const monitoredDirs = JSON.parse(document.getElementById('dirs-data').textContent);
+        let nextMediaCursor = null;
+        let mediaLoading = false;
+        let mediaLoadGeneration = 0;
+        let searchTimer = null;
 
         let currentTab = 'video'; // Videos active by default!
         let currentPath = [];
@@ -1745,12 +1749,57 @@
                 }
             });
             currentPath = [];
-            render();
+            reloadMedia();
         }
 
         function onSearch() {
             searchQuery = document.getElementById('search-input').value.toLowerCase();
-            render();
+            clearTimeout(searchTimer);
+            searchTimer = setTimeout(reloadMedia, 250);
+        }
+
+        async function reloadMedia() {
+            mediaLoadGeneration += 1;
+            filesData = [];
+            nextMediaCursor = null;
+            await loadMoreMedia(true, mediaLoadGeneration);
+        }
+
+        async function loadMoreMedia(firstPage = false, generation = mediaLoadGeneration) {
+            if (mediaLoading && !firstPage) return;
+            mediaLoading = true;
+            try {
+                const params = new URLSearchParams({
+                    limit: '250',
+                    category: currentTab,
+                });
+                if (!firstPage && nextMediaCursor) params.set('cursor', nextMediaCursor);
+                if (searchQuery) params.set('query', searchQuery);
+                const response = await fetch('/api/media?' + params.toString());
+                if (!response.ok) throw new Error('Media request failed: ' + response.status);
+                const page = await response.json();
+                if (generation !== mediaLoadGeneration) return;
+                filesData = firstPage ? page.files : filesData.concat(page.files);
+                nextMediaCursor = page.next_cursor;
+                render();
+            } catch (error) {
+                console.error('Failed to load media:', error);
+                if (filesData.length === 0) renderEmptyState('Could not load the media library.');
+            } finally {
+                mediaLoading = false;
+            }
+        }
+
+        function appendLoadMore(container) {
+            if (!nextMediaCursor) return;
+            const button = document.createElement('button');
+            button.className = 'btn-action';
+            button.style.margin = '1rem auto';
+            button.style.display = 'block';
+            button.textContent = mediaLoading ? 'Loading…' : 'Load more';
+            button.disabled = mediaLoading;
+            button.onclick = () => loadMoreMedia();
+            container.appendChild(button);
         }
 
         function playMedia(id) {
@@ -1784,13 +1833,17 @@
 
             // Filter files by tab and search
             let filteredFiles = filesData.filter(file => {
+                const matchesSearch = searchQuery === ''
+                    || file.name.toLowerCase().includes(searchQuery)
+                    || (file.title || '').toLowerCase().includes(searchQuery)
+                    || (file.artist || '').toLowerCase().includes(searchQuery)
+                    || (file.album || '').toLowerCase().includes(searchQuery);
                 if (currentTab === 'radio') {
-                    return file.cat === 'radio' && (searchQuery === '' || file.name.toLowerCase().includes(searchQuery));
+                    return file.cat === 'radio' && matchesSearch;
                 }
                 if (file.cat === 'radio') return false;
                 
                 const matchesTab = currentTab === 'all' || file.cat === currentTab;
-                const matchesSearch = searchQuery === '' || file.name.toLowerCase().includes(searchQuery);
                 return matchesTab && matchesSearch;
             });
 
@@ -1799,11 +1852,13 @@
                 document.getElementById('breadcrumbs').innerHTML = '<span>Internet Radio Stations</span>';
                 if (filteredFiles.length === 0) {
                     renderEmptyState("No radio stations configured.");
+                    appendLoadMore(fileListContainer);
                     return;
                 }
                 filteredFiles.forEach(file => {
                     fileListContainer.appendChild(createFileCard(file));
                 });
+                appendLoadMore(fileListContainer);
                 return;
             }
 
@@ -1813,6 +1868,7 @@
                 
                 if (filteredFiles.length === 0) {
                     renderEmptyState("No matching files found.");
+                    appendLoadMore(fileListContainer);
                     return;
                 }
                 
@@ -1823,6 +1879,7 @@
                         fileListContainer.appendChild(createFileCard(file));
                     }
                 });
+                appendLoadMore(fileListContainer);
                 return;
             }
 
@@ -1950,6 +2007,9 @@
 
             if (sortedFolders.length === 0 && sortedFiles.length === 0) {
                 renderEmptyState("This folder contains no items matching the active filter.");
+                appendLoadMore(fileListContainer);
+            } else {
+                appendLoadMore(fileListContainer);
             }
         }
 
@@ -2089,8 +2149,8 @@
             playNext();
         });
 
-        // Initial render
-        render();
+        // Load the first page only; subsequent pages are requested on demand.
+        reloadMedia();
     </script>
 </body>
 </html>

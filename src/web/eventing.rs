@@ -86,8 +86,12 @@ pub async fn content_directory_subscribe(
     );
     let update_id = state.content_update_id.load(Ordering::SeqCst);
     let initial_sid = sid.clone();
-    tokio::spawn(async move {
-        let _ = send_event_notification(&callback_url, &initial_sid, 0, update_id).await;
+    let cancellation = state.cancellation.clone();
+    state.background_tasks.spawn(async move {
+        tokio::select! {
+            _ = cancellation.cancelled() => {}
+            _ = send_event_notification(&callback_url, &initial_sid, 0, update_id) => {}
+        }
     });
     (
         StatusCode::OK,

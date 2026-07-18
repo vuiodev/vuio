@@ -40,14 +40,16 @@ async fn make_test_state() -> (TempDir, AppState) {
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
         web_metrics: Arc::new(WebHandlerMetrics::new()),
         lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES))),
         log_file_path: temp.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BrowseResponseCache::new())),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::ActiveCastRegistry::new())),
+        discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        background_tasks: tokio_util::task::TaskTracker::new(),
     };
     (temp, state)
 }
@@ -98,14 +100,16 @@ async fn test_mcp_initialize_and_tools_list() {
         content_update_id,
         web_metrics,
         lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES))),
         log_file_path: temp_dir.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BrowseResponseCache::new())),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::ActiveCastRegistry::new())),
+        discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        background_tasks: tokio_util::task::TaskTracker::new(),
     };
 
     // Add a fake client channel so message handler can send back to the SSE receiver
@@ -161,7 +165,7 @@ async fn test_mcp_initialize_and_tools_list() {
     assert_eq!(list_res["id"], 2);
     let tools = list_res["result"]["tools"].as_array().unwrap();
     assert!(tools.iter().any(|t| t["name"] == "search_media"));
-    assert!(tools.iter().any(|t| t["name"] == "list_tvs"));
+    assert!(tools.iter().any(|t| t["name"] == "list_renderers"));
 
     // 5. Test `tools/call` for `search_media`
     let search_req = serde_json::json!({

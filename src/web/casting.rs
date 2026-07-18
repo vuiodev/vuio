@@ -6,23 +6,20 @@ use tracing::error;
 
 #[derive(serde::Deserialize)]
 pub struct ApiCastPlaylistRequest {
-    pub tv_name: String,
+    pub renderer_id: String,
     pub folder_name: String,
     pub file_ids: Vec<i64>,
 }
 
 /// Discover UPnP/DLNA TVs and return their friendly names in JSON format
-pub async fn api_list_tvs() -> impl IntoResponse {
-    match crate::tv_control::discover_tvs().await {
-        Ok(tvs) => {
-            let names: Vec<String> = tvs.into_iter().map(|tv| tv.friendly_name).collect();
-            (StatusCode::OK, axum::Json(names))
-        }
+pub async fn api_list_renderers(State(state): State<AppState>) -> impl IntoResponse {
+    match state.discovered_tvs.get_or_refresh().await {
+        Ok(renderers) => (StatusCode::OK, axum::Json(renderers)),
         Err(e) => {
             error!(error = %e, "TV discovery request failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(vec!["Internal Server Error".to_string()]),
+                axum::Json(Vec::<crate::tv_control::DiscoveredTv>::new()),
             )
         }
     }
@@ -87,7 +84,7 @@ pub async fn api_cast_playlist(
     }
 
     // 4. Cast the playlist starting at index 0 using our shared helper
-    match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.tv_name, 0).await {
+    match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0).await {
         Ok(result) => (StatusCode::OK, axum::Json(result)),
         Err(e) => (
             StatusCode::BAD_REQUEST,

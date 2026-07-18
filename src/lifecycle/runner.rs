@@ -10,6 +10,10 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
 
     info!("Starting VuIO Server...");
 
+    let shutdown = ShutdownCoordinator::new();
+    let cancellation = shutdown.token();
+    let background_tasks = tokio_util::task::TaskTracker::new();
+
     // Detect platform information with comprehensive diagnostics
     let platform_info = match detect_platform_with_diagnostics().await {
         Ok(info) => Arc::new(info),
@@ -26,6 +30,8 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
         &platform_info,
         cli_args.config_path,
         cli_args.config_override,
+        cancellation.clone(),
+        background_tasks.clone(),
     )
     .await
     {
@@ -72,14 +78,24 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
         web_metrics: Arc::new(crate::web::diagnostics::WebHandlerMetrics::new()),
         lifecycle_stats: lifecycle_stats.clone(),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::BookmarkRegistry::new(
+                crate::runtime_state::BOOKMARK_MAX_ENTRIES,
+            ),
+        )),
         log_file_path: resolved_log_file,
-        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::BrowseResponseCache::new(),
+        )),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::ActiveCastRegistry::new(),
+        )),
+        discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: cancellation.clone(),
+        background_tasks: background_tasks.clone(),
     };
 
     let ApplicationContext {
@@ -98,12 +114,11 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
         app_state,
     };
 
-    let shutdown = ShutdownCoordinator::new();
-    let cancellation = shutdown.token();
     let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
 
     let subscription_handle = {
         let subscriptions = app_state.upnp_subscriptions.clone();
+        let active_casts = app_state.active_casts.clone();
         let cancellation = cancellation.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -116,6 +131,7 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
                             .lock()
                             .await
                             .retain(|_, subscription| subscription.expires_at > now);
+                        active_casts.lock().await.prune();
                     }
                 }
             }
@@ -302,9 +318,16 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
     }
 
     // One signal listener and one supervisor own the application lifetime.
+    let mut shutdown_error = None;
     tokio::select! {
-        _ = shutdown.wait_for_signal() => {
-            info!("Received shutdown signal");
+        result = shutdown.wait_for_signal() => {
+            match result {
+                Ok(()) => info!("Received shutdown signal"),
+                Err(error) => {
+                    error!("Shutdown signal listener failed: {}", error);
+                    shutdown_error = Some(error);
+                }
+            }
         }
         completed = services.join_next() => {
             match completed {
@@ -318,6 +341,7 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
 
     info!("Shutting down gracefully...");
     shutdown.cancel();
+    background_tasks.close();
     if let Err(error) = file_watcher.stop_watching().await {
         warn!("Failed to stop file watcher cleanly: {}", error);
     }
@@ -332,6 +356,7 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
                 _ => {}
             }
         }
+        background_tasks.wait().await;
     })
     .await;
     if joined.is_err() {
@@ -347,7 +372,11 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
     }
     info!("Shutdown completed in {:?}", shutdown_start.elapsed());
 
-    Ok(())
+    if let Some(error) = shutdown_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
 }
 
 /// Top-level owner of VuIO startup, services, and shutdown.

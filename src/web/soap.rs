@@ -39,6 +39,115 @@ struct BrowseParams {
     requested_count: u32,
 }
 
+fn soap_action(headers: &HeaderMap, body: &str) -> Result<String, Response> {
+    let header_action = headers
+        .get("soapaction")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_soap_action_header);
+    let body_action = match body_soap_action(body) {
+        Ok(action) => action,
+        Err(message) => return Err(invalid_soap_request(message)),
+    };
+
+    if let Some(header_action) = header_action {
+        if header_action != body_action {
+            return Err(invalid_soap_request(
+                "SOAPAction header does not match the SOAP body",
+            ));
+        }
+        Ok(header_action)
+    } else {
+        Ok(body_action)
+    }
+}
+
+fn parse_soap_action_header(value: &str) -> Option<String> {
+    let value = value.trim().trim_matches('"');
+    let action = value
+        .rsplit_once('#')
+        .map(|(_, action)| action)
+        .unwrap_or(value)
+        .trim();
+    (!action.is_empty()).then(|| action.to_string())
+}
+
+fn body_soap_action(body: &str) -> Result<String, &'static str> {
+    use quick_xml::{events::Event, Reader};
+
+    let mut reader = Reader::from_str(body);
+    let mut buffer = Vec::new();
+    let mut in_body = false;
+    loop {
+        match reader.read_event_into(&mut buffer) {
+            Ok(Event::Start(element)) => {
+                let qualified_name = element.name();
+                let name = local_xml_name(qualified_name.as_ref());
+                if in_body {
+                    return Ok(name.to_string());
+                }
+                if name == "Body" {
+                    in_body = true;
+                }
+            }
+            Ok(Event::Empty(element)) if in_body => {
+                return Ok(local_xml_name(element.name().as_ref()).to_string());
+            }
+            Ok(Event::End(element)) if local_xml_name(element.name().as_ref()) == "Body" => {
+                break;
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return Err("Malformed SOAP XML"),
+            _ => {}
+        }
+        buffer.clear();
+    }
+    Err("SOAP body has no action element")
+}
+
+fn xml_element_text(body: &str, expected_name: &str) -> Option<String> {
+    use quick_xml::{events::Event, Reader};
+
+    let mut reader = Reader::from_str(body);
+    let mut buffer = Vec::new();
+    let mut capture = false;
+    loop {
+        match reader.read_event_into(&mut buffer).ok()? {
+            Event::Start(element) => {
+                capture = local_xml_name(element.name().as_ref()) == expected_name;
+            }
+            Event::Text(text) if capture => {
+                return reader
+                    .decoder()
+                    .decode(text.as_ref())
+                    .ok()
+                    .map(|value| value.into_owned());
+            }
+            Event::End(_) => capture = false,
+            Event::Eof => return None,
+            _ => {}
+        }
+        buffer.clear();
+    }
+}
+
+fn local_xml_name(name: &[u8]) -> &str {
+    let local = name
+        .iter()
+        .rposition(|byte| *byte == b':')
+        .map(|position| &name[position + 1..])
+        .unwrap_or(name);
+    std::str::from_utf8(local).unwrap_or_default()
+}
+
+fn invalid_soap_request(message: &'static str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        message,
+    )
+        .into_response()
+}
+
 fn parse_browse_params(body: &str) -> BrowseParams {
     use quick_xml::events::Event;
     use quick_xml::Reader;
@@ -164,10 +273,8 @@ impl ContentDirectoryHandler {
         if state.content_update_id.load(Ordering::SeqCst) == current_update_id {
             let mut cache = state.browse_cache.lock().await;
             let needs_clear = cache
-                .keys()
-                .next()
-                .map(|k| k.content_update_id != current_update_id)
-                .unwrap_or(false);
+                .generation()
+                .is_some_and(|generation| generation != current_update_id);
             if needs_clear {
                 cache.clear();
             }
@@ -263,7 +370,7 @@ impl ContentDirectoryHandler {
                 crate::web::client::DlnaClientProfile::SamsungTv
                     | crate::web::client::DlnaClientProfile::SamsungTvQ
             ) {
-                state.bookmarks.lock().await.clone()
+                state.bookmarks.lock().await.snapshot()
             } else {
                 std::collections::HashMap::new()
             };
@@ -432,10 +539,8 @@ impl ContentDirectoryHandler {
         {
             let mut cache = state.browse_cache.lock().await;
             let needs_clear = cache
-                .keys()
-                .next()
-                .map(|k| k.content_update_id != current_update_id)
-                .unwrap_or(false);
+                .generation()
+                .is_some_and(|generation| generation != current_update_id);
             if needs_clear {
                 cache.clear();
             }
@@ -510,7 +615,11 @@ pub async fn content_directory_control(
 ) -> Response {
     let client = crate::web::client::detect_client(&headers);
     crate::web::client::CURRENT_CLIENT.scope(client, async move {
-        if body.contains("<u:Browse") {
+        let action = match soap_action(&headers, &body) {
+            Ok(action) => action,
+            Err(response) => return response,
+        };
+        if action == "Browse" {
             let params = parse_browse_params(&body);
             info!("Browse request - ObjectID: {}, StartingIndex: {}, RequestedCount: {}",
                   params.object_id, params.starting_index, params.requested_count);
@@ -560,25 +669,30 @@ pub async fn content_directory_control(
                 // represents the path relative to the media root.
                 return ContentDirectoryHandler::handle_folder_browse(&params, &state, "", params.object_id.as_str()).await;
             }
-        } else if body.contains("<u:GetSearchCapabilities") {
+        } else if action == "GetSearchCapabilities" {
             let content = "<SearchCaps>dc:creator,dc:date,dc:title,upnp:album,upnp:actor,upnp:artist,upnp:class,upnp:genre,@refID</SearchCaps>";
             build_soap_response("GetSearchCapabilities", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
-        } else if body.contains("<u:GetSortCapabilities") {
+        } else if action == "GetSortCapabilities" {
             let content = "<SortCaps>dc:title,dc:date,upnp:class,upnp:album,upnp:originalTrackNumber</SortCaps>";
             build_soap_response("GetSortCapabilities", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
-        } else if body.contains("<u:GetSystemUpdateID") {
+        } else if action == "GetSystemUpdateID" {
             let update_id = state.content_update_id.load(Ordering::SeqCst);
             let content = format!("<Id>{}</Id>", update_id);
             build_soap_response("GetSystemUpdateID", "urn:schemas-upnp-org:service:ContentDirectory:1", &content)
-        } else if body.contains("<u:X_GetFeatureList") {
+        } else if action == "X_GetFeatureList" {
             let content = r#"<FeatureList>&lt;?xml version="1.0" encoding="utf-8"?&gt;&lt;Features xmlns="urn:schemas-upnp-org:av:avs" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="urn:schemas-upnp-org:av:avs http://www.upnp.org/schemas/av/avs.xsd"&gt;&lt;Feature name="samsung.com_BASICVIEW" version="1"&gt;&lt;container id="1" type="object.item.audioItem"/&gt;&lt;container id="2" type="object.item.videoItem"/&gt;&lt;container id="3" type="object.item.imageItem"/&gt;&lt;/Feature&gt;&lt;/Features&gt;</FeatureList>"#;
             build_soap_response("X_GetFeatureList", "urn:schemas-upnp-org:service:ContentDirectory:1", content)
-        } else if body.contains("<u:X_SetBookmark") {
-            let object_id = body.split("<ObjectID>").nth(1).and_then(|s| s.split("</ObjectID>").next()).unwrap_or("");
-            let pos_second_str = body.split("<PosSecond>").nth(1).and_then(|s| s.split("</PosSecond>").next()).unwrap_or("");
-            if let (Ok(file_id), Ok(pos)) = (object_id.parse::<i64>(), pos_second_str.parse::<u32>()) {
+        } else if action == "X_SetBookmark" {
+            let object_id = xml_element_text(&body, "ObjectID");
+            let pos_second = xml_element_text(&body, "PosSecond");
+            if let (Some(object_id), Some(pos_second)) = (object_id, pos_second) {
+              if let (Ok(file_id), Ok(pos)) = (object_id.parse::<i64>(), pos_second.parse::<u32>()) {
+                if state.database.get_file_by_id(file_id).await.ok().flatten().is_none() {
+                    return (StatusCode::BAD_REQUEST, "Unknown media ID").into_response();
+                }
                 let mut bookmarks_guard = state.bookmarks.lock().await;
                 bookmarks_guard.insert(file_id, pos);
+              }
             }
             build_soap_response("X_SetBookmark", "urn:schemas-upnp-org:service:ContentDirectory:1", "")
         } else {
@@ -803,10 +917,8 @@ where
     {
         let mut cache = state.browse_cache.lock().await;
         let needs_clear = cache
-            .keys()
-            .next()
-            .map(|k| k.content_update_id != current_update_id)
-            .unwrap_or(false);
+            .generation()
+            .is_some_and(|generation| generation != current_update_id);
         if needs_clear {
             cache.clear();
         }
@@ -873,10 +985,8 @@ where
                 if state.content_update_id.load(Ordering::SeqCst) == current_update_id {
                     let mut cache = state.browse_cache.lock().await;
                     let needs_clear = cache
-                        .keys()
-                        .next()
-                        .map(|k| k.content_update_id != current_update_id)
-                        .unwrap_or(false);
+                        .generation()
+                        .is_some_and(|generation| generation != current_update_id);
                     if needs_clear {
                         cache.clear();
                     }
@@ -938,7 +1048,7 @@ where
             crate::web::client::DlnaClientProfile::SamsungTv
                 | crate::web::client::DlnaClientProfile::SamsungTvQ
         ) {
-            state.bookmarks.lock().await.clone()
+            state.bookmarks.lock().await.snapshot()
         } else {
             std::collections::HashMap::new()
         };
@@ -979,10 +1089,8 @@ where
                 if state.content_update_id.load(Ordering::SeqCst) == current_update_id {
                     let mut cache = state.browse_cache.lock().await;
                     let needs_clear = cache
-                        .keys()
-                        .next()
-                        .map(|k| k.content_update_id != current_update_id)
-                        .unwrap_or(false);
+                        .generation()
+                        .is_some_and(|generation| generation != current_update_id);
                     if needs_clear {
                         cache.clear();
                     }
@@ -1115,22 +1223,30 @@ pub async fn media_receiver_registrar_scpd() -> impl IntoResponse {
     )
 }
 
-pub async fn connection_manager_control(State(_state): State<AppState>, body: String) -> Response {
-    if body.contains("<u:GetProtocolInfo") {
+pub async fn connection_manager_control(
+    State(_state): State<AppState>,
+    headers: HeaderMap,
+    body: String,
+) -> Response {
+    let action = match soap_action(&headers, &body) {
+        Ok(action) => action,
+        Err(response) => return response,
+    };
+    if action == "GetProtocolInfo" {
         let content = r#"<Source>http-get:*:video/x-msvideo:*,http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-mkv:*,http-get:*:video/mpeg:*,http-get:*:video/divx:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,http-get:*:audio/mp4:*,http-get:*:image/jpeg:*,http-get:*:image/png:*,http-get:*:image/gif:*</Source><Sink></Sink>"#;
         build_soap_response(
             "GetProtocolInfo",
             "urn:schemas-upnp-org:service:ConnectionManager:1",
             content,
         )
-    } else if body.contains("<u:GetCurrentConnectionIDs") {
+    } else if action == "GetCurrentConnectionIDs" {
         let content = "<ConnectionIDs>0</ConnectionIDs>";
         build_soap_response(
             "GetCurrentConnectionIDs",
             "urn:schemas-upnp-org:service:ConnectionManager:1",
             content,
         )
-    } else if body.contains("<u:GetCurrentConnectionInfo") {
+    } else if action == "GetCurrentConnectionInfo" {
         let content = r#"<RcsID>-1</RcsID><AVTransportID>-1</AVTransportID><ProtocolInfo></ProtocolInfo><PeerConnectionManager></PeerConnectionManager><PeerConnectionID>-1</PeerConnectionID><Direction>Output</Direction><Status>Unknown</Status>"#;
         build_soap_response(
             "GetCurrentConnectionInfo",
@@ -1149,16 +1265,21 @@ pub async fn connection_manager_control(State(_state): State<AppState>, body: St
 
 pub async fn media_receiver_registrar_control(
     State(_state): State<AppState>,
+    headers: HeaderMap,
     body: String,
 ) -> Response {
-    if body.contains("<u:IsAuthorized") {
+    let action = match soap_action(&headers, &body) {
+        Ok(action) => action,
+        Err(response) => return response,
+    };
+    if action == "IsAuthorized" {
         let content = "<Result>1</Result>";
         build_soap_response(
             "IsAuthorized",
             "urn:microsoft.com:service:X_MS_MediaReceiverRegistrar:1",
             content,
         )
-    } else if body.contains("<u:RegisterDevice") {
+    } else if action == "RegisterDevice" {
         let content = "<RegistrationRespMsg></RegistrationRespMsg>";
         build_soap_response(
             "RegisterDevice",
@@ -1178,6 +1299,26 @@ pub async fn media_receiver_registrar_control(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn soap_action_ignores_action_names_in_comments() {
+        let headers = HeaderMap::new();
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><!-- <u:Browse/> --><u:GetSystemUpdateID xmlns:u="urn:test"/></s:Body></s:Envelope>"#;
+        assert_eq!(soap_action(&headers, body).unwrap(), "GetSystemUpdateID");
+    }
+
+    #[test]
+    fn soap_action_rejects_header_body_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "soapaction",
+            "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\""
+                .parse()
+                .unwrap(),
+        );
+        let body = r#"<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body><u:GetSystemUpdateID xmlns:u="urn:test"/></s:Body></s:Envelope>"#;
+        assert!(soap_action(&headers, body).is_err());
+    }
 
     #[test]
     fn test_parse_browse_params_valid_xml() {

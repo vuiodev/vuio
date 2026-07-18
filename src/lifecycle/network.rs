@@ -52,14 +52,6 @@ async fn start_http_server_task(
 
     info!("HTTP server started successfully");
 
-    // Helper to parse IP from location_url
-    fn parse_ip_from_url_helper(url_str: &str) -> Option<String> {
-        let without_scheme = url_str.split("://").nth(1)?;
-        let host_port = without_scheme.split('/').next()?;
-        let host = host_port.split(':').next()?;
-        Some(host.to_string())
-    }
-
     // Spawn background SSDP TV discovery cache refresher every 60s
     let state_clone = app_state.clone();
     let discovery_cancellation = cancellation.clone();
@@ -68,13 +60,8 @@ async fn start_http_server_task(
             tokio::select! {
                 _ = discovery_cancellation.cancelled() => break,
                 _ = async {
-                    if let Ok(tvs) = crate::tv_control::discover_tvs().await {
-                        let mut cache = state_clone.discovered_tvs.lock().await;
-                        for tv in tvs {
-                            if let Some(ip) = parse_ip_from_url_helper(&tv.location_url) {
-                                cache.insert(ip, tv.friendly_name);
-                            }
-                        }
+                    if let Err(error) = state_clone.discovered_tvs.refresh().await {
+                        tracing::warn!(%error, "Background renderer discovery failed");
                     }
                     tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
                 } => {}

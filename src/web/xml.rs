@@ -585,7 +585,7 @@ pub async fn generate_browse_response_with_totals(
             didl.push_str("</container>");
         }
 
-        let bookmarks_guard = if client == crate::web::client::DlnaClientProfile::SamsungTv
+        let mut bookmarks_guard = if client == crate::web::client::DlnaClientProfile::SamsungTv
             || client == crate::web::client::DlnaClientProfile::SamsungTvQ
         {
             Some(state.bookmarks.lock().await)
@@ -808,8 +808,8 @@ pub async fn generate_browse_response_with_totals(
                 || client == crate::web::client::DlnaClientProfile::SamsungTvQ
             {
                 let bookmark_sec = bookmarks_guard
-                    .as_ref()
-                    .and_then(|g| g.get(&file_id).cloned())
+                    .as_mut()
+                    .and_then(|g| g.get(&file_id).copied())
                     .unwrap_or(0);
                 let bookmark_val = if client == crate::web::client::DlnaClientProfile::SamsungTvQ {
                     bookmark_sec * 1000

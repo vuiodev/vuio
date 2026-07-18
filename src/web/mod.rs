@@ -42,6 +42,7 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(ui::root_handler))
+        .route("/api/media", get(ui::media_page_handler))
         .route("/description.xml", get(soap::description_handler))
         .route("/ContentDirectory.xml", get(soap::content_directory_scpd))
         .route(
@@ -64,7 +65,7 @@ pub fn create_router(state: AppState) -> Router {
         .route("/healthz", get(diagnostics::healthz_handler))
         .route("/readyz", get(diagnostics::readyz_handler))
         .route("/logs", get(diagnostics::get_logs_handler))
-        .route("/api/tvs", get(casting::api_list_tvs))
+        .route("/api/renderers", get(casting::api_list_renderers))
         .route("/sse", get(mcp::sse_handler))
         .merge(soap_routes)
         .merge(json_routes)

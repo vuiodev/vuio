@@ -1,14 +1,14 @@
 /// Wait for shutdown signals (Ctrl+C, SIGTERM, etc.)
 /// Supports graceful shutdown on first signal, force quit on second signal
-async fn wait_for_shutdown_signal() {
+async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
-        let mut sigint =
-            signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+        let mut sigterm = signal(SignalKind::terminate())
+            .context("Failed to register SIGTERM handler")?;
+        let mut sigint = signal(SignalKind::interrupt())
+            .context("Failed to register SIGINT handler")?;
 
         tokio::select! {
             _ = sigterm.recv() => {
@@ -31,20 +31,21 @@ async fn wait_for_shutdown_signal() {
     #[cfg(not(unix))]
     {
         // On Windows, only Ctrl+C is available
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            error!("Failed to listen for Ctrl+C signal: {}", e);
-        } else {
-            info!("Received Ctrl+C signal");
+        tokio::signal::ctrl_c()
+            .await
+            .context("Failed to listen for Ctrl+C signal")?;
+        info!("Received Ctrl+C signal");
 
-            // Set up a second signal handler for force quit
-            tokio::spawn(async {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    warn!("Received second Ctrl+C signal - forcing immediate exit");
-                    std::process::exit(1);
-                }
-            });
-        }
+        // Set up a second signal handler for force quit
+        tokio::spawn(async {
+            if tokio::signal::ctrl_c().await.is_ok() {
+                warn!("Received second Ctrl+C signal - forcing immediate exit");
+                std::process::exit(1);
+            }
+        });
     }
+
+    Ok(())
 }
 
 /// Perform graceful shutdown with ReDB atomic state persistence
@@ -115,8 +116,8 @@ impl ShutdownCoordinator {
         self.cancellation.cancel();
     }
 
-    pub async fn wait_for_signal(&self) {
-        wait_for_shutdown_signal().await;
+    pub async fn wait_for_signal(&self) -> anyhow::Result<()> {
+        wait_for_shutdown_signal().await
     }
 
     pub async fn finalize(

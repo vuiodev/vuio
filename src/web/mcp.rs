@@ -15,7 +15,10 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::{
-    database::{MediaRepository, PlaylistRepository, StatsRepository},
+    database::{
+        DatabaseReadSession, MediaFileQuery, MediaFileView, MediaRepository,
+        PlaylistRepository, StatsRepository,
+    },
     state::AppState,
 };
 use crate::tv_control;
@@ -93,6 +96,14 @@ fn get_tools_list() -> serde_json::Value {
                         "query": {
                             "type": "string",
                             "description": "Search keyword to match against filenames and titles"
+                        },
+                        "cursor": {
+                            "type": "string",
+                            "description": "Opaque cursor returned by the previous page"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Page size (defaults to 50, maximum 500)"
                         }
                     },
                     "required": ["query"]
@@ -140,16 +151,16 @@ fn get_tools_list() -> serde_json::Value {
                 }
             },
             {
-                "name": "list_tvs",
-                "description": "Discover UPnP/DLNA MediaRenderer devices (smart TVs, speakers, media players) on the local network. Returns their friendly names for use with cast_media_to_tv.",
+                "name": "list_renderers",
+                "description": "List cached UPnP/DLNA MediaRenderer devices and their stable IDs.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
                 }
             },
             {
-                "name": "cast_media_to_tv",
-                "description": "Cast a media file to a smart TV or media renderer by name. First use search_media to find the file ID and list_tvs to find the TV name.",
+                "name": "cast_media_to_renderer",
+                "description": "Cast a media file to a renderer by stable ID. First use list_renderers.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -157,23 +168,23 @@ fn get_tools_list() -> serde_json::Value {
                             "type": "integer",
                             "description": "The numeric ID of the media file to cast"
                         },
-                        "tv_name": {
+                        "renderer_id": {
                             "type": "string",
-                            "description": "The friendly name of the TV (as returned by list_tvs). Partial, case-insensitive match is supported."
+                            "description": "Stable renderer ID returned by list_renderers"
                         }
                     },
-                    "required": ["file_id", "tv_name"]
+                    "required": ["file_id", "renderer_id"]
                 }
             },
             {
-                "name": "control_tv",
+                "name": "control_renderer",
                 "description": "Send a playback control command to a smart TV or media renderer. Use after casting media to control playback.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "tv_name": {
+                        "renderer_id": {
                             "type": "string",
-                            "description": "The friendly name of the TV"
+                            "description": "Stable renderer ID returned by list_renderers"
                         },
                         "action": {
                             "type": "string",
@@ -181,7 +192,7 @@ fn get_tools_list() -> serde_json::Value {
                             "description": "The playback action to perform"
                         }
                     },
-                    "required": ["tv_name", "action"]
+                    "required": ["renderer_id", "action"]
                 }
             },
             {
@@ -198,6 +209,10 @@ fn get_tools_list() -> serde_json::Value {
                         "limit": {
                             "type": "integer",
                             "description": "Maximum number of files to return (defaults to 100)"
+                        },
+                        "cursor": {
+                            "type": "string",
+                            "description": "Opaque cursor returned by the previous page"
                         }
                     }
                 }
@@ -296,8 +311,8 @@ fn get_tools_list() -> serde_json::Value {
                 }
             },
             {
-                "name": "cast_playlist_to_tv",
-                "description": "Cast a playlist to a smart TV or media renderer by name. Starts playing the first item of the playlist (or the track specified by track_index).",
+                "name": "cast_playlist_to_renderer",
+                "description": "Cast a playlist to a renderer by stable ID.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {
@@ -305,16 +320,16 @@ fn get_tools_list() -> serde_json::Value {
                             "type": "integer",
                             "description": "The numeric ID of the playlist to cast"
                         },
-                        "tv_name": {
+                        "renderer_id": {
                             "type": "string",
-                            "description": "The friendly name of the TV (partial, case-insensitive match supported)"
+                            "description": "Stable renderer ID returned by list_renderers"
                         },
                         "track_index": {
                             "type": "integer",
                             "description": "Optional 0-based index of the track in the playlist to start playing from (defaults to 0)"
                         }
                     },
-                    "required": ["playlist_id", "tv_name"]
+                    "required": ["playlist_id", "renderer_id"]
                 }
             }
         ]
@@ -367,8 +382,12 @@ pub async fn sse_handler(
 
     // Sender::closed resolves as soon as Axum drops the SSE receiver, so stale
     // clients are removed immediately rather than by a coarse timeout.
-    tokio::spawn(async move {
-        disconnect_sender.closed().await;
+    let cleanup_cancellation = state.cancellation.clone();
+    state.background_tasks.spawn(async move {
+        tokio::select! {
+            _ = disconnect_sender.closed() => {}
+            _ = cleanup_cancellation.cancelled() => {}
+        }
         let mut clients = state_for_cleanup.mcp_clients.lock().await;
         let is_same_connection = clients
             .get(&client_id_for_cleanup)
@@ -514,9 +533,9 @@ async fn handle_tools_call(state: &AppState, request: &JsonRpcRequest) -> JsonRp
         "browse_folder" => tool_browse_folder(state, &arguments).await,
         "get_media_info" => tool_get_media_info(state, &arguments).await,
         "get_server_stats" => tool_get_server_stats(state).await,
-        "list_tvs" => tool_list_tvs().await,
-        "cast_media_to_tv" => tool_cast_media_to_tv(state, &arguments).await,
-        "control_tv" => tool_control_tv(&arguments).await,
+        "list_renderers" => tool_list_renderers(state).await,
+        "cast_media_to_renderer" => tool_cast_media_to_renderer(state, &arguments).await,
+        "control_renderer" => tool_control_renderer(state, &arguments).await,
         "list_media" => tool_list_media(state, &arguments).await,
         "list_playlists" => tool_list_playlists(state).await,
         "create_playlist" => tool_create_playlist(state, &arguments).await,
@@ -524,7 +543,7 @@ async fn handle_tools_call(state: &AppState, request: &JsonRpcRequest) -> JsonRp
         "add_to_playlist" => tool_add_to_playlist(state, &arguments).await,
         "remove_from_playlist" => tool_remove_from_playlist(state, &arguments).await,
         "get_playlist_tracks" => tool_get_playlist_tracks(state, &arguments).await,
-        "cast_playlist_to_tv" => tool_cast_playlist_to_tv(state, &arguments).await,
+        "cast_playlist_to_renderer" => tool_cast_playlist_to_renderer(state, &arguments).await,
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -563,45 +582,22 @@ async fn tool_search_media(
         .get("query")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'query' parameter")?
-        .to_lowercase();
-
-    let all_files = state
-        .database
-        .collect_all_media_files()
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
-
-    let mut matches: Vec<_> = all_files
-        .into_iter()
-        .filter(|f| {
-            f.filename.to_lowercase().contains(&query)
-                || f.title
-                    .as_ref()
-                    .map(|t| t.to_lowercase().contains(&query))
-                    .unwrap_or(false)
-                || f.artist
-                    .as_ref()
-                    .map(|a| a.to_lowercase().contains(&query))
-                    .unwrap_or(false)
-                || f.album
-                    .as_ref()
-                    .map(|a| a.to_lowercase().contains(&query))
-                    .unwrap_or(false)
-        })
-        .collect();
-
-    // Sort files case-insensitively by filename to maintain natural ordering (e.g. S05E01 before S05E10)
-    matches.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
-
-    let matches_json: Vec<serde_json::Value> = matches
-        .into_iter()
-        .take(50) // Limit results
-        .map(|f| media_file_to_json(&f))
-        .collect();
+        .to_string();
+    let limit = requested_limit(args, 50);
+    let after_id = cursor_after_id(args)?;
+    let (matches_json, next_cursor) = query_media_page(
+        state,
+        after_id,
+        None,
+        Some(query),
+        limit,
+    )
+    .await?;
 
     Ok(serde_json::json!({
         "total_matches": matches_json.len(),
-        "files": matches_json
+        "files": matches_json,
+        "next_cursor": next_cursor
     }))
 }
 
@@ -681,40 +677,20 @@ async fn tool_list_media(
         .and_then(|v| v.as_str())
         .unwrap_or("all");
 
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(100) as usize;
-
-    let all_files = state
-        .database
-        .collect_all_media_files()
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
-
-    let mut filtered: Vec<_> = all_files
-        .into_iter()
-        .filter(|f| {
-            if category == "all" || category.is_empty() {
-                true
-            } else {
-                f.mime_type.to_lowercase().starts_with(category)
-            }
-        })
-        .collect();
-
-    // Sort files case-insensitively by filename
-    filtered.sort_by(|a, b| a.filename.to_lowercase().cmp(&b.filename.to_lowercase()));
-
-    let filtered_json: Vec<serde_json::Value> = filtered
-        .into_iter()
-        .take(limit)
-        .map(|f| media_file_to_json(&f))
-        .collect();
+    let limit = requested_limit(args, 100);
+    let after_id = cursor_after_id(args)?;
+    let mime_family = match category {
+        "all" | "" => None,
+        "audio" | "video" | "image" => Some(category.to_string()),
+        _ => return Err(format!("Unknown media category '{category}'")),
+    };
+    let (filtered_json, next_cursor) =
+        query_media_page(state, after_id, mime_family, None, limit).await?;
 
     Ok(serde_json::json!({
         "total_files": filtered_json.len(),
-        "files": filtered_json
+        "files": filtered_json,
+        "next_cursor": next_cursor
     }))
 }
 
@@ -742,15 +718,16 @@ async fn tool_get_server_stats(state: &AppState) -> Result<serde_json::Value, St
     }))
 }
 
-async fn tool_list_tvs() -> Result<serde_json::Value, String> {
-    let tvs = tv_control::discover_tvs()
+async fn tool_list_renderers(state: &AppState) -> Result<serde_json::Value, String> {
+    let renderers = state.discovered_tvs.get_or_refresh()
         .await
-        .map_err(|e| format!("TV discovery error: {}", e))?;
+        .map_err(|e| format!("Renderer discovery error: {}", e))?;
 
-    let tv_list: Vec<serde_json::Value> = tvs
+    let renderer_list: Vec<serde_json::Value> = renderers
         .iter()
         .map(|tv| {
             serde_json::json!({
+                "id": tv.id,
                 "friendly_name": tv.friendly_name,
                 "model": tv.model_name,
                 "location": tv.location_url
@@ -759,12 +736,12 @@ async fn tool_list_tvs() -> Result<serde_json::Value, String> {
         .collect();
 
     Ok(serde_json::json!({
-        "tvs_found": tv_list.len(),
-        "tvs": tv_list
+        "renderers_found": renderer_list.len(),
+        "renderers": renderer_list
     }))
 }
 
-async fn tool_cast_media_to_tv(
+async fn tool_cast_media_to_renderer(
     state: &AppState,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -773,11 +750,10 @@ async fn tool_cast_media_to_tv(
         .and_then(|v| v.as_i64())
         .ok_or("Missing 'file_id' parameter")?;
 
-    let tv_name_query = args
-        .get("tv_name")
+    let renderer_id = args
+        .get("renderer_id")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'tv_name' parameter")?
-        .to_lowercase();
+        .ok_or("Missing 'renderer_id' parameter")?;
 
     // Look up the media file
     let file = state
@@ -787,18 +763,17 @@ async fn tool_cast_media_to_tv(
         .map_err(|e| format!("Database error: {}", e))?
         .ok_or(format!("File with ID {} not found", file_id))?;
 
-    // Discover TVs and find a match
-    let tvs = tv_control::discover_tvs()
+    let renderers = state.discovered_tvs.get_or_refresh()
         .await
-        .map_err(|e| format!("TV discovery error: {}", e))?;
+        .map_err(|e| format!("Renderer discovery error: {}", e))?;
 
-    let matched_tv = tvs
+    let matched_tv = renderers
         .iter()
-        .find(|tv| tv.friendly_name.to_lowercase().contains(&tv_name_query))
+        .find(|renderer| renderer.id == renderer_id)
         .ok_or(format!(
-            "No TV found matching '{}'. Available TVs: {}",
-            tv_name_query,
-            tvs.iter()
+            "No renderer found with ID '{}'. Available renderers: {}",
+            renderer_id,
+            renderers.iter()
                 .map(|tv| tv.friendly_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -827,17 +802,17 @@ async fn tool_cast_media_to_tv(
     Ok(serde_json::json!({
         "status": "playing",
         "file": file.filename,
-        "tv": matched_tv.friendly_name,
+        "renderer": matched_tv.friendly_name,
+        "renderer_id": matched_tv.id,
         "media_url": media_url
     }))
 }
 
-async fn tool_control_tv(args: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let tv_name_query = args
-        .get("tv_name")
+async fn tool_control_renderer(state: &AppState, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let renderer_id = args
+        .get("renderer_id")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'tv_name' parameter")?
-        .to_lowercase();
+        .ok_or("Missing 'renderer_id' parameter")?;
 
     let action = args
         .get("action")
@@ -851,18 +826,17 @@ async fn tool_control_tv(args: &serde_json::Value) -> Result<serde_json::Value, 
         _ => return Err(format!("Unknown action '{}'. Use play, pause, or stop.", action)),
     };
 
-    // Discover TVs and find a match
-    let tvs = tv_control::discover_tvs()
+    let renderers = state.discovered_tvs.get_or_refresh()
         .await
-        .map_err(|e| format!("TV discovery error: {}", e))?;
+        .map_err(|e| format!("Renderer discovery error: {}", e))?;
 
-    let matched_tv = tvs
+    let matched_tv = renderers
         .iter()
-        .find(|tv| tv.friendly_name.to_lowercase().contains(&tv_name_query))
+        .find(|renderer| renderer.id == renderer_id)
         .ok_or(format!(
-            "No TV found matching '{}'. Available TVs: {}",
-            tv_name_query,
-            tvs.iter()
+            "No renderer found with ID '{}'. Available renderers: {}",
+            renderer_id,
+            renderers.iter()
                 .map(|tv| tv.friendly_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -875,7 +849,8 @@ async fn tool_control_tv(args: &serde_json::Value) -> Result<serde_json::Value, 
     Ok(serde_json::json!({
         "status": "ok",
         "action": action,
-        "tv": matched_tv.friendly_name
+        "renderer": matched_tv.friendly_name,
+        "renderer_id": matched_tv.id
     }))
 }
 async fn tool_list_playlists(state: &AppState) -> Result<serde_json::Value, String> {
@@ -1036,35 +1011,18 @@ async fn tool_get_playlist_tracks(
     }))
 }
 
-pub async fn discover_tvs_and_cache(state: &AppState) -> Result<Vec<tv_control::DiscoveredTv>, String> {
-    let tvs = tv_control::discover_tvs()
+pub async fn cached_renderers(state: &AppState) -> Result<Vec<tv_control::DiscoveredTv>, String> {
+    state.discovered_tvs.get_or_refresh()
         .await
-        .map_err(|e| format!("TV discovery error: {}", e))?;
-        
-    let mut cache = state.discovered_tvs.lock().await;
-    for tv in &tvs {
-        if let Some(ip) = parse_ip_from_url(&tv.location_url) {
-            cache.insert(ip, tv.friendly_name.clone());
-        }
-    }
-    
-    Ok(tvs)
-}
-
-fn parse_ip_from_url(url_str: &str) -> Option<String> {
-    let without_scheme = url_str.split("://").nth(1)?;
-    let host_port = without_scheme.split('/').next()?;
-    let host = host_port.split(':').next()?;
-    Some(host.to_string())
+        .map_err(|e| format!("TV discovery error: {}", e))
 }
 
 pub async fn cast_playlist_helper(
     state: &AppState,
     playlist_id: i64,
-    tv_name_query: &str,
+    renderer_id: &str,
     track_index: usize,
 ) -> Result<serde_json::Value, String> {
-    let tv_name_query = tv_name_query.to_lowercase();
 
     // Get playlist tracks
     let tracks = state
@@ -1089,16 +1047,15 @@ pub async fn cast_playlist_helper(
     let selected_track = &tracks[track_index];
     let file_id = selected_track.id.ok_or("Media file is missing an ID")?;
 
-    // Discover TVs and find a match
-    let tvs = discover_tvs_and_cache(state).await?;
+    let renderers = cached_renderers(state).await?;
 
-    let matched_tv = tvs
+    let matched_tv = renderers
         .iter()
-        .find(|tv| tv.friendly_name.to_lowercase().contains(&tv_name_query))
+        .find(|renderer| renderer.id == renderer_id)
         .ok_or(format!(
-            "No TV found matching '{}'. Available TVs: {}",
-            tv_name_query,
-            tvs.iter()
+            "No renderer found with ID '{}'. Available renderers: {}",
+            renderer_id,
+            renderers.iter()
                 .map(|tv| tv.friendly_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1127,14 +1084,18 @@ pub async fn cast_playlist_helper(
     // Register active cast in global state
     {
         let mut casts = state.active_casts.lock().await;
-        casts.insert(matched_tv.friendly_name.clone(), (selected_track.filename.clone(), std::time::Instant::now()));
+        casts.insert_labeled(
+            matched_tv.id.clone(),
+            matched_tv.friendly_name.clone(),
+            selected_track.filename.clone(),
+        );
     }
 
     // Cancel existing monitor for this TV if any
     {
         let mut monitors = state.active_monitors.lock().await;
-        if let Some(cancel_tx) = monitors.remove(&matched_tv.control_url) {
-            let _ = cancel_tx.send(());
+        if let Some((_, cancellation)) = monitors.remove(&matched_tv.control_url) {
+            cancellation.cancel();
         }
     }
 
@@ -1172,25 +1133,39 @@ pub async fn cast_playlist_helper(
     }
 
     // Spawn new queue monitor to dynamically handle subsequent track transitions
-    let (cancel_tx, mut cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    let monitor_id = Uuid::new_v4();
+    let monitor_cancellation = state.cancellation.child_token();
     {
         let mut monitors = state.active_monitors.lock().await;
-        monitors.insert(matched_tv.control_url.clone(), cancel_tx);
+        if monitors.len() >= crate::runtime_state::ACTIVE_CAST_MAX_ENTRIES
+            && !monitors.contains_key(&matched_tv.control_url)
+        {
+            if let Some(oldest_key) = monitors.keys().next().cloned() {
+                if let Some((_, oldest)) = monitors.remove(&oldest_key) {
+                    oldest.cancel();
+                }
+            }
+        }
+        monitors.insert(
+            matched_tv.control_url.clone(),
+            (monitor_id, monitor_cancellation.clone()),
+        );
     }
 
     let state_clone = state.clone();
     let control_url_clone = matched_tv.control_url.clone();
     let server_ip_clone = server_ip.clone();
     let matched_tv_friendly_name = matched_tv.friendly_name.clone();
+    let matched_renderer_id = matched_tv.id.clone();
     
-    tokio::spawn(async move {
+    state.background_tasks.spawn(async move {
         let mut current_idx = track_index;
         let mut consecutive_stopped = 0;
         
-        loop {
+        'monitor: loop {
             // Check cancellation or sleep 4s
             tokio::select! {
-                _ = &mut cancel_rx => {
+                _ = monitor_cancellation.cancelled() => {
                     debug!("Queue monitor cancelled for TV: {}", control_url_clone);
                     break;
                 }
@@ -1198,7 +1173,10 @@ pub async fn cast_playlist_helper(
             }
             
             // Poll TV current playing track URI and transport state
-            let current_uri = match tv_control::get_position_info(&control_url_clone).await {
+            let current_uri = match tokio::select! {
+                _ = monitor_cancellation.cancelled() => break,
+                result = tv_control::get_position_info(&control_url_clone) => result,
+            } {
                 Ok(uri) => uri,
                 Err(e) => {
                     debug!("Queue monitor failed to get position info: {}", e);
@@ -1206,13 +1184,19 @@ pub async fn cast_playlist_helper(
                 }
             };
             
-            let transport_state = match tv_control::get_transport_state(&control_url_clone).await {
+            let transport_state = match tokio::select! {
+                _ = monitor_cancellation.cancelled() => break,
+                result = tv_control::get_transport_state(&control_url_clone) => result,
+            } {
                 Ok(st) => st,
                 Err(_) => "STOPPED".to_string(),
             };
             
             // Fetch playlist tracks from DB to get the latest list
-            let latest_tracks = match state_clone.database.get_playlist_tracks(playlist_id).await {
+            let latest_tracks = match tokio::select! {
+                _ = monitor_cancellation.cancelled() => break,
+                result = state_clone.database.get_playlist_tracks(playlist_id) => result,
+            } {
                 Ok(t) => t,
                 Err(_) => break,
             };
@@ -1235,7 +1219,11 @@ pub async fn cast_playlist_helper(
                             // Update active cast state with new playing file
                             {
                                 let mut casts = state_clone.active_casts.lock().await;
-                                casts.insert(matched_tv_friendly_name.clone(), (track.filename.clone(), std::time::Instant::now()));
+                                casts.insert_labeled(
+                                    matched_renderer_id.clone(),
+                                    matched_tv_friendly_name.clone(),
+                                    track.filename.clone(),
+                                );
                             }
 
                             // Queue the next track if available
@@ -1244,12 +1232,16 @@ pub async fn cast_playlist_helper(
                                 if let Some(next_id) = next_track.id {
                                     let next_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, next_id);
                                     let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
-                                    if let Err(e) = tv_control::set_next_media(
-                                        &control_url_clone,
-                                        &next_media_url,
-                                        next_title,
-                                        &next_track.mime_type,
-                                    ).await {
+                                    let queue_result = tokio::select! {
+                                        _ = monitor_cancellation.cancelled() => break 'monitor,
+                                        result = tv_control::set_next_media(
+                                            &control_url_clone,
+                                            &next_media_url,
+                                            next_title,
+                                            &next_track.mime_type,
+                                        ) => result,
+                                    };
+                                    if let Err(e) = queue_result {
                                         warn!("Queue monitor: Failed to queue next track: {}", e);
                                     } else {
                                         debug!("Queue monitor: Queued next track index {} ({})", current_idx + 1, next_track.filename);
@@ -1276,10 +1268,20 @@ pub async fn cast_playlist_helper(
             }
         }
 
-        // Cleanup: remove active cast state on exit
-        {
+        let removed_current_monitor = {
+            let mut monitors = state_clone.active_monitors.lock().await;
+            let is_current = monitors
+                .get(&control_url_clone)
+                .is_some_and(|(current_id, _)| *current_id == monitor_id);
+            if is_current {
+                monitors.remove(&control_url_clone);
+            }
+            is_current
+        };
+        // A replaced monitor must not clear the newer cast's telemetry.
+        if removed_current_monitor {
             let mut casts = state_clone.active_casts.lock().await;
-            casts.remove(&matched_tv_friendly_name);
+            casts.remove(&matched_renderer_id);
         }
     });
 
@@ -1290,12 +1292,13 @@ pub async fn cast_playlist_helper(
         "current_index": track_index,
         "current_file": selected_track.filename,
         "queued_next_file": queued_file,
-        "tv": matched_tv.friendly_name,
+        "renderer": matched_tv.friendly_name,
+        "renderer_id": matched_tv.id,
         "media_url": media_url
     }))
 }
 
-async fn tool_cast_playlist_to_tv(
+async fn tool_cast_playlist_to_renderer(
     state: &AppState,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
@@ -1304,17 +1307,17 @@ async fn tool_cast_playlist_to_tv(
         .and_then(|v| v.as_i64())
         .ok_or("Missing 'playlist_id' parameter")?;
 
-    let tv_name_query = args
-        .get("tv_name")
+    let renderer_id = args
+        .get("renderer_id")
         .and_then(|v| v.as_str())
-        .ok_or("Missing 'tv_name' parameter")?;
+        .ok_or("Missing 'renderer_id' parameter")?;
 
     let track_index = args
         .get("track_index")
         .and_then(|v| v.as_u64())
         .unwrap_or(0) as usize;
 
-    cast_playlist_helper(state, playlist_id, tv_name_query, track_index).await
+    cast_playlist_helper(state, playlist_id, renderer_id, track_index).await
 }
 
 // ──────────────────────────────────────────
@@ -1340,6 +1343,85 @@ fn media_file_to_json(f: &crate::database::MediaFile) -> serde_json::Value {
         "year": f.year,
         "album_artist": f.album_artist
     })
+}
+
+fn media_file_view_to_json(f: &impl MediaFileView) -> serde_json::Value {
+    serde_json::json!({
+        "id": f.id(),
+        "filename": f.filename(),
+        "path": f.path(),
+        "mime_type": f.mime_type(),
+        "size_bytes": f.size(),
+        "size_human": format_size(f.size()),
+        "duration_seconds": f.duration_secs(),
+        "title": f.title(),
+        "artist": f.artist(),
+        "album": f.album(),
+        "genre": f.genre(),
+        "track_number": f.track_number(),
+        "year": f.year(),
+        "album_artist": f.album_artist()
+    })
+}
+
+fn requested_limit(args: &serde_json::Value, default: usize) -> usize {
+    args.get("limit")
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(default)
+        .clamp(1, 500)
+}
+
+fn cursor_after_id(args: &serde_json::Value) -> Result<Option<i64>, String> {
+    let Some(cursor) = args.get("cursor") else {
+        return Ok(None);
+    };
+    if cursor.is_null() {
+        return Ok(None);
+    }
+    cursor
+        .as_str()
+        .ok_or("'cursor' must be a string")?
+        .parse::<i64>()
+        .map(Some)
+        .map_err(|_| "Invalid media cursor".to_string())
+}
+
+async fn query_media_page(
+    state: &AppState,
+    after_id: Option<i64>,
+    mime_family: Option<String>,
+    text: Option<String>,
+    limit: usize,
+) -> Result<(Vec<serde_json::Value>, Option<String>), String> {
+    let query = MediaFileQuery::Filtered {
+        after_id,
+        mime_family,
+        text,
+    };
+    let fetch_limit = limit.saturating_add(1);
+    let mut files = state
+        .database
+        .clone()
+        .read(move |session| {
+            let mut page = Vec::with_capacity(fetch_limit);
+            session.visit_files(&query, 0, fetch_limit, |file| {
+                page.push(media_file_view_to_json(&file));
+                Ok(())
+            })?;
+            Ok(page)
+        })
+        .await
+        .map_err(|error| format!("Database error: {error}"))?;
+
+    let has_more = files.len() > limit;
+    if has_more {
+        files.pop();
+    }
+    let next_cursor = has_more
+        .then(|| files.last()?.get("id")?.as_i64().map(|id| id.to_string()))
+        .flatten();
+    Ok((files, next_cursor))
 }
 
 fn format_size(bytes: u64) -> String {
@@ -1412,9 +1494,9 @@ mod tests {
         assert!(tool_names.contains(&"browse_folder"));
         assert!(tool_names.contains(&"get_media_info"));
         assert!(tool_names.contains(&"get_server_stats"));
-        assert!(tool_names.contains(&"list_tvs"));
-        assert!(tool_names.contains(&"cast_media_to_tv"));
-        assert!(tool_names.contains(&"control_tv"));
+        assert!(tool_names.contains(&"list_renderers"));
+        assert!(tool_names.contains(&"cast_media_to_renderer"));
+        assert!(tool_names.contains(&"control_renderer"));
         assert!(tool_names.contains(&"list_media"));
         assert!(tool_names.contains(&"list_playlists"));
         assert!(tool_names.contains(&"create_playlist"));
@@ -1422,7 +1504,7 @@ mod tests {
         assert!(tool_names.contains(&"add_to_playlist"));
         assert!(tool_names.contains(&"remove_from_playlist"));
         assert!(tool_names.contains(&"get_playlist_tracks"));
-        assert!(tool_names.contains(&"cast_playlist_to_tv"));
+        assert!(tool_names.contains(&"cast_playlist_to_renderer"));
         assert_eq!(tool_names.len(), 15);
     }
 

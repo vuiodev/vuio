@@ -256,6 +256,14 @@ pub enum MediaFileQuery {
     Year(u32),
     AlbumArtist(String),
     Playlist(i64),
+    /// Cursor-paged library scan. Filtering is performed against borrowed Rkyv
+    /// views inside the database read transaction, so rejected rows are never
+    /// materialized as `MediaFile` values.
+    Filtered {
+        after_id: Option<i64>,
+        mime_family: Option<String>,
+        text: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -5,6 +5,7 @@ pub mod logging;
 pub mod lifecycle;
 pub mod media;
 pub mod platform;
+pub mod runtime_state;
 pub mod ssdp;
 pub mod tv_control;
 pub mod watcher;
@@ -45,24 +46,21 @@ pub mod state {
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
         pub web_metrics: Arc<crate::web::diagnostics::WebHandlerMetrics>,
         pub lifecycle_stats: Arc<crate::lifecycle::ApplicationStats>,
-        pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
+        pub bookmarks: Arc<tokio::sync::Mutex<crate::runtime_state::BookmarkRegistry>>,
         pub log_file_path: std::path::PathBuf,
-        pub browse_cache:
-            Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, axum::body::Bytes>>>,
+        pub browse_cache: Arc<tokio::sync::Mutex<crate::runtime_state::BrowseResponseCache>>,
         pub mcp_clients: Arc<
             tokio::sync::Mutex<
                 std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>,
             >,
         >,
-        pub active_monitors: Arc<
-            tokio::sync::Mutex<std::collections::HashMap<String, tokio::sync::oneshot::Sender<()>>>,
-        >,
-        pub active_casts: Arc<
-            tokio::sync::Mutex<std::collections::HashMap<String, (String, std::time::Instant)>>,
-        >,
-        pub discovered_tvs: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+        pub active_monitors: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (uuid::Uuid, tokio_util::sync::CancellationToken)>>>,
+        pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
+        pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
         pub upnp_subscriptions:
             Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
+        pub cancellation: tokio_util::sync::CancellationToken,
+        pub background_tasks: tokio_util::task::TaskTracker,
     }
 
     impl<D: DatabaseManager> Clone for AppState<D> {
@@ -84,6 +82,8 @@ pub mod state {
                 active_casts: self.active_casts.clone(),
                 discovered_tvs: self.discovered_tvs.clone(),
                 upnp_subscriptions: self.upnp_subscriptions.clone(),
+                cancellation: self.cancellation.clone(),
+                background_tasks: self.background_tasks.clone(),
             }
         }
     }

@@ -84,9 +84,8 @@ pub async fn serve_media(
         let client_ip = client_addr.ip().to_string();
 
         let device_name = {
-            let cache = state.discovered_tvs.lock().await;
-            if let Some(name) = cache.get(&client_ip) {
-                name.clone()
+            if let Some(name) = state.discovered_tvs.name_for_ip(&client_ip).await {
+                name
             } else if let Some(ua) = headers
                 .get(axum::http::header::USER_AGENT)
                 .and_then(|h| h.to_str().ok())
@@ -112,10 +111,7 @@ pub async fn serve_media(
 
         {
             let mut casts = state.active_casts.lock().await;
-            casts.insert(
-                device_name,
-                (file_info.filename.clone(), std::time::Instant::now()),
-            );
+            casts.insert(device_name, file_info.filename.clone());
         }
     }
 
