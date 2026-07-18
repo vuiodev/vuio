@@ -1,6 +1,6 @@
 //! Browser dashboard handler and compile-time UI template rendering.
 
-use crate::{database::DatabaseManager, error::AppError, state::AppState};
+use crate::{database::MediaRepository, error::AppError, state::AppState};
 use axum::{extract::State, http::header, response::IntoResponse};
 
 const DASHBOARD_TEMPLATE: &str = include_str!("ui/dashboard.html");

@@ -14,7 +14,10 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::{database::DatabaseManager, state::AppState};
+use crate::{
+    database::{MediaRepository, PlaylistRepository, StatsRepository},
+    state::AppState,
+};
 use crate::tv_control;
 
 // ──────────────────────────────────────────

@@ -6,6 +6,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::interval;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 const SSDP_MULTICAST_ADDR: &str = "239.255.255.250";
@@ -62,8 +63,12 @@ impl UnifiedSsdpService {
         }
     }
 
-    /// Start the unified SSDP service
-    pub async fn start(&self) -> Result<()> {
+    async fn spawn_tasks(
+        &self,
+    ) -> Result<(
+        tokio::task::JoinHandle<Result<()>>,
+        tokio::task::JoinHandle<()>,
+    )> {
         info!("Starting unified SSDP service");
         
         let server_ip = self.platform_adapter.get_server_ip(&self.state);
@@ -93,21 +98,46 @@ impl UnifiedSsdpService {
         let responder_state = self.state.clone();
         let responder_manager = self.network_manager.clone();
         let responder_socket = socket.clone();
-        tokio::spawn(async move {
-            if let Err(e) = Self::search_responder_task(responder_state, responder_manager, responder_socket).await {
-                error!("SSDP search responder failed: {}", e);
-            }
+        let responder = tokio::spawn(async move {
+            Self::search_responder_task(responder_state, responder_manager, responder_socket).await
         });
 
         // Start announcement task
         let announcer_state = self.state.clone();
         let announcer_manager = self.network_manager.clone();
         let announcer_socket = socket.clone();
-        tokio::spawn(async move {
+        let announcer = tokio::spawn(async move {
             Self::announcer_task(announcer_state, announcer_manager, announcer_socket).await;
         });
 
         info!("Unified SSDP service started successfully");
+        Ok((responder, announcer))
+    }
+
+    /// Start the unified SSDP service using the legacy detached-task API.
+    pub async fn start(&self) -> Result<()> {
+        let _ = self.spawn_tasks().await?;
+        Ok(())
+    }
+
+    /// Run SSDP until cancellation while retaining ownership of both worker tasks.
+    pub async fn run_until_cancelled(self, cancellation: CancellationToken) -> Result<()> {
+        let (mut responder, mut announcer) = self.spawn_tasks().await?;
+        tokio::select! {
+            _ = cancellation.cancelled() => {}
+            result = &mut responder => {
+                announcer.abort();
+                return result.map_err(|error| anyhow::anyhow!("SSDP responder task failed: {error}"))?;
+            }
+            result = &mut announcer => {
+                responder.abort();
+                result.map_err(|error| anyhow::anyhow!("SSDP announcer task failed: {error}"))?;
+            }
+        }
+        responder.abort();
+        announcer.abort();
+        let _ = responder.await;
+        let _ = announcer.await;
         Ok(())
     }
 
@@ -375,6 +405,16 @@ pub fn run_ssdp_service(state: AppState) -> Result<()> {
     Ok(())
 }
 
+/// Run SSDP as an owned lifecycle service until cancellation.
+pub async fn run_ssdp_service_until_cancelled(
+    state: AppState,
+    cancellation: CancellationToken,
+) -> Result<()> {
+    UnifiedSsdpService::new(state)
+        .run_until_cancelled(cancellation)
+        .await
+}
+
 /// Default, parameterized platform adapter for SSDP service behavior
 pub struct DefaultSsdpAdapter {
     fallback_ports: Vec<u16>,
@@ -437,4 +477,3 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
 // ============================================================================
 // Legacy implementations removed - now using UnifiedSsdpService with platform adapters
 // ============================================================================
-

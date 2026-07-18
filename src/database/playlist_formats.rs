@@ -741,6 +741,7 @@ fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::{MediaRepository, PlaylistRepository};
     use std::io::Write;
     use tempfile::NamedTempFile;
 

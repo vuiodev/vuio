@@ -7,7 +7,7 @@ use tempfile::tempdir;
 
 use vuio::config::AppConfig;
 use vuio::database::redb::RedbDatabase;
-use vuio::database::{DatabaseManager, MediaFile};
+use vuio::database::{DatabaseManager, MediaFile, MediaRepository, PlaylistRepository};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
 use vuio::state::AppState;
@@ -69,6 +69,7 @@ async fn test_metrics_endpoints_data() {
         filesystem_manager,
         content_update_id,
         web_metrics,
+        lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         log_file_path: temp_dir.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

@@ -1,7 +1,7 @@
 //! UPnP device/service descriptions and SOAP control handlers.
 
 use crate::{
-    database::{DatabaseManager, MediaDirectory},
+    database::{MediaDirectory, MediaRepository, PlaylistRepository},
     state::AppState,
     web::xml::{generate_description_xml, generate_scpd_xml},
 };

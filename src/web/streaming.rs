@@ -1,6 +1,6 @@
 //! Media, radio, subtitle, and cover-art streaming handlers.
 
-use crate::{database::DatabaseManager, error::AppError, state::AppState};
+use crate::{database::MediaRepository, error::AppError, state::AppState};
 use axum::{
     body::Body,
     extract::{Path, State},

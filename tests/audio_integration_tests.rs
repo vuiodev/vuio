@@ -5,7 +5,7 @@ use tempfile::tempdir;
 
 use vuio::database::playlist_formats::PlaylistFileManager;
 use vuio::database::redb::RedbDatabase;
-use vuio::database::DatabaseManager;
+use vuio::database::{DatabaseManager, MediaRepository, PlaylistRepository};
 use vuio::media::MediaScanner;
 
 fn decode_base64(s: &str) -> Vec<u8> {
@@ -308,6 +308,7 @@ async fn test_cover_art_retrieval_and_xml() {
         filesystem_manager,
         content_update_id,
         web_metrics,
+        lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         log_file_path: temp_dir.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
@@ -443,6 +444,7 @@ https://cast1.asurahosting.com/proxy/julien/stream
         filesystem_manager,
         content_update_id,
         web_metrics,
+        lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
         bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         log_file_path: temp_dir.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

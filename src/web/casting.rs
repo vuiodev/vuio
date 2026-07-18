@@ -1,6 +1,6 @@
 //! TV discovery and dashboard playlist-casting API handlers.
 
-use crate::{database::DatabaseManager, state::AppState};
+use crate::{database::PlaylistRepository, state::AppState};
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 
 #[derive(serde::Deserialize)]

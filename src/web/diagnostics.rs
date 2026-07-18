@@ -1,6 +1,6 @@
 //! Web metrics, health/readiness probes, and log diagnostics.
 
-use crate::{database::DatabaseManager, state::AppState};
+use crate::{database::StatsRepository, state::AppState};
 use axum::{
     extract::State,
     http::{header, StatusCode},

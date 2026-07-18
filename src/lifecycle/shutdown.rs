@@ -1,0 +1,134 @@
+/// Wait for shutdown signals (Ctrl+C, SIGTERM, etc.)
+/// Supports graceful shutdown on first signal, force quit on second signal
+async fn wait_for_shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+
+        let mut sigterm =
+            signal(SignalKind::terminate()).expect("Failed to register SIGTERM handler");
+        let mut sigint =
+            signal(SignalKind::interrupt()).expect("Failed to register SIGINT handler");
+
+        tokio::select! {
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM signal");
+            }
+            _ = sigint.recv() => {
+                info!("Received SIGINT signal (Ctrl+C)");
+
+                // Set up a second signal handler for force quit
+                tokio::spawn(async move {
+                    if sigint.recv().await.is_some() {
+                        warn!("Received second SIGINT signal - forcing immediate exit");
+                        std::process::exit(1);
+                    }
+                });
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        // On Windows, only Ctrl+C is available
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to listen for Ctrl+C signal: {}", e);
+        } else {
+            info!("Received Ctrl+C signal");
+
+            // Set up a second signal handler for force quit
+            tokio::spawn(async {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    warn!("Received second Ctrl+C signal - forcing immediate exit");
+                    std::process::exit(1);
+                }
+            });
+        }
+    }
+}
+
+/// Perform graceful shutdown with ReDB atomic state persistence
+async fn perform_graceful_shutdown(
+    database: &Arc<database::redb::RedbDatabase>,
+    stats: &ApplicationStats,
+) -> anyhow::Result<()> {
+    info!("Performing graceful shutdown with atomic state persistence...");
+
+    let (files_processed, directories_scanned, events_handled, errors_encountered, last_activity) =
+        stats.snapshot();
+
+    // Log final application statistics
+    info!("Final application statistics:");
+    info!("  - Files processed: {}", files_processed);
+    info!("  - Directories scanned: {}", directories_scanned);
+    info!("  - Events handled: {}", events_handled);
+    info!("  - Errors encountered: {}", errors_encountered);
+    info!("  - Last activity: {:?}", last_activity);
+
+    // Ensure ReDB database persists all pending operations
+    info!("Persisting ReDB database state...");
+
+    // Get database statistics before shutdown
+    match database.get_stats().await {
+        Ok(db_stats) => {
+            info!("Database statistics at shutdown:");
+            info!("  - Total media files: {}", db_stats.total_files);
+            info!("  - Total media size: {} bytes", db_stats.total_size);
+            info!("  - Database file size: {} bytes", db_stats.database_size);
+        }
+        Err(e) => {
+            warn!(
+                "Could not retrieve database statistics during shutdown: {}",
+                e
+            );
+        }
+    }
+
+    // Perform database vacuum if needed (this will also ensure all data is persisted)
+    info!("Performing final database maintenance...");
+    if let Err(e) = database.vacuum().await {
+        warn!("Could not vacuum database during shutdown: {}", e);
+    }
+
+    info!("Graceful shutdown with atomic state persistence completed");
+    Ok(())
+}
+
+/// Shared cancellation and final persistence operations.
+#[derive(Clone)]
+pub struct ShutdownCoordinator {
+    cancellation: CancellationToken,
+}
+
+impl ShutdownCoordinator {
+    pub fn new() -> Self {
+        Self {
+            cancellation: CancellationToken::new(),
+        }
+    }
+
+    pub fn token(&self) -> CancellationToken {
+        self.cancellation.clone()
+    }
+
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    pub async fn wait_for_signal(&self) {
+        wait_for_shutdown_signal().await;
+    }
+
+    pub async fn finalize(
+        database: &Arc<database::redb::RedbDatabase>,
+        stats: &ApplicationStats,
+    ) -> anyhow::Result<()> {
+        perform_graceful_shutdown(database, stats).await
+    }
+}
+
+impl Default for ShutdownCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}

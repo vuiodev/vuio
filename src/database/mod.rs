@@ -122,23 +122,66 @@ impl MediaFile {
 }
 
 impl MediaFileView for MediaFile {
-    fn id(&self) -> Option<i64> { self.id }
-    fn path(&self) -> &str { self.path.to_str().unwrap_or_default() }
-    fn filename(&self) -> &str { &self.filename }
-    fn size(&self) -> u64 { self.size }
-    fn modified_secs(&self) -> u64 { self.modified.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() }
-    fn mime_type(&self) -> &str { &self.mime_type }
-    fn duration_secs(&self) -> Option<f64> { self.duration.map(|value| value.as_secs_f64()) }
-    fn title(&self) -> Option<&str> { self.title.as_deref() }
-    fn artist(&self) -> Option<&str> { self.artist.as_deref() }
-    fn album(&self) -> Option<&str> { self.album.as_deref() }
-    fn genre(&self) -> Option<&str> { self.genre.as_deref() }
-    fn track_number(&self) -> Option<u32> { self.track_number }
-    fn year(&self) -> Option<u32> { self.year }
-    fn album_artist(&self) -> Option<&str> { self.album_artist.as_deref() }
-    fn subtitle_available(&self) -> bool { self.subtitle_available }
-    fn created_at_secs(&self) -> u64 { self.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() }
-    fn updated_at_secs(&self) -> u64 { self.updated_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() }
+    fn id(&self) -> Option<i64> {
+        self.id
+    }
+    fn path(&self) -> &str {
+        self.path.to_str().unwrap_or_default()
+    }
+    fn filename(&self) -> &str {
+        &self.filename
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn modified_secs(&self) -> u64 {
+        self.modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+    fn mime_type(&self) -> &str {
+        &self.mime_type
+    }
+    fn duration_secs(&self) -> Option<f64> {
+        self.duration.map(|value| value.as_secs_f64())
+    }
+    fn title(&self) -> Option<&str> {
+        self.title.as_deref()
+    }
+    fn artist(&self) -> Option<&str> {
+        self.artist.as_deref()
+    }
+    fn album(&self) -> Option<&str> {
+        self.album.as_deref()
+    }
+    fn genre(&self) -> Option<&str> {
+        self.genre.as_deref()
+    }
+    fn track_number(&self) -> Option<u32> {
+        self.track_number
+    }
+    fn year(&self) -> Option<u32> {
+        self.year
+    }
+    fn album_artist(&self) -> Option<&str> {
+        self.album_artist.as_deref()
+    }
+    fn subtitle_available(&self) -> bool {
+        self.subtitle_available
+    }
+    fn created_at_secs(&self) -> u64 {
+        self.created_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
+    fn updated_at_secs(&self) -> u64 {
+        self.updated_at
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+    }
 }
 
 /// Borrowed, backend-neutral view of one media record.
@@ -246,14 +289,19 @@ pub trait DatabaseReadSession {
         mime_family: Option<&str>,
     ) -> Result<Vec<MediaDirectory>>;
 
-    fn visit_playlists<F>(&mut self, offset: usize, limit: usize, visitor: F) -> Result<VisitSummary>
+    fn visit_playlists<F>(
+        &mut self,
+        offset: usize,
+        limit: usize,
+        visitor: F,
+    ) -> Result<VisitSummary>
     where
         F: for<'a> FnMut(Self::Playlist<'a>) -> Result<()>;
 }
 
-/// Database manager trait for media file operations
+/// Media-library storage and query operations implemented by a database backend.
 #[async_trait]
-pub trait DatabaseManager: Send + Sync {
+pub trait MediaRepository: Send + Sync {
     type ReadSession: DatabaseReadSession + Send + 'static;
 
     /// Execute a complete scoped read operation. Implementations choose their
@@ -263,9 +311,6 @@ pub trait DatabaseManager: Send + Sync {
         Self: Sized + 'static,
         R: Send + 'static,
         F: FnOnce(&mut Self::ReadSession) -> Result<R> + Send + 'static;
-
-    /// Initialize the database and create tables if needed
-    async fn initialize(&self) -> Result<()>;
 
     /// Store a new media file record
     async fn store_media_file(&self, file: &MediaFile) -> Result<i64>;
@@ -339,21 +384,6 @@ pub trait DatabaseManager: Send + Sync {
     /// Get a specific file by ID
     async fn get_file_by_id(&self, id: i64) -> Result<Option<MediaFile>>;
 
-    /// Get database statistics
-    async fn get_stats(&self) -> Result<DatabaseStats>;
-
-    /// Check database integrity and repair if needed
-    async fn check_and_repair(&self) -> Result<DatabaseHealth>;
-
-    /// Create a backup of the database
-    async fn create_backup(&self, backup_path: &Path) -> Result<()>;
-
-    /// Restore database from backup
-    async fn restore_from_backup(&self, backup_path: &Path) -> Result<()>;
-
-    /// Vacuum the database to reclaim space and optimize performance
-    async fn vacuum(&self) -> Result<()>;
-
     // Music categorization methods
     /// Get all unique artists
     async fn get_artists(&self) -> Result<Vec<MusicCategory>>;
@@ -386,7 +416,55 @@ pub trait DatabaseManager: Send + Sync {
     /// Get music files by album artist
     async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>>;
 
-    // Playlist management methods
+    /// Get multiple files by their paths in a single query.
+    async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
+
+    /// Store multiple media files in a single batch operation.
+    async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>>;
+
+    /// Update multiple media files in a single batch operation.
+    async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()>;
+
+    /// Remove multiple media files by paths in a single batch operation.
+    async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
+
+    /// Atomically remove every media file at or below a path component boundary.
+    async fn remove_media_under_path(&self, path: &Path) -> Result<RemovalSummary>;
+
+    /// Get multiple files by their paths in a single batch query.
+    async fn bulk_get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
+        self.get_files_by_paths(paths).await
+    }
+
+    /// Get files with a specific canonical path prefix.
+    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>>;
+
+    /// Get direct subdirectories using canonical paths.
+    async fn get_direct_subdirectories(
+        &self,
+        canonical_parent_path: &str,
+    ) -> Result<Vec<MediaDirectory>>;
+
+    /// Batch cleanup missing files using canonical paths.
+    async fn batch_cleanup_missing_files(
+        &self,
+        existing_canonical_paths: &HashSet<String>,
+    ) -> Result<usize>;
+
+    /// Perform cleanup using backend-native operations.
+    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize>;
+
+    /// Get direct subdirectories containing the requested MIME family.
+    async fn get_filtered_direct_subdirectories(
+        &self,
+        canonical_parent_path: &str,
+        mime_filter: &str,
+    ) -> Result<Vec<MediaDirectory>>;
+}
+
+/// Playlist storage and ordered-entry operations.
+#[async_trait]
+pub trait PlaylistRepository: Send + Sync {
     /// Create a new playlist
     async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<i64>;
 
@@ -423,30 +501,6 @@ pub trait DatabaseManager: Send + Sync {
         media_file_ids: &[(i64, u32)],
     ) -> Result<Vec<i64>>;
 
-    /// Get multiple files by their paths in a single query
-    async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
-
-    // Bulk operations for high-performance batch processing
-    /// Store multiple media files in a single batch operation
-    async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>>;
-
-    /// Update multiple media files in a single batch operation
-    async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()>;
-
-    /// Remove multiple media files by paths in a single batch operation
-    async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
-
-    /// Atomically remove every media file at or below a path component boundary.
-    async fn remove_media_under_path(&self, path: &Path) -> Result<RemovalSummary>;
-
-    /// Rebuild all derived indexes from the live file table.
-    async fn rebuild_derived_indexes(&self) -> Result<DatabaseHealth>;
-
-    /// Get multiple files by their paths in a single batch query (alias for get_files_by_paths)
-    async fn bulk_get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
-        self.get_files_by_paths(paths).await
-    }
-
     /// Remove a track from a playlist
     async fn remove_from_playlist(&self, playlist_id: i64, media_file_id: i64) -> Result<bool>;
 
@@ -459,8 +513,34 @@ pub trait DatabaseManager: Send + Sync {
         playlist_id: i64,
         track_positions: &[(i64, u32)],
     ) -> Result<()>;
+}
 
-    // Playlist file format operations
+/// Integrity, recovery, backup, and maintenance operations.
+#[async_trait]
+pub trait HealthRepository: Send + Sync {
+    async fn check_and_repair(&self) -> Result<DatabaseHealth>;
+    async fn rebuild_derived_indexes(&self) -> Result<DatabaseHealth>;
+    async fn create_backup(&self, backup_path: &Path) -> Result<()>;
+    async fn restore_from_backup(&self, backup_path: &Path) -> Result<()>;
+    async fn vacuum(&self) -> Result<()>;
+}
+
+/// Database statistics independent of the storage backend.
+#[async_trait]
+pub trait StatsRepository: Send + Sync {
+    async fn get_stats(&self) -> Result<DatabaseStats>;
+}
+
+/// Aggregate database capability used by the application.
+#[async_trait]
+pub trait DatabaseManager:
+    MediaRepository + PlaylistRepository + HealthRepository + StatsRepository + Send + Sync
+{
+    /// Initialize the database and create tables if needed.
+    async fn initialize(&self) -> Result<()>;
+
+    // Playlist file format operations remain aggregate helpers because importing
+    // and exporting spans both media and playlist repositories.
     /// Import a playlist from a file (.m3u or .pls)
     async fn import_playlist_file(
         &self,
@@ -496,35 +576,6 @@ pub trait DatabaseManager: Send + Sync {
         playlist_formats::PlaylistFileManager::scan_and_import_playlists_recursive(self, directory)
             .await
     }
-
-    // New methods for efficient path-based queries using canonical paths
-
-    /// Get files with a specific canonical path prefix (for efficient directory deletion)
-    async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>>;
-
-    /// Get direct subdirectories using canonical paths (optimized two-query approach)
-    async fn get_direct_subdirectories(
-        &self,
-        canonical_parent_path: &str,
-    ) -> Result<Vec<MediaDirectory>>;
-
-    /// Batch cleanup missing files using canonical paths and HashSet difference logic
-    async fn batch_cleanup_missing_files(
-        &self,
-        existing_canonical_paths: &HashSet<String>,
-    ) -> Result<usize>;
-
-    /// Database-native file cleanup that performs cleanup entirely in SQL
-    /// This method accepts existing paths and performs cleanup using temporary tables
-    /// for better performance and memory efficiency with large datasets
-    async fn database_native_cleanup(&self, existing_canonical_paths: &[String]) -> Result<usize>;
-
-    /// Get direct subdirectories that contain files matching the media type filter (internal helper)
-    async fn get_filtered_direct_subdirectories(
-        &self,
-        canonical_parent_path: &str,
-        mime_filter: &str,
-    ) -> Result<Vec<MediaDirectory>>;
 }
 
 #[derive(Debug)]
@@ -562,4 +613,24 @@ pub enum IssueSeverity {
     Warning,
     Error,
     Critical,
+}
+
+#[cfg(test)]
+mod repository_contract_tests {
+    use super::*;
+
+    fn assert_composed_manager<T>()
+    where
+        T: DatabaseManager
+            + MediaRepository
+            + PlaylistRepository
+            + HealthRepository
+            + StatsRepository,
+    {
+    }
+
+    #[test]
+    fn redb_implements_every_repository_capability() {
+        assert_composed_manager::<redb::RedbDatabase>();
+    }
 }

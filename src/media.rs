@@ -864,6 +864,7 @@ pub struct ScanError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::MediaRepository;
     use crate::database::redb::RedbDatabase;
     use crate::platform::filesystem::BaseFileSystemManager;
     use std::sync::Arc;

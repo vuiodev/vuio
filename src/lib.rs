@@ -2,6 +2,7 @@ pub mod config;
 pub mod database;
 pub mod error;
 pub mod logging;
+pub mod lifecycle;
 pub mod media;
 pub mod platform;
 pub mod ssdp;
@@ -43,6 +44,7 @@ pub mod state {
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
         pub web_metrics: Arc<crate::web::diagnostics::WebHandlerMetrics>,
+        pub lifecycle_stats: Arc<crate::lifecycle::ApplicationStats>,
         pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
         pub log_file_path: std::path::PathBuf,
         pub browse_cache:
@@ -73,6 +75,7 @@ pub mod state {
                 filesystem_manager: self.filesystem_manager.clone(),
                 content_update_id: self.content_update_id.clone(),
                 web_metrics: self.web_metrics.clone(),
+                lifecycle_stats: self.lifecycle_stats.clone(),
                 bookmarks: self.bookmarks.clone(),
                 log_file_path: self.log_file_path.clone(),
                 browse_cache: self.browse_cache.clone(),
