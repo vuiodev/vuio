@@ -13,7 +13,14 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 const SSDP_PORT: u16 = 1900;
-const ANNOUNCE_INTERVAL_SECS: u64 = 300; // Announce every 5 minutes
+type SharedSsdpSocket = Arc<std::sync::RwLock<Arc<SsdpSocket>>>;
+
+fn load_ssdp_socket(socket: &SharedSsdpSocket) -> Arc<SsdpSocket> {
+    socket
+        .read()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+}
 
 /// Platform-specific adapter for SSDP service behavior
 #[async_trait]
@@ -64,7 +71,7 @@ impl UnifiedSsdpService {
         Self {
             network_manager,
             platform_adapter,
-            config: state.config.clone(),
+            config: state.current_config(),
             server_ip: state.get_server_ip(),
             primary_interface: state.platform_info.get_primary_interface().cloned(),
         }
@@ -72,9 +79,10 @@ impl UnifiedSsdpService {
 
     async fn spawn_tasks(
         &self,
+        cancellation: CancellationToken,
     ) -> Result<(
         tokio::task::JoinHandle<Result<()>>,
-        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<Result<()>>,
     )> {
         info!("Starting unified SSDP service");
 
@@ -103,18 +111,25 @@ impl UnifiedSsdpService {
             warn!("Failed to join multicast group: {}", e);
         }
 
-        let socket = Arc::new(tokio::sync::Mutex::new(socket));
+        // Tokio's UDP socket supports concurrent send and receive through
+        // shared references. Keeping the configured wrapper in an Arc avoids
+        // holding an async mutex across the indefinitely pending receive.
+        let socket = Arc::new(std::sync::RwLock::new(Arc::new(socket)));
 
         // Start M-SEARCH responder task
         let responder_config = self.config.clone();
         let responder_ip = self.server_ip.clone();
         let responder_manager = self.network_manager.clone();
+        let responder_ssdp_config = ssdp_config.clone();
+        let responder_interface = self.primary_interface.clone();
         let responder_socket = socket.clone();
         let responder = tokio::spawn(async move {
             Self::search_responder_task(
                 responder_config,
                 responder_ip,
                 responder_manager,
+                responder_ssdp_config,
+                responder_interface,
                 responder_socket,
             )
             .await
@@ -131,8 +146,9 @@ impl UnifiedSsdpService {
                 announcer_ip,
                 announcer_manager,
                 announcer_socket,
+                cancellation,
             )
-            .await;
+            .await
         });
 
         info!("Unified SSDP service started successfully");
@@ -141,23 +157,22 @@ impl UnifiedSsdpService {
 
     /// Run SSDP until cancellation while retaining ownership of both worker tasks.
     pub async fn run_until_cancelled(self, cancellation: CancellationToken) -> Result<()> {
-        let (mut responder, mut announcer) = self.spawn_tasks().await?;
+        let (mut responder, mut announcer) = self.spawn_tasks(cancellation.clone()).await?;
         tokio::select! {
-            _ = cancellation.cancelled() => {}
+            _ = cancellation.cancelled() => {
+                responder.abort();
+                let _ = tokio::time::timeout(Duration::from_secs(2), &mut announcer).await;
+                Ok(())
+            }
             result = &mut responder => {
                 announcer.abort();
-                return result.map_err(|error| anyhow::anyhow!("SSDP responder task failed: {error}"))?;
+                result.map_err(|error| anyhow::anyhow!("SSDP responder task failed: {error}"))?
             }
             result = &mut announcer => {
                 responder.abort();
-                result.map_err(|error| anyhow::anyhow!("SSDP announcer task failed: {error}"))?;
+                result.map_err(|error| anyhow::anyhow!("SSDP announcer task failed: {error}"))?
             }
         }
-        responder.abort();
-        announcer.abort();
-        let _ = responder.await;
-        let _ = announcer.await;
-        Ok(())
     }
 
     /// Task for handling M-SEARCH requests
@@ -165,7 +180,9 @@ impl UnifiedSsdpService {
         config: Arc<AppConfig>,
         server_ip: String,
         network_manager: Arc<dyn NetworkManager>,
-        socket: Arc<tokio::sync::Mutex<SsdpSocket>>,
+        ssdp_config: SsdpConfig,
+        primary_interface: Option<NetworkInterface>,
+        socket: SharedSsdpSocket,
     ) -> Result<()> {
         let mut buf = vec![0u8; 2048];
         let mut consecutive_errors = 0;
@@ -173,8 +190,8 @@ impl UnifiedSsdpService {
 
         loop {
             let (len, addr) = {
-                let mut socket_guard = socket.lock().await;
-                match socket_guard.recv_from(&mut buf).await {
+                let active_socket = load_ssdp_socket(&socket);
+                match active_socket.recv_from(&mut buf).await {
                     Ok(result) => result,
                     Err(e) => {
                         consecutive_errors += 1;
@@ -184,21 +201,26 @@ impl UnifiedSsdpService {
                         );
 
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
-                            error!("Too many consecutive errors, recreating socket");
-                            let ssdp_config = SsdpConfig::default();
-                            match network_manager
+                            warn!("Too many consecutive SSDP receive errors; recreating socket");
+                            let mut replacement = network_manager
                                 .create_ssdp_socket_with_config(&ssdp_config)
                                 .await
-                            {
-                                Ok(new_socket) => {
-                                    *socket_guard = new_socket;
-                                    consecutive_errors = 0;
-                                }
-                                Err(e) => {
-                                    error!("Failed to recreate socket: {}", e);
-                                    return Err(anyhow::anyhow!("Socket recreation failed: {}", e));
-                                }
-                            }
+                                .map_err(|error| {
+                                    anyhow::anyhow!("SSDP socket recreation failed: {error}")
+                                })?;
+                            network_manager
+                                .join_multicast_group(
+                                    &mut replacement,
+                                    SSDP_MULTICAST_IP,
+                                    primary_interface.as_ref(),
+                                )
+                                .await
+                                .map_err(|error| {
+                                    anyhow::anyhow!("SSDP multicast rejoin failed: {error}")
+                                })?;
+                            *socket.write().unwrap_or_else(|error| error.into_inner()) =
+                                Arc::new(replacement);
+                            consecutive_errors = 0;
                         }
 
                         tokio::time::sleep(Duration::from_millis(1000)).await;
@@ -221,7 +243,7 @@ impl UnifiedSsdpService {
     async fn handle_msearch_request(
         config: &AppConfig,
         server_ip: &str,
-        socket: &Arc<tokio::sync::Mutex<SsdpSocket>>,
+        socket: &SharedSsdpSocket,
         request: &str,
         addr: SocketAddr,
     ) {
@@ -246,10 +268,10 @@ impl UnifiedSsdpService {
         let response_count = response_types.len();
         for response_type in response_types {
             let response = Self::create_ssdp_response(config, server_ip, response_type);
+            let active_socket = load_ssdp_socket(socket);
 
-            let socket_guard = socket.lock().await;
             for retry in 0..3 {
-                match socket_guard.send_to(response.as_bytes(), addr).await {
+                match active_socket.send_to(response.as_bytes(), addr).await {
                     Ok(_) => {
                         debug!(
                             "Successfully sent M-SEARCH response to {} for {}",
@@ -281,14 +303,23 @@ impl UnifiedSsdpService {
         config: Arc<AppConfig>,
         server_ip: String,
         network_manager: Arc<dyn NetworkManager>,
-        socket: Arc<tokio::sync::Mutex<SsdpSocket>>,
-    ) {
-        let mut interval = interval(Duration::from_secs(ANNOUNCE_INTERVAL_SECS));
+        socket: SharedSsdpSocket,
+        cancellation: CancellationToken,
+    ) -> Result<()> {
+        let mut interval = interval(Duration::from_secs(
+            config.network.announce_interval_seconds.max(1),
+        ));
         let mut consecutive_failures = 0;
         const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = cancellation.cancelled() => {
+                    Self::send_ssdp_byebye(&config, &server_ip, &network_manager, &socket).await?;
+                    return Ok(());
+                }
+                _ = interval.tick() => {}
+            }
 
             match Self::send_ssdp_announcements(&config, &server_ip, &network_manager, &socket)
                 .await
@@ -318,7 +349,7 @@ impl UnifiedSsdpService {
         config: &AppConfig,
         server_ip: &str,
         network_manager: &Arc<dyn NetworkManager>,
-        socket: &Arc<tokio::sync::Mutex<SsdpSocket>>,
+        socket: &SharedSsdpSocket,
     ) -> Result<()> {
         info!("Sending SSDP NOTIFY announcements");
 
@@ -332,10 +363,10 @@ impl UnifiedSsdpService {
 
         for service_type in &service_types {
             let message = Self::create_notify_message(config, server_ip, service_type);
+            let active_socket = load_ssdp_socket(socket);
 
-            let socket_guard = socket.lock().await;
             match network_manager
-                .send_multicast(&socket_guard, message.as_bytes(), multicast_addr)
+                .send_multicast(&active_socket, message.as_bytes(), multicast_addr)
                 .await
             {
                 Ok(()) => {
@@ -349,9 +380,9 @@ impl UnifiedSsdpService {
 
                     if let Err(e) = network_manager
                         .send_unicast_fallback(
-                            &socket_guard,
+                            &active_socket,
                             message.as_bytes(),
-                            &socket_guard.interfaces,
+                            &active_socket.interfaces,
                         )
                         .await
                     {
@@ -366,6 +397,29 @@ impl UnifiedSsdpService {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
+        Ok(())
+    }
+
+    async fn send_ssdp_byebye(
+        config: &AppConfig,
+        server_ip: &str,
+        network_manager: &Arc<dyn NetworkManager>,
+        socket: &SharedSsdpSocket,
+    ) -> Result<()> {
+        let target = SocketAddr::new(SSDP_MULTICAST_IP, SSDP_PORT);
+        for service_type in [
+            "upnp:rootdevice",
+            "urn:schemas-upnp-org:device:MediaServer:1",
+            "urn:schemas-upnp-org:service:ContentDirectory:1",
+        ] {
+            let message = Self::create_notify_message(config, server_ip, service_type)
+                .replace("NTS: ssdp:alive", "NTS: ssdp:byebye");
+            let active_socket = load_ssdp_socket(socket);
+            network_manager
+                .send_multicast(&active_socket, message.as_bytes(), target)
+                .await?;
+        }
+        info!("Sent SSDP byebye announcements");
         Ok(())
     }
 

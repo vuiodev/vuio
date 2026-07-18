@@ -20,6 +20,14 @@ announce_interval_seconds = 30
 # Optional CIDRs allowed as UPnP event callback destinations in addition to the subscribing peer.
 upnp_callback_allowed_networks = []
 
+[management]
+enabled = true
+# Empty uses admin.token beside this config file. VUIO_ADMIN_TOKEN overrides the file.
+token_file = ""
+session_ttl_hours = 12
+# Empty permits management only from loopback. Add explicit CIDRs for LAN administration.
+allowed_networks = []
+
 # Media configuration
 # Default media directories for this platform: PLACEHOLDER_DEFAULT_MEDIA_DIRECTORIES
 [media]
@@ -45,7 +53,7 @@ validation_mode = "Warn"
 [database]
 path = "PLACEHOLDER_DATABASE_PATH"
 vacuum_on_startup = false
-backup_enabled = true
+backup_enabled = false
 
 # Platform-specific notes:
 # PLACEHOLDER_PLATFORM_NOTES

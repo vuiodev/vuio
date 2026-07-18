@@ -113,9 +113,12 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
     config.media.directories = vec![monitored_directory.clone()];
     let config = Arc::new(config);
     let state = AppState {
-        config,
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config.clone())),
         media_directories: Arc::new(tokio::sync::RwLock::new(vec![monitored_directory])),
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         database,
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
         platform_info: Arc::new(PlatformInfo::detect().await.expect("detect platform")),
         filesystem_manager: Arc::from(create_platform_filesystem_manager()),
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),

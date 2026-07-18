@@ -3,7 +3,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
     new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::error::Result;
+use crate::media::ScanPolicy;
 
 /// Events that can occur in the file system for media files
 #[derive(Debug, Clone)]
@@ -75,8 +76,8 @@ pub struct CrossPlatformWatcher {
     debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, FileIdMap>>>>,
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
-    watched_paths: Arc<RwLock<HashSet<PathBuf>>>,
-    watched_paths_sync: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
+    watched_paths: Arc<std::sync::Mutex<HashMap<PathBuf, bool>>>,
+    policies: Arc<std::sync::RwLock<Vec<ScanPolicy>>>,
     dirty_roots: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
     debounce_duration: Duration,
 }
@@ -90,11 +91,78 @@ impl CrossPlatformWatcher {
             debouncer: Arc::new(RwLock::new(None)),
             event_sender,
             event_receiver: Arc::new(RwLock::new(Some(event_receiver))),
-            watched_paths: Arc::new(RwLock::new(HashSet::with_capacity(16))), // Pre-allocate capacity
-            watched_paths_sync: Arc::new(std::sync::Mutex::new(HashSet::with_capacity(16))),
+            watched_paths: Arc::new(std::sync::Mutex::new(HashMap::with_capacity(16))),
+            policies: Arc::new(std::sync::RwLock::new(Vec::new())),
             dirty_roots: Arc::new(std::sync::Mutex::new(HashSet::with_capacity(16))),
             debounce_duration: Duration::from_millis(250), // 250ms debounce for reduced event frequency
         }
+    }
+
+    pub fn with_policies(policies: Vec<ScanPolicy>) -> Self {
+        let watcher = Self::new();
+        *watcher
+            .policies
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = policies;
+        watcher
+    }
+
+    pub fn set_policies(&self, policies: Vec<ScanPolicy>) {
+        *self
+            .policies
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = policies;
+    }
+
+    pub async fn add_watch_policy(&self, policy: ScanPolicy) -> Result<()> {
+        self.remove_watch_path(&policy.root).await?;
+        {
+            let mut policies = self
+                .policies
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            policies.retain(|existing| existing.root != policy.root);
+            policies.push(policy.clone());
+        }
+        self.add_watch_path_mode(&policy.root, policy.recursive)
+            .await
+    }
+
+    async fn add_watch_path_mode(&self, path: &Path, recursive: bool) -> Result<()> {
+        if !path.is_dir() {
+            warn!(
+                "Path does not exist or is not a directory, cannot watch: {}",
+                path.display()
+            );
+            return Ok(());
+        }
+        let mut debouncer_guard = self.debouncer.write().await;
+        if let Some(ref mut debouncer) = *debouncer_guard {
+            let mut watched = self
+                .watched_paths
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if watched.contains_key(path) {
+                return Ok(());
+            }
+            let mode = if recursive {
+                RecursiveMode::Recursive
+            } else {
+                RecursiveMode::NonRecursive
+            };
+            debouncer.watch(path, mode)?;
+            watched.insert(path.to_path_buf(), recursive);
+            info!(
+                "Added {} watch path: {}",
+                if recursive {
+                    "recursive"
+                } else {
+                    "non-recursive"
+                },
+                path.display()
+            );
+        }
+        Ok(())
     }
 
     /// Check if a file is a supported media file based on its extension
@@ -118,16 +186,15 @@ fn is_media_file(path: &Path) -> bool {
     false
 }
 
-fn is_watched_file(path: &Path) -> bool {
-    is_media_file(path)
-        || path
-            .extension()
-            .and_then(|extension| extension.to_str())
-            .is_some_and(|extension| extension.eq_ignore_ascii_case("srt"))
+fn path_is_relevant(path: &Path, policies: &[ScanPolicy]) -> bool {
+    ScanPolicy::for_path(policies, path).is_some_and(|policy| policy.allows_watched_path(path))
 }
 
 /// Convert notify events to our FileSystemEvent enum (helper)
-fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
+fn convert_watcher_events(
+    events: Vec<DebouncedEvent>,
+    policies: &[ScanPolicy],
+) -> Vec<FileSystemEvent> {
     let mut fs_events = Vec::with_capacity(events.len()); // Pre-allocate capacity
 
     for event in events {
@@ -141,7 +208,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                             path.display()
                         );
                         fs_events.push(FileSystemEvent::Created(path.clone()));
-                    } else if is_watched_file(path) {
+                    } else if path_is_relevant(path, policies) {
                         debug!(
                             "Media file created (detected by watcher): {}",
                             path.display()
@@ -167,7 +234,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                         } else {
                             for path in &event.event.paths {
                                 if path.exists() {
-                                    if path.is_dir() || is_watched_file(path) {
+                                    if path.is_dir() || path_is_relevant(path, policies) {
                                         fs_events.push(FileSystemEvent::Created(path.clone()));
                                     }
                                 } else {
@@ -185,7 +252,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                             .event
                             .paths
                             .iter()
-                            .filter(|path| is_watched_file(path))
+                            .filter(|path| path_is_relevant(path, policies))
                             .collect();
 
                         for path in media_paths {
@@ -215,7 +282,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                     .event
                     .paths
                     .iter()
-                    .filter(|path| is_watched_file(path))
+                    .filter(|path| path_is_relevant(path, policies))
                     .collect();
 
                 for path in media_paths {
@@ -229,7 +296,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                     .event
                     .paths
                     .iter()
-                    .filter(|path| is_watched_file(path))
+                    .filter(|path| path_is_relevant(path, policies))
                     .collect();
 
                 for path in media_paths {
@@ -266,7 +333,8 @@ impl CrossPlatformWatcher {
     async fn initialize_watcher(&self) -> Result<()> {
         let event_sender = self.event_sender.clone();
         let dirty_roots = self.dirty_roots.clone();
-        let watched_paths_sync = self.watched_paths_sync.clone();
+        let watched_paths = self.watched_paths.clone();
+        let policies = self.policies.clone();
 
         let debouncer = new_debouncer_opt(
             self.debounce_duration,
@@ -289,34 +357,52 @@ impl CrossPlatformWatcher {
                             }
                         }
 
-                        // Filter events for media files OR directories
-                        let relevant_events: Vec<_> = events.into_iter()
+                        let policy_snapshot = policies
+                            .read()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .clone();
+                        // Filter events through the same per-root policy used by scans.
+                        let relevant_events: Vec<_> = events
+                            .into_iter()
                             .filter(|event| {
                                 event.paths.iter().any(|path| {
                                     // If the path does not exist, it was deleted or renamed/moved.
                                     // We must include it so the database can be cleaned up.
-                                    if !path.exists() {
-                                        debug!("Including non-existent path (deleted or renamed): {}", path.display());
+                                    if !path.exists()
+                                        && ScanPolicy::for_path(&policy_snapshot, path).is_some()
+                                    {
+                                        debug!(
+                                            "Including non-existent path (deleted or renamed): {}",
+                                            path.display()
+                                        );
                                         return true;
                                     }
 
                                     // Include directories and media files for other events
-                                    if path.is_dir() {
-                                        debug!("Including directory event for path: {}", path.display());
+                                    if path.is_dir()
+                                        && ScanPolicy::for_path(&policy_snapshot, path).is_some_and(
+                                            |policy| policy.root == *path || policy.recursive,
+                                        )
+                                    {
+                                        debug!(
+                                            "Including directory event for path: {}",
+                                            path.display()
+                                        );
                                         return true;
                                     }
 
-                                    // Include media files
-                                    if let Some(extension) = path.extension() {
-                                        if let Some(ext_str) = extension.to_str() {
-                                            if crate::platform::filesystem::is_supported_media_extension(ext_str) || ext_str.eq_ignore_ascii_case("srt") {
-                                                debug!("Including media file event for path: {}", path.display());
-                                                return true;
-                                            }
-                                        }
+                                    if path_is_relevant(path, &policy_snapshot) {
+                                        debug!(
+                                            "Including configured file event for path: {}",
+                                            path.display()
+                                        );
+                                        return true;
                                     }
 
-                                    debug!("Excluding non-media file event for path: {}", path.display());
+                                    debug!(
+                                        "Excluding non-media file event for path: {}",
+                                        path.display()
+                                    );
                                     false
                                 })
                             })
@@ -325,7 +411,8 @@ impl CrossPlatformWatcher {
                         if !relevant_events.is_empty() {
                             debug!("Processing {} relevant events", relevant_events.len());
 
-                            let fs_events = convert_watcher_events(relevant_events);
+                            let fs_events =
+                                convert_watcher_events(relevant_events, &policy_snapshot);
                             for fs_event in fs_events {
                                 if let Err(e) = event_sender.try_send(fs_event) {
                                     error!("Failed to send file system event: {}", e);
@@ -335,13 +422,12 @@ impl CrossPlatformWatcher {
                                         | FileSystemEvent::Deleted { path, .. } => path,
                                         FileSystemEvent::Renamed { from, .. } => from,
                                     };
-                                    let watched = watched_paths_sync
-                                        .lock()
-                                        .unwrap_or_else(|p| p.into_inner());
+                                    let watched =
+                                        watched_paths.lock().unwrap_or_else(|p| p.into_inner());
                                     let mut dirty =
                                         dirty_roots.lock().unwrap_or_else(|p| p.into_inner());
                                     if let Some(root) =
-                                        watched.iter().find(|root| failed_path.starts_with(root))
+                                        watched.keys().find(|root| failed_path.starts_with(root))
                                     {
                                         dirty.insert(root.clone());
                                     }
@@ -353,11 +439,11 @@ impl CrossPlatformWatcher {
                         for error in errors {
                             error!("File watcher error: {:?}", error);
                         }
-                        let watched = watched_paths_sync.lock().unwrap_or_else(|p| p.into_inner());
+                        let watched = watched_paths.lock().unwrap_or_else(|p| p.into_inner());
                         dirty_roots
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .extend(watched.iter().cloned());
+                            .extend(watched.keys().cloned());
                     }
                 }
             },
@@ -385,6 +471,20 @@ impl FileSystemWatcher for CrossPlatformWatcher {
             directories.len()
         );
 
+        {
+            let mut policies = self
+                .policies
+                .write()
+                .unwrap_or_else(|error| error.into_inner());
+            if policies.is_empty() {
+                policies.extend(
+                    directories
+                        .iter()
+                        .map(|directory| ScanPolicy::platform_default(directory, true)),
+                );
+            }
+        }
+
         // Initialize the watcher if not already done
         if self.debouncer.read().await.is_none() {
             self.initialize_watcher().await?;
@@ -392,7 +492,15 @@ impl FileSystemWatcher for CrossPlatformWatcher {
 
         let mut debouncer_guard = self.debouncer.write().await;
         if let Some(ref mut debouncer) = *debouncer_guard {
-            let mut watched_paths = self.watched_paths.write().await;
+            let policies = self
+                .policies
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone();
+            let mut watched_paths = self
+                .watched_paths
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
 
             for directory in directories {
                 if !directory.exists() {
@@ -408,13 +516,16 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                     continue;
                 }
 
-                match debouncer.watch(directory, RecursiveMode::Recursive) {
+                let recursive = ScanPolicy::for_path(&policies, directory)
+                    .is_none_or(|policy| policy.recursive);
+                let mode = if recursive {
+                    RecursiveMode::Recursive
+                } else {
+                    RecursiveMode::NonRecursive
+                };
+                match debouncer.watch(directory, mode) {
                     Ok(()) => {
-                        watched_paths.insert(directory.clone());
-                        self.watched_paths_sync
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .insert(directory.clone());
+                        watched_paths.insert(directory.clone(), recursive);
                         info!("Started watching directory: {}", directory.display());
 
                         // Test if directory is accessible
@@ -447,12 +558,11 @@ impl FileSystemWatcher for CrossPlatformWatcher {
             drop(debouncer);
         }
 
-        let mut watched_paths = self.watched_paths.write().await;
-        watched_paths.clear();
-        self.watched_paths_sync
+        let mut watched_paths = self
+            .watched_paths
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .clear();
+            .unwrap_or_else(|error| error.into_inner());
+        watched_paths.clear();
 
         info!("File system watcher stopped");
         Ok(())
@@ -467,50 +577,25 @@ impl FileSystemWatcher for CrossPlatformWatcher {
     }
 
     async fn add_watch_path(&self, path: &Path) -> Result<()> {
-        if !path.exists() {
-            warn!("Path does not exist, cannot watch: {}", path.display());
-            return Ok(());
-        }
-
-        let mut debouncer_guard = self.debouncer.write().await;
-        if let Some(ref mut debouncer) = *debouncer_guard {
-            let mut watched_paths = self.watched_paths.write().await;
-
-            if watched_paths.contains(path) {
-                debug!("Path already being watched: {}", path.display());
-                return Ok(());
-            }
-
-            match debouncer.watch(path, RecursiveMode::Recursive) {
-                Ok(()) => {
-                    watched_paths.insert(path.to_path_buf());
-                    self.watched_paths_sync
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .insert(path.to_path_buf());
-                    info!("Added watch path: {}", path.display());
-                    Ok(())
-                }
-                Err(e) => {
-                    error!("Failed to add watch path {}: {}", path.display(), e);
-                    Err(e.into())
-                }
-            }
-        } else {
-            warn!(
-                "Watcher not initialized, cannot add path: {}",
-                path.display()
-            );
-            Ok(())
-        }
+        let recursive = self
+            .policies
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .iter()
+            .find(|policy| policy.root == path)
+            .map_or(true, |policy| policy.recursive);
+        self.add_watch_path_mode(path, recursive).await
     }
 
     async fn remove_watch_path(&self, path: &Path) -> Result<()> {
         let mut debouncer_guard = self.debouncer.write().await;
         if let Some(ref mut debouncer) = *debouncer_guard {
-            let mut watched_paths = self.watched_paths.write().await;
+            let mut watched_paths = self
+                .watched_paths
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
 
-            if !watched_paths.contains(path) {
+            if !watched_paths.contains_key(path) {
                 debug!("Path not being watched: {}", path.display());
                 return Ok(());
             }
@@ -518,10 +603,6 @@ impl FileSystemWatcher for CrossPlatformWatcher {
             match debouncer.unwatch(path) {
                 Ok(()) => {
                     watched_paths.remove(path);
-                    self.watched_paths_sync
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(path);
                     info!("Removed watch path: {}", path.display());
                     Ok(())
                 }
@@ -540,8 +621,10 @@ impl FileSystemWatcher for CrossPlatformWatcher {
     }
 
     async fn is_watching(&self, path: &Path) -> bool {
-        let watched_paths = self.watched_paths.read().await;
-        watched_paths.contains(path)
+        self.watched_paths
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .contains_key(path)
     }
 }
 

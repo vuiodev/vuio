@@ -24,12 +24,14 @@ use super::{
     DatabaseBackend, DatabaseHealth, DatabaseManager, DatabaseReadSession, DatabaseStats,
     DirectoryView, FileFingerprint, FileLocation, HealthRepository, IndexSnapshot, MediaDirectory,
     MediaFile, MediaFileQuery, MediaFileView, MediaRepository, MusicCategory, MusicCategoryType,
-    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, StatsRepository, VisitSummary,
+    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, RootAvailability, StatsRepository,
+    VisitSummary,
 };
 
 mod health;
 mod media_repo;
 mod playlist_repo;
+mod root_repo;
 mod stats;
 
 include!("schema.rs");
@@ -138,6 +140,7 @@ impl RedbDatabase {
                 let _ = write_txn.open_table(PLAYLIST_SOURCES)?;
                 let _ = write_txn.open_multimap_table(SOURCE_PLAYLISTS)?;
                 let _ = write_txn.open_table(METADATA_TABLE)?;
+                let _ = write_txn.open_table(ROOT_AVAILABILITY)?;
                 let _ = write_txn.open_multimap_table(ARTIST_INDEX)?;
                 let _ = write_txn.open_multimap_table(ALBUM_INDEX)?;
                 let _ = write_txn.open_multimap_table(GENRE_INDEX)?;
@@ -179,21 +182,24 @@ impl RedbDatabase {
             let mut max_file: i64 = 0;
             let mut total_files_c: u64 = 0;
             let mut total_size_s: u64 = 0;
-            for (key, value) in files_table.iter()?.flatten() {
+            for entry in files_table.iter()? {
+                let (key, value) = entry?;
                 max_file = max_file.max(key.value());
                 total_files_c += 1;
-                if let Ok(file) = Self::deserialize_media_file(value.value()) {
-                    total_size_s += file.size;
-                }
+                let file = Self::deserialize_media_file(value.value())
+                    .with_context(|| format!("corrupt media record {}", key.value()))?;
+                total_size_s += file.size;
             }
 
             let mut max_playlist: i64 = 0;
-            for (key, _) in playlists_table.iter()?.flatten() {
+            for entry in playlists_table.iter()? {
+                let (key, _) = entry?;
                 max_playlist = max_playlist.max(key.value());
             }
 
             let mut max_directory = 0_u64;
-            for (key, _) in directories_table.iter()?.flatten() {
+            for entry in directories_table.iter()? {
+                let (key, _) = entry?;
                 max_directory = max_directory.max(key.value());
             }
 
@@ -675,6 +681,22 @@ impl MediaRepository for RedbDatabase {
         RedbDatabase::load_file_fingerprints_impl(self).await
     }
 
+    async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>> {
+        RedbDatabase::get_root_availability_impl(self, path).await
+    }
+
+    async fn list_root_availability(&self) -> Result<Vec<RootAvailability>> {
+        RedbDatabase::list_root_availability_impl(self).await
+    }
+
+    async fn set_root_availability(&self, state: &RootAvailability) -> Result<()> {
+        RedbDatabase::set_root_availability_impl(self, state).await
+    }
+
+    async fn remove_root_availability(&self, path: &Path) -> Result<()> {
+        RedbDatabase::remove_root_availability_impl(self, path).await
+    }
+
     async fn get_artists(&self) -> Result<Vec<MusicCategory>> {
         RedbDatabase::get_artists_impl(self).await
     }
@@ -807,6 +829,16 @@ impl PlaylistRepository for RedbDatabase {
 
     async fn set_playlist_source(&self, playlist_id: i64, source_path: &Path) -> Result<()> {
         RedbDatabase::set_playlist_source_impl(self, playlist_id, source_path).await
+    }
+
+    async fn replace_playlist_from_source(
+        &self,
+        source_path: &Path,
+        name: &str,
+        media_file_ids: &[(i64, u32)],
+    ) -> Result<i64> {
+        RedbDatabase::replace_playlist_from_source_impl(self, source_path, name, media_file_ids)
+            .await
     }
 
     async fn remove_derived_content_by_source(&self, source_path: &Path) -> Result<usize> {

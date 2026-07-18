@@ -187,7 +187,9 @@ pub async fn serve_media<D: DatabaseManager>(
                 .unwrap_or("127.0.0.1");
             let srt_url = format!(
                 "http://{}:{}/media/{}/subtitle",
-                server_ip, state.config.server.port, file_id
+                server_ip,
+                state.current_config().server.port,
+                file_id
             );
             debug!(
                 "Injecting Samsung subtitle header CaptionInfo.sec: {}",

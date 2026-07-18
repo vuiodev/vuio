@@ -41,7 +41,7 @@ pub async fn server_info_handler<D: DatabaseManager>(
         .map(|directory| directory.path.clone())
         .collect();
     Json(ServerInfo {
-        server_name: state.config.server.name.clone(),
+        server_name: state.current_config().server.name.clone(),
         monitored_directories,
     })
 }

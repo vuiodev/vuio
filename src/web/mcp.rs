@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Query, State},
+    extract::{ConnectInfo, Json, Query, State},
     http::StatusCode,
     response::{
         sse::{Event, KeepAlive, Sse},
@@ -8,7 +8,11 @@ use axum::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use std::convert::Infallible;
+use std::{
+    convert::Infallible,
+    net::SocketAddr,
+    time::{Duration, Instant},
+};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
@@ -21,8 +25,13 @@ use crate::{
         DatabaseManager, DatabaseReadSession, DirectoryView, FileLocation, MediaFileQuery,
         MediaFileView,
     },
-    state::AppState,
+    state::{AppState, McpClient},
 };
+
+const MCP_MAX_CLIENTS: usize = 64;
+const MCP_MAX_CLIENTS_PER_PEER: usize = 4;
+const MCP_CLIENT_TTL: Duration = Duration::from_secs(30 * 60);
+const MCP_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 // ──────────────────────────────────────────
 // JSON-RPC 2.0 types
@@ -343,15 +352,33 @@ fn get_tools_list() -> serde_json::Value {
 
 pub async fn sse_handler<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
-    let client_id = Uuid::new_v4().to_string();
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+) -> axum::response::Response {
+    let client_id = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
     let (tx, rx) = mpsc::channel::<String>(64);
     let disconnect_sender = tx.clone();
+    let expires_at = Instant::now() + MCP_CLIENT_TTL;
 
     // Register this client
     {
         let mut clients = state.mcp_clients.lock().await;
-        clients.insert(client_id.clone(), tx);
+        let now = Instant::now();
+        clients.retain(|_, client| client.expires_at > now);
+        let peer_clients = clients
+            .values()
+            .filter(|client| client.peer == peer.ip())
+            .count();
+        if clients.len() >= MCP_MAX_CLIENTS || peer_clients >= MCP_MAX_CLIENTS_PER_PEER {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        clients.insert(
+            client_id.clone(),
+            McpClient {
+                sender: tx,
+                peer: peer.ip(),
+                expires_at,
+            },
+        );
     }
 
     info!("MCP client connected: {}", client_id);
@@ -377,18 +404,21 @@ pub async fn sse_handler<D: DatabaseManager + 'static>(
         tokio::select! {
             _ = disconnect_sender.closed() => {}
             _ = cleanup_cancellation.cancelled() => {}
+            _ = tokio::time::sleep_until(tokio::time::Instant::from_std(expires_at)) => {}
         }
         let mut clients = state_for_cleanup.mcp_clients.lock().await;
         let is_same_connection = clients
             .get(&client_id_for_cleanup)
-            .is_some_and(|sender| sender.same_channel(&disconnect_sender));
+            .is_some_and(|client| client.sender.same_channel(&disconnect_sender));
         if is_same_connection {
             clients.remove(&client_id_for_cleanup);
             info!("MCP client disconnected: {}", client_id_for_cleanup);
         }
     });
 
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 // ──────────────────────────────────────────
@@ -402,18 +432,24 @@ pub struct MessageQuery {
 
 pub async fn message_handler<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Query(query): Query<MessageQuery>,
-    body: String,
+    Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     let client_id = &query.client_id;
 
-    // Parse JSON-RPC request
-    let request: JsonRpcRequest = match serde_json::from_str(&body) {
-        Ok(r) => r,
-        Err(e) => {
-            let err_response = JsonRpcResponse::error(None, -32700, format!("Parse error: {}", e));
-            return (StatusCode::OK, axum::Json(err_response)).into_response();
-        }
+    // Validate the live, peer-bound capability before dispatching any method.
+    let sender = {
+        let mut clients = state.mcp_clients.lock().await;
+        let now = Instant::now();
+        clients.retain(|_, client| client.expires_at > now);
+        clients
+            .get(client_id)
+            .filter(|client| client.peer == peer.ip())
+            .map(|client| client.sender.clone())
+    };
+    let Some(sender) = sender else {
+        return StatusCode::UNAUTHORIZED.into_response();
     };
 
     debug!("MCP request from {}: method={}", client_id, request.method);
@@ -422,34 +458,36 @@ pub async fn message_handler<D: DatabaseManager + 'static>(
     let response = handle_method(&state, &request).await;
 
     // Send the response back through the SSE channel
-    let response_json = serde_json::to_string(&response).unwrap_or_default();
-    let mut sent_via_sse = false;
-    let sender = {
-        let clients = state.mcp_clients.lock().await;
-        clients.get(client_id).cloned()
-    };
-    if let Some(tx) = sender {
-        if let Err(e) = tx.send(response_json).await {
-            warn!("Failed to send MCP response to client {}: {}", client_id, e);
-            let mut clients = state.mcp_clients.lock().await;
-            if clients
-                .get(client_id)
-                .is_some_and(|sender| sender.same_channel(&tx))
-            {
-                clients.remove(client_id);
-            }
-        } else {
-            sent_via_sse = true;
+    let response_json = match serde_json::to_string(&response) {
+        Ok(response) if response.len() <= MCP_MAX_RESPONSE_BYTES => response,
+        Ok(_) => {
+            return (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                axum::Json(JsonRpcResponse::error(
+                    request.id.clone(),
+                    -32001,
+                    "Response exceeds server limit".to_owned(),
+                )),
+            )
+                .into_response();
         }
-    } else {
-        warn!("MCP client {} not found in client map", client_id);
+        Err(error) => {
+            warn!("Failed to serialize MCP response: {error}");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if let Err(e) = sender.send(response_json).await {
+        warn!("Failed to send MCP response to client {}: {}", client_id, e);
+        let mut clients = state.mcp_clients.lock().await;
+        if clients
+            .get(client_id)
+            .is_some_and(|client| client.sender.same_channel(&sender))
+        {
+            clients.remove(client_id);
+        }
+        return StatusCode::GONE.into_response();
     }
-
-    if sent_via_sse {
-        (StatusCode::ACCEPTED, "").into_response()
-    } else {
-        (StatusCode::OK, axum::Json(response)).into_response()
-    }
+    (StatusCode::ACCEPTED, "").into_response()
 }
 
 // ──────────────────────────────────────────
@@ -715,10 +753,10 @@ async fn tool_get_server_stats<D: DatabaseManager>(
         .map_err(|e| format!("Database error: {}", e))?;
 
     let server_ip = state.get_server_ip();
-    let port = state.config.server.port;
+    let port = state.current_config().server.port;
 
     Ok(serde_json::json!({
-        "server_name": state.config.server.name,
+        "server_name": state.current_config().server.name,
         "server_url": format!("http://{}:{}", server_ip, port),
         "total_files": stats.total_files,
         "total_size_bytes": stats.total_size,
@@ -801,7 +839,7 @@ async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
 
     // Build the media URL
     let server_ip = state.get_server_ip();
-    let port = state.config.server.port;
+    let port = state.current_config().server.port;
     let media_url = format!("http://{}:{}/media/{}", server_ip, port, file.id);
 
     let title = file.title.as_deref().unwrap_or(&file.filename);
@@ -1132,7 +1170,7 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
 
     // Build the media URL
     let server_ip = state.get_server_ip();
-    let port = state.config.server.port;
+    let port = state.current_config().server.port;
     let media_url = format!("http://{}:{}/media/{}", server_ip, port, file_id);
 
     let title = selected_track

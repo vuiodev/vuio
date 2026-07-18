@@ -21,7 +21,7 @@ async fn start_http_server_task<D: DatabaseManager + 'static>(
 ) -> anyhow::Result<NetworkTaskHandles> {
     info!("Starting HTTP server...");
 
-    let config = app_state.config.clone();
+    let config = app_state.current_config();
 
     // Create the Axum web server
     let app = web::create_router(app_state.clone());

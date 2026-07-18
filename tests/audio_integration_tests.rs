@@ -302,8 +302,11 @@ async fn test_cover_art_retrieval_and_xml() {
 
     let app_state = AppState {
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
-        config,
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config.clone())),
         database: db.clone(),
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
         platform_info,
         filesystem_manager,
         content_update_id,
@@ -454,8 +457,11 @@ https://cast1.asurahosting.com/proxy/julien/stream
 
     let app_state = AppState {
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
-        config,
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config)),
         database: db.clone(),
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
         platform_info,
         filesystem_manager,
         content_update_id,

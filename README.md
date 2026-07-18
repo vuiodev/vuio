@@ -239,7 +239,7 @@ exclude_patterns = ["*.tmp", ".*"]
 [database]
 path = "~/.local/share/vuio/media.redb"
 vacuum_on_startup = false
-backup_enabled = true
+backup_enabled = false
 ```
 
 ### Configuration Options

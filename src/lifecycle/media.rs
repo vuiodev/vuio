@@ -12,6 +12,13 @@ async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
     // Phase 1: Collect paths to delete (holds read lock)
     let mut paths_to_delete = Vec::new();
     let mut total_checked = 0;
+    let unavailable_roots = database
+        .list_root_availability()
+        .await?
+        .into_iter()
+        .filter(|root| root.unavailable_since_secs.is_some())
+        .map(|root| root.path)
+        .collect::<Vec<_>>();
 
     {
         for media_file in database.load_file_fingerprints().await? {
@@ -19,7 +26,10 @@ async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
 
             let unavailable_root = monitored_roots
                 .iter()
-                .any(|root| media_file.path.starts_with(root) && !root.is_dir());
+                .any(|root| media_file.path.starts_with(root) && !root.is_dir())
+                || unavailable_roots
+                    .iter()
+                    .any(|root| media_file.path.starts_with(root));
             if !unavailable_root && !media_file.path.exists() {
                 paths_to_delete.push(media_file.path.clone());
             }
@@ -53,19 +63,126 @@ async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
     Ok(removed_count)
 }
 
-async fn hide_unavailable_media_roots<D: DatabaseManager>(
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+async fn reconcile_unavailable_media_roots<D: DatabaseManager>(
     database: &Arc<D>,
     roots: &[PathBuf],
+    grace_hours: u64,
 ) -> anyhow::Result<usize> {
+    let fingerprints = database.load_file_fingerprints().await?;
+    let now = unix_now_secs();
+    let grace_secs = grace_hours.saturating_mul(3600);
     let mut removed = 0;
     for root in roots {
-        if root.is_dir() {
+        let indexed_count = fingerprints
+            .iter()
+            .filter(|file| file.path.starts_with(root))
+            .count() as u64;
+        let probe = tokio::fs::read_dir(root).await;
+        let reason = match probe {
+            Ok(mut entries) => {
+                if indexed_count > 0 && entries.next_entry().await?.is_none() {
+                    Some("previously populated root is unexpectedly empty".to_owned())
+                } else {
+                    database
+                        .set_root_availability(&database::RootAvailability {
+                            path: root.clone(),
+                            last_seen_secs: now,
+                            unavailable_since_secs: None,
+                            indexed_count,
+                            reason: String::new(),
+                        })
+                        .await?;
+                    None
+                }
+            }
+            Err(error) => Some(format!("{}: {error}", error.kind())),
+        };
+        let Some(reason) = reason else {
             continue;
+        };
+        let previous = database.get_root_availability(root).await?;
+        let unavailable_since = previous
+            .as_ref()
+            .and_then(|state| state.unavailable_since_secs)
+            .unwrap_or(now);
+        database
+            .set_root_availability(&database::RootAvailability {
+                path: root.clone(),
+                last_seen_secs: previous.as_ref().map_or(0, |state| state.last_seen_secs),
+                unavailable_since_secs: Some(unavailable_since),
+                indexed_count: previous
+                    .as_ref()
+                    .map_or(indexed_count, |state| state.indexed_count.max(indexed_count)),
+                reason: reason.clone(),
+            })
+            .await?;
+
+        let permission_denied = reason.starts_with("permission denied");
+        if !permission_denied && now.saturating_sub(unavailable_since) >= grace_secs {
+            removed += database.remove_derived_content_by_source(root).await?;
+            removed += database.remove_media_under_path(root).await?.removed_files;
         }
-        removed += database.remove_derived_content_by_source(root).await?;
-        removed += database.remove_media_under_path(root).await?.removed_files;
     }
     Ok(removed)
+}
+
+async fn record_root_scan<D: DatabaseManager>(
+    database: &Arc<D>,
+    root: &Path,
+    result: &media::ScanResult,
+) -> anyhow::Result<()> {
+    let now = unix_now_secs();
+    let previous = database.get_root_availability(root).await?;
+    let state = if result.complete {
+        database::RootAvailability {
+            path: root.to_path_buf(),
+            last_seen_secs: now,
+            unavailable_since_secs: None,
+            indexed_count: result.total_scanned as u64,
+            reason: String::new(),
+        }
+    } else {
+        database::RootAvailability {
+            path: root.to_path_buf(),
+            last_seen_secs: previous.as_ref().map_or(0, |state| state.last_seen_secs),
+            unavailable_since_secs: Some(
+                previous
+                    .as_ref()
+                    .and_then(|state| state.unavailable_since_secs)
+                    .unwrap_or(now),
+            ),
+            indexed_count: previous
+                .as_ref()
+                .map_or(result.total_scanned as u64, |state| state.indexed_count),
+            reason: result
+                .errors
+                .first()
+                .map_or_else(|| "incomplete scan".to_owned(), |error| error.error.clone()),
+        }
+    };
+    database.set_root_availability(&state).await
+}
+
+pub(crate) async fn refresh_unavailable_roots<D: DatabaseManager>(
+    app_state: &AppState<D>,
+) -> anyhow::Result<()> {
+    let unavailable = app_state
+        .database
+        .list_root_availability()
+        .await?
+        .into_iter()
+        .filter(|state| state.unavailable_since_secs.is_some())
+        .map(|state| state.path)
+        .collect();
+    *app_state.unavailable_roots.write().await = unavailable;
+    Ok(())
 }
 
 /// Perform initial media scan, using database cache when possible
@@ -81,7 +198,12 @@ async fn perform_initial_media_scan<D: DatabaseManager + 'static>(
         .iter()
         .map(|directory| PathBuf::from(&directory.path))
         .collect::<Vec<_>>();
-    let hidden = hide_unavailable_media_roots(database, &configured_roots).await?;
+    let hidden = reconcile_unavailable_media_roots(
+        database,
+        &configured_roots,
+        config.media.unavailable_root_grace_hours,
+    )
+    .await?;
     if hidden > 0 {
         info!(
             "Removed {} cached items belonging to unavailable media roots",
@@ -102,6 +224,7 @@ async fn perform_initial_media_scan<D: DatabaseManager + 'static>(
 
         for dir_config in &config.media.directories {
             let dir_path = std::path::PathBuf::from(&dir_config.path);
+            let policy = media::ScanPolicy::from_config(config, dir_config);
 
             if !dir_path.exists() {
                 warn!("Media directory does not exist: {}", dir_config.path);
@@ -112,14 +235,14 @@ async fn perform_initial_media_scan<D: DatabaseManager + 'static>(
 
             let scan_result = if dir_config.recursive {
                 scanner
-                    .scan_directory_recursive(&dir_path)
+                    .scan_directory_recursive_with_policy(&policy)
                     .await
                     .with_context(|| {
                         format!("Failed to recursively scan directory: {}", dir_config.path)
                     })?
             } else {
                 scanner
-                    .scan_directory(&dir_path)
+                    .scan_directory_with_policy(&policy)
                     .await
                     .with_context(|| format!("Failed to scan directory: {}", dir_config.path))?
             };
@@ -135,6 +258,7 @@ async fn perform_initial_media_scan<D: DatabaseManager + 'static>(
                     warn!("Scan error in {}: {}", err.path.display(), err.error);
                 }
             }
+            record_root_scan(database, &dir_path, &scan_result).await?;
             total_changes += scan_result.total_changes();
             total_files_scanned += scan_result.total_scanned;
         }
@@ -242,7 +366,7 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
     app_state: AppState<D>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
-    if !app_state.config.media.watch_for_changes {
+    if !app_state.current_config().media.watch_for_changes {
         info!("File system monitoring disabled");
         return Ok(None);
     }
@@ -305,17 +429,22 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                     let Some(event) = event else { break; };
                     if let Err(e) = handle_file_system_event(event, &app_state_clone).await {
                         error!("Failed to handle file system event; reconciling all roots: {}", e);
-                        let configured_directories = app_state_clone
+                        let configured_roots = app_state_clone
                             .media_directories
                             .read()
                             .await
-                            .iter()
-                            .map(|directory| PathBuf::from(&directory.path))
-                            .collect::<Vec<_>>();
-                        for root in &configured_directories {
-                            if root.is_dir() {
+                            .clone();
+                        for root in &configured_roots {
+                            let path = PathBuf::from(&root.path);
+                            if path.is_dir() {
                                 let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                                if scanner.scan_directory_recursive(root).await.is_ok() {
+                                let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
+                                let scan = if root.recursive {
+                                    scanner.scan_directory_recursive_with_policy(&policy).await
+                                } else {
+                                    scanner.scan_directory_with_policy(&policy).await
+                                };
+                                if scan.is_ok() {
                                     increment_content_update_id(&app_state_clone).await;
                                 }
                             }
@@ -332,9 +461,10 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                         .iter()
                         .map(|root| PathBuf::from(&root.path))
                         .collect::<Vec<_>>();
-                    match hide_unavailable_media_roots(
+                    match reconcile_unavailable_media_roots(
                         &app_state_clone.database,
                         &configured_directories,
+                        app_state_clone.current_config().media.unavailable_root_grace_hours,
                     )
                     .await
                     {
@@ -348,7 +478,15 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                     }
                     for root in &configured_directories {
                         if root.is_dir() && !watcher_clone.is_watching(root).await {
-                            if let Err(error) = watcher_clone.add_watch_path(root).await {
+                            let Some(root_config) = configured_roots
+                                .iter()
+                                .find(|configured| Path::new(&configured.path) == root)
+                            else { continue; };
+                            let policy = media::ScanPolicy::from_config(
+                                &app_state_clone.current_config(),
+                                root_config,
+                            );
+                            if let Err(error) = watcher_clone.add_watch_policy(policy).await {
                                 error!("Failed to restore watch for {}: {}", root.display(), error);
                             }
                         }
@@ -369,25 +507,39 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                     let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
                     for root in &configured_roots {
                         let path = PathBuf::from(&root.path);
+                        let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
                         if !path.is_dir() {
                             continue;
                         }
                         let result = if root.recursive {
-                            scanner.scan_directory_recursive(&path).await
+                            scanner.scan_directory_recursive_with_policy(&policy).await
                         } else {
-                            scanner.scan_directory(&path).await
+                            scanner.scan_directory_with_policy(&policy).await
                         };
                         match result {
-                            Ok(result) if result.total_changes() > 0 => {
-                                increment_content_update_id(&app_state_clone).await
+                            Ok(result) => {
+                                if let Err(error) = record_root_scan(
+                                    &app_state_clone.database,
+                                    &path,
+                                    &result,
+                                )
+                                .await
+                                {
+                                    error!("Failed to persist root scan state for {}: {}", path.display(), error);
+                                }
+                                if result.total_changes() > 0 {
+                                    increment_content_update_id(&app_state_clone).await;
+                                }
                             }
-                            Ok(_) => {}
                             Err(error) => error!(
                                 "Periodic media discovery failed for {}: {}",
                                 path.display(),
                                 error
                             ),
                         }
+                    }
+                    if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
+                        error!("Failed to refresh unavailable-root visibility: {}", error);
                     }
                     match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
                         Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
@@ -516,12 +668,6 @@ async fn update_subtitle_index<D: DatabaseManager + 'static>(
     Ok(true)
 }
 
-fn is_supported_media_path(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(crate::platform::filesystem::is_supported_media_extension)
-}
-
 /// Upsert a supported media path from its current filesystem metadata.
 async fn index_media_file_path<D: DatabaseManager + ?Sized>(
     database: &D,
@@ -544,29 +690,60 @@ async fn index_media_file_path<D: DatabaseManager + ?Sized>(
         .ok_or_else(|| anyhow::anyhow!("media upsert returned no ID for {}", path.display()))
 }
 
+async fn import_changed_playlist<D: DatabaseManager + ?Sized>(
+    database: &D,
+    path: &Path,
+) -> anyhow::Result<()> {
+    let is_radio = path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("radio"))
+        })
+    });
+    if is_radio {
+        database::playlist_formats::PlaylistFileManager::import_radio_playlist(database, path)
+            .await
+    } else {
+        database.import_playlist_file(path, None).await.map(|_| ())
+    }
+}
+
 async fn handle_file_system_event<D: DatabaseManager + 'static>(
     event: FileSystemEvent,
     app_state: &AppState<D>,
 ) -> anyhow::Result<()> {
     let database = &app_state.database;
     let stats = &app_state.lifecycle_stats;
+    let policies = media::ScanPolicy::policies(&app_state.current_config());
 
     // Record event handling with atomic counter
     stats.record_event_handled();
 
     match event {
         FileSystemEvent::Created(path) => {
+            let policy = media::ScanPolicy::for_path(&policies, &path).cloned();
+            let Some(policy) = policy else {
+                return Ok(());
+            };
             if is_srt_path(&path) {
                 update_subtitle_index(&path, true, app_state).await?;
                 return Ok(());
             }
             // Check if this is a directory or a file
             if path.is_dir() {
+                if !policy.recursive || path == policy.root {
+                    return Ok(());
+                }
                 info!("Directory created: {}", path.display());
 
                 // Scan the new directory for media files using ReDB bulk operations
                 let scanner = media::MediaScanner::with_database(database.clone());
-                match scanner.scan_directory_recursive(&path).await {
+                match scanner
+                    .scan_directory_recursive_with_policy(&policy.for_subtree(&path))
+                    .await
+                {
                     Ok(scan_result) => {
                         info!(
                             "Scanned new directory {}: {}",
@@ -596,7 +773,12 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                 // Handle individual media file creation using bulk operations (single-item batch)
                 info!("Media file created: {}", path.display());
 
-                if !is_supported_media_path(&path) {
+                if policy.allows_playlist(&path) {
+                    import_changed_playlist(database.as_ref(), &path).await?;
+                    increment_content_update_id(app_state).await;
+                    return Ok(());
+                }
+                if !policy.allows_media(&path) {
                     debug!("Not a supported media file, ignoring: {}", path.display());
                     return Ok(());
                 }
@@ -614,13 +796,22 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
         }
 
         FileSystemEvent::Modified(path) => {
+            let policy = media::ScanPolicy::for_path(&policies, &path).cloned();
+            let Some(policy) = policy else {
+                return Ok(());
+            };
             if is_srt_path(&path) {
                 update_subtitle_index(&path, true, app_state).await?;
                 return Ok(());
             }
             info!("Media file modified: {}", path.display());
 
-            if !is_supported_media_path(&path) {
+            if policy.allows_playlist(&path) {
+                import_changed_playlist(database.as_ref(), &path).await?;
+                increment_content_update_id(app_state).await;
+                return Ok(());
+            }
+            if !policy.allows_media(&path) {
                 debug!("Not a supported media file, ignoring: {}", path.display());
                 return Ok(());
             }
@@ -703,6 +894,12 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
 
             // Check if the destination is a directory or file
             if to.is_dir() {
+                let Some(policy) = media::ScanPolicy::for_path(&policies, &to).cloned() else {
+                    return Ok(());
+                };
+                if !policy.recursive || to == policy.root {
+                    return Ok(());
+                }
                 // Handle directory rename using ReDB bulk operations
                 info!("Directory renamed: {} -> {}", from.display(), to.display());
 
@@ -732,7 +929,10 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
 
                     // Scan the new directory location using ReDB bulk operations
                     let scanner = media::MediaScanner::with_database(database.clone());
-                    match scanner.scan_directory_recursive(&to).await {
+                    match scanner
+                        .scan_directory_recursive_with_policy(&policy.for_subtree(&to))
+                        .await
+                    {
                         Ok(scan_result) => {
                             info!(
                                 "Rescanned renamed directory {}: {}",
@@ -756,7 +956,32 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                 // a create because the staging source is intentionally unindexed.
                 info!("File renamed: {} -> {}", from.display(), to.display());
 
-                match classify_media_rename(&from, &to) {
+                let from_playlist = media::ScanPolicy::for_path(&policies, &from)
+                    .is_some_and(|policy| policy.allows_playlist(&from));
+                let to_playlist = media::ScanPolicy::for_path(&policies, &to)
+                    .is_some_and(|policy| policy.allows_playlist(&to));
+                if from_playlist || to_playlist {
+                    if from_playlist {
+                        database.remove_derived_content_by_source(&from).await?;
+                    }
+                    if to_playlist && to.is_file() {
+                        import_changed_playlist(database.as_ref(), &to).await?;
+                    }
+                    increment_content_update_id(app_state).await;
+                    return Ok(());
+                }
+
+                let from_media = media::ScanPolicy::for_path(&policies, &from)
+                    .is_some_and(|policy| policy.allows_media(&from));
+                let to_media = media::ScanPolicy::for_path(&policies, &to)
+                    .is_some_and(|policy| policy.allows_media(&to));
+                let rename_kind = match (from_media, to_media) {
+                    (false, false) => MediaRenameKind::Ignore,
+                    (false, true) => MediaRenameKind::Create,
+                    (true, false) => MediaRenameKind::Remove,
+                    (true, true) => MediaRenameKind::Replace,
+                };
+                match rename_kind {
                     MediaRenameKind::Ignore => {
                         debug!(
                             "Rename has no supported media endpoint, ignoring: {} -> {}",

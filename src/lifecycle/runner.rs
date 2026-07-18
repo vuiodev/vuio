@@ -1,11 +1,48 @@
-async fn run_with_database<D, Initialize, InitializeFuture>(
+async fn create_lifecycle_backup<D: DatabaseManager>(
+    database: &Arc<D>,
+    config: &AppConfig,
+) -> anyhow::Result<PathBuf> {
+    let database_path = config.get_database_path().with_extension("redb");
+    let backup_dir = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("backups");
+    tokio::fs::create_dir_all(&backup_dir).await?;
+    let filename = format!(
+        "vuio-{}-{}.redb",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+        uuid::Uuid::new_v4().simple()
+    );
+    let destination = backup_dir.join(filename);
+    database.create_backup(&destination).await?;
+
+    let mut entries = tokio::fs::read_dir(&backup_dir).await?;
+    let mut backups = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("redb") {
+            backups.push(path);
+        }
+    }
+    backups.sort();
+    let remove_count = backups.len().saturating_sub(3);
+    for old in backups.into_iter().take(remove_count) {
+        tokio::fs::remove_file(old).await?;
+    }
+    Ok(destination)
+}
+
+async fn run_with_database<D, Initialize, InitializeFuture, Restore, RestoreFuture>(
     cli_args: LaunchOptions,
     initialize_backend: Initialize,
+    restore_backend: Restore,
 ) -> anyhow::Result<()>
 where
     D: DatabaseManager + 'static,
     Initialize: FnOnce(Arc<AppConfig>) -> InitializeFuture,
     InitializeFuture: std::future::Future<Output = anyhow::Result<D>>,
+    Restore: FnOnce(Arc<AppConfig>, PathBuf) -> RestoreFuture,
+    RestoreFuture: std::future::Future<Output = anyhow::Result<()>>,
 {
     // Initialize logging with options
     let log_file_path = cli_args.log_file.as_ref().map(PathBuf::from);
@@ -53,6 +90,13 @@ where
     // Get the current configuration
     let config = Arc::new(config_manager.get_config().await);
 
+    if let Some(backup) = cli_args.restore_backup.as_deref() {
+        restore_backend(config.clone(), PathBuf::from(backup))
+            .await
+            .with_context(|| format!("Failed to restore database backup {backup}"))?;
+        info!("Restored database backup from {}", backup);
+    }
+
     // Initialize database manager
     let database = match initialize_backend(config.clone()).await {
         Ok(db) => Arc::new(db),
@@ -61,6 +105,13 @@ where
             return Err(e);
         }
     };
+
+    if config.database.backup_enabled {
+        match create_lifecycle_backup(&database, &config).await {
+            Ok(path) => info!("Created startup database backup at {}", path.display()),
+            Err(error) => warn!("Startup database backup failed: {}", error),
+        }
+    }
 
     // Initialize file system watcher
     let file_watcher = match initialize_file_watcher(&config).await {
@@ -77,10 +128,17 @@ where
     let resolved_log_file =
         log_file_path.unwrap_or_else(crate::config::AppConfig::get_platform_log_file_path);
     let lifecycle_stats = Arc::new(ApplicationStats::new());
+    let auth = Arc::new(crate::web::auth::AuthState::load(
+        &config.management,
+        config_manager.get_config_path(),
+    )?);
     let app_state = AppState {
         config: config.clone(),
+        live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         database: database.clone(),
+        auth,
         platform_info: platform_info.clone(),
         filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
@@ -126,6 +184,30 @@ where
     };
 
     let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
+
+    if config.database.backup_enabled {
+        let backup_database = database.clone();
+        let backup_state = app_state.clone();
+        let backup_cancellation = cancellation.clone();
+        services.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = backup_cancellation.cancelled() => break,
+                    _ = interval.tick() => {
+                        let current = backup_state.current_config();
+                        if current.database.backup_enabled {
+                            if let Err(error) = create_lifecycle_backup(&backup_database, &current).await {
+                                warn!("Periodic database backup failed: {}", error);
+                            }
+                        }
+                    }
+                }
+            }
+            ("database backup", Ok(()))
+        });
+    }
 
     let subscription_handle = {
         let subscriptions = app_state.upnp_subscriptions.clone();
@@ -185,6 +267,7 @@ where
         error!("Failed to perform initial media scan: {}", e);
         return Err(e);
     }
+    refresh_unavailable_roots(&app_state).await?;
 
     // Perform initial playlist file scan after media scan so referenced files exist.
     if let Err(e) = perform_initial_playlist_scan(&config, &database).await {
@@ -279,25 +362,23 @@ where
         let web_url = format!("http://{}:{}", display_ip, config.server.port);
         let db_path = config.get_database_path().with_extension("redb");
 
-        let name_str = config.server.name.clone();
-        let display_name = if name_str.len() > 41 {
-            format!("...{}", &name_str[name_str.len() - 38..])
-        } else {
-            name_str
-        };
+        fn tail_with_ellipsis(value: &str, max_chars: usize) -> String {
+            let count = value.chars().count();
+            if count <= max_chars {
+                return value.to_owned();
+            }
+            let tail = value
+                .chars()
+                .skip(count.saturating_sub(max_chars.saturating_sub(3)))
+                .collect::<String>();
+            format!("...{tail}")
+        }
 
-        let display_url = if web_url.len() > 41 {
-            format!("...{}", &web_url[web_url.len() - 38..])
-        } else {
-            web_url
-        };
+        let display_name = tail_with_ellipsis(&config.server.name, 41);
+        let display_url = tail_with_ellipsis(&web_url, 41);
 
         let db_path_str = db_path.to_string_lossy().to_string();
-        let display_db_path = if db_path_str.len() > 41 {
-            format!("...{}", &db_path_str[db_path_str.len() - 38..])
-        } else {
-            db_path_str
-        };
+        let display_db_path = tail_with_ellipsis(&db_path_str, 41);
 
         println!("┌────────────────────────────────────────────────────────┐");
         println!("│  VuIO Media Server                                     │");
@@ -315,11 +396,7 @@ where
         } else {
             for dir in &config.media.directories {
                 let path_str = &dir.path;
-                let display_path = if path_str.len() > 49 {
-                    format!("...{}", &path_str[path_str.len() - 46..])
-                } else {
-                    path_str.clone()
-                };
+                let display_path = tail_with_ellipsis(path_str, 49);
                 println!("│    • {:<49} │", display_path);
             }
         }
@@ -341,12 +418,14 @@ where
             }
         }
         completed = services.join_next() => {
-            match completed {
-                Some(Ok((name, Ok(())))) => warn!("Critical service stopped unexpectedly: {}", name),
-                Some(Ok((name, Err(error)))) => error!("Critical service {} failed: {}", name, error),
-                Some(Err(error)) => error!("Critical service task panicked: {}", error),
-                None => warn!("All lifecycle services stopped unexpectedly"),
-            }
+            let failure = match completed {
+                Some(Ok((name, Ok(())))) => anyhow::anyhow!("critical service {name} stopped unexpectedly"),
+                Some(Ok((name, Err(error)))) => anyhow::anyhow!("critical service {name} failed: {error}"),
+                Some(Err(error)) => anyhow::anyhow!("critical service task panicked: {error}"),
+                None => anyhow::anyhow!("all lifecycle services stopped unexpectedly"),
+            };
+            error!("{}", failure);
+            shutdown_error = Some(failure);
         }
     }
 
@@ -378,6 +457,12 @@ where
         services.abort_all();
     }
 
+    if app_state.current_config().database.backup_enabled {
+        match create_lifecycle_backup(&database, &app_state.current_config()).await {
+            Ok(path) => info!("Created shutdown database backup at {}", path.display()),
+            Err(error) => warn!("Shutdown database backup failed: {}", error),
+        }
+    }
     if let Err(e) = perform_graceful_shutdown(&database, &lifecycle_stats).await {
         error!("Error during graceful shutdown: {}", e);
     }
@@ -391,9 +476,14 @@ where
 }
 
 async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
-    run_with_database::<database::redb::RedbDatabase, _, _>(cli_args, |config| async move {
-        initialize_database(&config).await
-    })
+    run_with_database::<database::redb::RedbDatabase, _, _, _, _>(
+        cli_args,
+        |config| async move { initialize_database(&config).await },
+        |config, backup| async move {
+            let database_path = config.get_database_path().with_extension("redb");
+            database::redb::RedbDatabase::restore_backup_file(backup, database_path).await
+        },
+    )
     .await
 }
 

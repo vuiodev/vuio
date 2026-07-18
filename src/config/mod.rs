@@ -26,10 +26,42 @@ pub struct AppConfig {
     pub network: NetworkConfig,
     pub media: MediaConfig,
     pub database: DatabaseConfig,
+    #[serde(default)]
+    pub management: ManagementConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ManagementConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub token_file: Option<String>,
+    #[serde(default = "default_session_ttl_hours")]
+    pub session_ttl_hours: u64,
+    #[serde(default)]
+    pub allowed_networks: Vec<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_session_ttl_hours() -> u64 {
+    12
+}
+
+impl Default for ManagementConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            token_file: None,
+            session_ttl_hours: default_session_ttl_hours(),
+            allowed_networks: Vec::new(),
+        }
+    }
 }
 
 /// Server configuration settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub port: u16,
     pub interface: String,
@@ -39,7 +71,7 @@ pub struct ServerConfig {
 }
 
 /// Network configuration settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NetworkConfig {
     pub interface_selection: NetworkInterfaceConfig,
     pub multicast_ttl: u8,
@@ -68,6 +100,10 @@ fn default_scan_playlists() -> bool {
     true
 }
 
+fn default_unavailable_root_grace_hours() -> u64 {
+    168
+}
+
 /// Media configuration settings
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
@@ -80,6 +116,8 @@ pub struct MediaConfig {
     pub autoplay_enabled: bool,
     #[serde(default = "default_scan_playlists")]
     pub scan_playlists: bool,
+    #[serde(default = "default_unavailable_root_grace_hours")]
+    pub unavailable_root_grace_hours: u64,
     pub supported_extensions: Vec<String>,
 }
 
@@ -97,7 +135,7 @@ pub enum ValidationMode {
 }
 
 /// Configuration for a monitored directory
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MonitoredDirectoryConfig {
     pub path: String,
     pub recursive: bool,
@@ -108,7 +146,7 @@ pub struct MonitoredDirectoryConfig {
 }
 
 /// Database configuration settings
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DatabaseConfig {
     pub path: Option<String>,
     pub vacuum_on_startup: bool,
@@ -199,6 +237,10 @@ impl AppConfig {
             scan_playlists: std::env::var("VUIO_SCAN_PLAYLISTS")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(true),
+            unavailable_root_grace_hours: std::env::var("VUIO_UNAVAILABLE_ROOT_GRACE_HOURS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(default_unavailable_root_grace_hours),
             supported_extensions: vec![
                 "mp4".to_string(),
                 "mkv".to_string(),
@@ -248,6 +290,23 @@ impl AppConfig {
             network,
             media,
             database,
+            management: ManagementConfig {
+                enabled: std::env::var("VUIO_MANAGEMENT_ENABLED")
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(true),
+                token_file: std::env::var("VUIO_ADMIN_TOKEN_FILE").ok(),
+                session_ttl_hours: std::env::var("VUIO_ADMIN_SESSION_TTL_HOURS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(default_session_ttl_hours),
+                allowed_networks: std::env::var("VUIO_MANAGEMENT_ALLOWED_NETWORKS")
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+                    .collect(),
+            },
         })
     }
 
@@ -393,6 +452,7 @@ impl AppConfig {
                 cleanup_deleted_files: true,
                 autoplay_enabled: true,
                 scan_playlists: true,
+                unavailable_root_grace_hours: default_unavailable_root_grace_hours(),
                 supported_extensions: platform_config.get_default_media_extensions(),
             },
             database: DatabaseConfig {
@@ -403,9 +463,10 @@ impl AppConfig {
                         .to_string(),
                 ),
                 vacuum_on_startup: false,
-                backup_enabled: true,
+                backup_enabled: false,
                 redb_cache_mb: default_redb_cache_mb(),
             },
+            management: ManagementConfig::default(),
         }
     }
 
@@ -581,37 +642,8 @@ impl AppConfig {
 
         // Ensure media directories have platform-appropriate exclude patterns
         for dir_config in &mut self.media.directories {
-            if dir_config
-                .exclude_patterns
-                .as_ref()
-                .is_none_or(Vec::is_empty)
-            {
+            if dir_config.exclude_patterns.is_none() {
                 dir_config.exclude_patterns = Some(platform_config.get_default_exclude_patterns());
-            } else {
-                // Merge with platform defaults if not already present
-                let mut patterns = dir_config.exclude_patterns.clone().unwrap_or_default();
-                let platform_patterns = platform_config.get_default_exclude_patterns();
-
-                for platform_pattern in platform_patterns {
-                    if !patterns.contains(&platform_pattern) {
-                        patterns.push(platform_pattern);
-                    }
-                }
-
-                dir_config.exclude_patterns = Some(patterns);
-            }
-        }
-
-        // Update supported extensions if empty
-        if self.media.supported_extensions.is_empty() {
-            self.media.supported_extensions = platform_config.get_default_media_extensions();
-        } else {
-            // Merge with platform-specific extensions if not already present
-            let platform_extensions = platform_config.get_default_media_extensions();
-            for ext in platform_extensions {
-                if !self.media.supported_extensions.contains(&ext) {
-                    self.media.supported_extensions.push(ext);
-                }
             }
         }
 
@@ -729,6 +761,16 @@ impl AppConfig {
                         self.server.interface
                     )
                 })?;
+        }
+
+        anyhow::ensure!(
+            self.management.session_ttl_hours > 0,
+            "management session TTL must be greater than zero"
+        );
+        for network in &self.management.allowed_networks {
+            network
+                .parse::<ipnet::IpNet>()
+                .with_context(|| format!("Invalid management allowed network: {network}"))?;
         }
 
         // Platform-specific validations
@@ -1088,7 +1130,7 @@ impl Default for AppConfig {
 #[derive(Debug, Clone)]
 pub enum ConfigChangeEvent {
     /// Configuration file was modified and reloaded
-    Reloaded(AppConfig),
+    Reloaded(Box<AppConfig>),
     /// Monitored directories changed
     DirectoriesChanged {
         added: Vec<PathBuf>,
@@ -1281,7 +1323,7 @@ impl ConfigManager {
         new_config: &AppConfig,
     ) {
         // Send general reload event
-        let _ = sender.send(ConfigChangeEvent::Reloaded(new_config.clone()));
+        let _ = sender.send(ConfigChangeEvent::Reloaded(Box::new(new_config.clone())));
 
         // Check for directory changes
         let old_dirs: std::collections::HashSet<_> = old_config
@@ -1300,7 +1342,20 @@ impl ConfigManager {
 
         let added: Vec<_> = new_dirs.difference(&old_dirs).cloned().collect();
         let removed: Vec<_> = old_dirs.difference(&new_dirs).cloned().collect();
-        let modified: Vec<_> = new_dirs.intersection(&old_dirs).cloned().collect();
+        let modified: Vec<_> = new_config
+            .media
+            .directories
+            .iter()
+            .filter_map(|new_directory| {
+                old_config
+                    .media
+                    .directories
+                    .iter()
+                    .find(|old_directory| old_directory.path == new_directory.path)
+                    .filter(|old_directory| *old_directory != new_directory)
+                    .map(|_| PathBuf::from(&new_directory.path))
+            })
+            .collect();
 
         if !added.is_empty() || !removed.is_empty() || !modified.is_empty() {
             let _ = sender.send(ConfigChangeEvent::DirectoriesChanged {
@@ -1537,7 +1592,7 @@ mod tests {
 
         // Verify defaults were applied
         assert!(config.database.path.is_some());
-        assert!(!config.media.supported_extensions.is_empty());
+        assert!(config.media.supported_extensions.is_empty());
 
         Ok(())
     }
@@ -1659,7 +1714,7 @@ mod tests {
         assert!(config.apply_platform_defaults().is_ok());
 
         // Verify defaults were applied
-        assert!(!config.media.supported_extensions.is_empty());
+        assert!(config.media.supported_extensions.is_empty());
         assert!(!config.server.interface.is_empty());
         assert!(!config.server.name.is_empty());
 

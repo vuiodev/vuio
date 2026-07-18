@@ -288,12 +288,14 @@ impl RedbDatabase {
                 let read_txn = database.begin_read()?;
                 let path_index = read_txn.open_table(PATH_INDEX)?;
 
-                Ok(path_index
-                    .iter()?
-                    .filter_map(|r| r.ok())
-                    .filter(|(k, _)| !existing_set.contains(k.value()))
-                    .map(|(k, _)| PathBuf::from(k.value()))
-                    .collect())
+                let mut paths = Vec::new();
+                for entry in path_index.iter()? {
+                    let (key, _) = entry?;
+                    if !existing_set.contains(key.value()) {
+                        paths.push(PathBuf::from(key.value()));
+                    }
+                }
+                Ok(paths)
             })
             .await?;
 
@@ -343,10 +345,12 @@ impl RedbDatabase {
             for result in artist_index.iter()? {
                 let (key, value) = result?;
                 let artist_name = key.value().to_string();
-                let count = value
-                    .filter_map(|id| id.ok().map(|id| id.value()))
-                    .filter(|id| files_table.get(*id).ok().flatten().is_some())
-                    .count();
+                let mut count = 0;
+                for id in value {
+                    if files_table.get(id?.value())?.is_some() {
+                        count += 1;
+                    }
+                }
                 if count == 0 {
                     continue;
                 }
@@ -384,19 +388,21 @@ impl RedbDatabase {
                     let mut matched = 0;
                     for fid in file_ids {
                         if let Some(data) = files_table.get(fid)? {
-                            if let Ok(file) = RedbReadSession::view(data.value()) {
-                                if file.artist() == Some(artist) {
-                                    matched += 1;
-                                }
+                            let file = RedbReadSession::view(data.value())?;
+                            if file.artist() == Some(artist) {
+                                matched += 1;
                             }
                         }
                     }
                     matched
                 } else {
-                    file_ids
-                        .into_iter()
-                        .filter(|id| files_table.get(*id).ok().flatten().is_some())
-                        .count()
+                    let mut existing = 0;
+                    for id in file_ids {
+                        if files_table.get(id)?.is_some() {
+                            existing += 1;
+                        }
+                    }
+                    existing
                 };
 
                 if count > 0 {
@@ -423,10 +429,12 @@ impl RedbDatabase {
             for result in genre_index.iter()? {
                 let (key, value) = result?;
                 let name = key.value().to_string();
-                let count = value
-                    .filter_map(|id| id.ok().map(|id| id.value()))
-                    .filter(|id| files_table.get(*id).ok().flatten().is_some())
-                    .count();
+                let mut count = 0;
+                for id in value {
+                    if files_table.get(id?.value())?.is_some() {
+                        count += 1;
+                    }
+                }
                 if count == 0 {
                     continue;
                 }
@@ -452,10 +460,12 @@ impl RedbDatabase {
             for result in year_index.iter()? {
                 let (key, value) = result?;
                 let year = key.value();
-                let count = value
-                    .filter_map(|id| id.ok().map(|id| id.value()))
-                    .filter(|id| files_table.get(*id).ok().flatten().is_some())
-                    .count();
+                let mut count = 0;
+                for id in value {
+                    if files_table.get(id?.value())?.is_some() {
+                        count += 1;
+                    }
+                }
                 if count == 0 {
                     continue;
                 }
@@ -481,10 +491,12 @@ impl RedbDatabase {
             for result in album_artist_index.iter()? {
                 let (key, value) = result?;
                 let name = key.value().to_string();
-                let count = value
-                    .filter_map(|id| id.ok().map(|id| id.value()))
-                    .filter(|id| files_table.get(*id).ok().flatten().is_some())
-                    .count();
+                let mut count = 0;
+                for id in value {
+                    if files_table.get(id?.value())?.is_some() {
+                        count += 1;
+                    }
+                }
                 if count == 0 {
                     continue;
                 }

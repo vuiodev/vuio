@@ -438,8 +438,8 @@ pub async fn generate_description_xml<D: DatabaseManager>(state: &AppState<D>) -
         </serviceList>
     </device>
 </root>"#,
-        xml_escape(&state.config.server.name),
-        state.config.server.uuid
+        xml_escape(&state.current_config().server.name),
+        state.current_config().server.uuid
     )
 }
 
@@ -755,7 +755,9 @@ pub async fn generate_browse_response(
                 let _ = write!(
                     &mut didl,
                     "<upnp:albumArtURI>http://{}:{}/media/{}/cover</upnp:albumArtURI>",
-                    server_ip, state.config.server.port, file_id
+                    server_ip,
+                    state.current_config().server.port,
+                    file_id
                 );
             }
 
@@ -780,7 +782,7 @@ pub async fn generate_browse_response(
             };
 
             // Use enhanced DLNA flags that support autoplay and streaming
-            let dlna_flags = if state.config.media.autoplay_enabled {
+            let dlna_flags = if state.current_config().media.autoplay_enabled {
                 "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
             } else {
                 "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
@@ -842,14 +844,18 @@ pub async fn generate_browse_response(
                 let _ = write!(
                     &mut didl,
                     r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
-                    server_ip, state.config.server.port, file_id
+                    server_ip,
+                    state.current_config().server.port,
+                    file_id
                 );
             }
 
             let _ = write!(
                 &mut didl,
                 r#">http://{}:{}/media/{}</res>"#,
-                server_ip, state.config.server.port, file_id
+                server_ip,
+                state.current_config().server.port,
+                file_id
             );
 
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
@@ -857,7 +863,9 @@ pub async fn generate_browse_response(
                     &mut didl,
                     r#"
                 <res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#,
-                    server_ip, state.config.server.port, file_id
+                    server_ip,
+                    state.current_config().server.port,
+                    file_id
                 );
             }
 
@@ -869,7 +877,9 @@ pub async fn generate_browse_response(
                     &mut didl,
                     r#"
                 <sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#,
-                    server_ip, state.config.server.port, file_id
+                    server_ip,
+                    state.current_config().server.port,
+                    file_id
                 );
             }
 

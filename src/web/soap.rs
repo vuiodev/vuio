@@ -323,6 +323,7 @@ impl ContentDirectoryHandler {
         let cache_hit = false;
 
         let monitored_dirs = state.media_directories.read().await.clone();
+        let unavailable_roots = state.unavailable_roots.read().await.clone();
 
         // Parse directory index prefix (e.g. "d0/movies" -> index 0, relative path "movies")
         let (dir_index_opt, relative_path) = parse_dir_index_prefix(path_prefix_str);
@@ -337,7 +338,7 @@ impl ContentDirectoryHandler {
                 }
             }
             _ => {
-                let media_root = state.config.get_primary_media_dir();
+                let media_root = state.current_config().get_primary_media_dir();
                 if path_prefix_str.is_empty() {
                     media_root
                 } else {
@@ -351,7 +352,7 @@ impl ContentDirectoryHandler {
             let mut subdirs = Vec::new();
             for (idx, dir) in monitored_dirs.iter().enumerate() {
                 let path = PathBuf::from(&dir.path);
-                if !path.is_dir() {
+                if !path.is_dir() || unavailable_roots.contains(&path) {
                     continue;
                 }
                 let name = path
@@ -364,7 +365,11 @@ impl ContentDirectoryHandler {
                 });
             }
             (subdirs, Vec::<crate::database::MediaFile>::new())
-        } else if !browse_path.is_dir() {
+        } else if !browse_path.is_dir()
+            || unavailable_roots
+                .iter()
+                .any(|root| browse_path.starts_with(root))
+        {
             // Configured/removable roots are hidden while unavailable. The watcher
             // recovery loop will rescan and republish them when they return.
             (Vec::new(), Vec::new())
@@ -395,8 +400,8 @@ impl ContentDirectoryHandler {
             let context = crate::web::xml::BrowseRenderContext {
                 client,
                 server_ip: state.get_server_ip(),
-                server_port: state.config.server.port,
-                autoplay_enabled: state.config.media.autoplay_enabled,
+                server_port: state.current_config().server.port,
+                autoplay_enabled: state.current_config().media.autoplay_enabled,
                 update_id: current_update_id,
                 bookmarks,
             };
@@ -581,8 +586,8 @@ impl ContentDirectoryHandler {
                 .try_with(|client| *client)
                 .unwrap_or(crate::web::client::DlnaClientProfile::Standard),
             server_ip: state.get_server_ip(),
-            server_port: state.config.server.port,
-            autoplay_enabled: state.config.media.autoplay_enabled,
+            server_port: state.current_config().server.port,
+            autoplay_enabled: state.current_config().media.autoplay_enabled,
             update_id: state.content_update_id.load(Ordering::SeqCst),
             bookmarks: state.bookmarks.lock().await.snapshot(),
         };
@@ -1057,8 +1062,8 @@ where
         let context = crate::web::xml::BrowseRenderContext {
             client,
             server_ip: state.get_server_ip(),
-            server_port: state.config.server.port,
-            autoplay_enabled: state.config.media.autoplay_enabled,
+            server_port: state.current_config().server.port,
+            autoplay_enabled: state.current_config().media.autoplay_enabled,
             update_id: current_update_id,
             bookmarks,
         };

@@ -73,8 +73,11 @@ async fn test_metrics_endpoints_data() {
 
     let app_state = AppState {
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
-        config,
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config.clone())),
         database: db,
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
         platform_info,
         filesystem_manager,
         content_update_id,

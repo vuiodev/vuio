@@ -33,6 +33,8 @@ const PLAYLIST_SOURCES: TableDefinition<i64, &str> = TableDefinition::new("playl
 const SOURCE_PLAYLISTS: MultimapTableDefinition<&str, i64> =
     MultimapTableDefinition::new("source_playlists");
 const METADATA_TABLE: TableDefinition<&str, u64> = TableDefinition::new("metadata");
+const ROOT_AVAILABILITY: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("root_availability");
 
 const ARTIST_INDEX: MultimapTableDefinition<&str, i64> =
     MultimapTableDefinition::new("artist_index");
@@ -134,6 +136,39 @@ struct PlaylistSerializable {
     description: Option<String>,
     created_at_secs: u64,
     updated_at_secs: u64,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct RootAvailabilitySerializable {
+    path: String,
+    last_seen_secs: u64,
+    unavailable_since_secs: Option<u64>,
+    indexed_count: u64,
+    reason: String,
+}
+
+impl From<&RootAvailability> for RootAvailabilitySerializable {
+    fn from(state: &RootAvailability) -> Self {
+        Self {
+            path: state.path.to_string_lossy().into_owned(),
+            last_seen_secs: state.last_seen_secs,
+            unavailable_since_secs: state.unavailable_since_secs,
+            indexed_count: state.indexed_count,
+            reason: state.reason.clone(),
+        }
+    }
+}
+
+impl From<RootAvailabilitySerializable> for RootAvailability {
+    fn from(state: RootAvailabilitySerializable) -> Self {
+        Self {
+            path: PathBuf::from(state.path),
+            last_seen_secs: state.last_seen_secs,
+            unavailable_since_secs: state.unavailable_since_secs,
+            indexed_count: state.indexed_count,
+            reason: state.reason,
+        }
+    }
 }
 
 impl From<&Playlist> for PlaylistSerializable {

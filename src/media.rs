@@ -5,11 +5,173 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
+use crate::config::{AppConfig, MonitoredDirectoryConfig};
 use crate::database::{redb::RedbDatabase, DatabaseManager, FileFingerprint, MediaFile};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Batch size for database operations during parallel scanning
 const BATCH_SIZE: usize = 1000;
+
+/// Immutable rules for one configured media root.  The same value is shared by
+/// startup scans, reconciliation and watcher filtering so those paths cannot
+/// disagree about what belongs in the catalog.
+#[derive(Debug, Clone)]
+pub struct ScanPolicy {
+    pub root: PathBuf,
+    pub recursive: bool,
+    extensions: HashSet<String>,
+    exclude_patterns: Vec<String>,
+    pub scan_playlists: bool,
+}
+
+impl ScanPolicy {
+    pub fn from_config(config: &AppConfig, directory: &MonitoredDirectoryConfig) -> Self {
+        let extensions = directory
+            .extensions
+            .as_ref()
+            .unwrap_or(&config.media.supported_extensions)
+            .iter()
+            .map(|extension| extension.trim_start_matches('.').to_ascii_lowercase())
+            .filter(|extension| !extension.is_empty())
+            .collect();
+        Self {
+            root: PathBuf::from(&directory.path),
+            recursive: directory.recursive,
+            extensions,
+            exclude_patterns: directory.exclude_patterns.clone().unwrap_or_default(),
+            scan_playlists: config.media.scan_playlists,
+        }
+    }
+
+    pub fn platform_default(root: &Path, recursive: bool) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            recursive,
+            extensions: crate::platform::filesystem::get_supported_extensions()
+                .iter()
+                .map(|extension| extension.to_ascii_lowercase())
+                .collect(),
+            exclude_patterns: Vec::new(),
+            scan_playlists: false,
+        }
+    }
+
+    pub fn policies(config: &AppConfig) -> Vec<Self> {
+        config
+            .media
+            .directories
+            .iter()
+            .map(|directory| Self::from_config(config, directory))
+            .collect()
+    }
+
+    pub fn for_subtree(&self, root: &Path) -> Self {
+        let mut policy = self.clone();
+        policy.root = root.to_path_buf();
+        policy
+    }
+
+    pub fn for_path<'a>(policies: &'a [Self], path: &Path) -> Option<&'a Self> {
+        policies
+            .iter()
+            .filter(|policy| path.starts_with(&policy.root))
+            .max_by_key(|policy| policy.root.components().count())
+    }
+
+    pub fn contains(&self, path: &Path) -> bool {
+        if !path.starts_with(&self.root) {
+            return false;
+        }
+        self.recursive || path.parent().is_some_and(|parent| parent == self.root)
+    }
+
+    pub fn allows_media(&self, path: &Path) -> bool {
+        self.contains(path)
+            && !self.is_excluded(path)
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| self.extensions.contains(&extension.to_ascii_lowercase()))
+    }
+
+    pub fn allows_playlist(&self, path: &Path) -> bool {
+        self.scan_playlists
+            && self.contains(path)
+            && !self.is_excluded(path)
+            && path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| {
+                    matches!(
+                        extension.to_ascii_lowercase().as_str(),
+                        "m3u" | "m3u8" | "pls"
+                    )
+                })
+    }
+
+    pub fn allows_watched_path(&self, path: &Path) -> bool {
+        if path.is_dir() {
+            return path == self.root || (self.recursive && path.starts_with(&self.root));
+        }
+        self.allows_media(path)
+            || self.allows_playlist(path)
+            || (self.contains(path)
+                && !self.is_excluded(path)
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("srt")))
+    }
+
+    fn is_excluded(&self, path: &Path) -> bool {
+        let relative = path.strip_prefix(&self.root).unwrap_or(path);
+        relative.components().any(|component| {
+            let value = component.as_os_str().to_string_lossy();
+            self.exclude_patterns
+                .iter()
+                .any(|pattern| wildcard_match(pattern, &value))
+        })
+    }
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    let (pattern, value) = if cfg!(windows) {
+        (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
+    } else {
+        (pattern.to_owned(), value.to_owned())
+    };
+    let pattern = pattern.as_bytes();
+    let value = value.as_bytes();
+    let (mut p, mut v, mut star, mut checkpoint) = (0, 0, None, 0);
+    while v < value.len() {
+        if p < pattern.len() && (pattern[p] == b'?' || pattern[p] == value[v]) {
+            p += 1;
+            v += 1;
+        } else if p < pattern.len() && pattern[p] == b'*' {
+            star = Some(p);
+            p += 1;
+            checkpoint = v;
+        } else if let Some(star_position) = star {
+            p = star_position + 1;
+            checkpoint += 1;
+            v = checkpoint;
+        } else {
+            return false;
+        }
+    }
+    while p < pattern.len() && pattern[p] == b'*' {
+        p += 1;
+    }
+    p == pattern.len()
+}
+
+#[derive(Debug)]
+struct TraversalReport {
+    file_paths: Vec<PathBuf>,
+    uncertain_prefixes: Vec<PathBuf>,
+    errors: Vec<ScanError>,
+    root_complete: bool,
+}
 
 /// Media scanner that uses the file system manager and database for efficient scanning
 pub struct MediaScanner<D: DatabaseManager = RedbDatabase> {
@@ -84,67 +246,48 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
     /// Perform a full scan of a directory, updating the database with new/changed files
     pub async fn scan_directory(&self, directory: &Path) -> Result<ScanResult> {
-        self.scan_directory_with_existing_files(directory, None)
-            .await
+        let policy = ScanPolicy::platform_default(directory, false);
+        self.scan_directory_with_policy(&policy).await
     }
 
-    /// Internal method that allows passing existing files to avoid repeated database queries during recursive scans
-    async fn scan_directory_with_existing_files(
-        &self,
-        directory: &Path,
-        all_existing_files: Option<&[MediaFile]>,
-    ) -> Result<ScanResult> {
-        // Use canonical path normalization for consistency
+    pub async fn scan_directory_with_policy(&self, policy: &ScanPolicy) -> Result<ScanResult> {
+        let directory = &policy.root;
         let canonical_dir = match self.filesystem_manager.get_canonical_path(directory) {
             Ok(canonical) => PathBuf::from(canonical),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to get canonical path for {}: {}, using basic normalization",
-                    directory.display(),
-                    e
-                );
+            Err(error) => {
+                warn!("Failed to canonicalize {}: {error}", directory.display());
                 self.filesystem_manager.normalize_path(directory)
             }
         };
-
-        // Validate the directory path
         self.filesystem_manager.validate_path(&canonical_dir)?;
-
-        if !self.filesystem_manager.is_accessible(&canonical_dir).await {
-            return Err(anyhow::anyhow!(
-                "Directory is not accessible: {}",
-                canonical_dir.display()
-            ));
+        let mut effective_policy = policy.clone();
+        effective_policy.root = canonical_dir.clone();
+        let mut entries = tokio::fs::read_dir(&canonical_dir).await?;
+        let existing_files = self
+            .database_manager
+            .get_files_in_directory(&canonical_dir)
+            .await?;
+        let mut current_files = Vec::new();
+        while let Some(entry) = entries.next_entry().await? {
+            let path = entry.path();
+            if effective_policy.allows_media(&path) && tokio::fs::metadata(&path).await?.is_file() {
+                current_files.push(self.create_media_file_from_path(&path).await?);
+            }
         }
-
-        // Get existing files from database for this directory
-        let existing_files = if let Some(all_files) = all_existing_files {
-            // Filter existing files to only those in this directory
-            all_files
-                .iter()
-                .filter(|file| {
-                    let file_parent = file
-                        .path
-                        .parent()
-                        .unwrap_or_else(|| std::path::Path::new(""));
-                    file_parent == canonical_dir
-                })
-                .cloned()
-                .collect()
-        } else {
-            self.database_manager
-                .get_files_in_directory(&canonical_dir)
-                .await?
-        };
-
-        // Scan the file system for current files
-        let current_files = self
-            .filesystem_manager
-            .scan_media_directory(&canonical_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("File system scan failed: {}", e))?;
-
-        // Perform incremental update
+        if current_files.is_empty() && !existing_files.is_empty() {
+            let mut result = ScanResult::new();
+            result.complete = false;
+            result.total_scanned = 0;
+            result.errors.push(ScanError {
+                path: canonical_dir,
+                error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
+                    .to_owned(),
+            });
+            result
+                .unchanged_files
+                .extend(existing_files.iter().map(Self::fingerprint));
+            return Ok(result);
+        }
         self.perform_incremental_update(&canonical_dir, existing_files, current_files)
             .await
     }
@@ -361,7 +504,17 @@ impl<D: DatabaseManager> MediaScanner<D> {
     /// This method uses jwalk for fast parallel directory traversal, collecting all media files
     /// in a single pass. Files are then batched for efficient database operations.
     pub async fn scan_directory_recursive(&self, directory: &Path) -> Result<ScanResult> {
+        let policy = ScanPolicy::platform_default(directory, true);
+        self.scan_directory_recursive_with_policy(&policy).await
+    }
+
+    pub async fn scan_directory_recursive_with_policy(
+        &self,
+        policy: &ScanPolicy,
+    ) -> Result<ScanResult> {
         use jwalk::WalkDir;
+
+        let directory = &policy.root;
 
         // Use canonical path normalization for consistent database storage
         let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
@@ -397,29 +550,53 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         // Use jwalk for parallel directory traversal - runs in a blocking thread pool
         let root_clone = canonical_root.clone();
+        let mut traversal_policy = policy.clone();
+        traversal_policy.root = canonical_root.clone();
 
-        let file_paths: Vec<PathBuf> = tokio::task::spawn_blocking(move || {
-            WalkDir::new(&root_clone)
-                .skip_hidden(true)
-                .into_iter()
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().is_file())
-                .filter(|entry| {
-                    if let Some(ext) = entry.path().extension() {
-                        if let Some(ext_str) = ext.to_str() {
-                            return crate::platform::filesystem::is_supported_media_extension(
-                                ext_str,
-                            );
+        let traversal = tokio::task::spawn_blocking(move || {
+            let mut report = TraversalReport {
+                file_paths: Vec::new(),
+                uncertain_prefixes: Vec::new(),
+                errors: Vec::new(),
+                root_complete: true,
+            };
+            for entry in WalkDir::new(&root_clone).skip_hidden(false) {
+                match entry {
+                    Ok(entry) if entry.file_type().is_file() => {
+                        let path = entry.path();
+                        if traversal_policy.allows_media(&path) {
+                            report.file_paths.push(path);
                         }
                     }
-                    false
-                })
-                .map(|entry| entry.path())
-                .collect()
+                    Ok(_) => {}
+                    Err(error) => {
+                        let failed_path = error
+                            .path()
+                            .map(Path::to_path_buf)
+                            .unwrap_or_else(|| root_clone.clone());
+                        if failed_path == root_clone {
+                            report.root_complete = false;
+                        }
+                        report.uncertain_prefixes.push(failed_path.clone());
+                        report.errors.push(ScanError {
+                            path: failed_path,
+                            error: error.to_string(),
+                        });
+                    }
+                }
+            }
+            report
         })
         .await?;
 
+        let file_paths = traversal.file_paths;
+
         let total_files = file_paths.len();
+        let existing_in_root = existing_files_map
+            .keys()
+            .filter(|path| path.starts_with(&canonical_root))
+            .count();
+        let suspect_empty_root = total_files == 0 && existing_in_root > 0;
         info!(
             "Found {} media files, processing in batches of {}",
             total_files, BATCH_SIZE
@@ -427,6 +604,17 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         // Process files in batches
         let mut result = ScanResult::new();
+        result.errors.extend(traversal.errors);
+        result.complete = traversal.root_complete
+            && traversal.uncertain_prefixes.is_empty()
+            && !suspect_empty_root;
+        if suspect_empty_root {
+            result.errors.push(ScanError {
+                path: canonical_root.clone(),
+                error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
+                    .to_owned(),
+            });
+        }
         let mut files_to_insert: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
         let mut files_to_update: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
         let mut current_paths: HashSet<PathBuf> = HashSet::with_capacity(total_files);
@@ -534,6 +722,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
             .iter()
             .filter(|(path, _)| !current_paths.contains(*path))
             .filter(|(path, _)| path.starts_with(&canonical_root)) // Only remove files under scanned directory
+            .filter(|(path, _)| {
+                traversal.root_complete
+                    && !suspect_empty_root
+                    && !traversal
+                        .uncertain_prefixes
+                        .iter()
+                        .any(|prefix| path.starts_with(prefix))
+            })
             .map(|(_, file)| file.path.clone())
             .collect();
 
@@ -545,8 +741,9 @@ impl<D: DatabaseManager> MediaScanner<D> {
             self.database_manager
                 .bulk_remove_media_files(&files_to_remove)
                 .await?;
+            let removed_paths = files_to_remove.iter().collect::<HashSet<_>>();
             for (path, file) in existing_files_map.iter() {
-                if !current_paths.contains(path) && path.starts_with(&canonical_root) {
+                if removed_paths.contains(path) {
                     result.removed_files.push(file.clone());
                 }
             }
@@ -577,10 +774,15 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
         let size = metadata.len();
         let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+        let storage_path = self
+            .filesystem_manager
+            .get_canonical_path(path)
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| path.to_path_buf());
 
         let mut media_file = MediaFile {
             id: None,
-            path: path.to_path_buf(),
+            path: storage_path,
             filename,
             size,
             modified,
@@ -633,6 +835,9 @@ pub struct ScanResult {
 
     /// Errors encountered during scanning
     pub errors: Vec<ScanError>,
+
+    /// True only when the whole requested root was enumerated without uncertainty.
+    pub complete: bool,
 }
 
 impl ScanResult {
@@ -645,6 +850,7 @@ impl ScanResult {
             unchanged_files: Vec::with_capacity(1000),
             total_scanned: 0,
             errors: Vec::with_capacity(10),
+            complete: true,
         }
     }
 
@@ -656,6 +862,7 @@ impl ScanResult {
         self.unchanged_files.extend(other.unchanged_files);
         self.total_scanned += other.total_scanned;
         self.errors.extend(other.errors);
+        self.complete &= other.complete;
     }
 
     /// Get the total number of changes (new + updated + removed)

@@ -105,6 +105,7 @@ impl RedbDatabase {
         copy_table!(PLAYLIST_SOURCES);
         copy_multimap!(SOURCE_PLAYLISTS);
         copy_table!(METADATA_TABLE);
+        copy_table!(ROOT_AVAILABILITY);
         copy_multimap!(ARTIST_INDEX);
         copy_multimap!(ALBUM_INDEX);
         copy_multimap!(GENRE_INDEX);
@@ -201,8 +202,8 @@ impl RedbDatabase {
                         let mut table = txn.open_table($def)?;
                         let keys = table
                             .iter()?
-                            .filter_map(|e| e.ok().map(|(k, _)| k.value().to_string()))
-                            .collect::<Vec<_>>();
+                            .map(|entry| entry.map(|(key, _)| key.value().to_string()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             table.remove(key.as_str())?;
                         }
@@ -215,8 +216,8 @@ impl RedbDatabase {
                     let mut table = txn.open_table(DIRECTORY_RECORDS)?;
                     let keys = table
                         .iter()?
-                        .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
-                        .collect::<Vec<_>>();
+                        .map(|entry| entry.map(|(key, _)| key.value()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     for key in keys {
                         table.remove(key)?;
                     }
@@ -226,8 +227,8 @@ impl RedbDatabase {
                         let mut table = txn.open_multimap_table($def)?;
                         let keys = table
                             .iter()?
-                            .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_string()))
-                            .collect::<Vec<_>>();
+                            .map(|entry| entry.map(|(key, _)| key.value().to_string()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             let _ = table.remove_all(key.as_str())?;
                         }
@@ -242,8 +243,8 @@ impl RedbDatabase {
                         let mut table = txn.open_multimap_table($definition)?;
                         let keys = table
                             .iter()?
-                            .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
-                            .collect::<Vec<_>>();
+                            .map(|entry| entry.map(|(key, _)| key.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             let _ = table.remove_all(key)?;
                         }
@@ -256,8 +257,8 @@ impl RedbDatabase {
                     let mut table = txn.open_multimap_table(YEAR_INDEX)?;
                     let keys = table
                         .iter()?
-                        .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                        .collect::<Vec<_>>();
+                        .map(|entry| entry.map(|(key, _)| key.value()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     for key in keys {
                         let _ = table.remove_all(key)?;
                     }
@@ -316,8 +317,8 @@ impl RedbDatabase {
                         let mut table = txn.open_table(PLAYLISTS_TABLE)?;
                         let keys = table
                             .iter()?
-                            .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                            .collect::<Vec<_>>();
+                            .map(|entry| entry.map(|(key, _)| key.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             table.remove(key)?;
                         }
@@ -326,8 +327,8 @@ impl RedbDatabase {
                         let mut table = txn.open_table(PLAYLIST_ENTRIES)?;
                         let keys = table
                             .iter()?
-                            .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
-                            .collect::<Vec<_>>();
+                            .map(|entry| entry.map(|(key, _)| key.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             table.remove(key)?;
                         }
@@ -336,8 +337,8 @@ impl RedbDatabase {
                         let mut table = txn.open_table(PLAYLIST_SOURCES)?;
                         let keys = table
                             .iter()?
-                            .filter_map(|e| e.ok().map(|(k, _)| k.value()))
-                            .collect::<Vec<_>>();
+                            .map(|entry| entry.map(|(key, _)| key.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             table.remove(key)?;
                         }
@@ -349,23 +350,36 @@ impl RedbDatabase {
                     metadata.insert("codec_version", CODEC_VERSION)?;
                 }
                 {
+                    let playlists = txn.open_table(PLAYLISTS_TABLE)?;
+                    let mut live_playlists = HashSet::new();
+                    for entry in playlists.iter()? {
+                        let (playlist_id, bytes) = entry?;
+                        rkyv::access::<ArchivedPlaylistSerializable, rkyv::rancor::Error>(
+                            bytes.value(),
+                        )
+                        .with_context(|| {
+                            format!("corrupt playlist record {}", playlist_id.value())
+                        })?;
+                        live_playlists.insert(playlist_id.value());
+                    }
                     let live = winners.values().map(|(id, _)| *id).collect::<HashSet<_>>();
                     let mut entries = txn.open_table(PLAYLIST_ENTRIES)?;
                     let mut reverse = txn.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
                     let reverse_keys = reverse
                         .iter()?
-                        .filter_map(|entry| entry.ok().map(|(key, _)| key.value()))
-                        .collect::<Vec<_>>();
+                        .map(|entry| entry.map(|(key, _)| key.value()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     for key in reverse_keys {
                         reverse.remove_all(key)?;
                     }
                     let snapshot = entries
                         .iter()?
-                        .filter_map(|e| e.ok().map(|(k, v)| (k.value(), v.value())))
-                        .collect::<Vec<_>>();
+                        .map(|entry| entry.map(|(key, value)| (key.value(), value.value())))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     for (key, old) in snapshot {
+                        let playlist_id = ((key >> 32) as u64) as i64;
                         let id = remap.get(&old).copied().unwrap_or(old);
-                        if !live.contains(&id) {
+                        if !live.contains(&id) || !live_playlists.contains(&playlist_id) {
                             entries.remove(key)?;
                         } else if id != old {
                             entries.insert(key, id)?;
@@ -376,12 +390,27 @@ impl RedbDatabase {
                     }
                 }
                 {
-                    let sources = txn.open_table(PLAYLIST_SOURCES)?;
+                    let playlists = txn.open_table(PLAYLISTS_TABLE)?;
+                    let live_playlists = playlists
+                        .iter()?
+                        .map(|entry| entry.map(|(key, _)| key.value()))
+                        .collect::<std::result::Result<HashSet<_>, _>>()?;
+                    let mut sources = txn.open_table(PLAYLIST_SOURCES)?;
+                    let stale_sources = sources
+                        .iter()?
+                        .map(|entry| entry.map(|(key, _)| key.value()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?
+                        .into_iter()
+                        .filter(|id| !live_playlists.contains(id))
+                        .collect::<Vec<_>>();
+                    for playlist_id in stale_sources {
+                        sources.remove(playlist_id)?;
+                    }
                     let mut reverse = txn.open_multimap_table(SOURCE_PLAYLISTS)?;
                     let keys = reverse
                         .iter()?
-                        .filter_map(|entry| entry.ok().map(|(key, _)| key.value().to_owned()))
-                        .collect::<Vec<_>>();
+                        .map(|entry| entry.map(|(key, _)| key.value().to_owned()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
                     for key in keys {
                         reverse.remove_all(key.as_str())?;
                     }

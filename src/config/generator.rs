@@ -35,6 +35,8 @@ impl ConfigGenerator {
         // Update database section
         self.update_database_config(config)?;
 
+        self.update_management_config(config)?;
+
         // Replace platform-specific placeholders
         let mut content = self.template_doc.to_string();
         content = self.replace_platform_placeholders(content, &platform_config)?;
@@ -99,6 +101,9 @@ impl ConfigGenerator {
         media_table["watch_for_changes"] = value(config.media.watch_for_changes);
         media_table["cleanup_deleted_files"] = value(config.media.cleanup_deleted_files);
         media_table["autoplay_enabled"] = value(config.media.autoplay_enabled);
+        media_table["scan_playlists"] = value(config.media.scan_playlists);
+        media_table["unavailable_root_grace_hours"] =
+            value(config.media.unavailable_root_grace_hours as i64);
 
         // Update supported extensions array
         let mut extensions_array = Array::new();
@@ -138,16 +143,11 @@ impl ConfigGenerator {
 
         // Handle optional extensions - only set if there are actual extensions
         if let Some(extensions) = &dir_config.extensions {
-            if !extensions.is_empty() {
-                let mut ext_array = Array::new();
-                for ext in extensions {
-                    ext_array.push(ext);
-                }
-                dir_table["extensions"] = value(ext_array);
-            } else {
-                // Don't set extensions field if empty - let it use global defaults
-                dir_table.remove("extensions");
+            let mut ext_array = Array::new();
+            for ext in extensions {
+                ext_array.push(ext);
             }
+            dir_table["extensions"] = value(ext_array);
         } else {
             // Don't set extensions field if None - let it use global defaults
             dir_table.remove("extensions");
@@ -155,16 +155,11 @@ impl ConfigGenerator {
 
         // Handle optional exclude patterns - only set if there are actual patterns
         if let Some(patterns) = &dir_config.exclude_patterns {
-            if !patterns.is_empty() {
-                let mut patterns_array = Array::new();
-                for pattern in patterns {
-                    patterns_array.push(pattern);
-                }
-                dir_table["exclude_patterns"] = value(patterns_array);
-            } else {
-                // Don't set exclude_patterns field if empty
-                dir_table.remove("exclude_patterns");
+            let mut patterns_array = Array::new();
+            for pattern in patterns {
+                patterns_array.push(pattern);
             }
+            dir_table["exclude_patterns"] = value(patterns_array);
         } else {
             // Don't set exclude_patterns field if None
             dir_table.remove("exclude_patterns");
@@ -217,6 +212,21 @@ impl ConfigGenerator {
         database_table["vacuum_on_startup"] = value(config.database.vacuum_on_startup);
         database_table["backup_enabled"] = value(config.database.backup_enabled);
 
+        Ok(())
+    }
+
+    fn update_management_config(&mut self, config: &AppConfig) -> Result<()> {
+        let table = self.template_doc["management"]
+            .as_table_mut()
+            .context("Management section not found in template")?;
+        table["enabled"] = value(config.management.enabled);
+        table["token_file"] = value(config.management.token_file.as_deref().unwrap_or(""));
+        table["session_ttl_hours"] = value(config.management.session_ttl_hours as i64);
+        let mut networks = Array::new();
+        for network in &config.management.allowed_networks {
+            networks.push(network);
+        }
+        table["allowed_networks"] = value(networks);
         Ok(())
     }
 
@@ -395,8 +405,8 @@ impl ConfigGenerator {
 mod tests {
     use super::*;
     use crate::config::{
-        AppConfig, DatabaseConfig, MediaConfig, MonitoredDirectoryConfig, NetworkConfig,
-        NetworkInterfaceConfig, ServerConfig, ValidationMode,
+        AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
+        NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
     };
     use uuid::Uuid;
 
@@ -432,6 +442,7 @@ mod tests {
                 cleanup_deleted_files: false,
                 autoplay_enabled: false,
                 scan_playlists: false,
+                unavailable_root_grace_hours: 168,
                 supported_extensions: vec!["mp4".to_string(), "avi".to_string()],
             },
             database: DatabaseConfig {
@@ -440,6 +451,7 @@ mod tests {
                 backup_enabled: false,
                 redb_cache_mb: 128,
             },
+            management: ManagementConfig::default(),
         };
 
         // Generate TOML
@@ -537,6 +549,7 @@ mod tests {
                 cleanup_deleted_files: true,
                 autoplay_enabled: true,
                 scan_playlists: true,
+                unavailable_root_grace_hours: 168,
                 supported_extensions: vec!["mp4".to_string()],
             },
             database: DatabaseConfig {
@@ -545,6 +558,7 @@ mod tests {
                 backup_enabled: true,
                 redb_cache_mb: 128,
             },
+            management: ManagementConfig::default(),
         };
 
         // Generate TOML

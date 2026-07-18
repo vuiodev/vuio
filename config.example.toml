@@ -44,7 +44,15 @@ recursive = true
 [database]
 path = "./config/media.db"  # Will use platform-appropriate default if not specified
 vacuum_on_startup = false
-backup_enabled = true
+backup_enabled = false
+
+[management]
+enabled = true
+# Empty creates/uses admin.token beside the config file.
+token_file = ""
+session_ttl_hours = 12
+# Management is loopback-only unless CIDRs are explicitly listed.
+allowed_networks = []
 
 # ReDB Database Configuration (optional - uses minimal defaults if not set)
 # All values are optional and will use minimal defaults if not specified

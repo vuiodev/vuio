@@ -85,7 +85,6 @@ impl PlaylistFileManager {
                 .await
             }
         }?;
-        database.set_playlist_source(playlist_id, file_path).await?;
         Ok(playlist_id)
     }
 
@@ -118,9 +117,6 @@ impl PlaylistFileManager {
         source_path: &str,
     ) -> Result<i64> {
         debug!("Importing M3U playlist: {}", playlist_name);
-
-        // Create the playlist
-        let playlist_id = database.create_playlist(playlist_name, None).await?;
 
         // Collect all track paths first
         let mut track_paths = Vec::new();
@@ -160,17 +156,17 @@ impl PlaylistFileManager {
             .collect();
 
         // Add all tracks to playlist in batch operation
-        let added_count = Self::batch_add_tracks_to_playlist(
-            database,
-            playlist_id,
-            &file_paths_with_positions,
-            Some(source_path),
-        )
-        .await?;
+        let media_entries =
+            Self::resolve_playlist_tracks(database, &file_paths_with_positions, Some(source_path))
+                .await?;
+        let playlist_id = database
+            .replace_playlist_from_source(Path::new(source_path), playlist_name, &media_entries)
+            .await?;
 
         debug!(
             "Imported {} tracks to playlist '{}'",
-            added_count, playlist_name
+            media_entries.len(),
+            playlist_name
         );
         Ok(playlist_id)
     }
@@ -184,9 +180,6 @@ impl PlaylistFileManager {
         source_path: &str,
     ) -> Result<i64> {
         debug!("Importing PLS playlist: {}", playlist_name);
-
-        // Create the playlist
-        let playlist_id = database.create_playlist(playlist_name, None).await?;
 
         let mut tracks: Vec<(u32, String)> = Vec::new();
 
@@ -216,17 +209,17 @@ impl PlaylistFileManager {
             .collect();
 
         // Add all tracks to playlist in batch operation
-        let added_count = Self::batch_add_tracks_to_playlist(
-            database,
-            playlist_id,
-            &file_paths_with_positions,
-            Some(source_path),
-        )
-        .await?;
+        let media_entries =
+            Self::resolve_playlist_tracks(database, &file_paths_with_positions, Some(source_path))
+                .await?;
+        let playlist_id = database
+            .replace_playlist_from_source(Path::new(source_path), playlist_name, &media_entries)
+            .await?;
 
         debug!(
             "Imported {} tracks to playlist '{}'",
-            added_count, playlist_name
+            media_entries.len(),
+            playlist_name
         );
         Ok(playlist_id)
     }
@@ -322,14 +315,13 @@ impl PlaylistFileManager {
     }
 
     /// Add tracks to playlist by file paths using batch operations
-    async fn batch_add_tracks_to_playlist<D: DatabaseManager + ?Sized>(
+    async fn resolve_playlist_tracks<D: DatabaseManager + ?Sized>(
         database: &D,
-        playlist_id: i64,
         file_paths_with_positions: &[(String, u32)],
         source_path: Option<&str>,
-    ) -> Result<usize> {
+    ) -> Result<Vec<(i64, u32)>> {
         if file_paths_with_positions.is_empty() {
-            return Ok(0);
+            return Ok(Vec::new());
         }
 
         // Extract paths for batch query
@@ -370,31 +362,18 @@ impl PlaylistFileManager {
 
         // Build list of (media_file_id, position) pairs for files that exist in database
         let mut media_file_entries = Vec::new();
-        let mut added_count = 0;
 
         for (file_path_str, position) in file_paths_with_positions {
             let file_path = PathBuf::from(file_path_str);
 
             if let Some(&file_id) = path_to_file.get(&file_path) {
                 media_file_entries.push((file_id, *position));
-                added_count += 1;
             } else {
                 warn!("File not found in media database: {}", file_path.display());
             }
         }
 
-        // Add all found tracks to playlist in a single transaction
-        if !media_file_entries.is_empty() {
-            database
-                .batch_add_to_playlist(playlist_id, &media_file_entries)
-                .await?;
-            debug!(
-                "Added {} tracks to playlist in batch operation",
-                media_file_entries.len()
-            );
-        }
-
-        Ok(added_count)
+        Ok(media_file_entries)
     }
 
     /// Scan a directory for playlist files and import them
@@ -591,46 +570,47 @@ impl PlaylistFileManager {
             }
         }
 
-        // Clean up old radio files from this playlist first
+        // Discover old derived records, propagating storage corruption rather
+        // than silently committing a partial replacement.
         let mut old_paths = Vec::new();
         let mut stream = database.stream_all_media_files();
         while let Some(res) = stream.next().await {
-            if let Ok(file) = res {
-                if file.mime_type == "audio/radio"
-                    && file.album.as_deref() == Some(&playlist_path_str)
-                {
-                    old_paths.push(file.path.clone());
-                }
+            let file = res?;
+            if file.mime_type == "audio/radio" && file.album.as_deref() == Some(&playlist_path_str)
+            {
+                old_paths.push(file.path.clone());
             }
         }
+        drop(stream);
 
-        if !old_paths.is_empty() {
-            debug!(
-                "Removing {} old radio streams for playlist {}",
-                old_paths.len(),
-                file_path.display()
-            );
-            let _ = database.bulk_remove_media_files(&old_paths).await;
-        }
-
-        // Save new radio stations in the database
+        // Materialize the complete new set first and commit it in one database
+        // transaction. Stale records are removed only after that succeeds.
+        let mut new_files = Vec::with_capacity(stations.len());
+        let mut new_paths = std::collections::HashSet::with_capacity(stations.len());
         for (name, url) in stations {
             let path = PathBuf::from(&url);
-
-            // Check if this radio URL is already in the database
-            if let Ok(Some(existing_file)) = database.get_file_by_path(&path).await {
+            new_paths.insert(path.clone());
+            if let Some(existing_file) = database.get_file_by_path(&path).await? {
                 let mut file = existing_file;
                 file.filename = name.clone();
                 file.title = Some(name);
                 file.album = Some(playlist_path_str.clone());
-                database.store_media_file(&file).await?;
+                new_files.push(file);
             } else {
                 let mut file = MediaFile::new(path, 0, "audio/radio".to_string());
                 file.filename = name.clone();
                 file.title = Some(name);
                 file.album = Some(playlist_path_str.clone());
-                database.store_media_file(&file).await?;
+                new_files.push(file);
             }
+        }
+        database.bulk_store_media_files(&new_files).await?;
+        let stale_paths = old_paths
+            .into_iter()
+            .filter(|path| !new_paths.contains(path))
+            .collect::<Vec<_>>();
+        if !stale_paths.is_empty() {
+            database.bulk_remove_media_files(&stale_paths).await?;
         }
 
         Ok(())

@@ -142,8 +142,9 @@ pub async fn get_web_metrics<D: DatabaseManager>(
 ) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
 
-    let (database_result, runtime) = tokio::join!(
+    let (database_result, root_availability, runtime) = tokio::join!(
         state.database.get_stats(),
+        state.database.list_root_availability(),
         collect_runtime_diagnostics(&state)
     );
     let db_stats = match database_result {
@@ -164,6 +165,11 @@ pub async fn get_web_metrics<D: DatabaseManager>(
         casts.snapshot()
     };
     let (runtime_diagnostics, monitored_directory_count, accessible_directory_count) = runtime;
+    let unavailable_roots = root_availability
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|root| root.unavailable_since_secs.is_some())
+        .collect::<Vec<_>>();
 
     let metrics_json = serde_json::json!({
         "web_handler_metrics": {
@@ -191,10 +197,11 @@ pub async fn get_web_metrics<D: DatabaseManager>(
             "snapshot": runtime_diagnostics,
             "monitored_directory_count": monitored_directory_count,
             "accessible_directory_count": accessible_directory_count,
-            "watch_for_changes": state.config.media.watch_for_changes,
-            "scan_on_startup": state.config.media.scan_on_startup,
+            "watch_for_changes": state.current_config().media.watch_for_changes,
+            "scan_on_startup": state.current_config().media.scan_on_startup,
             "platform": state.platform_info.os_type.display_name(),
             "architecture": std::env::consts::ARCH,
+            "unavailable_or_incomplete_roots": unavailable_roots,
         },
         "active_casts": active_casts
     });
@@ -212,23 +219,19 @@ async fn read_last_log_lines(
     limit: usize,
 ) -> Result<String, std::io::Error> {
     use tokio::fs::File;
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    let file = File::open(path).await?;
-    let reader = BufReader::new(file);
-    let mut queue = std::collections::VecDeque::with_capacity(limit + 1);
-    let mut lines_stream = reader.lines();
-
-    while let Some(line) = lines_stream.next_line().await? {
-        queue.push_back(line);
-        if queue.len() > limit {
-            queue.pop_front();
-        }
-    }
-
-    let mut result = String::new();
-    for line in queue {
-        result.push_str(&line);
+    const MAX_TAIL_BYTES: u64 = 1024 * 1024;
+    let mut file = File::open(path).await?;
+    let length = file.metadata().await?.len();
+    let start = length.saturating_sub(MAX_TAIL_BYTES);
+    file.seek(std::io::SeekFrom::Start(start)).await?;
+    let mut bytes = Vec::with_capacity((length - start) as usize);
+    file.read_to_end(&mut bytes).await?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines = text.lines().rev().take(limit).collect::<Vec<_>>();
+    let mut result = lines.into_iter().rev().collect::<Vec<_>>().join("\n");
+    if !result.is_empty() {
         result.push('\n');
     }
     Ok(result)

@@ -22,6 +22,25 @@ pub mod state {
     };
     use std::sync::Arc;
 
+    pub struct LiveConfig(std::sync::RwLock<Arc<AppConfig>>);
+
+    impl LiveConfig {
+        pub fn new(config: Arc<AppConfig>) -> Self {
+            Self(std::sync::RwLock::new(config))
+        }
+
+        pub fn load(&self) -> Arc<AppConfig> {
+            self.0
+                .read()
+                .unwrap_or_else(|error| error.into_inner())
+                .clone()
+        }
+
+        pub fn store(&self, config: Arc<AppConfig>) {
+            *self.0.write().unwrap_or_else(|error| error.into_inner()) = config;
+        }
+    }
+
     #[derive(Hash, PartialEq, Eq, Clone, Debug)]
     pub struct SoapCacheKey {
         pub object_id: String,
@@ -35,16 +54,30 @@ pub mod state {
     #[derive(Clone)]
     pub struct UpnpSubscription {
         pub callback_url: String,
+        pub peer: std::net::IpAddr,
+        pub generation: uuid::Uuid,
         pub expires_at: std::time::Instant,
         pub next_sequence: u32,
         pub consecutive_failures: u8,
+        pub last_notification_at: std::time::Instant,
+    }
+
+    #[derive(Clone)]
+    pub struct McpClient {
+        pub sender: tokio::sync::mpsc::Sender<String>,
+        pub peer: std::net::IpAddr,
+        pub expires_at: std::time::Instant,
     }
 
     pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
         pub config: Arc<AppConfig>,
+        pub live_config: Arc<LiveConfig>,
         pub media_directories:
             Arc<tokio::sync::RwLock<Vec<crate::config::MonitoredDirectoryConfig>>>,
+        pub unavailable_roots:
+            Arc<tokio::sync::RwLock<std::collections::HashSet<std::path::PathBuf>>>,
         pub database: Arc<D>,
+        pub auth: Arc<crate::web::auth::AuthState>,
         pub platform_info: Arc<PlatformInfo>,
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
@@ -54,11 +87,7 @@ pub mod state {
         pub bookmarks: Arc<tokio::sync::Mutex<crate::runtime_state::BookmarkRegistry>>,
         pub log_file_path: std::path::PathBuf,
         pub browse_cache: Arc<tokio::sync::Mutex<crate::runtime_state::BrowseResponseCache>>,
-        pub mcp_clients: Arc<
-            tokio::sync::Mutex<
-                std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>,
-            >,
-        >,
+        pub mcp_clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, McpClient>>>,
         pub active_monitors: Arc<
             tokio::sync::Mutex<
                 std::collections::HashMap<
@@ -79,8 +108,11 @@ pub mod state {
         fn clone(&self) -> Self {
             Self {
                 config: self.config.clone(),
+                live_config: self.live_config.clone(),
                 media_directories: self.media_directories.clone(),
+                unavailable_roots: self.unavailable_roots.clone(),
                 database: self.database.clone(),
+                auth: self.auth.clone(),
                 platform_info: self.platform_info.clone(),
                 filesystem_manager: self.filesystem_manager.clone(),
                 content_update_id: self.content_update_id.clone(),
@@ -102,6 +134,9 @@ pub mod state {
     }
 
     impl<D: DatabaseManager> AppState<D> {
+        pub fn current_config(&self) -> Arc<AppConfig> {
+            self.live_config.load()
+        }
         /// Get the server's IP address using unified logic from platform_info
         pub fn get_server_ip(&self) -> String {
             // Check if server IP is explicitly configured (important for Docker)

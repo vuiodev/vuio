@@ -27,6 +27,15 @@ pub struct RemovalSummary {
     pub mime_families: HashSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RootAvailability {
+    pub path: PathBuf,
+    pub last_seen_secs: u64,
+    pub unavailable_since_secs: Option<u64>,
+    pub indexed_count: u64,
+    pub reason: String,
+}
+
 /// Represents a playlist
 #[derive(Clone, Debug)]
 pub struct Playlist {
@@ -558,6 +567,14 @@ pub trait MediaRepository: Send + Sync {
     /// Load compact scanner comparison records instead of complete media metadata.
     async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>>;
 
+    async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>>;
+
+    async fn list_root_availability(&self) -> Result<Vec<RootAvailability>>;
+
+    async fn set_root_availability(&self, state: &RootAvailability) -> Result<()>;
+
+    async fn remove_root_availability(&self, path: &Path) -> Result<()>;
+
     // Music categorization methods
     /// Get all unique artists
     async fn get_artists(&self) -> Result<Vec<MusicCategory>>;
@@ -668,6 +685,14 @@ pub trait PlaylistRepository: Send + Sync {
 
     /// Mark a playlist as derived from an on-disk source file.
     async fn set_playlist_source(&self, playlist_id: i64, source_path: &Path) -> Result<()>;
+
+    /// Atomically create or replace the playlist derived from one source.
+    async fn replace_playlist_from_source(
+        &self,
+        source_path: &Path,
+        name: &str,
+        media_file_ids: &[(i64, u32)],
+    ) -> Result<i64>;
 
     /// Delete playlists/radio records derived from an on-disk source file.
     async fn remove_derived_content_by_source(&self, source_path: &Path) -> Result<usize>;

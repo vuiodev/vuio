@@ -1,7 +1,8 @@
-use anyhow::Result;
-use quick_xml::events::Event;
-use quick_xml::Reader;
-use std::net::SocketAddr;
+use anyhow::{Context, Result};
+use futures_util::StreamExt;
+use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
+use quick_xml::{Reader, Writer};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
@@ -31,7 +32,7 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
     let target: SocketAddr = "239.255.255.250:1900".parse()?;
     socket.send_to(search_request.as_bytes(), target).await?;
 
-    let mut locations: Vec<(String, String)> = Vec::new();
+    let mut locations: Vec<(String, String, IpAddr)> = Vec::new();
     let mut buf = vec![0u8; 2048];
 
     let deadline = tokio::time::Instant::now() + Duration::from_secs(3);
@@ -39,7 +40,7 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
     loop {
         let recv_future = socket.recv_from(&mut buf);
         match tokio::time::timeout_at(deadline, recv_future).await {
-            Ok(Ok((len, _addr))) => {
+            Ok(Ok((len, addr))) => {
                 let response = String::from_utf8_lossy(&buf[..len]);
                 let mut location = None;
                 let mut usn = None;
@@ -52,8 +53,12 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
                     }
                 }
                 if let Some(location) = location {
-                    if !locations.iter().any(|(existing, _)| existing == &location) {
-                        locations.push((location, usn.unwrap_or_default()));
+                    if locations.len() < 32
+                        && !locations
+                            .iter()
+                            .any(|(existing, _, _)| existing == &location)
+                    {
+                        locations.push((location, usn.unwrap_or_default(), addr.ip()));
                     }
                 }
             }
@@ -73,10 +78,11 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
     let mut tvs = Vec::new();
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
-    for (location, usn) in locations {
-        match fetch_tv_info(&client, &location, &usn).await {
+    for (location, usn, responder) in locations {
+        match fetch_tv_info(&client, &location, &usn, responder).await {
             Ok(Some(tv)) => {
                 debug!("Discovered TV: {} at {}", tv.friendly_name, tv.control_url);
                 tvs.push(tv);
@@ -101,10 +107,35 @@ async fn fetch_tv_info(
     client: &reqwest::Client,
     location: &str,
     discovery_usn: &str,
+    responder: IpAddr,
 ) -> Result<Option<DiscoveredTv>> {
-    let body = client.get(location).send().await?.text().await?;
+    const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
+    let location_url = validate_renderer_url(location, Some(responder))?;
+    let response = client.get(location_url.clone()).send().await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "renderer descriptor returned {}",
+        response.status()
+    );
+    if let Some(length) = response.content_length() {
+        anyhow::ensure!(
+            length <= MAX_DESCRIPTOR_BYTES as u64,
+            "renderer descriptor is too large"
+        );
+    }
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        anyhow::ensure!(
+            bytes.len().saturating_add(chunk.len()) <= MAX_DESCRIPTOR_BYTES,
+            "renderer descriptor is too large"
+        );
+        bytes.extend_from_slice(&chunk);
+    }
+    let body = std::str::from_utf8(&bytes).context("renderer descriptor is not UTF-8")?;
 
-    let mut reader = Reader::from_str(&body);
+    let mut reader = Reader::from_str(body);
 
     let mut friendly_name = String::new();
     let mut model_name = String::new();
@@ -121,11 +152,8 @@ async fn fetch_tv_info(
                 current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
             }
             Ok(Event::Text(e)) => {
-                let text = reader
-                    .decoder()
-                    .decode(e.as_ref())
-                    .unwrap_or_default()
-                    .to_string();
+                let decoded = reader.decoder().decode(e.as_ref())?;
+                let text = quick_xml::escape::unescape(&decoded)?.into_owned();
                 match current_element.as_str() {
                     "friendlyName" if friendly_name.is_empty() => {
                         friendly_name = text;
@@ -160,7 +188,7 @@ async fn fetch_tv_info(
                 current_element.clear();
             }
             Ok(Event::Eof) => break,
-            Err(_) => break,
+            Err(error) => return Err(error.into()),
             _ => {}
         }
         buf.clear();
@@ -170,17 +198,8 @@ async fn fetch_tv_info(
         return Ok(None);
     }
 
-    // Resolve relative controlURL against the location base URL
-    let full_control_url = if control_url.starts_with("http") {
-        control_url
-    } else {
-        // Extract base URL from location
-        if let Some(base) = extract_base_url(location) {
-            format!("{}{}", base, control_url)
-        } else {
-            control_url
-        }
-    };
+    let full_control_url =
+        validate_renderer_url(location_url.join(&control_url)?.as_str(), Some(responder))?;
 
     Ok(Some(DiscoveredTv {
         id: if udn.is_empty() {
@@ -194,24 +213,160 @@ async fn fetch_tv_info(
             udn
         },
         friendly_name,
-        control_url: full_control_url,
-        location_url: location.to_string(),
+        control_url: full_control_url.to_string(),
+        location_url: location_url.to_string(),
         model_name,
     }))
 }
 
-fn extract_base_url(url: &str) -> Option<String> {
-    // Parse "http://192.168.1.100:8080/path/desc.xml" -> "http://192.168.1.100:8080"
-    let without_scheme = url
-        .strip_prefix("http://")
-        .or_else(|| url.strip_prefix("https://"))?;
-    let scheme = if url.starts_with("https") {
-        "https"
+fn renderer_address_is_safe(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_link_local()
+                && !ip.is_multicast()
+                && ip != Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(ip) => {
+            !ip.is_loopback()
+                && !ip.is_unspecified()
+                && !ip.is_unicast_link_local()
+                && !ip.is_multicast()
+        }
+    }
+}
+
+fn normalize_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
+        address => address,
+    }
+}
+
+fn validate_renderer_url(raw: &str, expected_peer: Option<IpAddr>) -> Result<reqwest::Url> {
+    let url = reqwest::Url::parse(raw).context("invalid renderer URL")?;
+    anyhow::ensure!(url.scheme() == "http", "renderer URL must use HTTP");
+    anyhow::ensure!(
+        url.username().is_empty() && url.password().is_none(),
+        "renderer URL credentials are forbidden"
+    );
+    anyhow::ensure!(
+        url.fragment().is_none(),
+        "renderer URL fragments are forbidden"
+    );
+    let address = normalize_ip(
+        url.host_str()
+            .context("renderer URL has no host")?
+            .parse::<IpAddr>()
+            .context("renderer URL host must be a numeric address")?,
+    );
+    anyhow::ensure!(
+        renderer_address_is_safe(address),
+        "renderer URL uses an unsafe address"
+    );
+    if let Some(peer) = expected_peer {
+        anyhow::ensure!(
+            address == normalize_ip(peer),
+            "renderer URL host does not match SSDP responder"
+        );
+    }
+    Ok(url)
+}
+
+fn write_text_element(writer: &mut Writer<Vec<u8>>, name: &str, value: &str) -> Result<()> {
+    writer.write_event(Event::Start(BytesStart::new(name)))?;
+    writer.write_event(Event::Text(BytesText::new(value)))?;
+    writer.write_event(Event::End(BytesEnd::new(name)))?;
+    Ok(())
+}
+
+fn media_class(mime_type: &str) -> &'static str {
+    if mime_type.starts_with("audio/") {
+        "object.item.audioItem.musicTrack"
+    } else if mime_type.starts_with("video/") {
+        "object.item.videoItem"
+    } else if mime_type.starts_with("image/") {
+        "object.item.imageItem.photo"
     } else {
-        "http"
+        "object.item"
+    }
+}
+
+fn build_transport_uri_soap(
+    action: &str,
+    media_url: &str,
+    title: &str,
+    mime_type: &str,
+) -> Result<String> {
+    anyhow::ensure!(
+        matches!(action, "SetAVTransportURI" | "SetNextAVTransportURI"),
+        "unsupported transport action"
+    );
+    let media = reqwest::Url::parse(media_url).context("invalid media URL")?;
+    anyhow::ensure!(
+        matches!(media.scheme(), "http" | "https"),
+        "media URL must use HTTP(S)"
+    );
+    anyhow::ensure!(
+        !mime_type.is_empty()
+            && mime_type.is_ascii()
+            && !mime_type.bytes().any(|b| b.is_ascii_control()),
+        "invalid MIME type"
+    );
+
+    let mut didl = Writer::new(Vec::new());
+    let mut root = BytesStart::new("DIDL-Lite");
+    root.push_attribute(("xmlns", "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"));
+    root.push_attribute(("xmlns:dc", "http://purl.org/dc/elements/1.1/"));
+    root.push_attribute(("xmlns:upnp", "urn:schemas-upnp-org:metadata-1-0/upnp/"));
+    didl.write_event(Event::Start(root))?;
+    let mut item = BytesStart::new("item");
+    item.push_attribute(("id", "0"));
+    item.push_attribute(("parentID", "0"));
+    item.push_attribute(("restricted", "1"));
+    didl.write_event(Event::Start(item))?;
+    write_text_element(&mut didl, "dc:title", title)?;
+    write_text_element(&mut didl, "upnp:class", media_class(mime_type))?;
+    let protocol_info = format!("http-get:*:{mime_type}:*");
+    let mut res = BytesStart::new("res");
+    res.push_attribute(("protocolInfo", protocol_info.as_str()));
+    didl.write_event(Event::Start(res))?;
+    didl.write_event(Event::Text(BytesText::new(media.as_str())))?;
+    didl.write_event(Event::End(BytesEnd::new("res")))?;
+    didl.write_event(Event::End(BytesEnd::new("item")))?;
+    didl.write_event(Event::End(BytesEnd::new("DIDL-Lite")))?;
+    let didl = String::from_utf8(didl.into_inner())?;
+
+    let mut soap = Writer::new(Vec::new());
+    soap.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
+    let mut envelope = BytesStart::new("s:Envelope");
+    envelope.push_attribute(("xmlns:s", "http://schemas.xmlsoap.org/soap/envelope/"));
+    envelope.push_attribute((
+        "s:encodingStyle",
+        "http://schemas.xmlsoap.org/soap/encoding/",
+    ));
+    soap.write_event(Event::Start(envelope))?;
+    soap.write_event(Event::Start(BytesStart::new("s:Body")))?;
+    let action_name = format!("u:{action}");
+    let mut action_tag = BytesStart::new(action_name.as_str());
+    action_tag.push_attribute(("xmlns:u", "urn:schemas-upnp-org:service:AVTransport:1"));
+    soap.write_event(Event::Start(action_tag))?;
+    write_text_element(&mut soap, "InstanceID", "0")?;
+    let (uri_name, metadata_name) = if action == "SetAVTransportURI" {
+        ("CurrentURI", "CurrentURIMetaData")
+    } else {
+        ("NextURI", "NextURIMetaData")
     };
-    let host_port = without_scheme.split('/').next()?;
-    Some(format!("{}://{}", scheme, host_port))
+    write_text_element(&mut soap, uri_name, media.as_str())?;
+    write_text_element(&mut soap, metadata_name, &didl)?;
+    soap.write_event(Event::End(BytesEnd::new(action_name.as_str())))?;
+    soap.write_event(Event::End(BytesEnd::new("s:Body")))?;
+    soap.write_event(Event::End(BytesEnd::new("s:Envelope")))?;
+    Ok(String::from_utf8(soap.into_inner())?)
 }
 
 /// Cast a media file to a TV by sending SOAP SetAVTransportURI + Play
@@ -221,43 +376,15 @@ pub async fn cast_media(
     title: &str,
     mime_type: &str,
 ) -> Result<()> {
+    let control_url = validate_renderer_url(control_url, None)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
-
-    let class = if mime_type.starts_with("audio/") {
-        "object.item.audioItem.musicTrack"
-    } else if mime_type.starts_with("video/") {
-        "object.item.videoItem"
-    } else if mime_type.starts_with("image/") {
-        "object.item.imageItem.photo"
-    } else {
-        "object.item"
-    };
-
-    // Construct fully compliant DIDL-Lite metadata with standard XML escaping for SOAP
-    let didl_metadata = format!(
-        r#"&lt;DIDL-Lite xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot; xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot;&gt;&lt;item id=&quot;0&quot; parentID=&quot;0&quot; restricted=&quot;1&quot;&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;{}&lt;/upnp:class&gt;&lt;res protocolInfo=&quot;http-get:*:{}:*&quot;&gt;{}&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#,
-        title, class, mime_type, media_url
-    );
-
-    // Step 1: SetAVTransportURI
-    let set_uri_body = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
-    s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-    <s:Body>
-        <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-            <InstanceID>0</InstanceID>
-            <CurrentURI>{media_url}</CurrentURI>
-            <CurrentURIMetaData>{didl_metadata}</CurrentURIMetaData>
-        </u:SetAVTransportURI>
-    </s:Body>
-</s:Envelope>"#
-    );
+    let set_uri_body = build_transport_uri_soap("SetAVTransportURI", media_url, title, mime_type)?;
 
     let resp = client
-        .post(control_url)
+        .post(control_url.clone())
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
         .header(
             "SOAPAction",
@@ -276,15 +403,21 @@ pub async fn cast_media(
     debug!("SetAVTransportURI succeeded on {}", control_url);
 
     // Step 2: Play
-    control_playback(control_url, "Play").await?;
+    control_playback(control_url.as_str(), "Play").await?;
 
     Ok(())
 }
 
 /// Send a playback control command (Play, Pause, Stop) to a TV
 pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
+    let control_url = validate_renderer_url(control_url, None)?;
+    anyhow::ensure!(
+        matches!(action, "Play" | "Pause" | "Stop"),
+        "unsupported playback action"
+    );
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let soap_action = format!("urn:schemas-upnp-org:service:AVTransport:1#{}", action);
@@ -309,7 +442,7 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
     );
 
     let resp = client
-        .post(control_url)
+        .post(control_url.clone())
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
         .header("SOAPAction", format!("\"{}\"", soap_action))
         .body(body)
@@ -333,42 +466,15 @@ pub async fn set_next_media(
     title: &str,
     mime_type: &str,
 ) -> Result<()> {
+    let control_url = validate_renderer_url(control_url, None)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
-
-    let class = if mime_type.starts_with("audio/") {
-        "object.item.audioItem.musicTrack"
-    } else if mime_type.starts_with("video/") {
-        "object.item.videoItem"
-    } else if mime_type.starts_with("image/") {
-        "object.item.imageItem.photo"
-    } else {
-        "object.item"
-    };
-
-    // Construct fully compliant DIDL-Lite metadata with standard XML escaping for SOAP
-    let didl_metadata = format!(
-        r#"&lt;DIDL-Lite xmlns=&quot;urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/&quot; xmlns:dc=&quot;http://purl.org/dc/elements/1.1/&quot; xmlns:upnp=&quot;urn:schemas-upnp-org:metadata-1-0/upnp/&quot;&gt;&lt;item id=&quot;0&quot; parentID=&quot;0&quot; restricted=&quot;1&quot;&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;upnp:class&gt;{}&lt;/upnp:class&gt;&lt;res protocolInfo=&quot;http-get:*:{}:*&quot;&gt;{}&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;"#,
-        title, class, mime_type, media_url
-    );
-
-    let body = format!(
-        r#"<?xml version="1.0" encoding="utf-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
-    s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-    <s:Body>
-        <u:SetNextAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
-            <InstanceID>0</InstanceID>
-            <NextURI>{media_url}</NextURI>
-            <NextURIMetaData>{didl_metadata}</NextURIMetaData>
-        </u:SetNextAVTransportURI>
-    </s:Body>
-</s:Envelope>"#
-    );
+    let body = build_transport_uri_soap("SetNextAVTransportURI", media_url, title, mime_type)?;
 
     let resp = client
-        .post(control_url)
+        .post(control_url.clone())
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
         .header(
             "SOAPAction",
@@ -394,8 +500,10 @@ pub async fn set_next_media(
 
 /// Query what media URI is currently active/playing on the TV
 pub async fn get_position_info(control_url: &str) -> Result<String> {
+    let control_url = validate_renderer_url(control_url, None)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -439,8 +547,10 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
 
 /// Query the current transport state (PLAYING, STOPPED, PAUSED_PLAYBACK) of the TV
 pub async fn get_transport_state(control_url: &str) -> Result<String> {
+    let control_url = validate_renderer_url(control_url, None)?;
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
 
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
@@ -485,23 +595,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_extract_base_url() {
-        assert_eq!(
-            extract_base_url("http://192.168.1.100:8080/path/desc.xml"),
-            Some("http://192.168.1.100:8080".to_string())
-        );
-        assert_eq!(
-            extract_base_url("http://192.168.1.5:49152/dmr/SamsungMRDesc.xml"),
-            Some("http://192.168.1.5:49152".to_string())
-        );
-        assert_eq!(extract_base_url("not-a-url"), None);
+    fn renderer_urls_are_peer_bound_and_numeric() {
+        let peer: IpAddr = "192.168.1.100".parse().unwrap();
+        assert!(validate_renderer_url("http://192.168.1.100:8080/desc.xml", Some(peer)).is_ok());
+        assert!(validate_renderer_url("http://192.168.1.101/desc.xml", Some(peer)).is_err());
+        assert!(validate_renderer_url("http://localhost/desc.xml", None).is_err());
+        assert!(validate_renderer_url("http://169.254.169.254/", None).is_err());
+        assert!(validate_renderer_url("https://192.168.1.100/", None).is_err());
     }
 
     #[test]
-    fn test_extract_base_url_https() {
-        assert_eq!(
-            extract_base_url("https://10.0.0.1:443/device.xml"),
-            Some("https://10.0.0.1:443".to_string())
-        );
+    fn transport_xml_escapes_nested_metadata_once() {
+        let xml = build_transport_uri_soap(
+            "SetAVTransportURI",
+            "http://192.168.1.2/a?x=1&y=2",
+            "A & <B>",
+            "video/mp4",
+        )
+        .unwrap();
+        assert!(xml.contains("A &amp;amp; &amp;lt;B&amp;gt;"));
+        assert!(!xml.contains("<dc:title>A &"));
     }
 }

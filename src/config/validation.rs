@@ -113,13 +113,6 @@ impl ConfigValidator {
             Self::validate_monitored_directory_strict(dir, index)?;
         }
 
-        // Validate supported extensions
-        if config.media.supported_extensions.is_empty() {
-            return Err(anyhow!(
-                "At least one supported file extension must be configured"
-            ));
-        }
-
         // Check for duplicate extensions
         let mut extensions = config.media.supported_extensions.clone();
         extensions.sort();
@@ -428,13 +421,6 @@ impl ConfigValidator {
             Self::validate_monitored_directory(dir, index)?;
         }
 
-        // Validate supported extensions
-        if config.media.supported_extensions.is_empty() {
-            return Err(anyhow!(
-                "At least one supported file extension must be configured"
-            ));
-        }
-
         // Check for duplicate extensions
         let mut extensions = config.media.supported_extensions.clone();
         extensions.sort();
@@ -568,7 +554,7 @@ mod tests {
             validation_mode: ValidationMode::Warn,
         }];
         config.media.supported_extensions = vec![];
-        assert!(ConfigValidator::validate(&config).is_err());
+        assert!(ConfigValidator::validate(&config).is_ok());
     }
 
     #[test]

@@ -21,11 +21,28 @@ async fn start_platform_adaptation<D: DatabaseManager + 'static>(
                             info!("Configuration change detected: {:?}", event);
                             match event {
                                 ConfigChangeEvent::Reloaded(new_config) => {
+                                    let new_config = *new_config;
+                                    let old_config = app_state.current_config();
+                                    if old_config.server.port != new_config.server.port
+                                        || old_config.server.interface != new_config.server.interface
+                                        || old_config.server.ip != new_config.server.ip
+                                        || old_config.server.uuid != new_config.server.uuid
+                                        || old_config.network != new_config.network
+                                        || old_config.database != new_config.database
+                                        || old_config.management != new_config.management
+                                    {
+                                        warn!(
+                                            "Configuration reloaded; server identity/bind, network, database, or management changes require restart"
+                                        );
+                                    }
                                     *app_state.media_directories.write().await =
                                         new_config.media.directories.clone();
+                                    watcher
+                                        .set_policies(media::ScanPolicy::policies(&new_config));
+                                    app_state.live_config.store(Arc::new(new_config));
                                     increment_content_update_id(&app_state).await;
                                 }
-                                ConfigChangeEvent::DirectoriesChanged { added, removed, .. } => {
+                                ConfigChangeEvent::DirectoriesChanged { added, removed, modified } => {
                                     for path in &removed {
                                         if let Err(error) = watcher.remove_watch_path(path).await {
                                             warn!("Failed to remove watch {}: {}", path.display(), error);
@@ -40,14 +57,30 @@ async fn start_platform_adaptation<D: DatabaseManager + 'static>(
                                         if let Err(error) = app_state.database.remove_media_under_path(path).await {
                                             error!("Failed to remove indexed content for removed root {}: {}", path.display(), error);
                                         }
+                                        if let Err(error) = app_state.database.remove_root_availability(path).await {
+                                            error!("Failed to remove availability state for removed root {}: {}", path.display(), error);
+                                        }
                                     }
-                                    for path in &added {
+                                    for path in added.iter().chain(modified.iter()) {
                                         if path.is_dir() {
-                                            if let Err(error) = watcher.add_watch_path(path).await {
+                                            if modified.contains(path) {
+                                                let _ = watcher.remove_watch_path(path).await;
+                                            }
+                                            let current = app_state.current_config();
+                                            let Some(root) = current.media.directories.iter().find(|root| Path::new(&root.path) == path) else {
+                                                continue;
+                                            };
+                                            let policy = media::ScanPolicy::from_config(&current, root);
+                                            if let Err(error) = watcher.add_watch_policy(policy.clone()).await {
                                                 warn!("Failed to add watch {}: {}", path.display(), error);
                                             } else {
                                                 let scanner = media::MediaScanner::with_database(app_state.database.clone());
-                                                if let Err(error) = scanner.scan_directory_recursive(path).await {
+                                                let scan = if root.recursive {
+                                                    scanner.scan_directory_recursive_with_policy(&policy).await
+                                                } else {
+                                                    scanner.scan_directory_with_policy(&policy).await
+                                                };
+                                                if let Err(error) = scan {
                                                     warn!("Failed to scan added root {}: {}", path.display(), error);
                                                 }
                                             }
@@ -397,6 +430,26 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
 
     // Perform health check
     info!("Performing database health check...");
+    if config.database.backup_enabled {
+        let backup_dir = db_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("backups");
+        let pre_repair = backup_dir.join(format!(
+            "pre-repair-{}-{}.redb",
+            chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+            uuid::Uuid::new_v4().simple()
+        ));
+        database
+            .create_backup(&pre_repair)
+            .await
+            .with_context(|| {
+                format!(
+                    "Failed to create mandatory pre-repair backup {}",
+                    pre_repair.display()
+                )
+            })?;
+    }
     let health = match database.check_and_repair().await {
         Ok(health) => health,
         Err(repair_error) => {
@@ -467,10 +520,12 @@ async fn initialize_file_watcher(
 
     if !config.media.watch_for_changes {
         info!("File system watching disabled in configuration");
-        return Ok(CrossPlatformWatcher::new());
+        return Ok(CrossPlatformWatcher::with_policies(
+            media::ScanPolicy::policies(config),
+        ));
     }
 
-    let watcher = CrossPlatformWatcher::new();
+    let watcher = CrossPlatformWatcher::with_policies(media::ScanPolicy::policies(config));
 
     // Validate that all monitored directories exist
     let mut valid_directories = Vec::new();

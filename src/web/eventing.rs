@@ -10,6 +10,10 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use tracing::{info, warn};
 
+const MAX_SUBSCRIPTIONS: usize = 256;
+const MAX_SUBSCRIPTIONS_PER_PEER: usize = 16;
+const MIN_NOTIFICATION_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Publish one externally visible ContentDirectory mutation.
 ///
 /// The revision, browse-response invalidation, and UPnP notification are kept
@@ -71,6 +75,9 @@ pub async fn content_directory_subscribe<D: DatabaseManager>(
         let Some(subscription) = subscriptions.get_mut(sid) else {
             return StatusCode::PRECONDITION_FAILED.into_response();
         };
+        if normalize_ip(subscription.peer) != normalize_ip(peer.ip()) {
+            return StatusCode::PRECONDITION_FAILED.into_response();
+        }
         subscription.expires_at =
             std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds);
         return (
@@ -97,21 +104,39 @@ pub async fn content_directory_subscribe<D: DatabaseManager>(
     let Some(callback_url) = validate_upnp_callback(
         raw_callback,
         peer.ip(),
-        &state.config.network.upnp_callback_allowed_networks,
+        &state
+            .current_config()
+            .network
+            .upnp_callback_allowed_networks,
     ) else {
         warn!("Rejected unsafe UPnP callback URL: {}", raw_callback);
         return StatusCode::BAD_REQUEST.into_response();
     };
     let sid = format!("uuid:{}", uuid::Uuid::new_v4());
-    state.upnp_subscriptions.lock().await.insert(
+    let mut subscriptions = state.upnp_subscriptions.lock().await;
+    let now = std::time::Instant::now();
+    subscriptions.retain(|_, subscription| subscription.expires_at > now);
+    let peer_ip = normalize_ip(peer.ip());
+    let peer_count = subscriptions
+        .values()
+        .filter(|subscription| normalize_ip(subscription.peer) == peer_ip)
+        .count();
+    if subscriptions.len() >= MAX_SUBSCRIPTIONS || peer_count >= MAX_SUBSCRIPTIONS_PER_PEER {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    subscriptions.insert(
         sid.clone(),
         crate::state::UpnpSubscription {
             callback_url: callback_url.clone(),
+            peer: peer_ip,
+            generation: uuid::Uuid::new_v4(),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds),
             next_sequence: 1,
             consecutive_failures: 0,
+            last_notification_at: now,
         },
     );
+    drop(subscriptions);
     let update_id = state.content_update_id.load(Ordering::SeqCst);
     let initial_sid = sid.clone();
     let cancellation = state.cancellation.clone();
@@ -267,32 +292,46 @@ pub async fn notify_content_change<D: DatabaseManager>(
     let now = std::time::Instant::now();
     // Keep notification batches serialized so subscribers observe monotonically
     // increasing SEQ values even when content changes are published concurrently.
-    let mut subscriptions = state.upnp_subscriptions.lock().await;
-    subscriptions.retain(|_, subscription| subscription.expires_at > now);
     let update_id = state.content_update_id.load(Ordering::SeqCst);
-    let notifications = subscriptions
-        .iter_mut()
-        .map(|(sid, subscription)| {
-            let sequence = subscription.next_sequence;
-            subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
-            (sid.clone(), subscription.callback_url.clone(), sequence)
-        })
-        .collect::<Vec<_>>();
+    let notifications = {
+        let mut subscriptions = state.upnp_subscriptions.lock().await;
+        subscriptions.retain(|_, subscription| subscription.expires_at > now);
+        subscriptions
+            .iter_mut()
+            .filter_map(|(sid, subscription)| {
+                if now.duration_since(subscription.last_notification_at) < MIN_NOTIFICATION_INTERVAL
+                {
+                    return None;
+                }
+                let sequence = subscription.next_sequence;
+                subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
+                subscription.last_notification_at = now;
+                Some((
+                    sid.clone(),
+                    subscription.callback_url.clone(),
+                    sequence,
+                    subscription.generation,
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
 
-    let results = stream::iter(
-        notifications
-            .into_iter()
-            .map(|(sid, url, sequence)| async move {
-                let success = send_event_notification(&url, &sid, sequence, update_id).await;
-                (sid, success)
-            }),
-    )
+    let results = stream::iter(notifications.into_iter().map(
+        |(sid, url, sequence, generation)| async move {
+            let success = send_event_notification(&url, &sid, sequence, update_id).await;
+            (sid, generation, success)
+        },
+    ))
     .buffer_unordered(8)
     .collect::<Vec<_>>()
     .await;
 
-    for (sid, success) in results {
-        if let Some(subscription) = subscriptions.get_mut(&sid) {
+    let mut subscriptions = state.upnp_subscriptions.lock().await;
+    for (sid, generation, success) in results {
+        if let Some(subscription) = subscriptions
+            .get_mut(&sid)
+            .filter(|subscription| subscription.generation == generation)
+        {
             if success {
                 subscription.consecutive_failures = 0;
             } else {

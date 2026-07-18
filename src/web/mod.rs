@@ -1,3 +1,4 @@
+pub mod auth;
 pub mod casting;
 pub mod client;
 pub mod diagnostics;
@@ -12,6 +13,7 @@ pub mod xml;
 use crate::{database::DatabaseManager, state::AppState};
 use axum::{
     extract::DefaultBodyLimit,
+    middleware,
     routing::{get, post},
     Router,
 };
@@ -41,10 +43,24 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         .route("/mcp/message", post(mcp::message_handler::<D>))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
 
-    Router::new()
+    let management_routes = Router::new()
         .route("/", get(ui::root_handler))
         .route("/api/server-info", get(ui::server_info_handler::<D>))
         .route("/api/media", get(ui::media_page_handler::<D>))
+        .route("/metrics", get(diagnostics::get_prometheus_metrics::<D>))
+        .route("/metrics/json", get(diagnostics::get_web_metrics::<D>))
+        .route("/logs", get(diagnostics::get_logs_handler::<D>))
+        .route("/api/renderers", get(casting::api_list_renderers::<D>))
+        .route("/sse", get(mcp::sse_handler::<D>))
+        .route("/logout", post(auth::logout::<D>))
+        .merge(json_routes)
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_management::<D>,
+        ));
+
+    Router::new()
+        .route("/login", get(auth::login_page).post(auth::login::<D>))
         .route("/description.xml", get(soap::description_handler::<D>))
         .route("/ContentDirectory.xml", get(soap::content_directory_scpd))
         .route(
@@ -62,14 +78,9 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         )
         .route("/media/{id}/cover", get(streaming::serve_cover::<D>))
         .route("/media/{id}/subtitle", get(streaming::serve_subtitle::<D>))
-        .route("/metrics", get(diagnostics::get_prometheus_metrics::<D>))
-        .route("/metrics/json", get(diagnostics::get_web_metrics::<D>))
         .route("/healthz", get(diagnostics::healthz_handler))
         .route("/readyz", get(diagnostics::readyz_handler::<D>))
-        .route("/logs", get(diagnostics::get_logs_handler::<D>))
-        .route("/api/renderers", get(casting::api_list_renderers::<D>))
-        .route("/sse", get(mcp::sse_handler::<D>))
         .merge(soap_routes)
-        .merge(json_routes)
+        .merge(management_routes)
         .with_state(state)
 }

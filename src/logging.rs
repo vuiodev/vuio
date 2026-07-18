@@ -3,6 +3,80 @@ use std::path::PathBuf;
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
+const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
+const LOG_RETENTION: usize = 3;
+
+struct RotatingFile {
+    path: PathBuf,
+    file: Option<std::fs::File>,
+    bytes: u64,
+}
+
+impl RotatingFile {
+    fn open(path: PathBuf) -> std::io::Result<Self> {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)?;
+        let bytes = file.metadata()?.len();
+        Ok(Self {
+            path,
+            file: Some(file),
+            bytes,
+        })
+    }
+
+    fn rotate(&mut self) -> std::io::Result<()> {
+        if let Some(file) = self.file.take() {
+            file.sync_all()?;
+        }
+        for index in (1..=LOG_RETENTION).rev() {
+            let source = if index == 1 {
+                self.path.clone()
+            } else {
+                self.path.with_extension(format!("log.{}", index - 1))
+            };
+            let destination = self.path.with_extension(format!("log.{index}"));
+            if index == LOG_RETENTION && destination.exists() {
+                std::fs::remove_file(&destination)?;
+            }
+            if source.exists() {
+                std::fs::rename(source, destination)?;
+            }
+        }
+        self.file = Some(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?,
+        );
+        self.bytes = 0;
+        Ok(())
+    }
+}
+
+impl std::io::Write for RotatingFile {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        if self.bytes > 0 && self.bytes.saturating_add(buffer.len() as u64) > MAX_LOG_BYTES {
+            self.rotate()?;
+        }
+        let written = self
+            .file
+            .as_mut()
+            .expect("rotating log file is open")
+            .write(buffer)?;
+        self.bytes = self.bytes.saturating_add(written as u64);
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file
+            .as_mut()
+            .expect("rotating log file is open")
+            .flush()
+    }
+}
+
 /// Initialize logging with platform-specific configuration.
 pub fn init_logging() -> Result<(), PlatformError> {
     init_logging_with_options(None, None, false)
@@ -67,11 +141,7 @@ pub fn init_logging_with_options(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let file_layer = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&resolved_log_file)
-    {
+    let file_layer = match RotatingFile::open(resolved_log_file.clone()) {
         Ok(file) => {
             let file_level = if debug { "debug" } else { "info" };
             let file_filter =

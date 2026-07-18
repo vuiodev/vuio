@@ -1,11 +1,13 @@
 use axum::{
     body::Body,
-    extract::{Query, State},
+    extract::{ConnectInfo, Json, Query, State},
     http::{Request, StatusCode},
     response::IntoResponse,
 };
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 use tower::ServiceExt;
 
@@ -14,12 +16,40 @@ use vuio::database::redb::RedbDatabase;
 use vuio::database::{DatabaseManager, MediaFile, MediaRepository};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
-use vuio::state::AppState;
+use vuio::state::{AppState, McpClient};
 use vuio::web::diagnostics::WebHandlerMetrics;
 use vuio::web::{
     create_router,
-    mcp::{message_handler, sse_handler, MessageQuery},
+    mcp::{message_handler, sse_handler, JsonRpcRequest, MessageQuery},
 };
+
+fn test_peer() -> SocketAddr {
+    "127.0.0.1:43123".parse().unwrap()
+}
+
+fn test_mcp_client(sender: tokio::sync::mpsc::Sender<String>) -> McpClient {
+    McpClient {
+        sender,
+        peer: test_peer().ip(),
+        expires_at: Instant::now() + Duration::from_secs(60),
+    }
+}
+
+async fn send_mcp_message(
+    state: AppState,
+    client_id: String,
+    request: serde_json::Value,
+) -> axum::response::Response {
+    let request: JsonRpcRequest = serde_json::from_value(request).unwrap();
+    message_handler(
+        State(state),
+        ConnectInfo(test_peer()),
+        Query(MessageQuery { client_id }),
+        Json(request),
+    )
+    .await
+    .into_response()
+}
 
 async fn make_test_state() -> (TempDir, AppState) {
     let temp = tempdir().unwrap();
@@ -33,8 +63,11 @@ async fn make_test_state() -> (TempDir, AppState) {
 
     let state = AppState {
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
-        config,
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config)),
         database,
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
         platform_info: Arc::new(PlatformInfo::detect().await.unwrap()),
         filesystem_manager: Arc::from(create_platform_filesystem_manager()),
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
@@ -135,8 +168,11 @@ async fn test_mcp_initialize_and_tools_list() {
 
     let app_state = AppState {
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
-        config,
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config)),
         database: db,
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
         platform_info,
         filesystem_manager,
         content_update_id,
@@ -168,7 +204,7 @@ async fn test_mcp_initialize_and_tools_list() {
         .mcp_clients
         .lock()
         .await
-        .insert(client_id.clone(), tx);
+        .insert(client_id.clone(), test_mcp_client(tx));
 
     // 3. Test `initialize` method
     let init_req = serde_json::json!({
@@ -177,14 +213,7 @@ async fn test_mcp_initialize_and_tools_list() {
         "id": 1
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        init_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), init_req).await;
 
     // Check message sent through channel
     let response_str = rx.recv().await.unwrap();
@@ -200,14 +229,7 @@ async fn test_mcp_initialize_and_tools_list() {
         "id": 2
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        list_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), list_req).await;
 
     let response_str2 = rx.recv().await.unwrap();
     let list_res: serde_json::Value = serde_json::from_str(&response_str2).unwrap();
@@ -229,14 +251,7 @@ async fn test_mcp_initialize_and_tools_list() {
         }
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        search_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), search_req).await;
 
     let response_str3 = rx.recv().await.unwrap();
     let search_res: serde_json::Value = serde_json::from_str(&response_str3).unwrap();
@@ -263,14 +278,7 @@ async fn test_mcp_initialize_and_tools_list() {
         }
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        list_media_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), list_media_req).await;
 
     let response_str4 = rx.recv().await.unwrap();
     let list_media_res: serde_json::Value = serde_json::from_str(&response_str4).unwrap();
@@ -297,14 +305,7 @@ async fn test_mcp_initialize_and_tools_list() {
         }
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        create_pl_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), create_pl_req).await;
 
     let response_str5 = rx.recv().await.unwrap();
     let create_pl_res: serde_json::Value = serde_json::from_str(&response_str5).unwrap();
@@ -331,14 +332,7 @@ async fn test_mcp_initialize_and_tools_list() {
         }
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        add_track_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), add_track_req).await;
 
     let response_str6 = rx.recv().await.unwrap();
     let add_track_res: serde_json::Value = serde_json::from_str(&response_str6).unwrap();
@@ -357,14 +351,7 @@ async fn test_mcp_initialize_and_tools_list() {
         }
     });
 
-    let _resp = message_handler(
-        State(app_state.clone()),
-        Query(MessageQuery {
-            client_id: client_id.clone(),
-        }),
-        get_tracks_req.to_string(),
-    )
-    .await;
+    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), get_tracks_req).await;
 
     let response_str7 = rx.recv().await.unwrap();
     let get_tracks_res: serde_json::Value = serde_json::from_str(&response_str7).unwrap();
@@ -381,7 +368,9 @@ async fn test_mcp_initialize_and_tools_list() {
 #[tokio::test]
 async fn sse_disconnect_removes_client_immediately() {
     let (_temp, state) = make_test_state().await;
-    let response = sse_handler(State(state.clone())).await.into_response();
+    let response = sse_handler(State(state.clone()), ConnectInfo(test_peer()))
+        .await
+        .into_response();
     assert_eq!(state.mcp_clients.lock().await.len(), 1);
 
     drop(response);
@@ -406,16 +395,14 @@ async fn blocked_mcp_send_does_not_hold_clients_mutex() {
         .mcp_clients
         .lock()
         .await
-        .insert("blocked-client".to_string(), sender);
+        .insert("blocked-client".to_string(), test_mcp_client(sender));
 
     let handler_state = state.clone();
     let task = tokio::spawn(async move {
-        message_handler(
-            State(handler_state),
-            Query(MessageQuery {
-                client_id: "blocked-client".to_string(),
-            }),
-            r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#.to_string(),
+        send_mcp_message(
+            handler_state,
+            "blocked-client".to_string(),
+            serde_json::json!({"jsonrpc":"2.0","method":"initialize","id":1}),
         )
         .await
     });
@@ -462,6 +449,11 @@ async fn post_endpoints_enforce_tiered_body_limits() {
             .clone()
             .oneshot(
                 Request::post(path)
+                    .extension(ConnectInfo(test_peer()))
+                    .header(
+                        "authorization",
+                        "Bearer test-management-token-which-is-long-enough",
+                    )
                     .header("content-type", "application/json")
                     .body(Body::from(vec![b'x'; 256 * 1024 + 1]))
                     .unwrap(),
@@ -475,6 +467,11 @@ async fn post_endpoints_enforce_tiered_body_limits() {
         .clone()
         .oneshot(
             Request::post("/mcp/message?client_id=missing")
+                .extension(ConnectInfo(test_peer()))
+                .header(
+                    "authorization",
+                    "Bearer test-management-token-which-is-long-enough",
+                )
                 .header("content-type", "application/json")
                 .body(Body::from(
                     r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#,

@@ -11,10 +11,7 @@ use crate::{
     },
     ssdp,
     state::AppState,
-    watcher::{
-        classify_media_rename, CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher,
-        MediaRenameKind,
-    },
+    watcher::{CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher, MediaRenameKind},
     web,
 };
 use anyhow::Context;

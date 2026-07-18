@@ -44,10 +44,11 @@ impl RedbDatabase {
 
             let mut playlists = Vec::new();
             for result in playlists_table.iter()? {
-                let (_, value) = result?;
-                if let Ok(playlist) = Self::deserialize_playlist(value.value()) {
-                    playlists.push(playlist);
-                }
+                let (key, value) = result?;
+                playlists.push(
+                    Self::deserialize_playlist(value.value())
+                        .with_context(|| format!("corrupt playlist record {}", key.value()))?,
+                );
             }
 
             Ok(playlists)
@@ -79,9 +80,11 @@ impl RedbDatabase {
         self.execute_write(move |database| {
             let write_txn = database.begin_write()?;
             {
-                write_txn
-                    .open_table(PLAYLISTS_TABLE)?
-                    .insert(playlist_id, serialized.as_slice())?;
+                let mut playlists = write_txn.open_table(PLAYLISTS_TABLE)?;
+                if playlists.get(playlist_id)?.is_none() {
+                    return Err(anyhow!("playlist {playlist_id} not found"));
+                }
+                playlists.insert(playlist_id, serialized.as_slice())?;
             }
             write_txn.commit()?;
             Ok(())
@@ -104,8 +107,8 @@ impl RedbDatabase {
                 // Remove all entries for this playlist
                 let entries = playlist_entries
                     .range(Self::playlist_entry_range(playlist_id))?
-                    .filter_map(|entry| entry.ok().map(|(key, file)| (key.value(), file.value())))
-                    .collect::<Vec<_>>();
+                    .map(|entry| entry.map(|(key, file)| (key.value(), file.value())))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 for (key, file_id) in entries {
                     playlist_entries.remove(key)?;
                     reverse_entries.remove(file_id, key)?;
@@ -138,6 +141,9 @@ impl RedbDatabase {
         self.execute_write(move |database| {
             let txn = database.begin_write()?;
             {
+                if txn.open_table(PLAYLISTS_TABLE)?.get(playlist_id)?.is_none() {
+                    return Err(anyhow!("playlist {playlist_id} not found"));
+                }
                 let mut sources = txn.open_table(PLAYLIST_SOURCES)?;
                 let mut reverse = txn.open_multimap_table(SOURCE_PLAYLISTS)?;
                 if let Some(old) = sources
@@ -151,6 +157,99 @@ impl RedbDatabase {
             }
             txn.commit()?;
             Ok(())
+        })
+        .await
+    }
+
+    pub(super) async fn replace_playlist_from_source_impl(
+        &self,
+        source_path: &Path,
+        name: &str,
+        media_file_ids: &[(i64, u32)],
+    ) -> Result<i64> {
+        let source = Self::canonical_path(source_path)?
+            .to_string_lossy()
+            .into_owned();
+        let name = name.to_owned();
+        let entries = media_file_ids.to_vec();
+        let candidate_id = self.next_playlist_id.fetch_add(1, Ordering::SeqCst);
+        self.execute_write(move |database| {
+            let transaction = database.begin_write()?;
+            let playlist_id = {
+                let reverse = transaction.open_multimap_table(SOURCE_PLAYLISTS)?;
+                let existing = reverse
+                    .get(source.as_str())?
+                    .map(|value| value.map(|id| id.value()))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                existing.into_iter().min().unwrap_or(candidate_id)
+            };
+
+            {
+                let files = transaction.open_table(FILES_TABLE)?;
+                for (file_id, _) in &entries {
+                    if files.get(*file_id)?.is_none() {
+                        return Err(anyhow!("media file {file_id} not found"));
+                    }
+                }
+            }
+
+            let now = SystemTime::now();
+            let playlist = Playlist {
+                id: Some(playlist_id),
+                name,
+                description: None,
+                created_at: now,
+                updated_at: now,
+            };
+            let serialized = Self::serialize_playlist(&playlist)?;
+            {
+                let mut playlists = transaction.open_table(PLAYLISTS_TABLE)?;
+                let mut playlist_entries = transaction.open_table(PLAYLIST_ENTRIES)?;
+                let mut reverse_entries = transaction.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
+                let mut sources = transaction.open_table(PLAYLIST_SOURCES)?;
+                let mut source_playlists = transaction.open_multimap_table(SOURCE_PLAYLISTS)?;
+
+                let old_entries = playlist_entries
+                    .range(Self::playlist_entry_range(playlist_id))?
+                    .map(|entry| entry.map(|(key, file)| (key.value(), file.value())))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                for (key, file_id) in old_entries {
+                    playlist_entries.remove(key)?;
+                    reverse_entries.remove(file_id, key)?;
+                }
+
+                let duplicate_ids = source_playlists
+                    .get(source.as_str())?
+                    .map(|value| value.map(|id| id.value()))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                for duplicate_id in duplicate_ids {
+                    if duplicate_id == playlist_id {
+                        continue;
+                    }
+                    let duplicate_entries = playlist_entries
+                        .range(Self::playlist_entry_range(duplicate_id))?
+                        .map(|entry| entry.map(|(key, file)| (key.value(), file.value())))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    for (key, file_id) in duplicate_entries {
+                        playlist_entries.remove(key)?;
+                        reverse_entries.remove(file_id, key)?;
+                    }
+                    playlists.remove(duplicate_id)?;
+                    sources.remove(duplicate_id)?;
+                }
+                source_playlists.remove_all(source.as_str())?;
+
+                playlists.insert(playlist_id, serialized.as_slice())?;
+                sources.insert(playlist_id, source.as_str())?;
+                source_playlists.insert(source.as_str(), playlist_id)?;
+                for (file_id, position) in &entries {
+                    let key = Self::playlist_entry_key(playlist_id, *position);
+                    playlist_entries.insert(key, *file_id)?;
+                    reverse_entries.insert(*file_id, key)?;
+                }
+            }
+            transaction.commit()?;
+            Ok(playlist_id)
         })
         .await
     }
@@ -218,6 +317,20 @@ impl RedbDatabase {
         self.execute_write(move |database| {
             let write_txn = database.begin_write()?;
             {
+                if write_txn
+                    .open_table(PLAYLISTS_TABLE)?
+                    .get(playlist_id)?
+                    .is_none()
+                {
+                    return Err(anyhow!("playlist {playlist_id} not found"));
+                }
+                if write_txn
+                    .open_table(FILES_TABLE)?
+                    .get(media_file_id)?
+                    .is_none()
+                {
+                    return Err(anyhow!("media file {media_file_id} not found"));
+                }
                 let mut entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
                 let old = entries
                     .insert(key, media_file_id)?
@@ -243,6 +356,19 @@ impl RedbDatabase {
         self.execute_write(move |database| {
             let write_txn = database.begin_write()?;
             {
+                if write_txn
+                    .open_table(PLAYLISTS_TABLE)?
+                    .get(playlist_id)?
+                    .is_none()
+                {
+                    return Err(anyhow!("playlist {playlist_id} not found"));
+                }
+                let files = write_txn.open_table(FILES_TABLE)?;
+                for (file_id, _) in &media_file_ids {
+                    if files.get(*file_id)?.is_none() {
+                        return Err(anyhow!("media file {file_id} not found"));
+                    }
+                }
                 let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
                 let mut reverse_entries = write_txn.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
                 for (file_id, position) in &media_file_ids {
@@ -271,13 +397,23 @@ impl RedbDatabase {
         self.execute_write(move |database| {
             let write_txn = database.begin_write()?;
             let removed = {
+                if write_txn
+                    .open_table(PLAYLISTS_TABLE)?
+                    .get(playlist_id)?
+                    .is_none()
+                {
+                    return Err(anyhow!("playlist {playlist_id} not found"));
+                }
                 let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
                 let mut reverse = write_txn.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
-                let key_to_remove = playlist_entries
-                    .range(Self::playlist_entry_range(playlist_id))?
-                    .filter_map(|entry| entry.ok())
-                    .find(|(_, value)| value.value() == media_file_id)
-                    .map(|(key, _)| key.value());
+                let mut key_to_remove = None;
+                for entry in playlist_entries.range(Self::playlist_entry_range(playlist_id))? {
+                    let (key, value) = entry?;
+                    if value.value() == media_file_id {
+                        key_to_remove = Some(key.value());
+                        break;
+                    }
+                }
 
                 if let Some(key) = key_to_remove {
                     playlist_entries.remove(key)?;
@@ -300,6 +436,13 @@ impl RedbDatabase {
     ) -> Result<Vec<MediaFile>> {
         self.execute_read(move |database| {
             let read_txn = database.begin_read()?;
+            if read_txn
+                .open_table(PLAYLISTS_TABLE)?
+                .get(playlist_id)?
+                .is_none()
+            {
+                return Err(anyhow!("playlist {playlist_id} not found"));
+            }
             let playlist_entries = read_txn.open_table(PLAYLIST_ENTRIES)?;
             let files_table = read_txn.open_table(FILES_TABLE)?;
 
@@ -307,9 +450,10 @@ impl RedbDatabase {
             for entry in playlist_entries.range(Self::playlist_entry_range(playlist_id))? {
                 let (_, file_id) = entry?;
                 let file_id = file_id.value();
-                if let Some(data) = files_table.get(file_id)? {
-                    files.push(Self::deserialize_media_file(data.value())?);
-                }
+                let data = files_table.get(file_id)?.ok_or_else(|| {
+                    anyhow!("playlist {playlist_id} references missing media file {file_id}")
+                })?;
+                files.push(Self::deserialize_media_file(data.value())?);
             }
 
             Ok(files)
@@ -326,14 +470,27 @@ impl RedbDatabase {
         self.execute_write(move |database| {
             let write_txn = database.begin_write()?;
             {
+                if write_txn
+                    .open_table(PLAYLISTS_TABLE)?
+                    .get(playlist_id)?
+                    .is_none()
+                {
+                    return Err(anyhow!("playlist {playlist_id} not found"));
+                }
+                let files = write_txn.open_table(FILES_TABLE)?;
+                for (file_id, _) in &track_positions {
+                    if files.get(*file_id)?.is_none() {
+                        return Err(anyhow!("media file {file_id} not found"));
+                    }
+                }
                 let mut playlist_entries = write_txn.open_table(PLAYLIST_ENTRIES)?;
                 let mut reverse_entries = write_txn.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
 
                 // Remove existing entries for this playlist
                 let entries = playlist_entries
                     .range(Self::playlist_entry_range(playlist_id))?
-                    .filter_map(|entry| entry.ok().map(|(key, file)| (key.value(), file.value())))
-                    .collect::<Vec<_>>();
+                    .map(|entry| entry.map(|(key, file)| (key.value(), file.value())))
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
                 for (key, file_id) in entries {
                     playlist_entries.remove(key)?;
                     reverse_entries.remove(file_id, key)?;
