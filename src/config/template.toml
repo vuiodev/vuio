@@ -17,6 +17,8 @@ ip = ""
 interface_selection = "Auto"
 multicast_ttl = 4
 announce_interval_seconds = 30
+# Optional CIDRs allowed as UPnP event callback destinations in addition to the subscribing peer.
+upnp_callback_allowed_networks = []
 
 # Media configuration
 # Default media directories for this platform: PLACEHOLDER_DEFAULT_MEDIA_DIRECTORIES

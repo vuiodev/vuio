@@ -272,6 +272,10 @@ pub async fn serve_media(
 
 // Helper function to parse range header manually
 fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
+    if file_size == 0 {
+        return Err(AppError::InvalidRange);
+    }
+
     let range_str = range_str.trim();
     // Remove "bytes=" prefix
     let range_part = range_str
@@ -291,13 +295,16 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
         let start_str = start_str.trim();
         let end_str = end_str.trim();
 
-        let start = if start_str.is_empty() {
-            // Suffix range like "-500" (last 500 bytes)
+        if start_str.is_empty() {
+            // Suffix range like "-500" (last 500 bytes).
             let suffix_len: u64 = end_str.parse().map_err(|_| AppError::InvalidRange)?;
-            file_size.saturating_sub(suffix_len)
-        } else {
-            start_str.parse().map_err(|_| AppError::InvalidRange)?
-        };
+            if suffix_len == 0 {
+                return Err(AppError::InvalidRange);
+            }
+            return Ok((file_size.saturating_sub(suffix_len), file_size - 1));
+        }
+
+        let start = start_str.parse().map_err(|_| AppError::InvalidRange)?;
 
         let end = if end_str.is_empty() {
             // Range like "500-" (from 500 to end)
@@ -315,6 +322,41 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
         Ok((start, end))
     } else {
         Err(AppError::InvalidRange)
+    }
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    #[test]
+    fn empty_files_reject_every_range_without_underflowing() {
+        for range in ["bytes=0-", "bytes=-1", "bytes=0-0"] {
+            assert!(matches!(
+                parse_range_header(range, 0),
+                Err(AppError::InvalidRange)
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_valid_bounded_open_and_suffix_ranges() {
+        assert_eq!(parse_range_header("bytes=2-5", 10).unwrap(), (2, 5));
+        assert_eq!(parse_range_header("bytes=7-", 10).unwrap(), (7, 9));
+        assert_eq!(parse_range_header("bytes=-3", 10).unwrap(), (7, 9));
+        assert_eq!(parse_range_header("bytes=7-99", 10).unwrap(), (7, 9));
+    }
+
+    #[test]
+    fn rejects_ranges_outside_the_file() {
+        assert!(matches!(
+            parse_range_header("bytes=10-", 10),
+            Err(AppError::InvalidRange)
+        ));
+        assert!(matches!(
+            parse_range_header("bytes=8-3", 10),
+            Err(AppError::InvalidRange)
+        ));
     }
 }
 

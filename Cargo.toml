@@ -48,6 +48,7 @@ toml_edit = "0.25"
 serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
+ipnet = "2.11"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream"] }
 audiotags = "0.5"
 quick-xml = "0.41"
@@ -68,6 +69,7 @@ windows = { version = "0.62", features = [
 [dev-dependencies]
 tempfile = "3.27"
 futures-util = "0.3"
+tower = { version = "0.5", features = ["util"] }
 
 [profile.release]
 opt-level = 3

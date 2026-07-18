@@ -1,7 +1,13 @@
-use axum::extract::{Query, State};
+use axum::{
+    body::Body,
+    extract::{Query, State},
+    http::{Request, StatusCode},
+    response::IntoResponse,
+};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tempfile::tempdir;
+use tempfile::{tempdir, TempDir};
+use tower::ServiceExt;
 
 use vuio::config::AppConfig;
 use vuio::database::redb::RedbDatabase;
@@ -10,7 +16,41 @@ use vuio::platform::filesystem::create_platform_filesystem_manager;
 use vuio::platform::PlatformInfo;
 use vuio::state::AppState;
 use vuio::web::diagnostics::WebHandlerMetrics;
-use vuio::web::mcp::{message_handler, MessageQuery};
+use vuio::web::{
+    create_router,
+    mcp::{message_handler, sse_handler, MessageQuery},
+};
+
+async fn make_test_state() -> (TempDir, AppState) {
+    let temp = tempdir().unwrap();
+    let database = Arc::new(
+        RedbDatabase::new(temp.path().join("security-tests.redb"))
+            .await
+            .unwrap(),
+    );
+    database.initialize().await.unwrap();
+    let config = Arc::new(AppConfig::default());
+
+    let state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
+        config,
+        database,
+        platform_info: Arc::new(PlatformInfo::detect().await.unwrap()),
+        filesystem_manager: Arc::from(create_platform_filesystem_manager()),
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        web_metrics: Arc::new(WebHandlerMetrics::new()),
+        lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        log_file_path: temp.path().join("vuio.log"),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        discovered_tvs: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+    };
+    (temp, state)
+}
 
 #[tokio::test]
 async fn test_mcp_initialize_and_tools_list() {
@@ -283,4 +323,120 @@ async fn test_mcp_initialize_and_tools_list() {
     let tracks_data: serde_json::Value = serde_json::from_str(tracks_text).unwrap();
     assert_eq!(tracks_data["tracks_count"], 1);
     assert_eq!(tracks_data["tracks"][0]["filename"], "song.mp3");
+}
+
+#[tokio::test]
+async fn sse_disconnect_removes_client_immediately() {
+    let (_temp, state) = make_test_state().await;
+    let response = sse_handler(State(state.clone())).await.into_response();
+    assert_eq!(state.mcp_clients.lock().await.len(), 1);
+
+    drop(response);
+    tokio::time::timeout(std::time::Duration::from_secs(1), async {
+        loop {
+            if state.mcp_clients.lock().await.is_empty() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("disconnected SSE client was not removed");
+}
+
+#[tokio::test]
+async fn blocked_mcp_send_does_not_hold_clients_mutex() {
+    let (_temp, state) = make_test_state().await;
+    let (sender, receiver) = tokio::sync::mpsc::channel(1);
+    sender.send("occupied".to_string()).await.unwrap();
+    state
+        .mcp_clients
+        .lock()
+        .await
+        .insert("blocked-client".to_string(), sender);
+
+    let handler_state = state.clone();
+    let task = tokio::spawn(async move {
+        message_handler(
+            State(handler_state),
+            Query(MessageQuery {
+                client_id: "blocked-client".to_string(),
+            }),
+            r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#.to_string(),
+        )
+        .await
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(!task.is_finished(), "MCP send did not block on the full channel");
+
+    let guard = tokio::time::timeout(
+        std::time::Duration::from_millis(200),
+        state.mcp_clients.lock(),
+    )
+    .await
+    .expect("MCP clients mutex was held across the channel send");
+    drop(guard);
+
+    drop(receiver);
+    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("MCP handler remained blocked")
+        .unwrap();
+}
+
+#[tokio::test]
+async fn post_endpoints_enforce_tiered_body_limits() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state);
+
+    let soap_response = router
+        .clone()
+        .oneshot(
+            Request::post("/control/ContentDirectory")
+                .header("content-type", "text/xml")
+                .body(Body::from(vec![b'x'; 1024 * 1024 + 1]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(soap_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    for path in ["/mcp/message?client_id=test", "/api/cast/playlist"] {
+        let response = router
+            .clone()
+            .oneshot(
+                Request::post(path)
+                    .header("content-type", "application/json")
+                    .body(Body::from(vec![b'x'; 256 * 1024 + 1]))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+    }
+
+    let small_mcp = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp/message?client_id=missing")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(small_mcp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+
+    let small_soap = router
+        .oneshot(
+            Request::post("/control/ConnectionManager")
+                .header("content-type", "text/xml")
+                .body(Body::from("<u:GetProtocolInfo/>"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(small_soap.status(), StatusCode::PAYLOAD_TOO_LARGE);
 }

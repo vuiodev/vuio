@@ -44,6 +44,9 @@ pub struct NetworkConfig {
     pub interface_selection: NetworkInterfaceConfig,
     pub multicast_ttl: u8,
     pub announce_interval_seconds: u64,
+    /// Additional IP networks permitted as UPnP event callback destinations.
+    #[serde(default)]
+    pub upnp_callback_allowed_networks: Vec<String>,
 }
 
 /// Network interface selection configuration
@@ -159,6 +162,15 @@ impl AppConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid VUIO_ANNOUNCE_INTERVAL")?,
+            upnp_callback_allowed_networks: std::env::var(
+                "VUIO_UPNP_CALLBACK_ALLOWED_NETWORKS",
+            )
+            .unwrap_or_default()
+            .split(',')
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .collect(),
         };
 
         let media_dirs = std::env::var("VUIO_MEDIA_DIRS")
@@ -343,6 +355,7 @@ impl AppConfig {
                 interface_selection: NetworkInterfaceConfig::Auto,
                 multicast_ttl: Self::get_platform_default_multicast_ttl(&platform_config),
                 announce_interval_seconds: Self::get_platform_default_announce_interval(&platform_config),
+                upnp_callback_allowed_networks: Vec::new(),
             },
             media: MediaConfig {
                 directories: monitored_dirs,

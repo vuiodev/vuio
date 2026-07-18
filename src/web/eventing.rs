@@ -2,16 +2,18 @@
 
 use crate::state::AppState;
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{header, HeaderMap, Method, StatusCode},
     response::IntoResponse,
 };
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
 use tracing::warn;
 
 /// Handle UPnP eventing subscription requests for ContentDirectory service
 pub async fn content_directory_subscribe(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     method: Method,
 ) -> impl IntoResponse {
@@ -64,7 +66,11 @@ pub async fn content_directory_subscribe(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let Some(callback_url) = validate_upnp_callback(raw_callback) else {
+    let Some(callback_url) = validate_upnp_callback(
+        raw_callback,
+        peer.ip(),
+        &state.config.network.upnp_callback_allowed_networks,
+    ) else {
         warn!("Rejected unsafe UPnP callback URL: {}", raw_callback);
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -98,7 +104,36 @@ pub async fn content_directory_subscribe(
         .into_response()
 }
 
-fn validate_upnp_callback(raw: &str) -> Option<String> {
+fn normalize_ip(address: IpAddr) -> IpAddr {
+    match address {
+        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
+        address => address,
+    }
+}
+
+fn is_forbidden_callback_address(address: IpAddr) -> bool {
+    match address {
+        IpAddr::V4(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_link_local()
+                || ip.is_multicast()
+                || ip == Ipv4Addr::BROADCAST
+        }
+        IpAddr::V6(ip) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || ip.is_unicast_link_local()
+        }
+    }
+}
+
+fn validate_upnp_callback(
+    raw: &str,
+    peer_ip: IpAddr,
+    allowed_networks: &[String],
+) -> Option<String> {
     let candidate = raw
         .split('>')
         .next()
@@ -109,12 +144,22 @@ fn validate_upnp_callback(raw: &str) -> Option<String> {
     if url.scheme() != "http" {
         return None;
     }
-    let address = url.host_str()?.parse::<std::net::IpAddr>().ok()?;
-    let allowed = match address {
-        std::net::IpAddr::V4(ip) => ip.is_private() || ip.is_link_local(),
-        std::net::IpAddr::V6(ip) => ip.is_unique_local() || ip.is_unicast_link_local(),
-    };
-    (allowed && !address.is_loopback() && !address.is_unspecified()).then(|| url.to_string())
+    if !url.username().is_empty() || url.password().is_some() || url.port() == Some(0) {
+        return None;
+    }
+
+    let address = normalize_ip(url.host_str()?.parse::<IpAddr>().ok()?);
+    if is_forbidden_callback_address(address) {
+        return None;
+    }
+
+    let peer_ip = normalize_ip(peer_ip);
+    let explicitly_allowed = allowed_networks
+        .iter()
+        .filter_map(|network| network.parse::<ipnet::IpNet>().ok())
+        .any(|network| network.contains(&address));
+
+    (address == peer_ip || explicitly_allowed).then(|| url.to_string())
 }
 
 async fn send_event_notification(
@@ -138,6 +183,7 @@ async fn send_event_notification(
 
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(3))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
     {
         Ok(client) => client,
@@ -224,12 +270,52 @@ mod tests {
     use super::*;
 
     #[test]
-    fn upnp_callback_policy_accepts_lan_and_rejects_ssrf_targets() {
-        assert!(validate_upnp_callback("<http://192.168.1.25:1234/events>").is_some());
-        assert!(validate_upnp_callback("<http://169.254.10.2/events>").is_some());
-        assert!(validate_upnp_callback("http://127.0.0.1/events").is_none());
-        assert!(validate_upnp_callback("https://192.168.1.25/events").is_none());
-        assert!(validate_upnp_callback("http://example.com/events").is_none());
-        assert!(validate_upnp_callback("http://8.8.8.8/events").is_none());
+    fn upnp_callback_policy_accepts_peer_and_explicit_networks() {
+        let peer = "192.168.1.25".parse().unwrap();
+        assert!(validate_upnp_callback("<http://192.168.1.25:1234/events>", peer, &[]).is_some());
+        assert!(validate_upnp_callback("http://192.168.1.26/events", peer, &[]).is_none());
+        assert!(validate_upnp_callback(
+            "http://192.168.1.26/events",
+            peer,
+            &["192.168.1.0/24".to_string()]
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn upnp_callback_policy_rejects_ssrf_targets_and_hostnames() {
+        let peer = "169.254.169.254".parse().unwrap();
+        assert!(validate_upnp_callback("http://169.254.169.254/events", peer, &[]).is_none());
+        assert!(validate_upnp_callback(
+            "http://127.0.0.1/events",
+            "127.0.0.1".parse().unwrap(),
+            &[]
+        )
+        .is_none());
+        assert!(validate_upnp_callback(
+            "https://192.168.1.25/events",
+            "192.168.1.25".parse().unwrap(),
+            &[]
+        )
+        .is_none());
+        assert!(validate_upnp_callback("http://example.com/events", peer, &[]).is_none());
+        assert!(validate_upnp_callback(
+            "http://224.0.0.1/events",
+            "224.0.0.1".parse().unwrap(),
+            &[]
+        )
+        .is_none());
+        assert!(validate_upnp_callback(
+            "http://[fe80::1]/events",
+            "fe80::1".parse().unwrap(),
+            &[]
+        )
+        .is_none());
+        assert!(validate_upnp_callback(
+            "http://user:secret@192.168.1.25/events",
+            "192.168.1.25".parse().unwrap(),
+            &[]
+        )
+        .is_none());
     }
 }

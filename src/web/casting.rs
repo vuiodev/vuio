@@ -2,6 +2,7 @@
 
 use crate::{database::PlaylistRepository, state::AppState};
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
+use tracing::error;
 
 #[derive(serde::Deserialize)]
 pub struct ApiCastPlaylistRequest {
@@ -17,10 +18,13 @@ pub async fn api_list_tvs() -> impl IntoResponse {
             let names: Vec<String> = tvs.into_iter().map(|tv| tv.friendly_name).collect();
             (StatusCode::OK, axum::Json(names))
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(vec![format!("Discovery error: {}", e)]),
-        ),
+        Err(e) => {
+            error!(error = %e, "TV discovery request failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(vec!["Internal Server Error".to_string()]),
+            )
+        }
     }
 }
 
@@ -33,9 +37,10 @@ pub async fn api_cast_playlist(
     let playlists = match state.database.get_playlists().await {
         Ok(list) => list,
         Err(e) => {
+            error!(error = %e, "Failed to list playlists for web casting");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": format!("Database error: {}", e) })),
+                axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
             )
         }
     };
@@ -53,11 +58,10 @@ pub async fn api_cast_playlist(
     let playlist_id = match state.database.create_playlist(&playlist_name, None).await {
         Ok(id) => id,
         Err(e) => {
+            error!(error = %e, "Failed to create web-cast playlist");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(
-                    serde_json::json!({ "error": format!("Failed to create playlist: {}", e) }),
-                ),
+                axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
             )
         }
     };
@@ -75,9 +79,10 @@ pub async fn api_cast_playlist(
         .batch_add_to_playlist(playlist_id, &tracks_to_add)
         .await
     {
+        error!(error = %e, playlist_id, "Failed to add tracks to web-cast playlist");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": format!("Failed to add tracks: {}", e) })),
+            axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
         );
     }
 

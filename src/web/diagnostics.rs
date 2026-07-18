@@ -215,10 +215,7 @@ pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse 
             (
                 StatusCode::SERVICE_UNAVAILABLE,
                 [(header::CONTENT_TYPE, "application/json")],
-                format!(
-                    r#"{{"status":"unhealthy","error":{}}}"#,
-                    serde_json::to_string(&e.to_string()).unwrap_or_default()
-                ),
+                r#"{"status":"unhealthy"}"#.to_string(),
             )
         }
     }
@@ -376,7 +373,7 @@ pub async fn get_logs_handler(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                format!("Failed to read log file: {}", e),
+                "Internal Server Error".to_string(),
             )
         }
     }

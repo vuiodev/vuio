@@ -336,6 +336,7 @@ pub async fn sse_handler(
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let client_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<String>(64);
+    let disconnect_sender = tx.clone();
 
     // Register this client
     {
@@ -364,14 +365,17 @@ pub async fn sse_handler(
     })
     .chain(rx_stream);
 
-    // Spawn a cleanup task that fires when the stream is dropped
+    // Sender::closed resolves as soon as Axum drops the SSE receiver, so stale
+    // clients are removed immediately rather than by a coarse timeout.
     tokio::spawn(async move {
-        // Wait a bit to detect disconnection — this is cleaned up when
-        // the channel sender is dropped by the client map removal
-        tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+        disconnect_sender.closed().await;
         let mut clients = state_for_cleanup.mcp_clients.lock().await;
-        if clients.remove(&client_id_for_cleanup).is_some() {
-            info!("MCP client disconnected (timeout): {}", client_id_for_cleanup);
+        let is_same_connection = clients
+            .get(&client_id_for_cleanup)
+            .is_some_and(|sender| sender.same_channel(&disconnect_sender));
+        if is_same_connection {
+            clients.remove(&client_id_for_cleanup);
+            info!("MCP client disconnected: {}", client_id_for_cleanup);
         }
     });
 
@@ -418,17 +422,25 @@ pub async fn message_handler(
     // Send the response back through the SSE channel
     let response_json = serde_json::to_string(&response).unwrap_or_default();
     let mut sent_via_sse = false;
-    {
+    let sender = {
         let clients = state.mcp_clients.lock().await;
-        if let Some(tx) = clients.get(client_id) {
-            if let Err(e) = tx.send(response_json).await {
-                warn!("Failed to send MCP response to client {}: {}", client_id, e);
-            } else {
-                sent_via_sse = true;
+        clients.get(client_id).cloned()
+    };
+    if let Some(tx) = sender {
+        if let Err(e) = tx.send(response_json).await {
+            warn!("Failed to send MCP response to client {}: {}", client_id, e);
+            let mut clients = state.mcp_clients.lock().await;
+            if clients
+                .get(client_id)
+                .is_some_and(|sender| sender.same_channel(&tx))
+            {
+                clients.remove(client_id);
             }
         } else {
-            warn!("MCP client {} not found in client map", client_id);
+            sent_via_sse = true;
         }
+    } else {
+        warn!("MCP client {} not found in client map", client_id);
     }
 
     if sent_via_sse {

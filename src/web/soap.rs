@@ -298,7 +298,7 @@ impl ContentDirectoryHandler {
                     Ok(Err(error)) => {
                         error!("ReDB browse failed for {}: {}", params.object_id, error);
                         state.web_metrics.record_error();
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "Error browsing content")
+                        return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
                             .into_response();
                     }
                     Err(_) => {
@@ -905,7 +905,7 @@ where
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    format!("Error browsing {}", category_name),
+                    "Internal Server Error",
                 )
                     .into_response()
             }
@@ -1014,7 +1014,7 @@ where
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                    format!("Error browsing {} tracks", category_name),
+                    "Internal Server Error",
                 )
                     .into_response()
             }

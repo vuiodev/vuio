@@ -71,6 +71,12 @@ impl ConfigValidator {
             return Err(anyhow!("Announce interval must be greater than 0 seconds"));
         }
 
+        for network in &config.network.upnp_callback_allowed_networks {
+            network
+                .parse::<ipnet::IpNet>()
+                .with_context(|| format!("Invalid UPnP callback network CIDR: {network}"))?;
+        }
+
         // Validate interface selection
         match &config.network.interface_selection {
             NetworkInterfaceConfig::Specific(interface) => {
@@ -701,7 +707,19 @@ backup_enabled = true
         assert_eq!(config.media.directories[0].validation_mode, ValidationMode::Strict);
         assert_eq!(config.media.directories[1].validation_mode, ValidationMode::Warn);
         assert_eq!(config.media.directories[2].validation_mode, ValidationMode::Skip);
+        assert!(config.network.upnp_callback_allowed_networks.is_empty());
         
         Ok(())
+    }
+
+    #[test]
+    fn callback_allowlist_requires_valid_cidr_notation() {
+        let mut config = AppConfig::default_for_platform();
+        config.network.upnp_callback_allowed_networks = vec!["192.168.1.0/24".to_string()];
+        assert!(ConfigValidator::validate_network_config(&config).is_ok());
+
+        config.network.upnp_callback_allowed_networks = vec!["192.168.1.999/24".to_string()];
+        let error = ConfigValidator::validate_network_config(&config).unwrap_err();
+        assert!(error.to_string().contains("Invalid UPnP callback network CIDR"));
     }
 }

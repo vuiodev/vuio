@@ -881,6 +881,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_incompatible_schema_preserves_database_contents() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("old-schema.redb");
+        {
+            let raw = Database::create(&path).unwrap();
+            let write = raw.begin_write().unwrap();
+            {
+                let mut files = write.open_table(FILES_TABLE).unwrap();
+                files.insert(42, &[1_u8, 2, 3][..]).unwrap();
+                let mut metadata = write.open_table(METADATA_TABLE).unwrap();
+                metadata.insert("schema_version", SCHEMA_VERSION - 1).unwrap();
+            }
+            write.commit().unwrap();
+        }
+
+        assert!(RedbDatabase::new(path.clone()).await.is_err());
+        assert!(path.exists());
+
+        let raw = Database::open(&path).unwrap();
+        let read = raw.begin_read().unwrap();
+        let files = read.open_table(FILES_TABLE).unwrap();
+        assert_eq!(files.get(42).unwrap().unwrap().value(), &[1_u8, 2, 3]);
+        let metadata = read.open_table(METADATA_TABLE).unwrap();
+        assert_eq!(
+            metadata.get("schema_version").unwrap().unwrap().value(),
+            SCHEMA_VERSION - 1
+        );
+    }
+
+    #[tokio::test]
     async fn test_redb_database_bulk_operations() {
         let temp_dir = tempdir().unwrap();
         let db_path = temp_dir.path().join("test_bulk.redb");

@@ -96,4 +96,20 @@ mod tests {
             assert_eq!(indexed.mime_type, mime_type);
         }
     }
+
+    #[test]
+    fn failed_database_is_quarantined_without_changing_its_contents() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("media.redb");
+        let original = b"unreadable database data";
+        std::fs::write(&path, original).unwrap();
+
+        let quarantine = preserve_failed_database(&path).unwrap().unwrap();
+
+        assert!(!path.exists());
+        assert_eq!(std::fs::read(&quarantine).unwrap(), original);
+        let name = quarantine.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with("media.failed-"));
+        assert!(name.ends_with(".redb"));
+    }
 }

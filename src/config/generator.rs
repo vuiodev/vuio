@@ -78,6 +78,11 @@ impl ConfigGenerator {
         
         network_table["multicast_ttl"] = value(config.network.multicast_ttl as i64);
         network_table["announce_interval_seconds"] = value(config.network.announce_interval_seconds as i64);
+        let mut callback_networks = Array::new();
+        for network in &config.network.upnp_callback_allowed_networks {
+            callback_networks.push(network);
+        }
+        network_table["upnp_callback_allowed_networks"] = value(callback_networks);
         
         Ok(())
     }
@@ -332,6 +337,7 @@ mod tests {
                 interface_selection: NetworkInterfaceConfig::Specific("eth0".to_string()),
                 multicast_ttl: 8,
                 announce_interval_seconds: 60,
+                upnp_callback_allowed_networks: vec!["192.168.1.0/24".to_string()],
             },
             media: MediaConfig {
                 directories: vec![
@@ -369,6 +375,7 @@ mod tests {
         assert!(toml_content.contains("interface_selection = \"eth0\""));
         assert!(toml_content.contains("multicast_ttl = 8"));
         assert!(toml_content.contains("announce_interval_seconds = 60"));
+        assert!(toml_content.contains("upnp_callback_allowed_networks = [\"192.168.1.0/24\"]"));
         assert!(toml_content.contains("scan_on_startup = false"));
         assert!(toml_content.contains("watch_for_changes = false"));
         assert!(toml_content.contains("cleanup_deleted_files = false"));
@@ -429,6 +436,7 @@ mod tests {
                 interface_selection: NetworkInterfaceConfig::Auto,
                 multicast_ttl: 4,
                 announce_interval_seconds: 30,
+                upnp_callback_allowed_networks: Vec::new(),
             },
             media: MediaConfig {
                 directories: vec![

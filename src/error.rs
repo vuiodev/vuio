@@ -51,36 +51,32 @@ pub enum AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            AppError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::InvalidRange => (StatusCode::RANGE_NOT_SATISFIABLE, self.to_string()),
-            AppError::InvalidInput(_) => (StatusCode::BAD_REQUEST, self.to_string()),
-            AppError::Platform(platform_err) => {
-                // Use platform-specific error messages with troubleshooting info
-                (StatusCode::INTERNAL_SERVER_ERROR, platform_err.user_message())
-            }
-            AppError::Database(db_err) => {
-                // Include database recovery information
-                let recovery_info = db_err.recovery_strategy();
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("{}\n\nRecovery: {}", db_err, recovery_info))
-            }
-            AppError::Configuration(config_err) => {
-                // Include configuration solution guidance
-                let solution = config_err.solution_guide();
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("{}\n\nSolution: {}", config_err, solution))
-            }
-            AppError::MediaScan(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("Media scanning failed: {}. Try rescanning or check directory permissions.", msg))
-            }
-            AppError::NetworkDiscovery(msg) => {
-                (StatusCode::SERVICE_UNAVAILABLE, format!("Network discovery failed: {}. Check network configuration and firewall settings.", msg))
-            }
-            AppError::FileServing(msg) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, format!("File serving error: {}. Check file permissions and disk space.", msg))
-            }
-            AppError::Internal(_) | AppError::Io(_) | AppError::Http(_) | AppError::Watcher(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
-            }
+        let status = match &self {
+            AppError::NotFound => StatusCode::NOT_FOUND,
+            AppError::InvalidRange => StatusCode::RANGE_NOT_SATISFIABLE,
+            AppError::InvalidInput(_) => StatusCode::BAD_REQUEST,
+            AppError::NetworkDiscovery(_) => StatusCode::SERVICE_UNAVAILABLE,
+            AppError::Platform(_)
+            | AppError::Database(_)
+            | AppError::Configuration(_)
+            | AppError::MediaScan(_)
+            | AppError::FileServing(_)
+            | AppError::Internal(_)
+            | AppError::Io(_)
+            | AppError::Http(_)
+            | AppError::Watcher(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+
+        if status.is_server_error() {
+            tracing::error!(error = ?self, %status, "HTTP request failed");
+        }
+
+        let message = match &self {
+            AppError::NotFound => "Not Found".to_string(),
+            AppError::InvalidRange => "Invalid Range Header".to_string(),
+            AppError::InvalidInput(_) => self.to_string(),
+            AppError::NetworkDiscovery(_) => "Service Unavailable".to_string(),
+            _ => "Internal Server Error".to_string(),
         };
 
         (status, message).into_response()
@@ -254,6 +250,7 @@ impl AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::to_bytes;
     use crate::platform::{WindowsError, DatabaseError, ConfigurationError};
     use std::path::PathBuf;
     
@@ -298,6 +295,29 @@ mod tests {
         assert!(app_error.is_recoverable());
         let actions = app_error.recovery_actions();
         assert!(actions.iter().any(|action| action.contains("default configuration")));
+    }
+
+    #[tokio::test]
+    async fn server_error_responses_do_not_expose_internal_details() {
+        let response = AppError::Io(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "secret path: /private/media",
+        ))
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"Internal Server Error");
+    }
+
+    #[tokio::test]
+    async fn service_unavailable_responses_are_stable() {
+        let response = AppError::NetworkDiscovery("private network details".to_string())
+            .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(&body[..], b"Service Unavailable");
     }
     
 

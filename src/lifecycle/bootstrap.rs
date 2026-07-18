@@ -333,7 +333,15 @@ fn preserve_failed_database(db_path: &std::path::Path) -> anyhow::Result<Option<
         return Ok(None);
     }
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
-    let backup_path = db_path.with_extension(format!("failed-{timestamp}.redb"));
+    let quarantine_id = uuid::Uuid::new_v4();
+    let backup_path =
+        db_path.with_extension(format!("failed-{timestamp}-{quarantine_id}.redb"));
+    if backup_path.try_exists()? {
+        anyhow::bail!(
+            "Refusing to overwrite existing database quarantine file {}",
+            backup_path.display()
+        );
+    }
     std::fs::rename(db_path, &backup_path).with_context(|| {
         format!(
             "Failed to preserve unusable database as {}",
