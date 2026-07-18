@@ -53,21 +53,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
         }
 
         // Scan the file system for current files
-        let mut fs_files = self
+        let fs_files = self
             .filesystem_manager
             .scan_media_directory(&canonical_dir)
             .await
             .map_err(|e| anyhow::anyhow!("File system scan failed: {}", e))?;
-
-        // Apply canonical path normalization to all scanned files
-        for file in &mut fs_files {
-            if let Ok(canonical_path) = self.filesystem_manager.get_canonical_path(&file.path) {
-                file.path = PathBuf::from(canonical_path);
-            } else {
-                // Fallback to basic normalization if canonical fails
-                file.path = self.filesystem_manager.normalize_path(&file.path);
-            }
-        }
 
         Ok(fs_files)
     }
@@ -111,18 +101,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 .scan_media_directory(&current_dir)
                 .await
             {
-                Ok(mut fs_files) => {
-                    // Apply canonical path normalization to all scanned files
-                    for file in &mut fs_files {
-                        if let Ok(canonical_path) =
-                            self.filesystem_manager.get_canonical_path(&file.path)
-                        {
-                            file.path = PathBuf::from(canonical_path);
-                        } else {
-                            // Fallback to basic normalization if canonical fails
-                            file.path = self.filesystem_manager.normalize_path(&file.path);
-                        }
-                    }
+                Ok(fs_files) => {
                     all_files.extend(fs_files);
                 }
                 Err(e) => warn!("Failed to scan directory {}: {}", current_dir.display(), e),
@@ -203,13 +182,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                         .path
                         .parent()
                         .unwrap_or_else(|| std::path::Path::new(""));
-                    // Use canonical normalization for consistent comparison
-                    let canonical_file_parent =
-                        match self.filesystem_manager.get_canonical_path(file_parent) {
-                            Ok(canonical) => PathBuf::from(canonical),
-                            Err(_) => self.filesystem_manager.normalize_path(file_parent),
-                        };
-                    canonical_file_parent == canonical_dir
+                    file_parent == canonical_dir
                 })
                 .cloned()
                 .collect()
@@ -220,32 +193,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
         };
 
         // Scan the file system for current files
-        let mut current_files = self
+        let current_files = self
             .filesystem_manager
             .scan_media_directory(&canonical_dir)
             .await
             .map_err(|e| anyhow::anyhow!("File system scan failed: {}", e))?;
-
-        // Apply canonical path normalization to all scanned files before database operations
-        for file in &mut current_files {
-            let original_path = file.path.clone();
-            if let Ok(canonical_path) = self.filesystem_manager.get_canonical_path(&file.path) {
-                file.path = PathBuf::from(canonical_path);
-                tracing::debug!(
-                    "Path normalization: '{}' -> '{}'",
-                    original_path.display(),
-                    file.path.display()
-                );
-            } else {
-                // Fallback to basic normalization if canonical fails
-                file.path = self.filesystem_manager.normalize_path(&file.path);
-                tracing::debug!(
-                    "Path normalization (fallback): '{}' -> '{}'",
-                    original_path.display(),
-                    file.path.display()
-                );
-            }
-        }
 
         // Perform incremental update
         self.perform_incremental_update(&canonical_dir, existing_files, current_files)
@@ -262,50 +214,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
     ) -> Result<ScanResult> {
         let mut result = ScanResult::new();
 
-        // Cache to store resolved canonical paths and prevent redundant syscalls
-        let mut canonical_path_cache: std::collections::HashMap<PathBuf, String> =
-            std::collections::HashMap::new();
-        let mut get_cached_canonical = |path: &PathBuf| -> PathBuf {
-            if let Some(canonical) = canonical_path_cache.get(path) {
-                return PathBuf::from(canonical);
-            }
-            match self.filesystem_manager.get_canonical_path(path) {
-                Ok(canonical) => {
-                    canonical_path_cache.insert(path.clone(), canonical.clone());
-                    PathBuf::from(canonical)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to get canonical path for {}: {}", path.display(), e);
-                    self.filesystem_manager.normalize_path(path)
-                }
-            }
-        };
-
-        // Create lookup maps for efficient comparison with pre-allocated capacity
-        // Use both original and normalized paths to handle legacy database entries
-        let mut existing_by_original: std::collections::HashMap<PathBuf, MediaFile> =
-            std::collections::HashMap::with_capacity(existing_files.len());
-        let mut existing_by_normalized: std::collections::HashMap<PathBuf, MediaFile> =
-            std::collections::HashMap::with_capacity(existing_files.len());
-
-        for existing_file in existing_files {
-            let canonical_path = get_cached_canonical(&existing_file.path);
-            existing_by_original.insert(existing_file.path.clone(), existing_file.clone());
-            existing_by_normalized.insert(canonical_path, existing_file);
-        }
-
-        // Current files paths - normalize for consistent comparison with pre-allocated capacity
-        let mut current_normalized: std::collections::HashMap<PathBuf, MediaFile> =
-            std::collections::HashMap::with_capacity(current_files.len());
-        for f in &current_files {
-            let canonical_path = get_cached_canonical(&f.path);
-
-            // Create a normalized version of the MediaFile for database storage
-            let mut normalized_file = f.clone();
-            normalized_file.path = canonical_path.clone();
-
-            current_normalized.insert(canonical_path, normalized_file);
-        }
+        let existing_by_normalized: std::collections::HashMap<PathBuf, MediaFile> = existing_files
+            .into_iter()
+            .map(|file| (file.path.clone(), file))
+            .collect();
+        let current_normalized: std::collections::HashMap<PathBuf, MediaFile> = current_files
+            .into_iter()
+            .map(|file| (file.path.clone(), file))
+            .collect();
 
         let current_paths: HashSet<PathBuf> = current_normalized.keys().cloned().collect();
 
@@ -316,10 +232,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         // Process current files - collect new ones and changed ones for bulk operations
         for (normalized_current_path, current_file) in &current_normalized {
-            // Try to find existing file by normalized path first, then by original path
-            let existing_file = existing_by_normalized
-                .get(normalized_current_path)
-                .or_else(|| existing_by_original.get(&current_file.path));
+            let existing_file = existing_by_normalized.get(normalized_current_path);
 
             match existing_file {
                 Some(existing_file) => {
@@ -342,24 +255,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
                         files_to_update.push(updated_file);
                     } else {
-                        // Check if the existing file path needs canonical normalization
-                        let existing_canonical = get_cached_canonical(&existing_file.path);
-
-                        if existing_file.path != existing_canonical {
-                            // Path needs canonical normalization - update it in the database
-                            tracing::debug!(
-                                "Normalizing path to canonical format: '{}' -> '{}'",
-                                existing_file.path.display(),
-                                existing_canonical.display()
-                            );
-                            let mut normalized_existing = existing_file.clone();
-                            normalized_existing.path = existing_canonical;
-                            normalized_existing.updated_at = SystemTime::now();
-
-                            files_to_update.push(normalized_existing);
-                        } else {
-                            result.unchanged_files.push(existing_file.clone());
-                        }
+                        result.unchanged_files.push(existing_file.clone());
                     }
                 }
                 None => {
@@ -371,7 +267,6 @@ impl<D: DatabaseManager> MediaScanner<D> {
         }
 
         // Find files that were removed from the file system
-        // Check both normalized and original paths to handle legacy entries
         for (normalized_existing_path, existing_file) in existing_by_normalized {
             if !current_paths.contains(&normalized_existing_path) {
                 // File was removed from file system, add to bulk removal list
@@ -398,7 +293,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             }
             let insert_ids = self
                 .database_manager
-                .bulk_store_media_files(&files_to_insert)
+                .bulk_store_canonical_media_files(&files_to_insert)
                 .await?;
 
             // Update result with inserted files and their IDs
@@ -417,7 +312,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 files_to_update.len()
             );
             self.database_manager
-                .bulk_update_media_files(&files_to_update)
+                .bulk_update_canonical_media_files(&files_to_update)
                 .await?;
             result.updated_files.extend(files_to_update);
         }
@@ -535,13 +430,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             while let Some(result) = stream.next().await {
                 match result {
                     Ok(file) => {
-                        // Normalize path for consistent lookup
-                        let canonical = match self.filesystem_manager.get_canonical_path(&file.path)
-                        {
-                            Ok(c) => PathBuf::from(c),
-                            Err(_) => self.filesystem_manager.normalize_path(&file.path),
-                        };
-                        map.insert(canonical, file);
+                        map.insert(file.path.clone(), file);
                     }
                     Err(e) => {
                         warn!("Error reading file from database: {}", e);
@@ -593,15 +482,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let mut processed = 0;
 
         for path in file_paths {
-            // Normalize path for consistent storage
-            let canonical_path = match self.filesystem_manager.get_canonical_path(&path) {
-                Ok(c) => PathBuf::from(c),
-                Err(_) => self.filesystem_manager.normalize_path(&path),
-            };
-            current_paths.insert(canonical_path.clone());
+            // jwalk descendants inherit the already-canonical root. It does not
+            // follow file symlinks, so ordinary entries require no syscall here.
+            current_paths.insert(path.clone());
 
             // Create MediaFile from path
-            let current_file = match self.create_media_file_from_path(&canonical_path).await {
+            let current_file = match self.create_media_file_from_path(&path).await {
                 Ok(f) => f,
                 Err(e) => {
                     debug!("Failed to create MediaFile for {}: {}", path.display(), e);
@@ -614,7 +500,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             };
 
             // Check if file exists in database
-            if let Some(existing) = existing_files_map.get(&canonical_path) {
+            if let Some(existing) = existing_files_map.get(&path) {
                 if self.file_needs_update(existing, &current_file) {
                     let mut updated = current_file;
                     updated.id = existing.id;
@@ -640,7 +526,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 );
                 let ids = self
                     .database_manager
-                    .bulk_store_media_files(&files_to_insert)
+                    .bulk_store_canonical_media_files(&files_to_insert)
                     .await?;
                 for (i, mut file) in files_to_insert.drain(..).enumerate() {
                     if let Some(id) = ids.get(i) {
@@ -658,7 +544,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     total_files
                 );
                 self.database_manager
-                    .bulk_update_media_files(&files_to_update)
+                    .bulk_update_canonical_media_files(&files_to_update)
                     .await?;
                 result.updated_files.extend(files_to_update.drain(..));
             }
@@ -674,7 +560,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             info!("Inserting final batch of {} files", files_to_insert.len());
             let ids = self
                 .database_manager
-                .bulk_store_media_files(&files_to_insert)
+                .bulk_store_canonical_media_files(&files_to_insert)
                 .await?;
             for (i, mut file) in files_to_insert.into_iter().enumerate() {
                 if let Some(id) = ids.get(i) {
@@ -687,7 +573,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         if !files_to_update.is_empty() {
             info!("Updating final batch of {} files", files_to_update.len());
             self.database_manager
-                .bulk_update_media_files(&files_to_update)
+                .bulk_update_canonical_media_files(&files_to_update)
                 .await?;
             result.updated_files.extend(files_to_update);
         }
@@ -1071,5 +957,35 @@ mod tests {
         // Verify the optimization is working by checking that we can handle the recursive scan
         // without making individual database queries for each directory
         assert!(second_result.errors.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_scan_resolves_only_symlinked_media_entries() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let media_root = temp.path().join("media");
+        tokio::fs::create_dir(&media_root).await.unwrap();
+        let target = temp.path().join("target.mp4");
+        tokio::fs::write(&target, b"video").await.unwrap();
+        let link = media_root.join("visible-name.mp4");
+        symlink(&target, &link).unwrap();
+
+        let database = Arc::new(
+            RedbDatabase::new(temp.path().join("symlink.redb"))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+        let scanner = MediaScanner::with_filesystem_manager(
+            Box::new(BaseFileSystemManager::new(true)),
+            database,
+        );
+
+        let result = scanner.scan_directory(&media_root).await.unwrap();
+        assert_eq!(result.new_files.len(), 1);
+        assert_eq!(result.new_files[0].filename, "visible-name.mp4");
+        assert_eq!(result.new_files[0].path, target.canonicalize().unwrap());
     }
 }

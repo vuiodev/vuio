@@ -8,7 +8,35 @@ use axum::{
 };
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::atomic::Ordering;
-use tracing::warn;
+use tracing::{info, warn};
+
+/// Publish one externally visible ContentDirectory mutation.
+///
+/// The revision, browse-response invalidation, and UPnP notification are kept
+/// together so callers cannot update one without the others.
+pub async fn publish_content_change(state: &AppState) {
+    let old_id = state
+        .content_update_id
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let new_id = old_id.wrapping_add(1);
+    invalidate_browse_responses(state).await;
+    info!(old_id, new_id, "ContentDirectory revision published");
+
+    let state = state.clone();
+    let cancellation = state.cancellation.clone();
+    let tracker = state.background_tasks.clone();
+    tracker.spawn(async move {
+        tokio::select! {
+            _ = cancellation.cancelled() => {}
+            _ = notify_content_change(&state, new_id) => {}
+        }
+    });
+}
+
+/// Clear cached SOAP browse responses without announcing a content mutation.
+pub async fn invalidate_browse_responses(state: &AppState) {
+    state.browse_cache.lock().await.clear();
+}
 
 /// Handle UPnP eventing subscription requests for ContentDirectory service
 pub async fn content_directory_subscribe(

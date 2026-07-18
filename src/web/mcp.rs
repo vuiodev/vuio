@@ -22,6 +22,7 @@ use crate::{
     state::AppState,
 };
 use crate::tv_control;
+use crate::web::format::format_bytes;
 
 // ──────────────────────────────────────────
 // JSON-RPC 2.0 types
@@ -339,12 +340,6 @@ fn get_tools_list() -> serde_json::Value {
 // ──────────────────────────────────────────
 // SSE Handler — GET /sse
 // ──────────────────────────────────────────
-
-#[derive(Debug, Deserialize)]
-pub struct SseQuery {
-    #[serde(default)]
-    pub client_id: Option<String>,
-}
 
 pub async fn sse_handler(
     State(state): State<AppState>,
@@ -709,7 +704,7 @@ async fn tool_get_server_stats(state: &AppState) -> Result<serde_json::Value, St
         "server_url": format!("http://{}:{}", server_ip, port),
         "total_files": stats.total_files,
         "total_size_bytes": stats.total_size,
-        "total_size_human": format_size(stats.total_size),
+        "total_size_human": format_bytes(stats.total_size),
         "video_files": stats.video_files,
         "audio_files": stats.audio_files,
         "image_files": stats.image_files,
@@ -895,6 +890,7 @@ async fn tool_create_playlist(
         .create_playlist(name, description)
         .await
         .map_err(|e| format!("Database error: {}", e))?;
+    crate::web::eventing::publish_content_change(state).await;
 
     Ok(serde_json::json!({
         "playlist_id": id,
@@ -917,6 +913,9 @@ async fn tool_delete_playlist(
         .delete_playlist(id)
         .await
         .map_err(|e| format!("Database error: {}", e))?;
+    if deleted {
+        crate::web::eventing::publish_content_change(state).await;
+    }
 
     Ok(serde_json::json!({
         "playlist_id": id,
@@ -949,6 +948,9 @@ async fn tool_add_to_playlist(
         .batch_add_to_playlist(playlist_id, &ids_to_add)
         .await
         .map_err(|e| format!("Database error: {}", e))?;
+    if !entry_ids.is_empty() {
+        crate::web::eventing::publish_content_change(state).await;
+    }
 
     Ok(serde_json::json!({
         "playlist_id": playlist_id,
@@ -976,6 +978,9 @@ async fn tool_remove_from_playlist(
         .remove_from_playlist(playlist_id, media_file_id)
         .await
         .map_err(|e| format!("Database error: {}", e))?;
+    if removed {
+        crate::web::eventing::publish_content_change(state).await;
+    }
 
     Ok(serde_json::json!({
         "playlist_id": playlist_id,
@@ -1333,7 +1338,7 @@ fn media_file_to_json(f: &crate::database::MediaFile) -> serde_json::Value {
         "path": f.path.to_string_lossy(),
         "mime_type": f.mime_type,
         "size_bytes": f.size,
-        "size_human": format_size(f.size),
+        "size_human": format_bytes(f.size),
         "duration_seconds": duration_secs,
         "title": f.title,
         "artist": f.artist,
@@ -1352,7 +1357,7 @@ fn media_file_view_to_json(f: &impl MediaFileView) -> serde_json::Value {
         "path": f.path(),
         "mime_type": f.mime_type(),
         "size_bytes": f.size(),
-        "size_human": format_size(f.size()),
+        "size_human": format_bytes(f.size()),
         "duration_seconds": f.duration_secs(),
         "title": f.title(),
         "artist": f.artist(),
@@ -1424,25 +1429,6 @@ async fn query_media_page(
     Ok((files, next_cursor))
 }
 
-fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-    const TB: u64 = GB * 1024;
-
-    if bytes >= TB {
-        format!("{:.1} TB", bytes as f64 / TB as f64)
-    } else if bytes >= GB {
-        format!("{:.1} GB", bytes as f64 / GB as f64)
-    } else if bytes >= MB {
-        format!("{:.1} MB", bytes as f64 / MB as f64)
-    } else if bytes >= KB {
-        format!("{:.1} KB", bytes as f64 / KB as f64)
-    } else {
-        format!("{} B", bytes)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1506,15 +1492,5 @@ mod tests {
         assert!(tool_names.contains(&"get_playlist_tracks"));
         assert!(tool_names.contains(&"cast_playlist_to_renderer"));
         assert_eq!(tool_names.len(), 15);
-    }
-
-    #[test]
-    fn test_format_size() {
-        assert_eq!(format_size(0), "0 B");
-        assert_eq!(format_size(512), "512 B");
-        assert_eq!(format_size(1024), "1.0 KB");
-        assert_eq!(format_size(1_048_576), "1.0 MB");
-        assert_eq!(format_size(1_073_741_824), "1.0 GB");
-        assert_eq!(format_size(1_099_511_627_776), "1.0 TB");
     }
 }

@@ -417,24 +417,7 @@ async fn start_file_monitoring(
 
 /// Increment the content update ID to notify DLNA clients of changes
 async fn increment_content_update_id(app_state: &AppState) {
-    let old_id = app_state
-        .content_update_id
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let new_id = old_id.wrapping_add(1);
-    app_state.browse_cache.lock().await.clear();
-    info!(
-        "Content update ID incremented from {} to {}",
-        old_id, new_id
-    );
-
-    let state = app_state.clone();
-    let cancellation = app_state.cancellation.clone();
-    app_state.background_tasks.spawn(async move {
-        tokio::select! {
-            _ = cancellation.cancelled() => {}
-            _ = crate::web::eventing::notify_content_change(&state, new_id) => {}
-        }
-    });
+    crate::web::eventing::publish_content_change(app_state).await;
 }
 
 /// Atomic application statistics for monitoring

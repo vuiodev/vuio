@@ -26,6 +26,7 @@ pub mod state {
         pub requested_count: u32,
         pub client_profile: crate::web::client::DlnaClientProfile,
         pub content_update_id: u32,
+        pub browse_epoch: u64,
     }
 
     #[derive(Clone)]

@@ -593,6 +593,21 @@ impl RedbDatabase {
         &self,
         files: &[MediaFile],
     ) -> Result<Vec<i64>> {
+        self.bulk_store_media_files_with_mode(files, false).await
+    }
+
+    pub(super) async fn bulk_store_canonical_media_files_impl(
+        &self,
+        files: &[MediaFile],
+    ) -> Result<Vec<i64>> {
+        self.bulk_store_media_files_with_mode(files, true).await
+    }
+
+    async fn bulk_store_media_files_with_mode(
+        &self,
+        files: &[MediaFile],
+        paths_are_canonical: bool,
+    ) -> Result<Vec<i64>> {
         let inputs = files.to_vec();
         let candidate_ids = inputs
             .iter()
@@ -629,7 +644,11 @@ impl RedbDatabase {
                     let mut archive_scratch: rkyv::util::AlignedVec = rkyv::util::AlignedVec::new();
 
                     for (input, candidate_id) in inputs.iter().zip(candidate_ids) {
-                        let file = Self::canonical_file(input)?;
+                        let file = if paths_are_canonical {
+                            input.clone()
+                        } else {
+                            Self::canonical_file(input)?
+                        };
                         let path_str = file.path.to_string_lossy().to_string();
                         let existing_path_id =
                             path_index.get(path_str.as_str())?.map(|v| v.value());
@@ -728,6 +747,17 @@ impl RedbDatabase {
             return Err(anyhow!("cannot update a media file without an ID"));
         }
         self.bulk_store_media_files_impl(files).await?;
+        Ok(())
+    }
+
+    pub(super) async fn bulk_update_canonical_media_files_impl(
+        &self,
+        files: &[MediaFile],
+    ) -> Result<()> {
+        if files.iter().any(|file| file.id.is_none()) {
+            return Err(anyhow!("cannot update a media file without an ID"));
+        }
+        self.bulk_store_canonical_media_files_impl(files).await?;
         Ok(())
     }
 

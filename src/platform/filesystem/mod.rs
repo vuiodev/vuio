@@ -777,10 +777,24 @@ impl BaseFileSystemManager {
                 let subtitle_available = tokio::fs::try_exists(entry_path.with_extension("srt"))
                     .await
                     .unwrap_or(false);
+                let storage_path = if entry.file_type().await?.is_symlink() {
+                    match fs::canonicalize(&entry_path).await {
+                        Ok(resolved) => PathBuf::from(
+                            self.path_normalizer
+                                .to_canonical(&resolved)
+                                .map_err(|error| FileSystemError::Platform(error.to_string()))?,
+                        ),
+                        Err(_) => entry_path.clone(),
+                    }
+                } else {
+                    // `path` is already canonicalized by the scanner. A direct
+                    // child therefore needs no additional filesystem lookup.
+                    entry_path.clone()
+                };
                 
                 let mut media_file = MediaFile {
                     id: None,
-                    path: entry_path,
+                    path: storage_path,
                     filename,
                     size: metadata.len(),
                     modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),

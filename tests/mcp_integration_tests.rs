@@ -55,6 +55,41 @@ async fn make_test_state() -> (TempDir, AppState) {
 }
 
 #[tokio::test]
+async fn content_publication_and_cache_only_invalidation_have_distinct_revisions() {
+    use axum::body::Bytes;
+    use std::sync::atomic::Ordering;
+    use vuio::state::SoapCacheKey;
+    use vuio::web::client::DlnaClientProfile;
+
+    let (_temp, state) = make_test_state().await;
+    let epoch = state.browse_cache.lock().await.epoch();
+    let key = SoapCacheKey {
+        object_id: "audio".to_string(),
+        starting_index: 0,
+        requested_count: 10,
+        client_profile: DlnaClientProfile::Standard,
+        content_update_id: 1,
+        browse_epoch: epoch,
+    };
+    state
+        .browse_cache
+        .lock()
+        .await
+        .insert(key, Bytes::from_static(b"cached"));
+
+    vuio::web::eventing::publish_content_change(&state).await;
+    assert_eq!(state.content_update_id.load(Ordering::SeqCst), 2);
+    assert!(state.browse_cache.lock().await.generation().is_none());
+
+    let revision = state.content_update_id.load(Ordering::SeqCst);
+    vuio::web::eventing::invalidate_browse_responses(&state).await;
+    assert_eq!(state.content_update_id.load(Ordering::SeqCst), revision);
+
+    state.background_tasks.close();
+    state.background_tasks.wait().await;
+}
+
+#[tokio::test]
 async fn test_mcp_initialize_and_tools_list() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test_mcp.redb");

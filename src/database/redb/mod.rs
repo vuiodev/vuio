@@ -671,8 +671,16 @@ impl MediaRepository for RedbDatabase {
         RedbDatabase::bulk_store_media_files_impl(self, files).await
     }
 
+    async fn bulk_store_canonical_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>> {
+        RedbDatabase::bulk_store_canonical_media_files_impl(self, files).await
+    }
+
     async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()> {
         RedbDatabase::bulk_update_media_files_impl(self, files).await
+    }
+
+    async fn bulk_update_canonical_media_files(&self, files: &[MediaFile]) -> Result<()> {
+        RedbDatabase::bulk_update_canonical_media_files_impl(self, files).await
     }
 
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize> {

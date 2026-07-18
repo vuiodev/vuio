@@ -5,6 +5,7 @@ use crate::{
     error::AppError,
     state::AppState,
 };
+use crate::web::format::format_bytes;
 use axum::{extract::{Query, State}, http::header, response::IntoResponse, Json};
 
 const DASHBOARD_TEMPLATE: &str = include_str!("ui/dashboard.html");
@@ -131,21 +132,10 @@ fn web_media_file(file: &impl MediaFileView) -> WebMediaFile {
         title: file.title().map(str::to_owned),
         artist: file.artist().map(str::to_owned),
         album: file.album().map(str::to_owned),
-        size_str: format_size(file.size()),
+        size_str: format_bytes(file.size()),
         ext: extension,
         cat: category.to_owned(),
     }
-}
-
-fn format_size(bytes: u64) -> String {
-    if bytes == 0 {
-        return "0 Bytes".to_string();
-    }
-    let k = 1024.0;
-    let sizes = ["Bytes", "KB", "MB", "GB", "TB"];
-    let i = (bytes as f64).log(k).floor() as usize;
-    let i = std::cmp::min(i, sizes.len() - 1);
-    format!("{:.1} {}", bytes as f64 / k.powi(i as i32), sizes[i])
 }
 
 fn html_escape(s: &str) -> String {

@@ -22,6 +22,7 @@ pub struct BrowseResponseCache {
     entries: HashMap<SoapCacheKey, BrowseEntry>,
     total_bytes: usize,
     clock: u64,
+    epoch: u64,
 }
 
 impl BrowseResponseCache {
@@ -30,6 +31,7 @@ impl BrowseResponseCache {
             entries: HashMap::new(),
             total_bytes: 0,
             clock: 0,
+            epoch: 0,
         }
     }
 
@@ -82,6 +84,11 @@ impl BrowseResponseCache {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.total_bytes = 0;
+        self.epoch = self.epoch.wrapping_add(1);
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
     }
 
     pub fn generation(&self) -> Option<u32> {
@@ -340,4 +347,33 @@ fn renderer_ip(url: &str) -> Option<String> {
         return Some(ipv6.split(']').next()?.to_string());
     }
     Some(authority.split(':').next()?.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cache_key(epoch: u64) -> SoapCacheKey {
+        SoapCacheKey {
+            object_id: "audio".to_string(),
+            starting_index: 0,
+            requested_count: 25,
+            client_profile: crate::web::client::DlnaClientProfile::Standard,
+            content_update_id: 1,
+            browse_epoch: epoch,
+        }
+    }
+
+    #[test]
+    fn cleared_epoch_cannot_reuse_a_late_stale_response() {
+        let mut cache = BrowseResponseCache::new();
+        let stale_key = cache_key(cache.epoch());
+        cache.clear();
+        let current_key = cache_key(cache.epoch());
+
+        // Simulate a request that finished after invalidation and inserted its
+        // response late. Its old epoch must not match a subsequent request.
+        cache.insert(stale_key, Bytes::from_static(b"stale"));
+        assert!(cache.get(&current_key).is_none());
+    }
 }

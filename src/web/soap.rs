@@ -261,12 +261,14 @@ impl ContentDirectoryHandler {
             .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
 
         let current_update_id = state.content_update_id.load(Ordering::SeqCst);
+        let browse_epoch = state.browse_cache.lock().await.epoch();
         let cache_key = crate::state::SoapCacheKey {
             object_id: params.object_id.clone(),
             starting_index: params.starting_index,
             requested_count: params.requested_count,
             client_profile: client,
             content_update_id: current_update_id,
+            browse_epoch,
         };
 
         // Cache lookup
@@ -692,6 +694,8 @@ pub async fn content_directory_control(
                 }
                 let mut bookmarks_guard = state.bookmarks.lock().await;
                 bookmarks_guard.insert(file_id, pos);
+                drop(bookmarks_guard);
+                crate::web::eventing::invalidate_browse_responses(&state).await;
               }
             }
             build_soap_response("X_SetBookmark", "urn:schemas-upnp-org:service:ContentDirectory:1", "")
@@ -905,12 +909,14 @@ where
         .unwrap_or(crate::web::client::DlnaClientProfile::Standard);
 
     let current_update_id = state.content_update_id.load(Ordering::SeqCst);
+    let browse_epoch = state.browse_cache.lock().await.epoch();
     let cache_key = crate::state::SoapCacheKey {
         object_id: params.object_id.clone(),
         starting_index: params.starting_index,
         requested_count: params.requested_count,
         client_profile: client,
         content_update_id: current_update_id,
+        browse_epoch,
     };
 
     // Cache lookup

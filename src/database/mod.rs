@@ -430,8 +430,20 @@ pub trait MediaRepository: Send + Sync {
     /// Store multiple media files in a single batch operation.
     async fn bulk_store_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>>;
 
+    /// Store scanner-owned records whose paths already satisfy the backend's
+    /// canonical-path invariant. Backends may override this to skip defensive
+    /// path resolution; the default keeps the safe public write behavior.
+    async fn bulk_store_canonical_media_files(&self, files: &[MediaFile]) -> Result<Vec<i64>> {
+        self.bulk_store_media_files(files).await
+    }
+
     /// Update multiple media files in a single batch operation.
     async fn bulk_update_media_files(&self, files: &[MediaFile]) -> Result<()>;
+
+    /// Update scanner-owned records with already-canonical paths.
+    async fn bulk_update_canonical_media_files(&self, files: &[MediaFile]) -> Result<()> {
+        self.bulk_update_media_files(files).await
+    }
 
     /// Remove multiple media files by paths in a single batch operation.
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;

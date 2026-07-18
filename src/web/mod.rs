@@ -2,6 +2,7 @@ pub mod casting;
 pub mod client;
 pub mod diagnostics;
 pub mod eventing;
+mod format;
 pub mod mcp;
 pub mod soap;
 pub mod streaming;
