@@ -18,8 +18,8 @@ use crate::tv_control;
 use crate::web::format::format_bytes;
 use crate::{
     database::{
-        DatabaseReadSession, MediaFileQuery, MediaFileView, MediaRepository, PlaylistRepository,
-        StatsRepository,
+        DatabaseManager, DatabaseReadSession, DirectoryView, FileLocation, MediaFileQuery,
+        MediaFileView,
     },
     state::AppState,
 };
@@ -341,8 +341,8 @@ fn get_tools_list() -> serde_json::Value {
 // SSE Handler — GET /sse
 // ──────────────────────────────────────────
 
-pub async fn sse_handler(
-    State(state): State<AppState>,
+pub async fn sse_handler<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
 ) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
     let client_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<String>(64);
@@ -400,8 +400,8 @@ pub struct MessageQuery {
     pub client_id: String,
 }
 
-pub async fn message_handler(
-    State(state): State<AppState>,
+pub async fn message_handler<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
     Query(query): Query<MessageQuery>,
     body: String,
 ) -> impl IntoResponse {
@@ -456,7 +456,10 @@ pub async fn message_handler(
 // Method dispatcher
 // ──────────────────────────────────────────
 
-async fn handle_method(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
+async fn handle_method<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    request: &JsonRpcRequest,
+) -> JsonRpcResponse {
     match request.method.as_str() {
         "initialize" => handle_initialize(request),
         "initialized" => {
@@ -496,7 +499,10 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     JsonRpcResponse::success(request.id.clone(), get_tools_list())
 }
 
-async fn handle_tools_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
+async fn handle_tools_call<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    request: &JsonRpcRequest,
+) -> JsonRpcResponse {
     let params = match &request.params {
         Some(p) => p,
         None => {
@@ -560,8 +566,8 @@ async fn handle_tools_call(state: &AppState, request: &JsonRpcRequest) -> JsonRp
 // Tool implementations
 // ──────────────────────────────────────────
 
-async fn tool_search_media(
-    state: &AppState,
+async fn tool_search_media<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let query = args
@@ -581,8 +587,8 @@ async fn tool_search_media(
     }))
 }
 
-async fn tool_browse_folder(
-    state: &AppState,
+async fn tool_browse_folder<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let path_str = args
@@ -596,31 +602,48 @@ async fn tool_browse_folder(
         .unwrap_or("all");
 
     let media_type_filter = match category {
-        "audio" => "audio",
-        "video" => "video",
-        "image" => "image",
-        _ => "",
+        "audio" => Some("audio/".to_owned()),
+        "video" => Some("video/".to_owned()),
+        "image" => Some("image/".to_owned()),
+        _ => None,
     };
 
     let browse_path = std::path::PathBuf::from(path_str);
-
-    let (dirs, files) = state
+    let canonical_path = state
+        .filesystem_manager
+        .get_canonical_path(&browse_path)
+        .map_err(|error| format!("Invalid browse path: {error}"))?;
+    let query = MediaFileQuery::Directory {
+        path: canonical_path.clone(),
+        mime_family: media_type_filter.clone(),
+    };
+    let (dir_list, file_list) = state
         .database
-        .get_directory_listing(&browse_path, media_type_filter)
+        .clone()
+        .read(move |session| {
+            let mut directories = Vec::new();
+            session.visit_direct_subdirectories(
+                &canonical_path,
+                media_type_filter.as_deref(),
+                0,
+                usize::MAX,
+                |directory| {
+                    directories.push(serde_json::json!({
+                        "name": directory.name(),
+                        "path": directory.path(),
+                    }));
+                    Ok(())
+                },
+            )?;
+            let mut files = Vec::new();
+            session.visit_files(&query, 0, usize::MAX, |file| {
+                files.push(media_file_view_to_json(&file));
+                Ok(())
+            })?;
+            Ok((directories, files))
+        })
         .await
         .map_err(|e| format!("Database error: {}", e))?;
-
-    let dir_list: Vec<serde_json::Value> = dirs
-        .iter()
-        .map(|d| {
-            serde_json::json!({
-                "name": d.name,
-                "path": d.path.to_string_lossy()
-            })
-        })
-        .collect();
-
-    let file_list: Vec<serde_json::Value> = files.iter().map(media_file_to_json).collect();
 
     Ok(serde_json::json!({
         "path": path_str,
@@ -629,8 +652,8 @@ async fn tool_browse_folder(
     }))
 }
 
-async fn tool_get_media_info(
-    state: &AppState,
+async fn tool_get_media_info<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let file_id = args
@@ -640,16 +663,24 @@ async fn tool_get_media_info(
 
     let file = state
         .database
-        .get_file_by_id(file_id)
+        .clone()
+        .read(move |session| {
+            let mut result = None;
+            session.visit_files(&MediaFileQuery::Id(file_id), 0, 1, |file| {
+                result = Some(media_file_view_to_json(&file));
+                Ok(())
+            })?;
+            Ok(result)
+        })
         .await
         .map_err(|e| format!("Database error: {}", e))?
         .ok_or(format!("File with ID {} not found", file_id))?;
 
-    Ok(media_file_to_json(&file))
+    Ok(file)
 }
 
-async fn tool_list_media(
-    state: &AppState,
+async fn tool_list_media<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let category = args
@@ -674,7 +705,9 @@ async fn tool_list_media(
     }))
 }
 
-async fn tool_get_server_stats(state: &AppState) -> Result<serde_json::Value, String> {
+async fn tool_get_server_stats<D: DatabaseManager>(
+    state: &AppState<D>,
+) -> Result<serde_json::Value, String> {
     let stats = state
         .database
         .get_stats()
@@ -698,7 +731,9 @@ async fn tool_get_server_stats(state: &AppState) -> Result<serde_json::Value, St
     }))
 }
 
-async fn tool_list_renderers(state: &AppState) -> Result<serde_json::Value, String> {
+async fn tool_list_renderers<D: DatabaseManager>(
+    state: &AppState<D>,
+) -> Result<serde_json::Value, String> {
     let renderers = state
         .discovered_tvs
         .get_or_refresh()
@@ -723,8 +758,8 @@ async fn tool_list_renderers(state: &AppState) -> Result<serde_json::Value, Stri
     }))
 }
 
-async fn tool_cast_media_to_renderer(
-    state: &AppState,
+async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let file_id = args
@@ -740,7 +775,7 @@ async fn tool_cast_media_to_renderer(
     // Look up the media file
     let file = state
         .database
-        .get_file_by_id(file_id)
+        .get_file_location_by_id(file_id)
         .await
         .map_err(|e| format!("Database error: {}", e))?
         .ok_or(format!("File with ID {} not found", file_id))?;
@@ -767,12 +802,7 @@ async fn tool_cast_media_to_renderer(
     // Build the media URL
     let server_ip = state.get_server_ip();
     let port = state.config.server.port;
-    let media_url = format!(
-        "http://{}:{}/media/{}",
-        server_ip,
-        port,
-        file.id.unwrap_or(file_id)
-    );
+    let media_url = format!("http://{}:{}/media/{}", server_ip, port, file.id);
 
     let title = file.title.as_deref().unwrap_or(&file.filename);
 
@@ -790,8 +820,8 @@ async fn tool_cast_media_to_renderer(
     }))
 }
 
-async fn tool_control_renderer(
-    state: &AppState,
+async fn tool_control_renderer<D: DatabaseManager>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let renderer_id = args
@@ -846,7 +876,9 @@ async fn tool_control_renderer(
         "renderer_id": matched_tv.id
     }))
 }
-async fn tool_list_playlists(state: &AppState) -> Result<serde_json::Value, String> {
+async fn tool_list_playlists<D: DatabaseManager>(
+    state: &AppState<D>,
+) -> Result<serde_json::Value, String> {
     let playlists = state
         .database
         .get_playlists()
@@ -871,8 +903,8 @@ async fn tool_list_playlists(state: &AppState) -> Result<serde_json::Value, Stri
     }))
 }
 
-async fn tool_create_playlist(
-    state: &AppState,
+async fn tool_create_playlist<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let name = args
@@ -895,8 +927,8 @@ async fn tool_create_playlist(
     }))
 }
 
-async fn tool_delete_playlist(
-    state: &AppState,
+async fn tool_delete_playlist<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let id = args
@@ -919,8 +951,8 @@ async fn tool_delete_playlist(
     }))
 }
 
-async fn tool_add_to_playlist(
-    state: &AppState,
+async fn tool_add_to_playlist<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let playlist_id = args
@@ -957,8 +989,8 @@ async fn tool_add_to_playlist(
     }))
 }
 
-async fn tool_remove_from_playlist(
-    state: &AppState,
+async fn tool_remove_from_playlist<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let playlist_id = args
@@ -987,8 +1019,8 @@ async fn tool_remove_from_playlist(
     }))
 }
 
-async fn tool_get_playlist_tracks(
-    state: &AppState,
+async fn tool_get_playlist_tracks<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let playlist_id = args
@@ -996,13 +1028,24 @@ async fn tool_get_playlist_tracks(
         .and_then(|v| v.as_i64())
         .ok_or("Missing 'playlist_id' parameter")?;
 
-    let tracks = state
+    let list = state
         .database
-        .get_playlist_tracks(playlist_id)
+        .clone()
+        .read(move |session| {
+            let mut tracks = Vec::new();
+            session.visit_files(
+                &MediaFileQuery::Playlist(playlist_id),
+                0,
+                usize::MAX,
+                |file| {
+                    tracks.push(media_file_view_to_json(&file));
+                    Ok(())
+                },
+            )?;
+            Ok(tracks)
+        })
         .await
-        .map_err(|e| format!("Database error: {}", e))?;
-
-    let list: Vec<serde_json::Value> = tracks.iter().map(media_file_to_json).collect();
+        .map_err(|e| format!("Database error: {e}"))?;
 
     Ok(serde_json::json!({
         "playlist_id": playlist_id,
@@ -1011,7 +1054,9 @@ async fn tool_get_playlist_tracks(
     }))
 }
 
-pub async fn cached_renderers(state: &AppState) -> Result<Vec<tv_control::DiscoveredTv>, String> {
+pub async fn cached_renderers<D: DatabaseManager>(
+    state: &AppState<D>,
+) -> Result<Vec<tv_control::DiscoveredTv>, String> {
     state
         .discovered_tvs
         .get_or_refresh()
@@ -1019,18 +1064,40 @@ pub async fn cached_renderers(state: &AppState) -> Result<Vec<tv_control::Discov
         .map_err(|e| format!("TV discovery error: {}", e))
 }
 
-pub async fn cast_playlist_helper(
-    state: &AppState,
+async fn playlist_file_locations<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    playlist_id: i64,
+) -> Result<Vec<FileLocation>, String> {
+    state
+        .database
+        .clone()
+        .read(move |session| {
+            let mut tracks = Vec::new();
+            session.visit_files(
+                &MediaFileQuery::Playlist(playlist_id),
+                0,
+                usize::MAX,
+                |file| {
+                    if let Some(location) = file.to_file_location() {
+                        tracks.push(location);
+                    }
+                    Ok(())
+                },
+            )?;
+            Ok(tracks)
+        })
+        .await
+        .map_err(|error| format!("Database error: {error}"))
+}
+
+pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     playlist_id: i64,
     renderer_id: &str,
     track_index: usize,
 ) -> Result<serde_json::Value, String> {
     // Get playlist tracks
-    let tracks = state
-        .database
-        .get_playlist_tracks(playlist_id)
-        .await
-        .map_err(|e| format!("Database error: {}", e))?;
+    let tracks = playlist_file_locations(state, playlist_id).await?;
 
     if tracks.is_empty() {
         return Err("Cannot cast an empty playlist".to_string());
@@ -1046,7 +1113,7 @@ pub async fn cast_playlist_helper(
 
     // Get selected track
     let selected_track = &tracks[track_index];
-    let file_id = selected_track.id.ok_or("Media file is missing an ID")?;
+    let file_id = selected_track.id;
 
     let renderers = cached_renderers(state).await?;
 
@@ -1105,8 +1172,8 @@ pub async fn cast_playlist_helper(
     let mut queued_file = None;
     if track_index + 1 < tracks.len() {
         let next_track = &tracks[track_index + 1];
-        if let Some(next_id) = next_track.id {
-            let next_media_url = format!("http://{}:{}/media/{}", server_ip, port, next_id);
+        {
+            let next_media_url = format!("http://{}:{}/media/{}", server_ip, port, next_track.id);
             let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
 
             // Queue on the TV and log/ignore failures on non-compliant devices
@@ -1191,7 +1258,7 @@ pub async fn cast_playlist_helper(
             // Fetch playlist tracks from DB to get the latest list
             let latest_tracks = match tokio::select! {
                 _ = monitor_cancellation.cancelled() => break,
-                result = state_clone.database.get_playlist_tracks(playlist_id) => result,
+                result = playlist_file_locations(&state_clone, playlist_id) => result,
             } {
                 Ok(t) => t,
                 Err(_) => break,
@@ -1204,8 +1271,8 @@ pub async fn cast_playlist_helper(
             // If current track URI matches a track URL, check if the TV transitioned
             let mut matched_any = false;
             for (idx, track) in latest_tracks.iter().enumerate() {
-                if let Some(id) = track.id {
-                    let track_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, id);
+                {
+                    let track_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, track.id);
                     if current_uri == track_media_url {
                         matched_any = true;
                         if idx != current_idx {
@@ -1225,8 +1292,8 @@ pub async fn cast_playlist_helper(
                             // Queue the next track if available
                             if current_idx + 1 < latest_tracks.len() {
                                 let next_track = &latest_tracks[current_idx + 1];
-                                if let Some(next_id) = next_track.id {
-                                    let next_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, next_id);
+                                {
+                                    let next_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, next_track.id);
                                     let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
                                     let queue_result = tokio::select! {
                                         _ = monitor_cancellation.cancelled() => break 'monitor,
@@ -1294,8 +1361,8 @@ pub async fn cast_playlist_helper(
     }))
 }
 
-async fn tool_cast_playlist_to_renderer(
-    state: &AppState,
+async fn tool_cast_playlist_to_renderer<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
     let playlist_id = args
@@ -1319,27 +1386,6 @@ async fn tool_cast_playlist_to_renderer(
 // ──────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────
-
-fn media_file_to_json(f: &crate::database::MediaFile) -> serde_json::Value {
-    let duration_secs = f.duration.map(|d| d.as_secs());
-
-    serde_json::json!({
-        "id": f.id,
-        "filename": f.filename,
-        "path": f.path.to_string_lossy(),
-        "mime_type": f.mime_type,
-        "size_bytes": f.size,
-        "size_human": format_bytes(f.size),
-        "duration_seconds": duration_secs,
-        "title": f.title,
-        "artist": f.artist,
-        "album": f.album,
-        "genre": f.genre,
-        "track_number": f.track_number,
-        "year": f.year,
-        "album_artist": f.album_artist
-    })
-}
 
 fn media_file_view_to_json(f: &impl MediaFileView) -> serde_json::Value {
     serde_json::json!({
@@ -1383,8 +1429,8 @@ fn cursor_after_id(args: &serde_json::Value) -> Result<Option<i64>, String> {
         .map_err(|_| "Invalid media cursor".to_string())
 }
 
-async fn query_media_page(
-    state: &AppState,
+async fn query_media_page<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
     after_id: Option<i64>,
     mime_family: Option<String>,
     text: Option<String>,

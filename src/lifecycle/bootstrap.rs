@@ -1,9 +1,9 @@
 /// Start platform adaptation services for runtime detection and adaptation
-async fn start_platform_adaptation(
+async fn start_platform_adaptation<D: DatabaseManager + 'static>(
     _platform_info: Arc<PlatformInfo>,
     config_manager: Arc<ConfigManager>,
     watcher: Arc<CrossPlatformWatcher>,
-    app_state: AppState,
+    app_state: AppState<D>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     info!("Starting platform adaptation services...");
@@ -448,11 +448,11 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
     // Vacuum database if configured
     if config.database.vacuum_on_startup {
         info!("Performing database compaction...");
-        database
+        let compacted = database
             .vacuum()
             .await
             .context("Failed to compact database")?;
-        info!("Database compaction completed");
+        info!(compacted, "Database compaction completed");
     }
 
     info!("Database initialized successfully");
@@ -462,7 +462,6 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
 /// Initialize file system watcher for real-time media monitoring
 async fn initialize_file_watcher(
     config: &AppConfig,
-    _database: Arc<database::redb::RedbDatabase>,
 ) -> anyhow::Result<CrossPlatformWatcher> {
     info!("Initializing file system watcher...");
 
@@ -501,13 +500,13 @@ async fn initialize_file_watcher(
 
 /// Fully initialized resources shared by lifecycle services.
 #[derive(Clone)]
-pub struct ApplicationContext {
+pub struct ApplicationContext<D: DatabaseManager = database::redb::RedbDatabase> {
     pub config: Arc<AppConfig>,
     pub config_manager: Arc<ConfigManager>,
-    pub database: Arc<database::redb::RedbDatabase>,
+    pub database: Arc<D>,
     pub file_watcher: Arc<CrossPlatformWatcher>,
     pub platform_info: Arc<PlatformInfo>,
-    pub app_state: AppState,
+    pub app_state: AppState<D>,
 }
 
 /// Public bootstrap operations for embedders that manage the lifecycle themselves.
@@ -526,16 +525,15 @@ impl BootstrapService {
 
     pub async fn initialize_watcher(
         config: &AppConfig,
-        database: Arc<database::redb::RedbDatabase>,
     ) -> anyhow::Result<CrossPlatformWatcher> {
-        initialize_file_watcher(config, database).await
+        initialize_file_watcher(config).await
     }
 
-    pub async fn start_platform_adaptation(
+    pub async fn start_platform_adaptation<D: DatabaseManager + 'static>(
         platform_info: Arc<PlatformInfo>,
         config_manager: Arc<ConfigManager>,
         watcher: Arc<CrossPlatformWatcher>,
-        state: AppState,
+        state: AppState<D>,
         cancellation: CancellationToken,
     ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         start_platform_adaptation(platform_info, config_manager, watcher, state, cancellation).await

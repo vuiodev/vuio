@@ -1,4 +1,5 @@
 use crate::config::AppConfig;
+use crate::database::DatabaseManager;
 use crate::platform::network::{
     NetworkManager, PlatformNetworkManager, SsdpConfig, SsdpSocket, SSDP_MULTICAST_IP,
 };
@@ -30,22 +31,22 @@ pub trait SsdpPlatformAdapter: Send + Sync {
     fn should_bind_to_specific_interface(&self) -> bool;
 
     /// Get server IP address using platform-specific logic
-    fn get_server_ip(&self, state: &AppState) -> String;
-
     /// Get platform-specific SSDP configuration
-    fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig;
+    fn get_ssdp_config(&self, config: &AppConfig) -> SsdpConfig;
 }
 
 /// Unified SSDP service that works across all platforms
 pub struct UnifiedSsdpService {
     network_manager: Arc<dyn NetworkManager>,
     platform_adapter: Box<dyn SsdpPlatformAdapter>,
-    state: AppState,
+    config: Arc<AppConfig>,
+    server_ip: String,
+    primary_interface: Option<NetworkInterface>,
 }
 
 impl UnifiedSsdpService {
     /// Create a new unified SSDP service with the appropriate platform adapter
-    pub fn new(state: AppState) -> Self {
+    pub fn new<D: DatabaseManager>(state: AppState<D>) -> Self {
         let network_manager = Arc::new(PlatformNetworkManager::new());
         let platform_adapter: Box<dyn SsdpPlatformAdapter> = if AppConfig::is_running_in_docker() {
             Box::new(DefaultSsdpAdapter::new(vec![], false))
@@ -63,7 +64,9 @@ impl UnifiedSsdpService {
         Self {
             network_manager,
             platform_adapter,
-            state,
+            config: state.config.clone(),
+            server_ip: state.get_server_ip(),
+            primary_interface: state.platform_info.get_primary_interface().cloned(),
         }
     }
 
@@ -75,11 +78,11 @@ impl UnifiedSsdpService {
     )> {
         info!("Starting unified SSDP service");
 
-        let server_ip = self.platform_adapter.get_server_ip(&self.state);
+        let server_ip = self.server_ip.clone();
         info!("SSDP service using server IP: {}", server_ip);
 
         // Create SSDP socket with platform-specific configuration
-        let ssdp_config = self.platform_adapter.get_ssdp_config(&self.state);
+        let ssdp_config = self.platform_adapter.get_ssdp_config(&self.config);
         let mut socket = self
             .network_manager
             .create_ssdp_socket_with_config(&ssdp_config)
@@ -91,7 +94,7 @@ impl UnifiedSsdpService {
 
         // Join multicast group
         let multicast_addr = SSDP_MULTICAST_IP;
-        let primary_interface = self.state.platform_info.get_primary_interface().cloned();
+        let primary_interface = self.primary_interface.clone();
         if let Err(e) = self
             .network_manager
             .join_multicast_group(&mut socket, multicast_addr, primary_interface.as_ref())
@@ -103,19 +106,33 @@ impl UnifiedSsdpService {
         let socket = Arc::new(tokio::sync::Mutex::new(socket));
 
         // Start M-SEARCH responder task
-        let responder_state = self.state.clone();
+        let responder_config = self.config.clone();
+        let responder_ip = self.server_ip.clone();
         let responder_manager = self.network_manager.clone();
         let responder_socket = socket.clone();
         let responder = tokio::spawn(async move {
-            Self::search_responder_task(responder_state, responder_manager, responder_socket).await
+            Self::search_responder_task(
+                responder_config,
+                responder_ip,
+                responder_manager,
+                responder_socket,
+            )
+            .await
         });
 
         // Start announcement task
-        let announcer_state = self.state.clone();
+        let announcer_config = self.config.clone();
+        let announcer_ip = self.server_ip.clone();
         let announcer_manager = self.network_manager.clone();
         let announcer_socket = socket.clone();
         let announcer = tokio::spawn(async move {
-            Self::announcer_task(announcer_state, announcer_manager, announcer_socket).await;
+            Self::announcer_task(
+                announcer_config,
+                announcer_ip,
+                announcer_manager,
+                announcer_socket,
+            )
+            .await;
         });
 
         info!("Unified SSDP service started successfully");
@@ -145,7 +162,8 @@ impl UnifiedSsdpService {
 
     /// Task for handling M-SEARCH requests
     async fn search_responder_task(
-        state: AppState,
+        config: Arc<AppConfig>,
+        server_ip: String,
         network_manager: Arc<dyn NetworkManager>,
         socket: Arc<tokio::sync::Mutex<SsdpSocket>>,
     ) -> Result<()> {
@@ -194,14 +212,15 @@ impl UnifiedSsdpService {
 
             if request.contains("M-SEARCH") {
                 debug!("Received M-SEARCH from {}", addr);
-                Self::handle_msearch_request(&state, &socket, &request, addr).await;
+                Self::handle_msearch_request(&config, &server_ip, &socket, &request, addr).await;
             }
         }
     }
 
     /// Handle M-SEARCH request and send appropriate responses
     async fn handle_msearch_request(
-        state: &AppState,
+        config: &AppConfig,
+        server_ip: &str,
         socket: &Arc<tokio::sync::Mutex<SsdpSocket>>,
         request: &str,
         addr: SocketAddr,
@@ -226,7 +245,7 @@ impl UnifiedSsdpService {
 
         let response_count = response_types.len();
         for response_type in response_types {
-            let response = Self::create_ssdp_response(state, response_type);
+            let response = Self::create_ssdp_response(config, server_ip, response_type);
 
             let socket_guard = socket.lock().await;
             for retry in 0..3 {
@@ -259,7 +278,8 @@ impl UnifiedSsdpService {
 
     /// Task for periodic SSDP announcements
     async fn announcer_task(
-        state: AppState,
+        config: Arc<AppConfig>,
+        server_ip: String,
         network_manager: Arc<dyn NetworkManager>,
         socket: Arc<tokio::sync::Mutex<SsdpSocket>>,
     ) {
@@ -270,7 +290,9 @@ impl UnifiedSsdpService {
         loop {
             interval.tick().await;
 
-            match Self::send_ssdp_announcements(&state, &network_manager, &socket).await {
+            match Self::send_ssdp_announcements(&config, &server_ip, &network_manager, &socket)
+                .await
+            {
                 Ok(()) => {
                     consecutive_failures = 0;
                 }
@@ -293,13 +315,13 @@ impl UnifiedSsdpService {
 
     /// Send SSDP NOTIFY announcements
     async fn send_ssdp_announcements(
-        state: &AppState,
+        config: &AppConfig,
+        server_ip: &str,
         network_manager: &Arc<dyn NetworkManager>,
         socket: &Arc<tokio::sync::Mutex<SsdpSocket>>,
     ) -> Result<()> {
         info!("Sending SSDP NOTIFY announcements");
 
-        let server_ip = Self::get_server_ip(state);
         let service_types = [
             "upnp:rootdevice",
             "urn:schemas-upnp-org:device:MediaServer:1",
@@ -309,7 +331,7 @@ impl UnifiedSsdpService {
         let multicast_addr = SocketAddr::new(SSDP_MULTICAST_IP, SSDP_PORT);
 
         for service_type in &service_types {
-            let message = Self::create_notify_message(state, &server_ip, service_type);
+            let message = Self::create_notify_message(config, server_ip, service_type);
 
             let socket_guard = socket.lock().await;
             match network_manager
@@ -348,10 +370,7 @@ impl UnifiedSsdpService {
     }
 
     /// Create SSDP response message
-    fn create_ssdp_response(state: &AppState, service_type: &str) -> String {
-        let server_ip = Self::get_server_ip(state);
-        let config = &state.config;
-
+    fn create_ssdp_response(config: &AppConfig, server_ip: &str, service_type: &str) -> String {
         let (st, usn) = match service_type {
             "upnp:rootdevice" => (
                 "upnp:rootdevice".to_string(),
@@ -394,9 +413,7 @@ impl UnifiedSsdpService {
     }
 
     /// Create SSDP NOTIFY message
-    fn create_notify_message(state: &AppState, server_ip: &str, service_type: &str) -> String {
-        let config = &state.config;
-
+    fn create_notify_message(config: &AppConfig, server_ip: &str, service_type: &str) -> String {
         let (nt, usn) = match service_type {
             "upnp:rootdevice" => (
                 "upnp:rootdevice".to_string(),
@@ -432,16 +449,11 @@ impl UnifiedSsdpService {
             SSDP_MULTICAST_IP, SSDP_PORT, server_ip, config.server.port, nt, usn
         )
     }
-
-    /// Get server IP address using unified logic from AppState
-    fn get_server_ip(state: &AppState) -> String {
-        state.get_server_ip()
-    }
 }
 
 /// Run SSDP as an owned lifecycle service until cancellation.
-pub async fn run_ssdp_service_until_cancelled(
-    state: AppState,
+pub async fn run_ssdp_service_until_cancelled<D: DatabaseManager>(
+    state: AppState<D>,
     cancellation: CancellationToken,
 ) -> Result<()> {
     UnifiedSsdpService::new(state)
@@ -498,16 +510,12 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
         false
     }
 
-    fn get_server_ip(&self, state: &AppState) -> String {
-        state.get_server_ip()
-    }
-
-    fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
+    fn get_ssdp_config(&self, config: &AppConfig) -> SsdpConfig {
         SsdpConfig {
             primary_port: SSDP_PORT,
             fallback_ports: self.fallback_ports.clone(),
             multicast_address: SSDP_MULTICAST_IP,
-            announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
+            announce_interval: Duration::from_secs(config.network.announce_interval_seconds),
             max_retries: 3,
             interfaces: Vec::new(),
         }

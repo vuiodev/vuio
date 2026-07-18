@@ -49,8 +49,8 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 }
 
 /// Perform graceful shutdown with ReDB atomic state persistence
-async fn perform_graceful_shutdown(
-    database: &Arc<database::redb::RedbDatabase>,
+async fn perform_graceful_shutdown<D: DatabaseManager>(
+    database: &Arc<D>,
     stats: &ApplicationStats,
 ) -> anyhow::Result<()> {
     info!("Performing graceful shutdown with atomic state persistence...");
@@ -87,8 +87,9 @@ async fn perform_graceful_shutdown(
 
     // Perform database vacuum if needed (this will also ensure all data is persisted)
     info!("Performing final database maintenance...");
-    if let Err(e) = database.vacuum().await {
-        warn!("Could not vacuum database during shutdown: {}", e);
+    match database.vacuum().await {
+        Ok(compacted) => info!(compacted, "Final database compaction completed"),
+        Err(e) => warn!("Could not compact database during shutdown: {}", e),
     }
 
     info!("Graceful shutdown with atomic state persistence completed");
@@ -120,8 +121,8 @@ impl ShutdownCoordinator {
         wait_for_shutdown_signal().await
     }
 
-    pub async fn finalize(
-        database: &Arc<database::redb::RedbDatabase>,
+    pub async fn finalize<D: DatabaseManager>(
+        database: &Arc<D>,
         stats: &ApplicationStats,
     ) -> anyhow::Result<()> {
         perform_graceful_shutdown(database, stats).await

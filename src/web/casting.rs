@@ -1,6 +1,6 @@
 //! TV discovery and dashboard playlist-casting API handlers.
 
-use crate::{database::PlaylistRepository, state::AppState};
+use crate::{database::DatabaseManager, state::AppState};
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use tracing::error;
 
@@ -12,7 +12,9 @@ pub struct ApiCastPlaylistRequest {
 }
 
 /// Discover UPnP/DLNA TVs and return their friendly names in JSON format
-pub async fn api_list_renderers(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn api_list_renderers<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> impl IntoResponse {
     match state.discovered_tvs.get_or_refresh().await {
         Ok(renderers) => (StatusCode::OK, axum::Json(renderers)),
         Err(e) => {
@@ -26,8 +28,8 @@ pub async fn api_list_renderers(State(state): State<AppState>) -> impl IntoRespo
 }
 
 /// Create a temporary playlist with the provided video files and cast it to the TV
-pub async fn api_cast_playlist(
-    State(state): State<AppState>,
+pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
     axum::Json(payload): axum::Json<ApiCastPlaylistRequest>,
 ) -> impl IntoResponse {
     // Read old web-cast playlists, but keep them until the replacement is complete.

@@ -1,12 +1,11 @@
 use anyhow::Result;
-use futures_util::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
-use crate::database::{redb::RedbDatabase, DatabaseManager, MediaFile};
+use crate::database::{redb::RedbDatabase, DatabaseManager, FileFingerprint, MediaFile};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Batch size for database operations during parallel scanning
@@ -19,6 +18,16 @@ pub struct MediaScanner<D: DatabaseManager = RedbDatabase> {
 }
 
 impl<D: DatabaseManager> MediaScanner<D> {
+    fn fingerprint(file: &MediaFile) -> FileFingerprint {
+        FileFingerprint {
+            id: file.id.unwrap_or_default(),
+            path: file.path.clone(),
+            size: file.size,
+            modified: file.modified,
+            created_at: file.created_at,
+        }
+    }
+
     /// Create a new media scanner with database manager
     pub fn with_database(database_manager: Arc<D>) -> Self {
         Self {
@@ -191,7 +200,9 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
                         files_to_update.push(updated_file);
                     } else {
-                        result.unchanged_files.push(existing_file.clone());
+                        result
+                            .unchanged_files
+                            .push(Self::fingerprint(existing_file));
                     }
                 }
                 None => {
@@ -207,7 +218,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             if !current_paths.contains(&normalized_existing_path) {
                 // File was removed from file system, add to bulk removal list
                 files_to_remove.push(existing_file.path.clone());
-                result.removed_files.push(existing_file);
+                result.removed_files.push(Self::fingerprint(&existing_file));
             }
         }
 
@@ -311,6 +322,18 @@ impl<D: DatabaseManager> MediaScanner<D> {
         }
     }
 
+    fn fingerprint_needs_update(&self, existing: &FileFingerprint, current: &MediaFile) -> bool {
+        if existing.size != current.size {
+            return true;
+        }
+        let time_diff = if existing.modified > current.modified {
+            existing.modified.duration_since(current.modified)
+        } else {
+            current.modified.duration_since(existing.modified)
+        };
+        time_diff.map_or(true, |difference| difference.as_secs() > 10)
+    }
+
     /// Scan multiple directories and return combined results
     pub async fn scan_directories(&self, directories: &[PathBuf]) -> Result<ScanResult> {
         let mut combined_result = ScanResult::new();
@@ -360,21 +383,13 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         // Load all existing files from database once at the start (for incremental updates)
         debug!("Loading existing files from database...");
-        let existing_files_map: HashMap<PathBuf, MediaFile> = {
-            let mut map = HashMap::with_capacity(10000);
-            let mut stream = self.database_manager.stream_all_media_files();
-            while let Some(result) = stream.next().await {
-                match result {
-                    Ok(file) => {
-                        map.insert(file.path.clone(), file);
-                    }
-                    Err(e) => {
-                        warn!("Error reading file from database: {}", e);
-                    }
-                }
-            }
-            map
-        };
+        let existing_files_map: HashMap<PathBuf, FileFingerprint> = self
+            .database_manager
+            .load_file_fingerprints()
+            .await?
+            .into_iter()
+            .map(|fingerprint| (fingerprint.path.clone(), fingerprint))
+            .collect();
         debug!(
             "Loaded {} existing files from database",
             existing_files_map.len()
@@ -437,9 +452,9 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
             // Check if file exists in database
             if let Some(existing) = existing_files_map.get(&path) {
-                if self.file_needs_update(existing, &current_file) {
+                if self.fingerprint_needs_update(existing, &current_file) {
                     let mut updated = current_file;
-                    updated.id = existing.id;
+                    updated.id = Some(existing.id);
                     updated.created_at = existing.created_at;
                     updated.updated_at = SystemTime::now();
                     files_to_update.push(updated);
@@ -608,10 +623,10 @@ pub struct ScanResult {
     pub updated_files: Vec<MediaFile>,
 
     /// Files that were removed from the database
-    pub removed_files: Vec<MediaFile>,
+    pub removed_files: Vec<FileFingerprint>,
 
     /// Files that were unchanged
-    pub unchanged_files: Vec<MediaFile>,
+    pub unchanged_files: Vec<FileFingerprint>,
 
     /// Total number of files scanned from the file system
     pub total_scanned: usize,
@@ -691,6 +706,7 @@ mod tests {
     use crate::platform::filesystem::BaseFileSystemManager;
     #[cfg(target_os = "windows")]
     use crate::platform::filesystem::WindowsPathNormalizer;
+    use futures_util::StreamExt;
     use std::sync::Arc;
     use tempfile::tempdir;
 

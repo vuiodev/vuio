@@ -2,10 +2,7 @@ use crate::{
     config::{
         AppConfig, ConfigChangeEvent, ConfigManager, MonitoredDirectoryConfig, ValidationMode,
     },
-    database::{
-        self, DatabaseManager, HealthRepository, MediaRepository, PlaylistRepository,
-        StatsRepository,
-    },
+    database::{self, DatabaseManager, HealthRepository, StatsRepository},
     logging, media,
     platform::{
         self,
@@ -42,6 +39,7 @@ include!("runner.rs");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::MediaRepository;
     use tempfile::tempdir;
 
     #[tokio::test]

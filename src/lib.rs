@@ -11,6 +11,9 @@ pub mod tv_control;
 pub mod watcher;
 pub mod web;
 
+pub type DefaultDatabase = crate::database::redb::RedbDatabase;
+pub type DefaultAppState = crate::state::AppState<DefaultDatabase>;
+
 pub mod state {
     use crate::{
         config::AppConfig,

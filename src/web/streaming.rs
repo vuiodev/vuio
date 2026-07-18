@@ -1,6 +1,6 @@
 //! Media, radio, subtitle, and cover-art streaming handlers.
 
-use crate::{database::MediaRepository, error::AppError, state::AppState};
+use crate::{database::DatabaseManager, error::AppError, state::AppState};
 use axum::{
     body::Body,
     extract::{Path, State},
@@ -42,8 +42,8 @@ impl<R: tokio::io::AsyncRead + Unpin> tokio::io::AsyncRead for MetricsTrackingRe
     }
 }
 
-pub async fn serve_media(
-    State(state): State<AppState>,
+pub async fn serve_media<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
     axum::extract::ConnectInfo(client_addr): axum::extract::ConnectInfo<std::net::SocketAddr>,
     Path(id): Path<String>,
     method: Method,
@@ -59,7 +59,7 @@ pub async fn serve_media(
     // Use ReDB database with atomic cache lookup
     let file_info = state
         .database
-        .get_file_by_id(file_id)
+        .get_file_location_by_id(file_id)
         .await
         .map_err(|e| {
             error!("ReDB database error getting file by ID {}: {}", file_id, e);
@@ -179,24 +179,21 @@ pub async fn serve_media(
         .get("getcaptioninfo.sec")
         .and_then(|h| h.to_str().ok())
     {
-        if caption_req == "1" {
-            let srt_path = std::path::PathBuf::from(&file_info.path).with_extension("srt");
-            if srt_path.exists() {
-                let server_ip = headers
-                    .get(header::HOST)
-                    .and_then(|h| h.to_str().ok())
-                    .and_then(|h| h.split(':').next())
-                    .unwrap_or("127.0.0.1");
-                let srt_url = format!(
-                    "http://{}:{}/media/{}/subtitle",
-                    server_ip, state.config.server.port, file_id
-                );
-                debug!(
-                    "Injecting Samsung subtitle header CaptionInfo.sec: {}",
-                    srt_url
-                );
-                response_builder = response_builder.header("CaptionInfo.sec", srt_url);
-            }
+        if caption_req == "1" && file_info.subtitle_available {
+            let server_ip = headers
+                .get(header::HOST)
+                .and_then(|h| h.to_str().ok())
+                .and_then(|h| h.split(':').next())
+                .unwrap_or("127.0.0.1");
+            let srt_url = format!(
+                "http://{}:{}/media/{}/subtitle",
+                server_ip, state.config.server.port, file_id
+            );
+            debug!(
+                "Injecting Samsung subtitle header CaptionInfo.sec: {}",
+                srt_url
+            );
+            response_builder = response_builder.header("CaptionInfo.sec", srt_url);
         }
     }
 
@@ -321,8 +318,8 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
     }
 }
 
-pub async fn serve_subtitle(
-    State(state): State<AppState>,
+pub async fn serve_subtitle<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let file_id = id.parse::<i64>().map_err(|_| {
@@ -332,7 +329,7 @@ pub async fn serve_subtitle(
 
     let file_info = state
         .database
-        .get_file_by_id(file_id)
+        .get_file_location_by_id(file_id)
         .await
         .map_err(|e| {
             error!("Error getting file by ID for subtitle {}: {}", file_id, e);
@@ -365,8 +362,8 @@ pub async fn serve_subtitle(
         .map_err(|_| AppError::NotFound)
 }
 
-pub async fn serve_cover(
-    State(state): State<AppState>,
+pub async fn serve_cover<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
     Path(id): Path<String>,
 ) -> Result<Response, AppError> {
     let file_id = id.parse::<i64>().map_err(|_| {
@@ -376,7 +373,7 @@ pub async fn serve_cover(
 
     let file_info = state
         .database
-        .get_file_by_id(file_id)
+        .get_file_location_by_id(file_id)
         .await
         .map_err(|e| {
             error!("Error getting file by ID for cover {}: {}", file_id, e);

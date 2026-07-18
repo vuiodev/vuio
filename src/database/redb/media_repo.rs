@@ -10,6 +10,9 @@ impl RedbDatabase {
     {
         let database = Arc::clone(&self.db);
         tokio::task::spawn_blocking(move || {
+            let database = database
+                .read()
+                .map_err(|_| anyhow!("ReDB handle lock is poisoned"))?;
             let transaction = database.begin_read()?;
             let mut session = RedbReadSession { transaction };
             operation(&mut session)
@@ -26,6 +29,47 @@ impl RedbDatabase {
             .ok_or_else(|| anyhow!("media upsert returned no ID"))
     }
 
+    pub(super) async fn get_file_location_by_id_impl(
+        &self,
+        id: i64,
+    ) -> Result<Option<FileLocation>> {
+        self.execute_read(move |database| {
+            let transaction = database.begin_read()?;
+            let files = transaction.open_table(FILES_TABLE)?;
+            files
+                .get(id)?
+                .map(|bytes| {
+                    RedbReadSession::view(bytes.value())?
+                        .to_file_location()
+                        .ok_or_else(|| anyhow!("stored media record {id} has no ID"))
+                })
+                .transpose()
+        })
+        .await
+    }
+
+    pub(super) async fn load_file_fingerprints_impl(&self) -> Result<Vec<FileFingerprint>> {
+        let capacity = self.total_files.load(Ordering::Relaxed) as usize;
+        self.execute_read(move |database| {
+            let transaction = database.begin_read()?;
+            let files = transaction.open_table(FILES_TABLE)?;
+            let mut fingerprints = Vec::with_capacity(capacity);
+            for entry in files.iter()? {
+                let (id, bytes) = entry?;
+                let view = RedbReadSession::view(bytes.value())?;
+                fingerprints.push(FileFingerprint {
+                    id: id.value(),
+                    path: PathBuf::from(view.path()),
+                    size: view.size(),
+                    modified: UNIX_EPOCH + Duration::from_secs(view.modified_secs()),
+                    created_at: UNIX_EPOCH + Duration::from_secs(view.created_at_secs()),
+                });
+            }
+            Ok(fingerprints)
+        })
+        .await
+    }
+
     pub(super) fn stream_all_media_files_impl(
         &self,
     ) -> Pin<Box<dyn futures_util::Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>>
@@ -34,6 +78,10 @@ impl RedbDatabase {
         let (sender, receiver) = tokio::sync::mpsc::channel(32);
         tokio::task::spawn_blocking(move || {
             let operation = || -> std::result::Result<(), DatabaseError> {
+                let db = db.read().map_err(|_| DatabaseError::QueryFailed {
+                    query: "database handle".into(),
+                    reason: "ReDB handle lock is poisoned".into(),
+                })?;
                 let read_txn = db
                     .begin_read()
                     .map_err(|error| DatabaseError::QueryFailed {
@@ -632,6 +680,7 @@ impl RedbDatabase {
                     let mut directory_records = write_txn.open_table(DIRECTORY_RECORDS)?;
                     let mut directory_children =
                         write_txn.open_multimap_table(DIRECTORY_CHILDREN)?;
+                    let mut ordered_children = write_txn.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
                     let mut directory_files = write_txn.open_multimap_table(DIRECTORY_FILES)?;
                     let mut directory_mime_counts = write_txn.open_table(DIRECTORY_MIME_COUNTS)?;
 
@@ -663,6 +712,7 @@ impl RedbDatabase {
                                 &mut directory_paths,
                                 &mut directory_records,
                                 &mut directory_children,
+                                &mut ordered_children,
                                 &mut directory_files,
                                 &mut directory_mime_counts,
                                 file_id,
@@ -703,6 +753,7 @@ impl RedbDatabase {
                             &mut directory_paths,
                             &mut directory_records,
                             &mut directory_children,
+                            &mut ordered_children,
                             &mut directory_files,
                             &mut directory_mime_counts,
                             &next_directory_id,
@@ -786,9 +837,10 @@ impl RedbDatabase {
                             continue;
                         }
                         if let Some(data) = files_table.get(id)? {
-                            let file =
-                                Self::canonical_file(&Self::deserialize_media_file(data.value())?)?;
-                            files.push((path_string.clone(), id, file));
+                            let view = RedbReadSession::view(data.value())?;
+                            let snapshot = IndexSnapshot::from_view(&view)
+                                .ok_or_else(|| anyhow!("stored media record {id} has no ID"))?;
+                            files.push((path_string.clone(), id, snapshot));
                         } else {
                             orphan_paths.push(path_string.clone());
                         }
@@ -867,15 +919,16 @@ impl RedbDatabase {
                             continue;
                         }
                         if let Some(data) = files_table.get(id)? {
-                            let file =
-                                Self::canonical_file(&Self::deserialize_media_file(data.value())?)?;
-                            if let Some(parent) = file.path.parent() {
+                            let view = RedbReadSession::view(data.value())?;
+                            if let Some(parent) = Path::new(view.path()).parent() {
                                 summary.affected_parents.push(parent.to_path_buf());
                             }
                             summary
                                 .mime_families
-                                .insert(Self::mime_family(&file.mime_type));
-                            files.push((file.path.to_string_lossy().into_owned(), id, file));
+                                .insert(Self::mime_family(view.mime_type()));
+                            let snapshot = IndexSnapshot::from_view(&view)
+                                .ok_or_else(|| anyhow!("stored media record {id} has no ID"))?;
+                            files.push((view.path().to_owned(), id, snapshot));
                         }
                     }
                 }

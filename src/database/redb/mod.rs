@@ -21,10 +21,10 @@ use tracing::{debug, info};
 use crate::platform::DatabaseError;
 
 use super::{
-    DatabaseHealth, DatabaseManager, DatabaseReadSession, DatabaseStats, HealthRepository,
-    MediaDirectory, MediaFile, MediaFileQuery, MediaFileView, MediaRepository, MusicCategory,
-    MusicCategoryType, Playlist, PlaylistRepository, PlaylistView, RemovalSummary, StatsRepository,
-    VisitSummary,
+    DatabaseBackend, DatabaseHealth, DatabaseManager, DatabaseReadSession, DatabaseStats,
+    DirectoryView, FileFingerprint, FileLocation, HealthRepository, IndexSnapshot, MediaDirectory,
+    MediaFile, MediaFileQuery, MediaFileView, MediaRepository, MusicCategory, MusicCategoryType,
+    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, StatsRepository, VisitSummary,
 };
 
 mod health;
@@ -36,7 +36,7 @@ include!("schema.rs");
 
 /// RedbDatabase - ACID-compliant embedded database
 pub struct RedbDatabase {
-    db: Arc<Database>,
+    db: Arc<std::sync::RwLock<Database>>,
     db_path: PathBuf,
     next_file_id: AtomicI64,
     next_playlist_id: AtomicI64,
@@ -56,6 +56,17 @@ impl std::fmt::Debug for RedbDatabase {
                 &self.next_playlist_id.load(Ordering::Relaxed),
             )
             .finish()
+    }
+}
+
+#[async_trait]
+impl DatabaseBackend for RedbDatabase {
+    async fn open(path: PathBuf, cache_size_mb: usize) -> Result<Self> {
+        Self::new_with_cache(path, cache_size_mb).await
+    }
+
+    fn backend_name() -> &'static str {
+        "redb"
     }
 }
 
@@ -118,6 +129,7 @@ impl RedbDatabase {
                 let _ = write_txn.open_table(DIRECTORY_PATH_INDEX)?;
                 let _ = write_txn.open_table(DIRECTORY_RECORDS)?;
                 let _ = write_txn.open_multimap_table(DIRECTORY_CHILDREN)?;
+                let _ = write_txn.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
                 let _ = write_txn.open_multimap_table(DIRECTORY_FILES)?;
                 let _ = write_txn.open_table(DIRECTORY_MIME_COUNTS)?;
                 let _ = write_txn.open_table(PLAYLISTS_TABLE)?;
@@ -204,7 +216,7 @@ impl RedbDatabase {
         );
 
         Ok(Self {
-            db: Arc::new(db),
+            db: Arc::new(std::sync::RwLock::new(db)),
             db_path: path,
             next_file_id: AtomicI64::new(max_file_id + 1),
             next_playlist_id: AtomicI64::new(max_playlist_id + 1),
@@ -213,12 +225,6 @@ impl RedbDatabase {
             total_size: AtomicU64::new(total_size_sum),
             mutation_lock: tokio::sync::Mutex::new(()),
         })
-    }
-
-    /// Serialize a media record into Rkyv's directly-accessible wire format.
-    fn serialize_media_file(file: &MediaFile) -> Result<rkyv::util::AlignedVec> {
-        rkyv::to_bytes::<rkyv::rancor::Error>(&MediaFileSerializable::from(file))
-            .map_err(|error| anyhow!("Failed to archive MediaFile using Rkyv: {error}"))
     }
 
     /// Materialize an owned media record for legacy/ownership-requiring callers.
@@ -245,9 +251,14 @@ impl RedbDatabase {
         F: FnOnce(&Database) -> Result<R> + Send + 'static,
     {
         let database = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || operation(&database))
-            .await
-            .context("ReDB read task failed")?
+        tokio::task::spawn_blocking(move || {
+            let database = database
+                .read()
+                .map_err(|_| anyhow!("ReDB handle lock is poisoned"))?;
+            operation(&database)
+        })
+        .await
+        .context("ReDB read task failed")?
     }
 
     async fn execute_write<R, F>(&self, operation: F) -> Result<R>
@@ -257,9 +268,14 @@ impl RedbDatabase {
     {
         let _mutation_guard = self.mutation_lock.lock().await;
         let database = Arc::clone(&self.db);
-        tokio::task::spawn_blocking(move || operation(&database))
-            .await
-            .context("ReDB write task failed")?
+        tokio::task::spawn_blocking(move || {
+            let database = database
+                .read()
+                .map_err(|_| anyhow!("ReDB handle lock is poisoned"))?;
+            operation(&database)
+        })
+        .await
+        .context("ReDB write task failed")?
     }
 
     /// Get the directory key for a path
@@ -296,10 +312,29 @@ impl RedbDatabase {
         }
     }
 
+    fn directory_name(path: &str) -> &str {
+        path.rsplit(['/', '\\']).next().unwrap_or(path)
+    }
+
+    fn directory_order_key(parent_id: u64, path: &str, child_id: u64) -> String {
+        format!(
+            "{parent_id:016x}\0{}\0{child_id:016x}",
+            Self::directory_name(path).to_lowercase()
+        )
+    }
+
+    fn directory_order_range(parent_id: u64) -> (String, String) {
+        (
+            format!("{parent_id:016x}\0"),
+            format!("{parent_id:016x}\u{1}"),
+        )
+    }
+
     fn ensure_directory(
         paths: &mut redb::Table<&str, u64>,
         records: &mut redb::Table<u64, &str>,
         children: &mut redb::MultimapTable<u64, u64>,
+        ordered_children: &mut redb::Table<&str, u64>,
         next_directory_id: &AtomicU64,
         path: &str,
     ) -> Result<u64> {
@@ -312,6 +347,7 @@ impl RedbDatabase {
                 paths,
                 records,
                 children,
+                ordered_children,
                 next_directory_id,
                 &parent,
             )?)
@@ -324,6 +360,8 @@ impl RedbDatabase {
         records.insert(id, path)?;
         if let Some(parent_id) = parent_id {
             children.insert(parent_id, id)?;
+            let order_key = Self::directory_order_key(parent_id, path, id);
+            ordered_children.insert(order_key.as_str(), id)?;
         }
         Ok(id)
     }
@@ -371,10 +409,12 @@ impl RedbDatabase {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)] // One atomic directory-index update spans these tables.
     fn add_directory_membership<V: MediaFileView>(
         paths: &mut redb::Table<&str, u64>,
         records: &mut redb::Table<u64, &str>,
         children: &mut redb::MultimapTable<u64, u64>,
+        ordered_children: &mut redb::Table<&str, u64>,
         directory_files: &mut redb::MultimapTable<u64, i64>,
         counts: &mut redb::Table<&str, u64>,
         next_directory_id: &AtomicU64,
@@ -384,8 +424,14 @@ impl RedbDatabase {
             .id()
             .ok_or_else(|| anyhow!("cannot index directory membership without a file ID"))?;
         let directory_path = Self::get_dir_key_str(file.path());
-        let directory_id =
-            Self::ensure_directory(paths, records, children, next_directory_id, &directory_path)?;
+        let directory_id = Self::ensure_directory(
+            paths,
+            records,
+            children,
+            ordered_children,
+            next_directory_id,
+            &directory_path,
+        )?;
         directory_files.insert(directory_id, file_id)?;
         Self::change_recursive_mime_count(
             paths,
@@ -397,10 +443,12 @@ impl RedbDatabase {
         Self::change_recursive_mime_count(paths, counts, &directory_path, "*", 1)
     }
 
+    #[allow(clippy::too_many_arguments)] // One atomic directory-index update spans these tables.
     fn remove_directory_membership<V: MediaFileView>(
         paths: &mut redb::Table<&str, u64>,
         records: &mut redb::Table<u64, &str>,
         children: &mut redb::MultimapTable<u64, u64>,
+        ordered_children: &mut redb::Table<&str, u64>,
         directory_files: &mut redb::MultimapTable<u64, i64>,
         counts: &mut redb::Table<&str, u64>,
         file_id: i64,
@@ -439,6 +487,8 @@ impl RedbDatabase {
             if let Some(parent) = parent_path.as_deref() {
                 if let Some(parent_id) = paths.get(parent)?.map(|value| value.value()) {
                     children.remove(parent_id, id)?;
+                    let order_key = Self::directory_order_key(parent_id, &path, id);
+                    ordered_children.remove(order_key.as_str())?;
                 }
             }
             paths.remove(path.as_str())?;
@@ -504,13 +554,14 @@ impl RedbDatabase {
 
     fn remove_files_from_transaction(
         transaction: &redb::WriteTransaction,
-        files: &[(String, i64, MediaFile)],
+        files: &[(String, i64, IndexSnapshot)],
     ) -> Result<(usize, u64)> {
         let mut files_table = transaction.open_table(FILES_TABLE)?;
         let mut path_index = transaction.open_table(PATH_INDEX)?;
         let mut directory_paths = transaction.open_table(DIRECTORY_PATH_INDEX)?;
         let mut directory_records = transaction.open_table(DIRECTORY_RECORDS)?;
         let mut directory_children = transaction.open_multimap_table(DIRECTORY_CHILDREN)?;
+        let mut ordered_children = transaction.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
         let mut directory_files = transaction.open_multimap_table(DIRECTORY_FILES)?;
         let mut directory_mime_counts = transaction.open_table(DIRECTORY_MIME_COUNTS)?;
         let mut artist_index = transaction.open_multimap_table(ARTIST_INDEX)?;
@@ -530,6 +581,7 @@ impl RedbDatabase {
                 &mut directory_paths,
                 &mut directory_records,
                 &mut directory_children,
+                &mut ordered_children,
                 &mut directory_files,
                 &mut directory_mime_counts,
                 *id,
@@ -613,6 +665,14 @@ impl MediaRepository for RedbDatabase {
 
     async fn get_file_by_id(&self, id: i64) -> Result<Option<MediaFile>> {
         RedbDatabase::get_file_by_id_impl(self, id).await
+    }
+
+    async fn get_file_location_by_id(&self, id: i64) -> Result<Option<FileLocation>> {
+        RedbDatabase::get_file_location_by_id_impl(self, id).await
+    }
+
+    async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>> {
+        RedbDatabase::load_file_fingerprints_impl(self).await
     }
 
     async fn get_artists(&self) -> Result<Vec<MusicCategory>> {
@@ -797,11 +857,7 @@ impl HealthRepository for RedbDatabase {
         RedbDatabase::create_backup_impl(self, backup_path).await
     }
 
-    async fn restore_from_backup(&self, backup_path: &Path) -> Result<()> {
-        RedbDatabase::restore_from_backup_impl(self, backup_path).await
-    }
-
-    async fn vacuum(&self) -> Result<()> {
+    async fn vacuum(&self) -> Result<bool> {
         RedbDatabase::vacuum_impl(self).await
     }
 
@@ -1003,13 +1059,16 @@ mod tests {
         let playlist = db.create_playlist("Kept playlist", None).await.unwrap();
         db.add_to_playlist(playlist, id, Some(0)).await.unwrap();
 
-        let transaction = db.db.begin_write().unwrap();
-        transaction
-            .open_table(FILES_TABLE)
-            .unwrap()
-            .remove(id)
-            .unwrap();
-        transaction.commit().unwrap();
+        {
+            let database = db.db.read().unwrap();
+            let transaction = database.begin_write().unwrap();
+            transaction
+                .open_table(FILES_TABLE)
+                .unwrap()
+                .remove(id)
+                .unwrap();
+            transaction.commit().unwrap();
+        }
 
         let health = db.rebuild_derived_indexes().await.unwrap();
         assert!(health.is_healthy);
@@ -1190,5 +1249,99 @@ mod tests {
         );
         assert!(db.get_playlist(playlist).await.unwrap().is_none());
         assert!(db.get_file_by_id(radio_id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn backup_and_offline_restore_preserve_a_valid_snapshot() {
+        let temp = tempdir().unwrap();
+        let database_path = temp.path().join("active.redb");
+        let backup_path = temp.path().join("snapshot.redb");
+        let db = RedbDatabase::new(database_path.clone()).await.unwrap();
+        db.initialize().await.unwrap();
+        db.rebuild_derived_indexes().await.unwrap();
+        db.store_media_file(&MediaFile::new(
+            PathBuf::from("/media/original.mp4"),
+            42,
+            "video/mp4".to_owned(),
+        ))
+        .await
+        .unwrap();
+        db.create_backup(&backup_path).await.unwrap();
+        drop(db);
+
+        let replacement = RedbDatabase::new(database_path.clone()).await.unwrap();
+        replacement.initialize().await.unwrap();
+        replacement
+            .store_media_file(&MediaFile::new(
+                PathBuf::from("/media/replacement.mp4"),
+                7,
+                "video/mp4".to_owned(),
+            ))
+            .await
+            .unwrap();
+        drop(replacement);
+
+        RedbDatabase::restore_backup_file(backup_path, database_path.clone())
+            .await
+            .unwrap();
+        let restored = RedbDatabase::new(database_path).await.unwrap();
+        restored.initialize().await.unwrap();
+        assert!(restored
+            .get_file_by_path(Path::new("/media/original.mp4"))
+            .await
+            .unwrap()
+            .is_some());
+        assert!(restored
+            .get_file_by_path(Path::new("/media/replacement.mp4"))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_directory_visitor_orders_and_pages_before_loading_records() {
+        let temp = tempdir().unwrap();
+        let db = Arc::new(
+            RedbDatabase::new(temp.path().join("ordered.redb"))
+                .await
+                .unwrap(),
+        );
+        db.initialize().await.unwrap();
+        db.bulk_store_media_files(&[
+            MediaFile::new(
+                PathBuf::from("/media/Zeta/z.mp4"),
+                1,
+                "video/mp4".to_owned(),
+            ),
+            MediaFile::new(
+                PathBuf::from("/media/alpha/a.mp4"),
+                1,
+                "video/mp4".to_owned(),
+            ),
+        ])
+        .await
+        .unwrap();
+
+        let (summary, names) = db
+            .clone()
+            .read(|session| {
+                let mut names = Vec::new();
+                let summary = session.visit_direct_subdirectories(
+                    "/media",
+                    Some("video/"),
+                    0,
+                    1,
+                    |directory| {
+                        names.push(directory.name().to_owned());
+                        Ok(())
+                    },
+                )?;
+                Ok((summary, names))
+            })
+            .await
+            .unwrap();
+        assert_eq!(summary.matched, 2);
+        assert_eq!(summary.visited, 1);
+        assert_eq!(names, ["alpha"]);
     }
 }

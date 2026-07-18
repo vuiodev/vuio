@@ -89,6 +89,115 @@ pub struct MediaFile {
     pub updated_at: SystemTime,
 }
 
+/// Explicit name for a complete record that must outlive a database read session.
+pub type OwnedMediaFile = MediaFile;
+
+/// Minimal persisted state needed to compare a filesystem scan with the index.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileFingerprint {
+    pub id: i64,
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: SystemTime,
+    pub created_at: SystemTime,
+}
+
+/// Minimal owned state needed after a database session to serve one resource.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileLocation {
+    pub id: i64,
+    pub path: PathBuf,
+    pub filename: String,
+    pub title: Option<String>,
+    pub mime_type: String,
+    pub size: u64,
+    pub subtitle_available: bool,
+}
+
+/// Small owned copy of fields required after a write invalidates an archived value guard.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IndexSnapshot {
+    pub id: i64,
+    pub path: String,
+    pub size: u64,
+    pub mime_type: String,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<u32>,
+    pub album_artist: Option<String>,
+}
+
+impl IndexSnapshot {
+    pub fn from_view(view: &impl MediaFileView) -> Option<Self> {
+        Some(Self {
+            id: view.id()?,
+            path: view.path().to_owned(),
+            size: view.size(),
+            mime_type: view.mime_type().to_owned(),
+            artist: view.artist().map(str::to_owned),
+            album: view.album().map(str::to_owned),
+            genre: view.genre().map(str::to_owned),
+            year: view.year(),
+            album_artist: view.album_artist().map(str::to_owned),
+        })
+    }
+}
+
+impl MediaFileView for IndexSnapshot {
+    fn id(&self) -> Option<i64> {
+        Some(self.id)
+    }
+    fn path(&self) -> &str {
+        &self.path
+    }
+    fn filename(&self) -> &str {
+        ""
+    }
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn modified_secs(&self) -> u64 {
+        0
+    }
+    fn mime_type(&self) -> &str {
+        &self.mime_type
+    }
+    fn duration_secs(&self) -> Option<f64> {
+        None
+    }
+    fn title(&self) -> Option<&str> {
+        None
+    }
+    fn artist(&self) -> Option<&str> {
+        self.artist.as_deref()
+    }
+    fn album(&self) -> Option<&str> {
+        self.album.as_deref()
+    }
+    fn genre(&self) -> Option<&str> {
+        self.genre.as_deref()
+    }
+    fn track_number(&self) -> Option<u32> {
+        None
+    }
+    fn year(&self) -> Option<u32> {
+        self.year
+    }
+    fn album_artist(&self) -> Option<&str> {
+        self.album_artist.as_deref()
+    }
+    fn subtitle_available(&self) -> bool {
+        false
+    }
+    fn created_at_secs(&self) -> u64 {
+        0
+    }
+    fn updated_at_secs(&self) -> u64 {
+        0
+    }
+}
+
 impl MediaFile {
     pub fn new(path: PathBuf, size: u64, mime_type: String) -> Self {
         let filename = path
@@ -207,6 +316,28 @@ pub trait MediaFileView {
     fn created_at_secs(&self) -> u64;
     fn updated_at_secs(&self) -> u64;
 
+    fn to_fingerprint(&self) -> Option<FileFingerprint> {
+        Some(FileFingerprint {
+            id: self.id()?,
+            path: PathBuf::from(self.path()),
+            size: self.size(),
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.created_at_secs()),
+        })
+    }
+
+    fn to_file_location(&self) -> Option<FileLocation> {
+        Some(FileLocation {
+            id: self.id()?,
+            path: PathBuf::from(self.path()),
+            filename: self.filename().to_owned(),
+            title: self.title().map(str::to_owned),
+            mime_type: self.mime_type().to_owned(),
+            size: self.size(),
+            subtitle_available: self.subtitle_available(),
+        })
+    }
+
     fn to_owned_media_file(&self) -> MediaFile {
         MediaFile {
             id: self.id(),
@@ -236,6 +367,27 @@ pub trait PlaylistView {
     fn description(&self) -> Option<&str>;
     fn created_at_secs(&self) -> u64;
     fn updated_at_secs(&self) -> u64;
+}
+
+/// Borrowed directory record. ReDB implements this directly over its table value.
+pub trait DirectoryView {
+    fn id(&self) -> u64;
+    fn path(&self) -> &str;
+    fn name(&self) -> &str;
+}
+
+impl DirectoryView for MediaDirectory {
+    fn id(&self) -> u64 {
+        0
+    }
+
+    fn path(&self) -> &str {
+        self.path.to_str().unwrap_or_default()
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -280,6 +432,9 @@ pub trait DatabaseReadSession {
     type Playlist<'a>: PlaylistView
     where
         Self: 'a;
+    type Directory<'a>: DirectoryView
+    where
+        Self: 'a;
 
     fn visit_files<F>(
         &mut self,
@@ -291,11 +446,16 @@ pub trait DatabaseReadSession {
     where
         F: for<'a> FnMut(Self::File<'a>) -> Result<()>;
 
-    fn direct_subdirectories(
+    fn visit_direct_subdirectories<F>(
         &mut self,
         canonical_parent: &str,
         mime_family: Option<&str>,
-    ) -> Result<Vec<MediaDirectory>>;
+        offset: usize,
+        limit: usize,
+        visitor: F,
+    ) -> Result<VisitSummary>
+    where
+        F: for<'a> FnMut(Self::Directory<'a>) -> Result<()>;
 
     fn visit_playlists<F>(
         &mut self,
@@ -391,6 +551,12 @@ pub trait MediaRepository: Send + Sync {
 
     /// Get a specific file by ID
     async fn get_file_by_id(&self, id: i64) -> Result<Option<MediaFile>>;
+
+    /// Load only the fields required by media streaming.
+    async fn get_file_location_by_id(&self, id: i64) -> Result<Option<FileLocation>>;
+
+    /// Load compact scanner comparison records instead of complete media metadata.
+    async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>>;
 
     // Music categorization methods
     /// Get all unique artists
@@ -541,8 +707,7 @@ pub trait HealthRepository: Send + Sync {
     async fn check_and_repair(&self) -> Result<DatabaseHealth>;
     async fn rebuild_derived_indexes(&self) -> Result<DatabaseHealth>;
     async fn create_backup(&self, backup_path: &Path) -> Result<()>;
-    async fn restore_from_backup(&self, backup_path: &Path) -> Result<()>;
-    async fn vacuum(&self) -> Result<()>;
+    async fn vacuum(&self) -> Result<bool>;
 }
 
 /// Database statistics independent of the storage backend.
@@ -596,6 +761,14 @@ pub trait DatabaseManager:
         playlist_formats::PlaylistFileManager::scan_and_import_playlists_recursive(self, directory)
             .await
     }
+}
+
+/// Construction boundary for statically dispatched database backends.
+/// Backend selection happens once at startup; record loops remain monomorphized.
+#[async_trait]
+pub trait DatabaseBackend: DatabaseManager + Sized + 'static {
+    async fn open(path: PathBuf, cache_size_mb: usize) -> Result<Self>;
+    fn backend_name() -> &'static str;
 }
 
 #[derive(Debug)]

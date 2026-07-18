@@ -1,6 +1,6 @@
 /// Start atomic application statistics monitoring
-async fn start_atomic_monitoring(
-    database: Arc<database::redb::RedbDatabase>,
+async fn start_atomic_monitoring<D: DatabaseManager + 'static>(
+    database: Arc<D>,
     stats: Arc<ApplicationStats>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
@@ -55,8 +55,8 @@ async fn start_atomic_monitoring(
 pub struct MaintenanceService;
 
 impl MaintenanceService {
-    pub async fn start(
-        database: Arc<database::redb::RedbDatabase>,
+    pub async fn start<D: DatabaseManager + 'static>(
+        database: Arc<D>,
         stats: Arc<ApplicationStats>,
         cancellation: CancellationToken,
     ) -> anyhow::Result<tokio::task::JoinHandle<()>> {

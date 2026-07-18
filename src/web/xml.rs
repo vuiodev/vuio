@@ -1,32 +1,35 @@
 // src\web\xml.rs
 use crate::{
-    database::{DatabaseReadSession, MediaDirectory, MediaFile, MediaFileQuery, MediaFileView},
+    database::{
+        DatabaseManager, DatabaseReadSession, DirectoryView, MediaDirectory, MediaFile,
+        MediaFileQuery, MediaFileView,
+    },
     state::AppState,
 };
 use anyhow::Result;
 use axum::body::Bytes;
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
 fn write_xml_escaped<W: std::fmt::Write>(target: &mut W, value: &str) -> std::fmt::Result {
-    let sanitized = if value.chars().all(is_valid_xml_character) {
-        Cow::Borrowed(value)
-    } else {
-        Cow::Owned(
-            value
-                .chars()
-                .map(|character| {
-                    if is_valid_xml_character(character) {
-                        character
-                    } else {
-                        '\u{fffd}'
-                    }
-                })
-                .collect(),
-        )
-    };
-    target.write_str(&quick_xml::escape::escape(sanitized))
+    let mut unescaped_start = 0;
+    for (offset, character) in value.char_indices() {
+        let replacement = match character {
+            '&' => Some("&amp;"),
+            '<' => Some("&lt;"),
+            '>' => Some("&gt;"),
+            '"' => Some("&quot;"),
+            '\'' => Some("&apos;"),
+            value if !is_valid_xml_character(value) => Some("\u{fffd}"),
+            _ => None,
+        };
+        if let Some(replacement) = replacement {
+            target.write_str(&value[unescaped_start..offset])?;
+            target.write_str(replacement)?;
+            unescaped_start = offset + character.len_utf8();
+        }
+    }
+    target.write_str(&value[unescaped_start..])
 }
 
 fn is_valid_xml_character(character: char) -> bool {
@@ -50,15 +53,34 @@ fn xml_escape(value: &str) -> XmlEscaped<'_> {
 
 /// Writes a complete DIDL document as the escaped text of SOAP's `<Result>`
 /// directly into the final response buffer.
-struct SoapResultWriter<'a>(&'a mut String);
+struct ByteBuffer(Vec<u8>);
 
-impl SoapResultWriter<'_> {
+impl ByteBuffer {
+    fn with_capacity(capacity: usize) -> Self {
+        Self(Vec::with_capacity(capacity))
+    }
+
+    fn into_bytes(self) -> Bytes {
+        Bytes::from(self.0)
+    }
+}
+
+impl std::fmt::Write for ByteBuffer {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        self.0.extend_from_slice(value.as_bytes());
+        Ok(())
+    }
+}
+
+struct SoapResultWriter<'a, W: std::fmt::Write>(&'a mut W);
+
+impl<W: std::fmt::Write> SoapResultWriter<'_, W> {
     fn push_str(&mut self, value: &str) {
         let _ = std::fmt::Write::write_str(self, value);
     }
 }
 
-impl std::fmt::Write for SoapResultWriter<'_> {
+impl<W: std::fmt::Write> std::fmt::Write for SoapResultWriter<'_, W> {
     fn write_str(&mut self, value: &str) -> std::fmt::Result {
         write_xml_escaped(self.0, value)
     }
@@ -95,13 +117,13 @@ pub struct BrowseRenderContext {
     pub bookmarks: HashMap<i64, u32>,
 }
 
-fn write_directory<W: std::fmt::Write>(
+fn write_directory<W: std::fmt::Write, D: DirectoryView>(
     output: &mut W,
     object_id: &str,
-    container: &MediaDirectory,
+    container: &D,
     client: crate::web::client::DlnaClientProfile,
 ) -> std::fmt::Result {
-    let path = container.path.to_string_lossy();
+    let path = container.path();
     let container_id = if path.starts_with("audio/")
         || path.starts_with("video/")
         || path.starts_with("image/")
@@ -111,18 +133,18 @@ fn write_directory<W: std::fmt::Write>(
         || path == "image"
         || path == "radio"
     {
-        path.into_owned()
+        path.to_owned()
     } else if path.starts_with('d') && path[1..].chars().all(|c| c.is_ascii_digit()) {
         format!("{}/{}", object_id.trim_end_matches('/'), path)
     } else {
-        format!("{}/{}", object_id.trim_end_matches('/'), container.name)
+        format!("{}/{}", object_id.trim_end_matches('/'), container.name())
     };
     write!(
         output,
         r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>"#,
         xml_escape(&container_id),
         xml_escape(object_id),
-        xml_escape(&container.name)
+        xml_escape(container.name())
     )?;
     if matches!(
         client,
@@ -313,29 +335,35 @@ pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
     requested_count: usize,
     context: BrowseRenderContext,
 ) -> Result<Bytes> {
-    let mut directories = session.direct_subdirectories(
-        canonical_parent,
-        (!mime_family.is_empty()).then_some(mime_family),
-    )?;
-    directories.sort_by_cached_key(|directory| directory.name.to_lowercase());
-    let directory_count = directories.len();
-    let selected_directories = directories
-        .iter()
-        .skip(starting_index)
-        .take(requested_count)
-        .collect::<Vec<_>>();
+    let directory_count = session
+        .visit_direct_subdirectories(
+            canonical_parent,
+            (!mime_family.is_empty()).then_some(mime_family),
+            0,
+            0,
+            |_| Ok(()),
+        )?
+        .matched;
+    let directory_limit = requested_count.min(directory_count.saturating_sub(starting_index));
     let file_offset = starting_index.saturating_sub(directory_count);
-    let file_limit = requested_count.saturating_sub(selected_directories.len());
+    let file_limit = requested_count.saturating_sub(directory_limit);
 
-    let mut response = String::with_capacity(750 + requested_count.saturating_mul(500));
-    response.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
+    let mut response = ByteBuffer::with_capacity(750 + requested_count.saturating_mul(500));
+    response.write_str(r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-    <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#);
+    <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#)?;
     let mut result = SoapResultWriter(&mut response);
     result.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
-    for directory in &selected_directories {
-        write_directory(&mut result, object_id, directory, context.client)?;
-    }
+    let directory_summary = session.visit_direct_subdirectories(
+        canonical_parent,
+        (!mime_family.is_empty()).then_some(mime_family),
+        starting_index,
+        directory_limit,
+        |directory| {
+            write_directory(&mut result, object_id, &directory, context.client)
+                .map_err(|_| anyhow::anyhow!("failed to construct directory XML"))
+        },
+    )?;
     let query = MediaFileQuery::Directory {
         path: canonical_parent.to_owned(),
         mime_family: (!mime_family.is_empty()).then(|| mime_family.to_owned()),
@@ -345,10 +373,10 @@ pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
             .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))
     })?;
     result.push_str("</DIDL-Lite>");
-    let returned = selected_directories.len() + summary.visited;
+    let returned = directory_summary.visited + summary.visited;
     let total = directory_count + summary.matched;
     write!(&mut response, "</Result><NumberReturned>{returned}</NumberReturned><TotalMatches>{total}</TotalMatches><UpdateID>{}</UpdateID></u:BrowseResponse></s:Body></s:Envelope>", context.update_id)?;
-    Ok(Bytes::from(response))
+    Ok(response.into_bytes())
 }
 
 pub fn generate_indexed_items_response<S: DatabaseReadSession>(
@@ -359,10 +387,10 @@ pub fn generate_indexed_items_response<S: DatabaseReadSession>(
     requested_count: usize,
     context: BrowseRenderContext,
 ) -> Result<Bytes> {
-    let mut response = String::with_capacity(750 + requested_count.saturating_mul(500));
-    response.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
+    let mut response = ByteBuffer::with_capacity(750 + requested_count.saturating_mul(500));
+    response.write_str(r#"<?xml version="1.0" encoding="UTF-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-    <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#);
+    <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#)?;
     let mut result = SoapResultWriter(&mut response);
     result.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
     let summary = session.visit_files(&query, starting_index, requested_count, |file| {
@@ -371,10 +399,10 @@ pub fn generate_indexed_items_response<S: DatabaseReadSession>(
     })?;
     result.push_str("</DIDL-Lite>");
     write!(&mut response, "</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>{}</UpdateID></u:BrowseResponse></s:Body></s:Envelope>", summary.visited, summary.matched, context.update_id)?;
-    Ok(Bytes::from(response))
+    Ok(response.into_bytes())
 }
 
-pub async fn generate_description_xml(state: &AppState) -> String {
+pub async fn generate_description_xml<D: DatabaseManager>(state: &AppState<D>) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <root xmlns="urn:schemas-upnp-org:device-1-0">
@@ -535,7 +563,7 @@ pub async fn generate_browse_response(
     object_id: &str,
     subdirectories: &[MediaDirectory],
     files: &[MediaFile],
-    state: &AppState,
+    state: &AppState<impl DatabaseManager>,
     server_ip: &str,
     total_matches: usize,
 ) -> String {

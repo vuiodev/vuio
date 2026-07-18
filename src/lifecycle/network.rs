@@ -1,6 +1,6 @@
 /// Start SSDP service with platform abstraction
-async fn start_ssdp_service(
-    app_state: AppState,
+async fn start_ssdp_service<D: DatabaseManager + 'static>(
+    app_state: AppState<D>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
     info!("Starting SSDP discovery service...");
@@ -15,8 +15,8 @@ async fn start_ssdp_service(
 }
 
 /// Start HTTP server as a background task with proper error handling
-async fn start_http_server_task(
-    app_state: AppState,
+async fn start_http_server_task<D: DatabaseManager + 'static>(
+    app_state: AppState<D>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<NetworkTaskHandles> {
     info!("Starting HTTP server...");
@@ -92,15 +92,15 @@ pub struct NetworkTaskHandles {
 }
 
 impl NetworkLifecycleService {
-    pub async fn start_http(
-        state: AppState,
+    pub async fn start_http<D: DatabaseManager + 'static>(
+        state: AppState<D>,
         cancellation: CancellationToken,
     ) -> anyhow::Result<NetworkTaskHandles> {
         start_http_server_task(state, cancellation).await
     }
 
-    pub async fn start_ssdp(
-        state: AppState,
+    pub async fn start_ssdp<D: DatabaseManager + 'static>(
+        state: AppState<D>,
         cancellation: CancellationToken,
     ) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
         start_ssdp_service(state, cancellation).await

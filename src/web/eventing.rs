@@ -1,6 +1,6 @@
 //! UPnP ContentDirectory subscription and change-notification handling.
 
-use crate::state::AppState;
+use crate::{database::DatabaseManager, state::AppState};
 use axum::{
     extract::{ConnectInfo, State},
     http::{header, HeaderMap, Method, StatusCode},
@@ -14,7 +14,7 @@ use tracing::{info, warn};
 ///
 /// The revision, browse-response invalidation, and UPnP notification are kept
 /// together so callers cannot update one without the others.
-pub async fn publish_content_change(state: &AppState) {
+pub async fn publish_content_change<D: DatabaseManager + 'static>(state: &AppState<D>) {
     let old_id = state
         .content_update_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -34,13 +34,13 @@ pub async fn publish_content_change(state: &AppState) {
 }
 
 /// Clear cached SOAP browse responses without announcing a content mutation.
-pub async fn invalidate_browse_responses(state: &AppState) {
+pub async fn invalidate_browse_responses<D: DatabaseManager>(state: &AppState<D>) {
     state.browse_cache.lock().await.clear();
 }
 
 /// Handle UPnP eventing subscription requests for ContentDirectory service
-pub async fn content_directory_subscribe(
-    State(state): State<AppState>,
+pub async fn content_directory_subscribe<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     method: Method,
@@ -258,7 +258,10 @@ async fn send_event_notification(
     }
 }
 
-pub async fn notify_content_change(state: &AppState, _published_update_id: u32) {
+pub async fn notify_content_change<D: DatabaseManager>(
+    state: &AppState<D>,
+    _published_update_id: u32,
+) {
     use futures_util::{stream, StreamExt};
 
     let now = std::time::Instant::now();

@@ -2,16 +2,18 @@
 
 use crate::web::format::format_bytes;
 use crate::{
-    database::{DatabaseReadSession, MediaFileQuery, MediaFileView, MediaRepository},
+    database::{DatabaseManager, DatabaseReadSession, MediaFileQuery, MediaFileView},
     error::AppError,
     state::AppState,
 };
 use axum::{
+    body::Bytes,
     extract::{Query, State},
-    http::header,
-    response::IntoResponse,
+    http::{header, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
+use std::io::Write as _;
 
 const DASHBOARD_TEMPLATE: &str = include_str!("ui/dashboard.html");
 
@@ -28,7 +30,9 @@ pub struct ServerInfo {
     monitored_directories: Vec<String>,
 }
 
-pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerInfo> {
+pub async fn server_info_handler<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> Json<ServerInfo> {
     let monitored_directories = state
         .media_directories
         .read()
@@ -50,29 +54,10 @@ pub struct MediaPageQuery {
     query: Option<String>,
 }
 
-#[derive(serde::Serialize)]
-struct WebMediaFile {
-    id: i64,
-    path: String,
-    name: String,
-    title: Option<String>,
-    artist: Option<String>,
-    album: Option<String>,
-    size_str: String,
-    ext: String,
-    cat: String,
-}
-
-#[derive(serde::Serialize)]
-pub struct MediaPage {
-    files: Vec<WebMediaFile>,
-    next_cursor: Option<String>,
-}
-
-pub async fn media_page_handler(
-    State(state): State<AppState>,
+pub async fn media_page_handler<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
     Query(params): Query<MediaPageQuery>,
-) -> Result<Json<MediaPage>, AppError> {
+) -> Result<Response, AppError> {
     let after_id = params
         .cursor
         .as_deref()
@@ -95,30 +80,46 @@ pub async fn media_page_handler(
         text,
     };
     let fetch_limit = limit + 1;
-    let mut files = state
+    let response = state
         .database
         .clone()
         .read(move |session| {
-            let mut page = Vec::with_capacity(fetch_limit);
-            session.visit_files(&query, 0, fetch_limit, |file| {
-                page.push(web_media_file(&file));
+            let mut output = Vec::with_capacity(limit.saturating_mul(320));
+            output.extend_from_slice(b"{\"files\":[");
+            let mut emitted = 0_usize;
+            let mut last_id = None;
+            let summary = session.visit_files(&query, 0, fetch_limit, |file| {
+                if emitted >= limit {
+                    return Ok(());
+                }
+                if emitted > 0 {
+                    output.push(b',');
+                }
+                write_web_media_file(&mut output, &file)?;
+                last_id = file.id();
+                emitted += 1;
                 Ok(())
             })?;
-            Ok(page)
+            output.extend_from_slice(b"],\"next_cursor\":");
+            if summary.visited > limit {
+                serde_json::to_writer(&mut output, &last_id.map(|id| id.to_string()))?;
+            } else {
+                output.extend_from_slice(b"null");
+            }
+            output.push(b'}');
+            Ok(Bytes::from(output))
         })
         .await
         .map_err(AppError::Internal)?;
-    let has_more = files.len() > limit;
-    if has_more {
-        files.pop();
-    }
-    let next_cursor = has_more
-        .then(|| files.last().map(|file| file.id.to_string()))
-        .flatten();
-    Ok(Json(MediaPage { files, next_cursor }))
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        response,
+    )
+        .into_response())
 }
 
-fn web_media_file(file: &impl MediaFileView) -> WebMediaFile {
+fn write_web_media_file(output: &mut Vec<u8>, file: &impl MediaFileView) -> anyhow::Result<()> {
     let mime_type = file.mime_type();
     let category = if mime_type == "audio/radio" {
         "radio"
@@ -130,17 +131,28 @@ fn web_media_file(file: &impl MediaFileView) -> WebMediaFile {
         .and_then(|value| value.to_str())
         .unwrap_or("")
         .to_lowercase();
-    WebMediaFile {
-        id: file.id().unwrap_or_default(),
-        path: file.path().to_owned(),
-        name: file.filename().to_owned(),
-        title: file.title().map(str::to_owned),
-        artist: file.artist().map(str::to_owned),
-        album: file.album().map(str::to_owned),
-        size_str: format_bytes(file.size()),
-        ext: extension,
-        cat: category.to_owned(),
-    }
+    write!(
+        output,
+        "{{\"id\":{},\"path\":",
+        file.id().unwrap_or_default()
+    )?;
+    serde_json::to_writer(&mut *output, file.path())?;
+    output.extend_from_slice(b",\"name\":");
+    serde_json::to_writer(&mut *output, file.filename())?;
+    output.extend_from_slice(b",\"title\":");
+    serde_json::to_writer(&mut *output, &file.title())?;
+    output.extend_from_slice(b",\"artist\":");
+    serde_json::to_writer(&mut *output, &file.artist())?;
+    output.extend_from_slice(b",\"album\":");
+    serde_json::to_writer(&mut *output, &file.album())?;
+    output.extend_from_slice(b",\"size_str\":");
+    serde_json::to_writer(&mut *output, &format_bytes(file.size()))?;
+    output.extend_from_slice(b",\"ext\":");
+    serde_json::to_writer(&mut *output, &extension)?;
+    output.extend_from_slice(b",\"cat\":");
+    serde_json::to_writer(&mut *output, category)?;
+    output.push(b'}');
+    Ok(())
 }
 
 #[cfg(test)]

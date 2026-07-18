@@ -3,12 +3,10 @@
 /// Uses two-phase approach to avoid RwLock deadlock:
 /// 1. Stream all files and collect paths to delete (read lock)
 /// 2. Drop stream, then bulk delete (write lock)
-async fn validate_and_cleanup_deleted_files(
-    database: Arc<database::redb::RedbDatabase>,
+async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
+    database: Arc<D>,
     monitored_roots: &[PathBuf],
 ) -> anyhow::Result<usize> {
-    use futures_util::StreamExt;
-
     info!("Validating cached media files...");
 
     // Phase 1: Collect paths to delete (holds read lock)
@@ -16,12 +14,7 @@ async fn validate_and_cleanup_deleted_files(
     let mut total_checked = 0;
 
     {
-        let mut stream = database.stream_all_media_files();
-
-        while let Some(media_file_result) = stream.next().await {
-            let media_file =
-                media_file_result.context("Failed to read media file from database stream")?;
-
+        for media_file in database.load_file_fingerprints().await? {
             total_checked += 1;
 
             let unavailable_root = monitored_roots
@@ -60,8 +53,8 @@ async fn validate_and_cleanup_deleted_files(
     Ok(removed_count)
 }
 
-async fn hide_unavailable_media_roots(
-    database: &Arc<database::redb::RedbDatabase>,
+async fn hide_unavailable_media_roots<D: DatabaseManager>(
+    database: &Arc<D>,
     roots: &[PathBuf],
 ) -> anyhow::Result<usize> {
     let mut removed = 0;
@@ -76,9 +69,9 @@ async fn hide_unavailable_media_roots(
 }
 
 /// Perform initial media scan, using database cache when possible
-async fn perform_initial_media_scan(
+async fn perform_initial_media_scan<D: DatabaseManager + 'static>(
     config: &AppConfig,
-    database: &Arc<database::redb::RedbDatabase>,
+    database: &Arc<D>,
 ) -> anyhow::Result<()> {
     info!("Performing initial media scan...");
 
@@ -182,9 +175,9 @@ async fn perform_initial_media_scan(
 }
 
 /// Perform initial playlist file scan
-async fn perform_initial_playlist_scan(
+async fn perform_initial_playlist_scan<D: DatabaseManager + 'static>(
     config: &AppConfig,
-    database: &Arc<database::redb::RedbDatabase>,
+    database: &Arc<D>,
 ) -> anyhow::Result<()> {
     if !config.media.scan_playlists {
         info!("Playlist scanning disabled in configuration");
@@ -244,9 +237,9 @@ async fn perform_initial_playlist_scan(
 }
 
 /// Start file system monitoring with database integration
-async fn start_file_monitoring(
+async fn start_file_monitoring<D: DatabaseManager + 'static>(
     watcher: Arc<CrossPlatformWatcher>,
-    app_state: AppState,
+    app_state: AppState<D>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
     if !app_state.config.media.watch_for_changes {
@@ -416,7 +409,7 @@ async fn start_file_monitoring(
 }
 
 /// Increment the content update ID to notify DLNA clients of changes
-async fn increment_content_update_id(app_state: &AppState) {
+async fn increment_content_update_id<D: DatabaseManager + 'static>(app_state: &AppState<D>) {
     crate::web::eventing::publish_content_change(app_state).await;
 }
 
@@ -498,10 +491,10 @@ fn is_srt_path(path: &std::path::Path) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case("srt"))
 }
 
-async fn update_subtitle_index(
+async fn update_subtitle_index<D: DatabaseManager + 'static>(
     subtitle_path: &std::path::Path,
     available: bool,
-    app_state: &AppState,
+    app_state: &AppState<D>,
 ) -> anyhow::Result<bool> {
     let Some(parent) = subtitle_path.parent() else {
         return Ok(false);
@@ -551,9 +544,9 @@ async fn index_media_file_path<D: DatabaseManager + ?Sized>(
         .ok_or_else(|| anyhow::anyhow!("media upsert returned no ID for {}", path.display()))
 }
 
-async fn handle_file_system_event(
+async fn handle_file_system_event<D: DatabaseManager + 'static>(
     event: FileSystemEvent,
-    app_state: &AppState,
+    app_state: &AppState<D>,
 ) -> anyhow::Result<()> {
     let database = &app_state.database;
     let stats = &app_state.lifecycle_stats;
@@ -822,21 +815,21 @@ async fn handle_file_system_event(
 pub struct MediaLifecycleService;
 
 impl MediaLifecycleService {
-    pub async fn initial_scan(
+    pub async fn initial_scan<D: DatabaseManager + 'static>(
         config: &AppConfig,
-        database: &Arc<database::redb::RedbDatabase>,
+        database: &Arc<D>,
     ) -> anyhow::Result<()> {
         perform_initial_media_scan(config, database).await?;
         perform_initial_playlist_scan(config, database).await
     }
 
-    pub async fn handle_event(event: FileSystemEvent, state: &AppState) -> anyhow::Result<()> {
+    pub async fn handle_event<D: DatabaseManager + 'static>(event: FileSystemEvent, state: &AppState<D>) -> anyhow::Result<()> {
         handle_file_system_event(event, state).await
     }
 
-    pub async fn start_monitoring(
+    pub async fn start_monitoring<D: DatabaseManager + 'static>(
         watcher: Arc<CrossPlatformWatcher>,
-        state: AppState,
+        state: AppState<D>,
         cancellation: CancellationToken,
     ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
         start_file_monitoring(watcher, state, cancellation).await

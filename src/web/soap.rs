@@ -1,7 +1,7 @@
 //! UPnP device/service descriptions and SOAP control handlers.
 
 use crate::{
-    database::{MediaDirectory, MediaRepository, PlaylistRepository},
+    database::{DatabaseManager, MediaDirectory},
     state::AppState,
     web::xml::{generate_description_xml, generate_scpd_xml},
 };
@@ -13,7 +13,9 @@ use axum::{
 use std::{path::PathBuf, sync::atomic::Ordering, time::Instant};
 use tracing::{debug, error, info, warn};
 
-pub async fn description_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn description_handler<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> impl IntoResponse {
     let xml = generate_description_xml(&state).await;
     (
         StatusCode::OK,
@@ -236,27 +238,27 @@ struct ContentDirectoryHandler;
 
 impl ContentDirectoryHandler {
     /// Handle video browse requests
-    async fn handle_video_browse(
+    async fn handle_video_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
-        state: &AppState,
+        state: &AppState<D>,
         path_prefix_str: &str,
     ) -> Response {
         Self::handle_folder_browse(params, state, "video/", path_prefix_str).await
     }
 
     /// Handle music browse requests (folder-based, not categorized)
-    async fn handle_music_browse(
+    async fn handle_music_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
-        state: &AppState,
+        state: &AppState<D>,
         path_prefix_str: &str,
     ) -> Response {
         Self::handle_folder_browse(params, state, "audio/", path_prefix_str).await
     }
 
     /// Handle image browse requests
-    async fn handle_image_browse(
+    async fn handle_image_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
-        state: &AppState,
+        state: &AppState<D>,
         path_prefix_str: &str,
     ) -> Response {
         Self::handle_folder_browse(params, state, "image/", path_prefix_str).await
@@ -264,9 +266,9 @@ impl ContentDirectoryHandler {
 
     /// Handle generic folder-based browse requests with consistent path normalization
     /// Enhanced with atomic performance tracking and cache-friendly operations
-    async fn handle_folder_browse(
+    async fn handle_folder_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
-        state: &AppState,
+        state: &AppState<D>,
         media_type_filter: &str,
         path_prefix_str: &str,
     ) -> Response {
@@ -464,44 +466,18 @@ impl ContentDirectoryHandler {
             files.len()
         );
 
-        // Apply pagination if requested
-        // Combine directories and files for pagination with atomic counting
-        let mut all_items = Vec::new();
-        for subdir in &subdirectories {
-            all_items.push((subdir.clone(), None));
-        }
-        for file in &files {
-            all_items.push((
-                MediaDirectory {
-                    path: file.path.clone(),
-                    name: String::new(),
-                },
-                Some(file.clone()),
-            ));
-        }
-
-        let total_matches = all_items.len();
+        // This fallback is used only for virtual/unavailable roots. Persisted
+        // directory and file listings return through the indexed visitor above.
+        let total_matches = subdirectories.len();
         let page = browse_page_bounds(params, total_matches);
         let starting_index = page.start;
         let end_index = page.end;
-
-        // Extract paginated items with zero-copy operations
-        let paginated_items = &all_items[page];
-        let mut paginated_subdirs = Vec::new();
-        let mut paginated_files = Vec::new();
-
-        for (item, file_opt) in paginated_items {
-            if let Some(file) = file_opt {
-                paginated_files.push(file.clone());
-            } else {
-                paginated_subdirs.push(item.clone());
-            }
-        }
+        let paginated_subdirs = &subdirectories[page];
 
         debug!(
             "ReDB returning paginated results: {} subdirs, {} files (index {}-{} of {})",
             paginated_subdirs.len(),
-            paginated_files.len(),
+            0,
             starting_index,
             end_index,
             total_matches
@@ -517,8 +493,8 @@ impl ContentDirectoryHandler {
         let server_ip = state.get_server_ip();
         let response = generate_browse_response(
             &params.object_id,
-            &paginated_subdirs,
-            &paginated_files,
+            paginated_subdirs,
+            &[],
             state,
             &server_ip,
             total_matches,
@@ -549,7 +525,10 @@ impl ContentDirectoryHandler {
     }
 
     /// Handle root browse request (ObjectID "0")
-    async fn handle_root_browse(params: &BrowseParams, state: &AppState) -> Response {
+    async fn handle_root_browse<D: DatabaseManager>(
+        params: &BrowseParams,
+        state: &AppState<D>,
+    ) -> Response {
         use crate::web::xml::generate_browse_response;
 
         let containers = [
@@ -593,33 +572,47 @@ impl ContentDirectoryHandler {
     }
 
     /// Handle radio browse request
-    async fn handle_radio_browse(params: &BrowseParams, state: &AppState) -> Response {
-        use crate::web::xml::generate_browse_response;
-        use futures_util::StreamExt;
-
-        let mut stream = state.database.stream_all_media_files();
-        let mut radio_files = Vec::new();
-        while let Some(res) = stream.next().await {
-            if let Ok(file) = res {
-                if file.mime_type == "audio/radio" {
-                    radio_files.push(file);
-                }
+    async fn handle_radio_browse<D: DatabaseManager + 'static>(
+        params: &BrowseParams,
+        state: &AppState<D>,
+    ) -> Response {
+        let context = crate::web::xml::BrowseRenderContext {
+            client: crate::web::client::CURRENT_CLIENT
+                .try_with(|client| *client)
+                .unwrap_or(crate::web::client::DlnaClientProfile::Standard),
+            server_ip: state.get_server_ip(),
+            server_port: state.config.server.port,
+            autoplay_enabled: state.config.media.autoplay_enabled,
+            update_id: state.content_update_id.load(Ordering::SeqCst),
+            bookmarks: state.bookmarks.lock().await.snapshot(),
+        };
+        let starting_index = params.starting_index as usize;
+        let requested_count = browse_page_limit(params);
+        let response = match state
+            .database
+            .clone()
+            .read(move |session| {
+                crate::web::xml::generate_indexed_items_response(
+                    session,
+                    crate::database::MediaFileQuery::Filtered {
+                        after_id: None,
+                        mime_family: Some("audio/radio".to_owned()),
+                        text: None,
+                    },
+                    "radio",
+                    starting_index,
+                    requested_count,
+                    context,
+                )
+            })
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                error!(%error, "Radio browse query failed");
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
-        }
-        radio_files.sort_by_cached_key(|file| file.filename.to_lowercase());
-
-        let total_matches = radio_files.len();
-        let page = browse_page_bounds(params, total_matches);
-        let server_ip = state.get_server_ip();
-        let response = generate_browse_response(
-            "radio",
-            &[],
-            &radio_files[page],
-            state,
-            &server_ip,
-            total_matches,
-        )
-        .await;
+        };
         (
             StatusCode::OK,
             [
@@ -632,8 +625,8 @@ impl ContentDirectoryHandler {
     }
 }
 
-pub async fn content_directory_control(
-    State(state): State<AppState>,
+pub async fn content_directory_control<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
@@ -711,7 +704,7 @@ pub async fn content_directory_control(
             let pos_second = xml_element_text(&body, "PosSecond");
             if let (Some(object_id), Some(pos_second)) = (object_id, pos_second) {
               if let (Ok(file_id), Ok(pos)) = (object_id.parse::<i64>(), pos_second.parse::<u32>()) {
-                if state.database.get_file_by_id(file_id).await.ok().flatten().is_none() {
+                if state.database.get_file_location_by_id(file_id).await.ok().flatten().is_none() {
                     return (StatusCode::BAD_REQUEST, "Unknown media ID").into_response();
                 }
                 let mut bookmarks_guard = state.bookmarks.lock().await;
@@ -735,7 +728,10 @@ pub async fn content_directory_control(
 // Music categorization handlers
 
 /// Handle browsing the root audio container with music categorization
-async fn handle_audio_root_browse(params: &BrowseParams, state: &AppState) -> Response {
+async fn handle_audio_root_browse<D: DatabaseManager>(
+    params: &BrowseParams,
+    state: &AppState<D>,
+) -> Response {
     use crate::web::xml::generate_browse_response;
 
     // Create virtual categorization containers
@@ -782,9 +778,9 @@ async fn handle_audio_root_browse(params: &BrowseParams, state: &AppState) -> Re
 
 impl ContentDirectoryHandler {
     /// Handle artist browse requests with atomic performance tracking and ReDB operations
-    async fn handle_artist_browse(
+    async fn handle_artist_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
-        state: &AppState,
+        state: &AppState<D>,
         audio_path: &str,
     ) -> Response {
         let database = state.database.clone();
@@ -803,9 +799,9 @@ impl ContentDirectoryHandler {
     }
 
     /// Handle album browse requests with atomic performance tracking and ReDB operations
-    async fn handle_album_browse(
+    async fn handle_album_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
-        state: &AppState,
+        state: &AppState<D>,
         audio_path: &str,
     ) -> Response {
         let database = state.database.clone();
@@ -825,9 +821,9 @@ impl ContentDirectoryHandler {
 }
 
 /// Handle browsing genres with atomic performance tracking and ReDB operations
-async fn handle_genres_browse(
+async fn handle_genres_browse<D: DatabaseManager + 'static>(
     params: &BrowseParams,
-    state: &AppState,
+    state: &AppState<D>,
     audio_path: &str,
 ) -> Response {
     let database = state.database.clone();
@@ -846,9 +842,9 @@ async fn handle_genres_browse(
 }
 
 /// Handle browsing years with atomic performance tracking and ReDB operations
-async fn handle_years_browse(
+async fn handle_years_browse<D: DatabaseManager + 'static>(
     params: &BrowseParams,
-    state: &AppState,
+    state: &AppState<D>,
     audio_path: &str,
 ) -> Response {
     let database = state.database.clone();
@@ -867,9 +863,9 @@ async fn handle_years_browse(
 }
 
 /// Handle browsing playlists with atomic performance tracking and ReDB operations
-async fn handle_playlists_browse(
+async fn handle_playlists_browse<D: DatabaseManager + 'static>(
     params: &BrowseParams,
-    state: &AppState,
+    state: &AppState<D>,
     audio_path: &str,
 ) -> Response {
     let database = state.database.clone();
@@ -888,15 +884,16 @@ async fn handle_playlists_browse(
 }
 
 /// Helper function to perform generic music category browsing
-async fn handle_generic_category_browse<C, F, FFuture>(
+async fn handle_generic_category_browse<D, C, F, FFuture>(
     params: &BrowseParams,
-    state: &AppState,
+    state: &AppState<D>,
     audio_path: &str,
     category_name: &str,
     list_categories_fn: F,
     map_category_fn: impl Fn(C) -> crate::database::MediaDirectory,
 ) -> Response
 where
+    D: DatabaseManager + 'static,
     F: FnOnce() -> FFuture,
     FFuture: std::future::Future<Output = Result<Vec<C>, anyhow::Error>>,
 {
@@ -1228,8 +1225,8 @@ pub async fn media_receiver_registrar_scpd() -> impl IntoResponse {
     )
 }
 
-pub async fn connection_manager_control(
-    State(_state): State<AppState>,
+pub async fn connection_manager_control<D: DatabaseManager>(
+    State(_state): State<AppState<D>>,
     headers: HeaderMap,
     body: String,
 ) -> Response {
@@ -1268,8 +1265,8 @@ pub async fn connection_manager_control(
     }
 }
 
-pub async fn media_receiver_registrar_control(
-    State(_state): State<AppState>,
+pub async fn media_receiver_registrar_control<D: DatabaseManager>(
+    State(_state): State<AppState<D>>,
     headers: HeaderMap,
     body: String,
 ) -> Response {

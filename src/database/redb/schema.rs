@@ -12,6 +12,10 @@ const DIRECTORY_PATH_INDEX: TableDefinition<&str, u64> =
 const DIRECTORY_RECORDS: TableDefinition<u64, &str> = TableDefinition::new("directory_records");
 const DIRECTORY_CHILDREN: MultimapTableDefinition<u64, u64> =
     MultimapTableDefinition::new("directory_children");
+// Composite key `<parent id>\0<case-folded name>\0<child id>` keeps direct
+// children in stable display order and permits pagination before loading paths.
+const DIRECTORY_CHILDREN_BY_NAME: TableDefinition<&str, u64> =
+    TableDefinition::new("directory_children_by_name");
 const DIRECTORY_FILES: MultimapTableDefinition<u64, i64> =
     MultimapTableDefinition::new("directory_files");
 // Composite key `<directory id>:<MIME family>`. Counts are recursive, so a
@@ -37,7 +41,7 @@ const GENRE_INDEX: MultimapTableDefinition<&str, i64> = MultimapTableDefinition:
 const YEAR_INDEX: MultimapTableDefinition<u32, i64> = MultimapTableDefinition::new("year_index");
 const ALBUM_ARTIST_INDEX: MultimapTableDefinition<&str, i64> =
     MultimapTableDefinition::new("album_artist_index");
-const SCHEMA_VERSION: u64 = 4;
+const SCHEMA_VERSION: u64 = 5;
 const CODEC_VERSION: u64 = 1;
 
 // Stable storage records. Keep these independent from application structs so
@@ -173,6 +177,26 @@ pub struct RkyvPlaylistView<'a> {
     archived: &'a ArchivedPlaylistSerializable,
 }
 
+pub struct RedbDirectoryView<'a> {
+    id: u64,
+    path: &'a str,
+    name: &'a str,
+}
+
+impl DirectoryView for RedbDirectoryView<'_> {
+    fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn path(&self) -> &str {
+        self.path
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+}
+
 impl PlaylistView for RkyvPlaylistView<'_> {
     fn id(&self) -> Option<i64> {
         self.archived.id.as_ref().map(|value| value.to_native())
@@ -272,6 +296,7 @@ impl RedbReadSession {
 impl DatabaseReadSession for RedbReadSession {
     type File<'a> = RkyvMediaFileView<'a>;
     type Playlist<'a> = RkyvPlaylistView<'a>;
+    type Directory<'a> = RedbDirectoryView<'a>;
 
     fn visit_files<F>(
         &mut self,
@@ -414,9 +439,6 @@ impl DatabaseReadSession for RedbReadSession {
                         visitor(view)?;
                         summary.visited += 1;
                     }
-                    if summary.visited >= limit {
-                        break;
-                    }
                 }
             }
         }
@@ -424,22 +446,30 @@ impl DatabaseReadSession for RedbReadSession {
         Ok(summary)
     }
 
-    fn direct_subdirectories(
+    fn visit_direct_subdirectories<F>(
         &mut self,
         canonical_parent: &str,
         mime_family: Option<&str>,
-    ) -> Result<Vec<MediaDirectory>> {
+        offset: usize,
+        limit: usize,
+        mut visitor: F,
+    ) -> Result<VisitSummary>
+    where
+        F: for<'a> FnMut(Self::Directory<'a>) -> Result<()>,
+    {
         let paths = self.transaction.open_table(DIRECTORY_PATH_INDEX)?;
         let records = self.transaction.open_table(DIRECTORY_RECORDS)?;
-        let children = self.transaction.open_multimap_table(DIRECTORY_CHILDREN)?;
+        let children = self.transaction.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
         let counts = self.transaction.open_table(DIRECTORY_MIME_COUNTS)?;
         let Some(parent_id) = paths.get(canonical_parent)?.map(|value| value.value()) else {
-            return Ok(Vec::new());
+            return Ok(VisitSummary::default());
         };
         let family = mime_family.filter(|value| !value.is_empty()).unwrap_or("*");
-        let mut directories = Vec::new();
-        for child in children.get(parent_id)? {
-            let child_id = child?.value();
+        let (range_start, range_end) = RedbDatabase::directory_order_range(parent_id);
+        let mut summary = VisitSummary::default();
+        for child in children.range(range_start.as_str()..range_end.as_str())? {
+            let (_, child_id) = child?;
+            let child_id = child_id.value();
             let key = RedbDatabase::mime_count_key(child_id, family);
             if counts
                 .get(key.as_str())?
@@ -447,20 +477,21 @@ impl DatabaseReadSession for RedbReadSession {
             {
                 continue;
             }
+            summary.matched += 1;
+            if summary.matched <= offset || summary.visited >= limit {
+                continue;
+            }
             if let Some(path) = records.get(child_id)? {
-                let path = path.value().to_owned();
-                let name = Path::new(&path)
-                    .file_name()
-                    .map(|value| value.to_string_lossy().into_owned())
-                    .unwrap_or_default();
-                directories.push(MediaDirectory {
-                    path: PathBuf::from(path),
-                    name,
-                });
+                let path = path.value();
+                visitor(RedbDirectoryView {
+                    id: child_id,
+                    path,
+                    name: RedbDatabase::directory_name(path),
+                })?;
+                summary.visited += 1;
             }
         }
-        directories.sort_by_cached_key(|directory| directory.name.to_lowercase());
-        Ok(directories)
+        Ok(summary)
     }
 
     fn visit_playlists<F>(

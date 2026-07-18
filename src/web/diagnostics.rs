@@ -1,6 +1,6 @@
 //! Web metrics, health/readiness probes, and log diagnostics.
 
-use crate::{database::StatsRepository, state::AppState};
+use crate::{database::DatabaseManager, state::AppState};
 use axum::{
     extract::State,
     http::{header, StatusCode},
@@ -9,8 +9,8 @@ use axum::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::error;
 
-async fn collect_runtime_diagnostics(
-    state: &AppState,
+async fn collect_runtime_diagnostics<D: DatabaseManager>(
+    state: &AppState<D>,
 ) -> (
     Option<crate::platform::diagnostics::RuntimeDiagnostics>,
     usize,
@@ -137,7 +137,9 @@ pub struct WebHandlerStats {
 }
 
 /// Get web handler performance metrics for monitoring
-pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_web_metrics<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
 
     let (database_result, runtime) = tokio::join!(
@@ -242,7 +244,9 @@ pub async fn healthz_handler() -> impl IntoResponse {
 }
 
 /// Readiness probe to check if the database is accessible
-pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn readyz_handler<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> impl IntoResponse {
     match state.database.get_stats().await {
         Ok(_) => (
             StatusCode::OK,
@@ -261,7 +265,9 @@ pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 /// Serve metrics in standard Prometheus Exposition Format (plain text)
-pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
+pub async fn get_prometheus_metrics<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
 
     let runtime = collect_runtime_diagnostics(&state).await;
@@ -466,8 +472,8 @@ pub struct LogsQuery {
 }
 
 /// Serve log file contents for Loki / Grafana scraping or debugging
-pub async fn get_logs_handler(
-    State(state): State<AppState>,
+pub async fn get_logs_handler<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
     axum::extract::Query(query): axum::extract::Query<LogsQuery>,
 ) -> impl IntoResponse {
     let limit = query.limit.unwrap_or(100).min(5000); // Caps limit at 5000 lines to prevent memory issues

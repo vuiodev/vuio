@@ -1,4 +1,12 @@
-async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
+async fn run_with_database<D, Initialize, InitializeFuture>(
+    cli_args: LaunchOptions,
+    initialize_backend: Initialize,
+) -> anyhow::Result<()>
+where
+    D: DatabaseManager + 'static,
+    Initialize: FnOnce(Arc<AppConfig>) -> InitializeFuture,
+    InitializeFuture: std::future::Future<Output = anyhow::Result<D>>,
+{
     // Initialize logging with options
     let log_file_path = cli_args.log_file.as_ref().map(PathBuf::from);
     logging::init_logging_with_options(
@@ -46,7 +54,7 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
     let config = Arc::new(config_manager.get_config().await);
 
     // Initialize database manager
-    let database = match initialize_database(&config).await {
+    let database = match initialize_backend(config.clone()).await {
         Ok(db) => Arc::new(db),
         Err(e) => {
             error!("Failed to initialize database: {}", e);
@@ -55,7 +63,7 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
     };
 
     // Initialize file system watcher
-    let file_watcher = match initialize_file_watcher(&config, database.clone()).await {
+    let file_watcher = match initialize_file_watcher(&config).await {
         Ok(watcher) => Arc::new(watcher),
         Err(e) => {
             error!("Failed to initialize file system watcher: {}", e);
@@ -380,6 +388,13 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
     } else {
         Ok(())
     }
+}
+
+async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
+    run_with_database::<database::redb::RedbDatabase, _, _>(cli_args, |config| async move {
+        initialize_database(&config).await
+    })
+    .await
 }
 
 /// Top-level owner of VuIO startup, services, and shutdown.
