@@ -1,8 +1,8 @@
 pub mod config;
 pub mod database;
 pub mod error;
-pub mod logging;
 pub mod lifecycle;
+pub mod logging;
 pub mod media;
 pub mod platform;
 pub mod runtime_state;
@@ -46,6 +46,7 @@ pub mod state {
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
         pub web_metrics: Arc<crate::web::diagnostics::WebHandlerMetrics>,
+        pub runtime_diagnostics: Arc<crate::platform::diagnostics::SystemDiagnosticsSampler>,
         pub lifecycle_stats: Arc<crate::lifecycle::ApplicationStats>,
         pub bookmarks: Arc<tokio::sync::Mutex<crate::runtime_state::BookmarkRegistry>>,
         pub log_file_path: std::path::PathBuf,
@@ -55,7 +56,14 @@ pub mod state {
                 std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>,
             >,
         >,
-        pub active_monitors: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (uuid::Uuid, tokio_util::sync::CancellationToken)>>>,
+        pub active_monitors: Arc<
+            tokio::sync::Mutex<
+                std::collections::HashMap<
+                    String,
+                    (uuid::Uuid, tokio_util::sync::CancellationToken),
+                >,
+            >,
+        >,
         pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
         pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
         pub upnp_subscriptions:
@@ -74,6 +82,7 @@ pub mod state {
                 filesystem_manager: self.filesystem_manager.clone(),
                 content_update_id: self.content_update_id.clone(),
                 web_metrics: self.web_metrics.clone(),
+                runtime_diagnostics: self.runtime_diagnostics.clone(),
                 lifecycle_stats: self.lifecycle_stats.clone(),
                 bookmarks: self.bookmarks.clone(),
                 log_file_path: self.log_file_path.clone(),

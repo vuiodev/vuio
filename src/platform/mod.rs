@@ -1,26 +1,25 @@
 use std::collections::HashMap;
 use std::net::IpAddr;
 
-
 pub mod config;
 pub mod diagnostics;
 pub mod error;
 pub mod filesystem;
 pub mod network;
 
-#[cfg(target_os = "windows")]
-mod windows;
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "linux")]
-mod linux;
 #[cfg(target_os = "freebsd")]
 mod bsd;
+#[cfg(target_os = "linux")]
+mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "windows")]
+mod windows;
 
 // Re-export the comprehensive error types from the error module
 pub use error::{
-    BsdError, ConfigurationError, DatabaseError, LinuxError, MacOSError, PlatformError, PlatformResult,
-    WindowsError,
+    BsdError, ConfigurationError, DatabaseError, LinuxError, MacOSError, PlatformError,
+    PlatformResult, WindowsError,
 };
 
 /// Operating system types supported by the platform abstraction layer
@@ -47,7 +46,12 @@ impl OsType {
         #[cfg(target_os = "freebsd")]
         return OsType::Bsd;
 
-        #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "freebsd"
+        )))]
         compile_error!("Unsupported operating system");
     }
 
@@ -199,7 +203,10 @@ impl PlatformInfo {
             use crate::platform::network::windows::WindowsNetworkManager;
             use crate::platform::network::NetworkManager;
             let manager = WindowsNetworkManager::new();
-            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
+            manager
+                .get_local_interfaces()
+                .await
+                .map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
 
         #[cfg(target_os = "macos")]
@@ -207,7 +214,10 @@ impl PlatformInfo {
             use crate::platform::network::macos::MacOSNetworkManager;
             use crate::platform::network::NetworkManager;
             let manager = MacOSNetworkManager::new();
-            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
+            manager
+                .get_local_interfaces()
+                .await
+                .map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
 
         #[cfg(target_os = "linux")]
@@ -215,7 +225,10 @@ impl PlatformInfo {
             use crate::platform::network::linux::LinuxNetworkManager;
             use crate::platform::network::NetworkManager;
             let manager = LinuxNetworkManager::new();
-            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
+            manager
+                .get_local_interfaces()
+                .await
+                .map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
 
         #[cfg(target_os = "freebsd")]
@@ -223,7 +236,10 @@ impl PlatformInfo {
             use crate::platform::network::linux::LinuxNetworkManager; // BSD uses Linux implementation
             use crate::platform::network::NetworkManager;
             let manager = LinuxNetworkManager::new();
-            manager.get_local_interfaces().await.map_err(|e| PlatformError::DetectionFailed(e.to_string()))
+            manager
+                .get_local_interfaces()
+                .await
+                .map_err(|e| PlatformError::DetectionFailed(e.to_string()))
         }
     }
 
@@ -277,35 +293,38 @@ impl PlatformInfo {
     /// Get the best network interface for DLNA operations using a deterministic priority.
     pub fn get_primary_interface(&self) -> Option<&NetworkInterface> {
         // A simple, deterministic approach to finding the best interface.
-        
+
         // Priority 1: Find the first active, non-loopback Ethernet interface with a private IPv4 address.
         if let Some(iface) = self.network_interfaces.iter().find(|i| {
-            i.is_up && !i.is_loopback && i.interface_type == InterfaceType::Ethernet &&
-            matches!(i.ip_address, IpAddr::V4(ip) if ip.is_private())
+            i.is_up
+                && !i.is_loopback
+                && i.interface_type == InterfaceType::Ethernet
+                && matches!(i.ip_address, IpAddr::V4(ip) if ip.is_private())
         }) {
             return Some(iface);
         }
 
         // Priority 2: Find the first active, non-loopback Wi-Fi interface with a private IPv4 address.
         if let Some(iface) = self.network_interfaces.iter().find(|i| {
-            i.is_up && !i.is_loopback && i.interface_type == InterfaceType::WiFi &&
-            matches!(i.ip_address, IpAddr::V4(ip) if ip.is_private())
+            i.is_up
+                && !i.is_loopback
+                && i.interface_type == InterfaceType::WiFi
+                && matches!(i.ip_address, IpAddr::V4(ip) if ip.is_private())
         }) {
             return Some(iface);
         }
 
         // Priority 3: Find any other active, non-loopback interface with a private IPv4 address.
         if let Some(iface) = self.network_interfaces.iter().find(|i| {
-            i.is_up && !i.is_loopback &&
-            matches!(i.ip_address, IpAddr::V4(ip) if ip.is_private())
+            i.is_up && !i.is_loopback && matches!(i.ip_address, IpAddr::V4(ip) if ip.is_private())
         }) {
             return Some(iface);
         }
-        
+
         // Priority 4: As a last resort, take the first active, non-loopback interface of any kind.
-        self.network_interfaces.iter().find(|i| {
-            i.is_up && !i.is_loopback
-        })
+        self.network_interfaces
+            .iter()
+            .find(|i| i.is_up && !i.is_loopback)
     }
 
     /// Check if the platform supports a specific feature

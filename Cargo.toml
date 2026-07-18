@@ -53,6 +53,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 audiotags = "0.5"
 quick-xml = "0.41"
 percent-encoding = "2.3"
+sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"] }
 
 redb = "4.1"
 jwalk = "0.8"

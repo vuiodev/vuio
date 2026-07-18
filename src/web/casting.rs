@@ -38,7 +38,7 @@ pub async fn api_cast_playlist(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
-            )
+            );
         }
     };
 
@@ -57,7 +57,7 @@ pub async fn api_cast_playlist(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
-            )
+            );
         }
     };
 
@@ -103,7 +103,8 @@ pub async fn api_cast_playlist(
     crate::web::eventing::publish_content_change(&state).await;
 
     // Cast the playlist starting at index 0 using our shared helper.
-    match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0).await {
+    match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0).await
+    {
         Ok(result) => (StatusCode::OK, axum::Json(result)),
         Err(e) => (
             StatusCode::BAD_REQUEST,

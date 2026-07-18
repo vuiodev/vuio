@@ -62,70 +62,6 @@ impl<D: DatabaseManager> MediaScanner<D> {
         Ok(fs_files)
     }
 
-    /// Simple recursive directory scan that returns files without database operations.
-    ///
-    /// # Difference from `scan_directory_recursive`
-    /// - `scan_directory_recursively_simple` is a slow, sequential, non-database scan. It does not update or query the database and is not optimized for large directories.
-    /// - `scan_directory_recursive` uses parallel file system walk (`jwalk`) and does incremental, ReDB database synchronization.
-    ///
-    /// This function is deprecated in favor of using `scan_directory_recursive`.
-    #[deprecated(
-        note = "Use scan_directory_recursive instead for optimized parallel scanning and database synchronization"
-    )]
-    pub async fn scan_directory_recursively_simple(
-        &self,
-        directory: &Path,
-    ) -> Result<Vec<MediaFile>> {
-        let mut all_files = Vec::with_capacity(1000); // Pre-allocate capacity
-        let mut dirs_to_scan = Vec::with_capacity(100); // Pre-allocate capacity
-
-        // Start with canonical path normalization
-        let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
-            Ok(canonical) => PathBuf::from(canonical),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to get canonical path for {}: {}, using basic normalization",
-                    directory.display(),
-                    e
-                );
-                self.filesystem_manager.normalize_path(directory)
-            }
-        };
-
-        dirs_to_scan.push(canonical_root);
-
-        while let Some(current_dir) = dirs_to_scan.pop() {
-            // Scan current directory for files
-            match self
-                .filesystem_manager
-                .scan_media_directory(&current_dir)
-                .await
-            {
-                Ok(fs_files) => {
-                    all_files.extend(fs_files);
-                }
-                Err(e) => warn!("Failed to scan directory {}: {}", current_dir.display(), e),
-            }
-
-            // Find subdirectories and add to the queue
-            if let Ok(mut entries) = tokio::fs::read_dir(&current_dir).await {
-                while let Ok(Some(entry)) = entries.next_entry().await {
-                    let path = entry.path();
-                    if path.is_dir() {
-                        // Apply canonical normalization to subdirectory paths too
-                        let canonical_subdir =
-                            match self.filesystem_manager.get_canonical_path(&path) {
-                                Ok(canonical) => PathBuf::from(canonical),
-                                Err(_) => self.filesystem_manager.normalize_path(&path),
-                            };
-                        dirs_to_scan.push(canonical_subdir);
-                    }
-                }
-            }
-        }
-        Ok(all_files)
-    }
-
     /// Create a media scanner with a custom file system manager (for testing)
     pub fn with_filesystem_manager(
         filesystem_manager: Box<dyn FileSystemManager>,
@@ -546,7 +482,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 self.database_manager
                     .bulk_update_canonical_media_files(&files_to_update)
                     .await?;
-                result.updated_files.extend(files_to_update.drain(..));
+                result.updated_files.append(&mut files_to_update);
             }
 
             // Progress logging every 1000 files
@@ -750,8 +686,8 @@ pub struct ScanError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::MediaRepository;
     use crate::database::redb::RedbDatabase;
+    use crate::database::MediaRepository;
     use crate::platform::filesystem::BaseFileSystemManager;
     use std::sync::Arc;
     use tempfile::tempdir;

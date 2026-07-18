@@ -1,40 +1,45 @@
 //! Browser dashboard handler and compile-time UI template rendering.
 
+use crate::web::format::format_bytes;
 use crate::{
     database::{DatabaseReadSession, MediaFileQuery, MediaFileView, MediaRepository},
     error::AppError,
     state::AppState,
 };
-use crate::web::format::format_bytes;
-use axum::{extract::{Query, State}, http::header, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    http::header,
+    response::IntoResponse,
+    Json,
+};
 
 const DASHBOARD_TEMPLATE: &str = include_str!("ui/dashboard.html");
 
-fn render_dashboard(server_name: &str, files_json: &str, dirs_json: &str) -> String {
-    DASHBOARD_TEMPLATE
-        .replace("__VUIO_SERVER_NAME__", server_name)
-        .replace("__VUIO_FILES_JSON__", files_json)
-        .replace("__VUIO_DIRS_JSON__", dirs_json)
+pub async fn root_handler() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        DASHBOARD_TEMPLATE,
+    )
 }
 
-pub async fn root_handler(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let monitored_dirs: Vec<String> = state
+#[derive(serde::Serialize)]
+pub struct ServerInfo {
+    server_name: String,
+    monitored_directories: Vec<String>,
+}
+
+pub async fn server_info_handler(State(state): State<AppState>) -> Json<ServerInfo> {
+    let monitored_directories = state
         .media_directories
         .read()
         .await
         .iter()
-        .map(|dir| dir.path.clone())
+        .map(|directory| directory.path.clone())
         .collect();
-    let dirs_json = serde_json::to_string(&monitored_dirs).unwrap_or_else(|_| "[]".to_string());
-
-    let server_name = html_escape(&state.config.server.name);
-
-    let html_content = render_dashboard(&server_name, "[]", &dirs_json);
-
-    Ok((
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        html_content,
-    ))
+    Json(ServerInfo {
+        server_name: state.config.server.name.clone(),
+        monitored_directories,
+    })
 }
 
 #[derive(serde::Deserialize)]
@@ -138,45 +143,13 @@ fn web_media_file(file: &impl MediaFileView) -> WebMediaFile {
     }
 }
 
-fn html_escape(s: &str) -> String {
-    let mut result = String::with_capacity(s.len() + s.len() / 4);
-    for ch in s.chars() {
-        match ch {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
-            '"' => result.push_str("&quot;"),
-            '\'' => result.push_str("&#39;"),
-            c => result.push(c),
-        }
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn dashboard_template_replaces_all_dynamic_markers() {
-        let html = render_dashboard(
-            "VuIO &amp; Friends",
-            r#"[{"id":1,"name":"Movie"}]"#,
-            r#"["/media"]"#,
-        );
-
-        assert!(!html.contains("__VUIO_"));
-        assert!(html.contains("<title>VuIO &amp; Friends</title>"));
-        assert!(html.contains(r#"[{"id":1,"name":"Movie"}]"#));
-        assert!(html.contains(r#"["/media"]"#));
-        assert!(html.contains("${file.id}"));
-    }
-
-    #[test]
-    fn dashboard_server_name_is_html_escaped() {
-        assert_eq!(
-            html_escape("<VuIO & \"TV\">"),
-            "&lt;VuIO &amp; &quot;TV&quot;&gt;"
-        );
+    fn dashboard_contains_no_runtime_data_markers() {
+        assert!(!DASHBOARD_TEMPLATE.contains("__VUIO_"));
+        assert!(DASHBOARD_TEMPLATE.contains("/api/server-info"));
     }
 }

@@ -1,30 +1,39 @@
 // src\web\xml.rs
 use crate::{
-    database::{
-        DatabaseReadSession, MediaDirectory, MediaFile, MediaFileQuery, MediaFileView,
-    },
+    database::{DatabaseReadSession, MediaDirectory, MediaFile, MediaFileQuery, MediaFileView},
     state::AppState,
 };
 use anyhow::Result;
 use axum::body::Bytes;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
 fn write_xml_escaped<W: std::fmt::Write>(target: &mut W, value: &str) -> std::fmt::Result {
-    for ch in value.chars() {
-        match ch {
-            '&' => target.write_str("&amp;")?,
-            '<' => target.write_str("&lt;")?,
-            '>' => target.write_str("&gt;")?,
-            '"' => target.write_str("&quot;")?,
-            '\'' => target.write_str("&#39;")?,
-            c if (c as u32) < 32 && c != '\t' && c != '\n' && c != '\r' => {
-                write!(target, "&#{};", c as u32)?;
-            }
-            c => target.write_char(c)?,
-        }
-    }
-    Ok(())
+    let sanitized = if value.chars().all(is_valid_xml_character) {
+        Cow::Borrowed(value)
+    } else {
+        Cow::Owned(
+            value
+                .chars()
+                .map(|character| {
+                    if is_valid_xml_character(character) {
+                        character
+                    } else {
+                        '\u{fffd}'
+                    }
+                })
+                .collect(),
+        )
+    };
+    target.write_str(&quick_xml::escape::escape(sanitized))
+}
+
+fn is_valid_xml_character(character: char) -> bool {
+    matches!(character, '\u{9}' | '\u{a}' | '\u{d}')
+        || ('\u{20}'..='\u{d7ff}').contains(&character)
+        || ('\u{e000}'..='\u{fffd}').contains(&character)
+        || ('\u{10000}'..='\u{10ffff}').contains(&character)
 }
 
 struct XmlEscaped<'a>(&'a str);
@@ -126,7 +135,10 @@ fn write_directory<W: std::fmt::Write>(
         } else {
             "V"
         };
-        write!(output, r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{class}</av:mediaClass>"#)?;
+        write!(
+            output,
+            r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{class}</av:mediaClass>"#
+        )?;
     }
     output.write_str("</container>")
 }
@@ -167,13 +179,20 @@ fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             write!(output, "<upnp:genre>{}</upnp:genre>", xml_escape(value))?;
         }
         if let Some(value) = file.track_number() {
-            write!(output, "<upnp:originalTrackNumber>{value}</upnp:originalTrackNumber>")?;
+            write!(
+                output,
+                "<upnp:originalTrackNumber>{value}</upnp:originalTrackNumber>"
+            )?;
         }
         if let Some(value) = file.year() {
             write!(output, "<dc:date>{value}-01-01</dc:date>")?;
         }
         if let Some(value) = file.album_artist() {
-            write!(output, "<upnp:albumArtist>{}</upnp:albumArtist>", xml_escape(value))?;
+            write!(
+                output,
+                "<upnp:albumArtist>{}</upnp:albumArtist>",
+                xml_escape(value)
+            )?;
         }
         write!(
             output,
@@ -194,12 +213,21 @@ fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
         match context.client {
             crate::web::client::DlnaClientProfile::SamsungTv
             | crate::web::client::DlnaClientProfile::SamsungTvQ
-                if mime == "video/x-matroska" => "video/x-mkv",
+                if mime == "video/x-matroska" =>
+            {
+                "video/x-mkv"
+            }
             crate::web::client::DlnaClientProfile::SamsungTv
             | crate::web::client::DlnaClientProfile::SamsungTvQ
-                if mime == "video/x-msvideo" => "video/mpeg",
+                if mime == "video/x-msvideo" =>
+            {
+                "video/mpeg"
+            }
             crate::web::client::DlnaClientProfile::SonyBdp
-                if mime == "video/x-matroska" || mime == "video/mpeg" => "video/divx",
+                if mime == "video/x-matroska" || mime == "video/mpeg" =>
+            {
+                "video/divx"
+            }
             crate::web::client::DlnaClientProfile::Xbox if mime == "video/x-msvideo" => "video/avi",
             _ => mime,
         }
@@ -226,21 +254,50 @@ fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             | crate::web::client::DlnaClientProfile::PanasonicTv
     ) && has_srt
     {
-        write!(output, r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#, context.server_ip, context.server_port, file_id)?;
+        write!(
+            output,
+            r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+            context.server_ip, context.server_port, file_id
+        )?;
     }
-    write!(output, ">http://{}:{}/media/{}</res>", context.server_ip, context.server_port, file_id)?;
+    write!(
+        output,
+        ">http://{}:{}/media/{}</res>",
+        context.server_ip, context.server_port, file_id
+    )?;
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
-        write!(output, r#"<res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#, context.server_ip, context.server_port, file_id)?;
+        write!(
+            output,
+            r#"<res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#,
+            context.server_ip, context.server_port, file_id
+        )?;
     }
-    if matches!(context.client, crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ) && has_srt {
-        write!(output, r#"<sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#, context.server_ip, context.server_port, file_id)?;
+    if matches!(
+        context.client,
+        crate::web::client::DlnaClientProfile::SamsungTv
+            | crate::web::client::DlnaClientProfile::SamsungTvQ
+    ) && has_srt
+    {
+        write!(
+            output,
+            r#"<sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#,
+            context.server_ip, context.server_port, file_id
+        )?;
     }
-    if matches!(context.client, crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ) {
+    if matches!(
+        context.client,
+        crate::web::client::DlnaClientProfile::SamsungTv
+            | crate::web::client::DlnaClientProfile::SamsungTvQ
+    ) {
         let mut bookmark = context.bookmarks.get(&file_id).copied().unwrap_or(0);
         if context.client == crate::web::client::DlnaClientProfile::SamsungTvQ {
             bookmark = bookmark.saturating_mul(1000);
         }
-        write!(output, "<sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={bookmark}</sec:dcmInfo>", xml_escape(file.filename()))?;
+        write!(
+            output,
+            "<sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={bookmark}</sec:dcmInfo>",
+            xml_escape(file.filename())
+        )?;
     }
     output.write_str("</item>")
 }
@@ -286,7 +343,6 @@ pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
             .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))
     })?;
     result.push_str("</DIDL-Lite>");
-    drop(result);
     let returned = selected_directories.len() + summary.visited;
     let total = directory_count + summary.matched;
     write!(&mut response, "</Result><NumberReturned>{returned}</NumberReturned><TotalMatches>{total}</TotalMatches><UpdateID>{}</UpdateID></u:BrowseResponse></s:Body></s:Envelope>", context.update_id)?;
@@ -312,7 +368,6 @@ pub fn generate_indexed_items_response<S: DatabaseReadSession>(
             .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))
     })?;
     result.push_str("</DIDL-Lite>");
-    drop(result);
     write!(&mut response, "</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>{}</UpdateID></u:BrowseResponse></s:Body></s:Envelope>", summary.visited, summary.matched, context.update_id)?;
     Ok(Bytes::from(response))
 }
@@ -840,7 +895,6 @@ pub async fn generate_browse_response_with_totals(
     };
 
     didl.push_str("</DIDL-Lite>");
-    drop(didl);
     let final_total_matches = total_matches.unwrap_or(number_returned);
 
     let update_id = state
@@ -868,4 +922,27 @@ pub async fn generate_browse_response_with_totals(
 
     debug!("Final XML response size: {} bytes", final_response.len());
     final_response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xml_escape_handles_markup_unicode_and_invalid_controls() {
+        let value = "A&B <tag> \"quoted\" 'single' café\u{1}";
+        let escaped = xml_escape(value).to_string();
+        assert_eq!(
+            escaped,
+            "A&amp;B &lt;tag&gt; &quot;quoted&quot; &apos;single&apos; café�"
+        );
+    }
+
+    #[test]
+    fn soap_result_writer_applies_the_required_second_escape_layer() {
+        let mut output = String::new();
+        write!(&mut SoapResultWriter(&mut output), "{}", xml_escape("A&B"))
+            .expect("write nested XML");
+        assert_eq!(output, "A&amp;amp;B");
+    }
 }

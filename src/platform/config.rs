@@ -49,7 +49,7 @@ impl PlatformConfig {
     fn for_windows() -> Self {
         // Use executable-relative paths for native versions
         let exe_dir = Self::get_executable_directory();
-        
+
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "windows".to_string());
         metadata.insert("case_sensitive".to_string(), "false".to_string());
@@ -95,7 +95,7 @@ impl PlatformConfig {
     fn for_linux() -> Self {
         // Use executable-relative paths for native versions
         let exe_dir = Self::get_executable_directory();
-        
+
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "linux".to_string());
         metadata.insert("case_sensitive".to_string(), "true".to_string());
@@ -118,17 +118,10 @@ impl PlatformConfig {
     fn for_bsd() -> Self {
         // Use executable-relative paths for native versions
         let exe_dir = Self::get_executable_directory();
-        
+
         let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/usr/home"));
-        
+
         // Common BSD media directories
-        let default_media_dirs = vec![
-            home_dir.join("Music"),
-            home_dir.join("Videos"),
-            home_dir.join("Pictures"),
-            PathBuf::from("/mnt"),
-        ];
-        
         let mut metadata = HashMap::new();
         metadata.insert("platform".to_string(), "bsd".to_string());
         metadata.insert("case_sensitive".to_string(), "true".to_string());
@@ -137,7 +130,7 @@ impl PlatformConfig {
 
         Self {
             os_type: OsType::Bsd,
-            default_media_dir: default_media_dirs[0].clone(),
+            default_media_dir: home_dir.join("Music"),
             config_dir: exe_dir.join("config"),
             log_dir: exe_dir.join("config").join("logs"),
             cache_dir: exe_dir.join("config").join("cache"),
@@ -300,11 +293,9 @@ impl PlatformConfig {
                 }
 
                 // Add common BSD media locations
-                let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/usr/home/unknown"));
-                let additional_dirs = [
-                    home_dir.join("Desktop"),
-                    PathBuf::from("/mnt"),
-                ];
+                let home_dir =
+                    dirs::home_dir().unwrap_or_else(|| PathBuf::from("/usr/home/unknown"));
+                let additional_dirs = [home_dir.join("Desktop"), PathBuf::from("/mnt")];
 
                 for dir in &additional_dirs {
                     if dir.exists() && !directories.contains(dir) {
@@ -360,7 +351,7 @@ impl PlatformConfig {
         // Create config directory first
         std::fs::create_dir_all(&self.config_dir).map_err(|e| {
             PlatformError::FileSystemAccess(format!(
-                "Failed to create config directory '{}': {}. Please ensure the executable has write permissions to its directory.", 
+                "Failed to create config directory '{}': {}. Please ensure the executable has write permissions to its directory.",
                 self.config_dir.display(), e
             ))
         })?;
@@ -368,21 +359,21 @@ impl PlatformConfig {
         // Create subdirectories
         std::fs::create_dir_all(&self.log_dir).map_err(|e| {
             PlatformError::FileSystemAccess(format!(
-                "Failed to create log directory '{}': {}. Please ensure the config directory is writable.", 
+                "Failed to create log directory '{}': {}. Please ensure the config directory is writable.",
                 self.log_dir.display(), e
             ))
         })?;
 
         std::fs::create_dir_all(&self.cache_dir).map_err(|e| {
             PlatformError::FileSystemAccess(format!(
-                "Failed to create cache directory '{}': {}. Please ensure the config directory is writable.", 
+                "Failed to create cache directory '{}': {}. Please ensure the config directory is writable.",
                 self.cache_dir.display(), e
             ))
         })?;
 
         std::fs::create_dir_all(&self.database_dir).map_err(|e| {
             PlatformError::FileSystemAccess(format!(
-                "Failed to create database directory '{}': {}. Please ensure the config directory is writable.", 
+                "Failed to create database directory '{}': {}. Please ensure the config directory is writable.",
                 self.database_dir.display(), e
             ))
         })?;
@@ -424,11 +415,11 @@ impl PlatformConfig {
     pub fn get_default_exclude_patterns(&self) -> Vec<String> {
         match self.os_type {
             OsType::Windows => vec![
-                ".*".to_string(),           // Hidden files
-                "Thumbs.db".to_string(),    // Windows thumbnails
-                "desktop.ini".to_string(),  // Windows folder settings
-                "*.tmp".to_string(),        // Temporary files
-                "*.temp".to_string(),       // Temporary files
+                ".*".to_string(),                        // Hidden files
+                "Thumbs.db".to_string(),                 // Windows thumbnails
+                "desktop.ini".to_string(),               // Windows folder settings
+                "*.tmp".to_string(),                     // Temporary files
+                "*.temp".to_string(),                    // Temporary files
                 "System Volume Information".to_string(), // Windows system folder
             ],
 
@@ -541,10 +532,12 @@ impl PlatformConfig {
         let fs_manager = create_platform_filesystem_manager();
         // The filesystem manager's validate_path only validates the format.
         // Existence is checked by callers during configuration initialization.
-        fs_manager.validate_path(path).map_err(|e: FileSystemError| {
-            // Convert FileSystemError to a PlatformError for consistency.
-            PlatformError::FileSystemAccess(e.user_message())
-        })
+        fs_manager
+            .validate_path(path)
+            .map_err(|e: FileSystemError| {
+                // Convert FileSystemError to a PlatformError for consistency.
+                PlatformError::FileSystemAccess(e.user_message())
+            })
     }
 }
 
@@ -637,7 +630,7 @@ mod tests {
 
         // Create a temporary directory to ensure existence for the test.
         let temp_dir = tempfile::tempdir().unwrap();
-        assert!(config.validate_path(&temp_dir.path().to_path_buf()).is_ok());
+        assert!(config.validate_path(temp_dir.path()).is_ok());
 
         // Test with a non-existent but correctly formatted path.
         // The new validation logic only checks format, not existence.

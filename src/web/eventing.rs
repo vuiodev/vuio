@@ -138,7 +138,10 @@ pub async fn content_directory_subscribe(
 
 fn normalize_ip(address: IpAddr) -> IpAddr {
     match address {
-        IpAddr::V6(ip) => ip.to_ipv4_mapped().map(IpAddr::V4).unwrap_or(IpAddr::V6(ip)),
+        IpAddr::V6(ip) => ip
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(ip)),
         address => address,
     }
 }
@@ -223,7 +226,8 @@ async fn send_event_notification(
     };
     match client
         .request(
-            reqwest::Method::from_bytes(b"NOTIFY").unwrap(),
+            reqwest::Method::from_bytes(b"NOTIFY")
+                .expect("NOTIFY is a valid constant HTTP extension method"),
             callback_url,
         )
         .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
@@ -337,12 +341,10 @@ mod tests {
             &[]
         )
         .is_none());
-        assert!(validate_upnp_callback(
-            "http://[fe80::1]/events",
-            "fe80::1".parse().unwrap(),
-            &[]
-        )
-        .is_none());
+        assert!(
+            validate_upnp_callback("http://[fe80::1]/events", "fe80::1".parse().unwrap(), &[])
+                .is_none()
+        );
         assert!(validate_upnp_callback(
             "http://user:secret@192.168.1.25/events",
             "192.168.1.25".parse().unwrap(),

@@ -1,5 +1,5 @@
 #[cfg(target_os = "freebsd")]
-use super::{NetworkInterface, InterfaceType, PlatformResult};
+use super::{InterfaceType, NetworkInterface, PlatformResult};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::process::Command;
@@ -19,13 +19,12 @@ pub fn get_bsd_version() -> PlatformResult<String> {
     }
 }
 
-
 /// Gather BSD-specific metadata
 pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
     let mut metadata = HashMap::new();
-    
+
     metadata.insert("platform".to_string(), "BSD".to_string());
-    
+
     // Get system information using uname
     if let Ok(output) = Command::new("uname").arg("-a").output() {
         if output.status.success() {
@@ -33,7 +32,7 @@ pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
             metadata.insert("uname".to_string(), uname_output);
         }
     }
-    
+
     // Get FreeBSD version
     if let Ok(output) = Command::new("uname").arg("-r").output() {
         if output.status.success() {
@@ -41,7 +40,7 @@ pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
             metadata.insert("version".to_string(), version);
         }
     }
-    
+
     // Get architecture
     if let Ok(output) = Command::new("uname").arg("-m").output() {
         if output.status.success() {
@@ -49,7 +48,7 @@ pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
             metadata.insert("architecture".to_string(), arch);
         }
     }
-    
+
     // Get hostname
     if let Ok(output) = Command::new("hostname").output() {
         if output.status.success() {
@@ -57,19 +56,19 @@ pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
             metadata.insert("hostname".to_string(), hostname);
         }
     }
-    
+
     // Check for common BSD services and features
     let has_pf = std::path::Path::new("/etc/pf.conf").exists();
     metadata.insert("has_pf".to_string(), has_pf.to_string());
-    
+
     let has_ipfw = std::path::Path::new("/sbin/ipfw").exists();
     metadata.insert("has_ipfw".to_string(), has_ipfw.to_string());
-    
+
     // Check for package manager
-    let has_pkg = std::path::Path::new("/usr/sbin/pkg").exists() || 
-                  std::path::Path::new("/usr/local/sbin/pkg").exists();
+    let has_pkg = std::path::Path::new("/usr/sbin/pkg").exists()
+        || std::path::Path::new("/usr/local/sbin/pkg").exists();
     metadata.insert("has_pkg".to_string(), has_pkg.to_string());
-    
+
     // Check for jails
     if let Ok(output) = Command::new("sysctl").arg("security.jail.jailed").output() {
         if output.status.success() {
@@ -78,16 +77,14 @@ pub fn gather_bsd_metadata() -> PlatformResult<HashMap<String, String>> {
             metadata.insert("is_jailed".to_string(), is_jailed.to_string());
         }
     }
-    
+
     Ok(metadata)
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_bsd_version_detection() {
         let version = get_bsd_version();
@@ -95,7 +92,7 @@ mod tests {
         let ver = version.unwrap();
         assert!(!ver.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_bsd_interface_detection() {
         use crate::platform::network::linux::LinuxNetworkManager;
@@ -106,7 +103,7 @@ mod tests {
         let ifaces = interfaces.unwrap();
         assert!(!ifaces.is_empty());
     }
-    
+
     #[test]
     fn test_bsd_metadata() {
         let metadata = gather_bsd_metadata();

@@ -1,12 +1,15 @@
 use crate::platform::{
-    NetworkInterface, InterfaceType, PlatformError, PlatformResult,
-    network::{NetworkManager, SsdpSocket, SsdpConfig, NetworkDiagnostics, InterfaceStatus, FirewallStatus}
+    network::{
+        FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager, SsdpConfig,
+        SsdpSocket, LOOPBACK_IPV4, SSDP_MULTICAST_IPV4,
+    },
+    InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
 use std::process::Command;
 use tokio::net::UdpSocket;
-use tracing::{debug, info, warn, error};
+use tracing::{debug, error, info, warn};
 
 /// Linux-specific network manager implementation
 pub struct LinuxNetworkManager {
@@ -22,10 +25,10 @@ impl LinuxNetworkManager {
             cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
-    
+
     /// Create a new Linux network manager with custom configuration
     pub fn with_config(config: SsdpConfig) -> Self {
-        Self { 
+        Self {
             config,
             cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
@@ -37,34 +40,34 @@ impl LinuxNetworkManager {
         *cached = None;
         debug!("Cleared network interface cache");
     }
-    
+
     /// Check if running as root
     fn is_elevated(&self) -> bool {
         std::env::var("USER")
             .map(|user| user == "root")
-            .unwrap_or(false) ||
-        unsafe { libc::geteuid() == 0 }
+            .unwrap_or(false)
+            || unsafe { libc::geteuid() == 0 }
     }
-    
+
     /// Check if a port requires root privileges on Linux
     fn requires_elevation(&self, port: u16) -> bool {
         // Ports below 1024 require root privileges or CAP_NET_BIND_SERVICE capability
         port < 1024
     }
-    
+
     /// Try to bind to a port with Linux-specific handling
     async fn try_bind_port_linux(&self, port: u16) -> PlatformResult<UdpSocket> {
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port));
-        
+
         match UdpSocket::bind(socket_addr).await {
             Ok(socket) => {
                 debug!("Successfully bound to port {} on Linux", port);
-                
+
                 // Set socket options for better multicast support
                 if let Err(e) = self.configure_multicast_socket(&socket) {
                     warn!("Failed to configure multicast socket options: {}", e);
                 }
-                
+
                 Ok(socket)
             }
             Err(e) => {
@@ -83,13 +86,16 @@ impl LinuxNetworkManager {
             }
         }
     }
-    
+
     /// Configure socket for optimal multicast support
-    fn configure_multicast_socket(&self, socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
+    fn configure_multicast_socket(
+        &self,
+        socket: &UdpSocket,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         use std::os::unix::io::AsRawFd;
-        
+
         let fd = socket.as_raw_fd();
-        
+
         // Enable SO_REUSEADDR
         let optval: libc::c_int = 1;
         let ret = unsafe {
@@ -102,9 +108,12 @@ impl LinuxNetworkManager {
             )
         };
         if ret != 0 {
-            warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
+            warn!(
+                "Failed to set SO_REUSEADDR: {}",
+                std::io::Error::last_os_error()
+            );
         }
-        
+
         // Set multicast TTL
         let ttl: libc::c_int = 4; // Standard multicast TTL
         let ret = unsafe {
@@ -117,9 +126,12 @@ impl LinuxNetworkManager {
             )
         };
         if ret != 0 {
-            warn!("Failed to set IP_MULTICAST_TTL: {}", std::io::Error::last_os_error());
+            warn!(
+                "Failed to set IP_MULTICAST_TTL: {}",
+                std::io::Error::last_os_error()
+            );
         }
-        
+
         // Enable multicast loopback (important for Docker containers)
         let loop_val: libc::c_int = 1;
         let ret = unsafe {
@@ -132,51 +144,56 @@ impl LinuxNetworkManager {
             )
         };
         if ret != 0 {
-            warn!("Failed to set IP_MULTICAST_LOOP: {}", std::io::Error::last_os_error());
+            warn!(
+                "Failed to set IP_MULTICAST_LOOP: {}",
+                std::io::Error::last_os_error()
+            );
         }
-        
+
         debug!("Configured multicast socket options for optimal Docker compatibility");
         Ok(())
     }
-    
+
     /// Detect Linux firewall status
     async fn detect_firewall_status(&self) -> FirewallStatus {
         let mut detected = false;
         let mut blocking_ssdp = None;
         let mut suggestions = Vec::new();
-        
+
         // Check for common firewall tools
         let has_iptables = Command::new("which")
             .arg("iptables")
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
-        
+
         let has_ufw = Command::new("which")
             .arg("ufw")
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
-        
+
         let has_firewalld = Command::new("which")
             .arg("firewall-cmd")
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
-        
+
         if has_ufw {
             // Check UFW status
             match Command::new("ufw").arg("status").output() {
                 Ok(output) if output.status.success() => {
                     let output_str = String::from_utf8_lossy(&output.stdout);
                     detected = output_str.contains("Status: active");
-                    
+
                     if detected {
                         info!("UFW firewall detected and active");
                         blocking_ssdp = Some(true); // Assume it might block SSDP
                         suggestions.push("Check UFW rules: sudo ufw status verbose".to_string());
                         suggestions.push("Allow SSDP traffic: sudo ufw allow 1900/udp".to_string());
-                        suggestions.push("Allow your HTTP server port: sudo ufw allow <port>/tcp".to_string());
+                        suggestions.push(
+                            "Allow your HTTP server port: sudo ufw allow <port>/tcp".to_string(),
+                        );
                     }
                 }
                 _ => {}
@@ -187,24 +204,30 @@ impl LinuxNetworkManager {
                 Ok(output) if output.status.success() => {
                     let output_str = String::from_utf8_lossy(&output.stdout);
                     detected = output_str.trim() == "running";
-                    
+
                     if detected {
                         info!("firewalld detected and running");
                         blocking_ssdp = Some(true); // Assume it might block SSDP
-                        suggestions.push("Check firewalld rules: sudo firewall-cmd --list-all".to_string());
-                        suggestions.push("Allow SSDP service: sudo firewall-cmd --add-service=ssdp --permanent".to_string());
-                        suggestions.push("Reload firewalld: sudo firewall-cmd --reload".to_string());
+                        suggestions.push(
+                            "Check firewalld rules: sudo firewall-cmd --list-all".to_string(),
+                        );
+                        suggestions.push(
+                            "Allow SSDP service: sudo firewall-cmd --add-service=ssdp --permanent"
+                                .to_string(),
+                        );
+                        suggestions
+                            .push("Reload firewalld: sudo firewall-cmd --reload".to_string());
                     }
                 }
                 _ => {}
             }
         } else if has_iptables {
             // Check iptables rules
-            match Command::new("iptables").args(&["-L", "-n"]).output() {
+            match Command::new("iptables").args(["-L", "-n"]).output() {
                 Ok(output) if output.status.success() => {
                     let output_str = String::from_utf8_lossy(&output.stdout);
                     detected = !output_str.is_empty() && output_str.lines().count() > 3; // More than just headers
-                    
+
                     if detected {
                         info!("iptables rules detected");
                         // Check if there are DROP or REJECT rules
@@ -220,70 +243,77 @@ impl LinuxNetworkManager {
                 _ => {}
             }
         }
-        
+
         if !detected && (has_iptables || has_ufw || has_firewalld) {
-            suggestions.push("Firewall tools detected but status unclear. Check manually.".to_string());
+            suggestions
+                .push("Firewall tools detected but status unclear. Check manually.".to_string());
         }
-        
+
         if detected {
-            suggestions.push("Consider temporarily disabling firewall to test connectivity".to_string());
-            suggestions.push("Ensure multicast traffic is allowed on your network interfaces".to_string());
+            suggestions
+                .push("Consider temporarily disabling firewall to test connectivity".to_string());
+            suggestions
+                .push("Ensure multicast traffic is allowed on your network interfaces".to_string());
         }
-        
+
         FirewallStatus {
             detected,
             blocking_ssdp,
             suggestions,
         }
     }
-    
+
     /// Get network interfaces using Linux-specific methods
     async fn get_linux_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
-        
+
         // Try to use ip command first (more modern)
         if let Ok(ip_interfaces) = self.parse_ip_command_output().await {
             if !ip_interfaces.is_empty() {
                 return Ok(ip_interfaces);
             }
         }
-        
+
         // Fallback to /proc/net/dev
         if let Ok(proc_interfaces) = self.parse_proc_net_dev().await {
             if !proc_interfaces.is_empty() {
                 return Ok(proc_interfaces);
             }
         }
-        
+
         // Final fallback
         warn!("Failed to get network interfaces using standard methods, using fallback");
         interfaces.push(NetworkInterface {
             name: "eth0".to_string(),
-            ip_address: "127.0.0.1".parse().unwrap(),
+            ip_address: LOOPBACK_IPV4,
             is_loopback: false,
             is_up: true,
             supports_multicast: true,
             interface_type: InterfaceType::Ethernet,
         });
-        
+
         Ok(interfaces)
     }
-    
+
     /// Parse output from 'ip addr show' command
     async fn parse_ip_command_output(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let output = Command::new("ip")
-            .args(&["addr", "show"])
+            .args(["addr", "show"])
             .output()
-            .map_err(|e| PlatformError::NetworkConfig(format!("Failed to run 'ip addr show': {}", e)))?;
-        
+            .map_err(|e| {
+                PlatformError::NetworkConfig(format!("Failed to run 'ip addr show': {}", e))
+            })?;
+
         if !output.status.success() {
-            return Err(PlatformError::NetworkConfig("'ip addr show' command failed".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "'ip addr show' command failed".to_string(),
+            ));
         }
-        
+
         let output_str = String::from_utf8_lossy(&output.stdout);
         self.parse_ip_addr_output(&output_str)
     }
-    
+
     /// Parse the output of 'ip addr show'
     fn parse_ip_addr_output(&self, output: &str) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
@@ -292,25 +322,26 @@ impl LinuxNetworkManager {
         let mut is_up = false;
         let mut supports_multicast = false;
         let mut is_loopback = false;
-        
+
         for line in output.lines() {
             let line = line.trim();
-            
+
             // Interface line: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000"
             if let Some(colon_pos) = line.find(':') {
                 if let Some(second_colon) = line[colon_pos + 1..].find(':') {
                     let second_colon_pos = colon_pos + 1 + second_colon;
-                    
+
                     // Save previous interface with the best IP
                     if let Some(name) = &current_interface {
                         if !name.starts_with("lo") && !current_ips.is_empty() {
                             // Choose the best IP address (prefer non-localhost)
-                            let best_ip = current_ips.iter()
+                            let best_ip = current_ips
+                                .iter()
                                 .find(|ip| !ip.is_loopback())
                                 .or_else(|| current_ips.first())
                                 .copied()
-                                .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
-                            
+                                .unwrap_or(LOOPBACK_IPV4);
+
                             let interface_type = self.determine_linux_interface_type(name);
                             interfaces.push(NetworkInterface {
                                 name: name.clone(),
@@ -322,13 +353,13 @@ impl LinuxNetworkManager {
                             });
                         }
                     }
-                    
+
                     // Parse new interface
                     let interface_name = line[colon_pos + 1..second_colon_pos].trim().to_string();
                     current_interface = Some(interface_name.clone());
                     current_ips.clear();
                     is_loopback = interface_name.starts_with("lo");
-                    
+
                     // Parse flags
                     if let Some(flags_start) = line.find('<') {
                         if let Some(flags_end) = line.find('>') {
@@ -339,7 +370,7 @@ impl LinuxNetworkManager {
                     }
                 }
             }
-            
+
             // IP address line: "    inet 192.168.1.100/24 brd 192.168.1.255 scope global dynamic eth0"
             if line.contains("inet ") && !line.contains("inet6") {
                 if let Some(inet_pos) = line.find("inet ") {
@@ -354,17 +385,18 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
+
         // Don't forget the last interface
         if let Some(name) = current_interface {
             if !name.starts_with("lo") && !current_ips.is_empty() {
                 // Choose the best IP address (prefer non-localhost)
-                let best_ip = current_ips.iter()
+                let best_ip = current_ips
+                    .iter()
                     .find(|ip| !ip.is_loopback())
                     .or_else(|| current_ips.first())
                     .copied()
-                    .unwrap_or_else(|| "127.0.0.1".parse().unwrap());
-                
+                    .unwrap_or(LOOPBACK_IPV4);
+
                 let interface_type = self.determine_linux_interface_type(&name);
                 interfaces.push(NetworkInterface {
                     name,
@@ -376,7 +408,7 @@ impl LinuxNetworkManager {
                 });
             }
         }
-        
+
         // If we still don't have any good interfaces, try a different approach
         if interfaces.is_empty() || interfaces.iter().all(|i| i.ip_address.is_loopback()) {
             debug!("Standard interface detection failed, trying alternative methods");
@@ -386,14 +418,17 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
+
         // Special handling for Docker containers - prioritize configured server IP
         if self.is_running_in_docker() && interfaces.iter().all(|i| i.ip_address.is_loopback()) {
             if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Replace all loopback IPs with the configured server IP for the primary interface
-                    if let Some(primary_interface) = interfaces.iter_mut().find(|i| i.is_up && i.supports_multicast) {
-                        info!("Docker container detected: Overriding interface {} IP from {} to configured server IP {}", 
+                    if let Some(primary_interface) = interfaces
+                        .iter_mut()
+                        .find(|i| i.is_up && i.supports_multicast)
+                    {
+                        info!("Docker container detected: Overriding interface {} IP from {} to configured server IP {}",
                               primary_interface.name, primary_interface.ip_address, server_ip);
                         primary_interface.ip_address = server_ip;
                         primary_interface.is_loopback = false;
@@ -401,36 +436,41 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
+
         Ok(interfaces)
     }
-    
+
     /// Parse /proc/net/dev as fallback
     async fn parse_proc_net_dev(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        let contents = std::fs::read_to_string("/proc/net/dev")
-            .map_err(|e| PlatformError::NetworkConfig(format!("Failed to read /proc/net/dev: {}", e)))?;
-        
+        let contents = std::fs::read_to_string("/proc/net/dev").map_err(|e| {
+            PlatformError::NetworkConfig(format!("Failed to read /proc/net/dev: {}", e))
+        })?;
+
         let mut interfaces = Vec::new();
-        
-        for line in contents.lines().skip(2) { // Skip header lines
+
+        for line in contents.lines().skip(2) {
+            // Skip header lines
             if let Some(interface_name) = line.split(':').next() {
                 let interface_name = interface_name.trim().to_string();
-                
+
                 // Skip loopback
                 if interface_name.starts_with("lo") {
                     continue;
                 }
-                
+
                 // Check if interface is up by reading from /sys/class/net
-                let is_up = std::fs::read_to_string(format!("/sys/class/net/{}/operstate", interface_name))
-                    .map(|state| state.trim() == "up")
-                    .unwrap_or(false);
-                
+                let is_up =
+                    std::fs::read_to_string(format!("/sys/class/net/{}/operstate", interface_name))
+                        .map(|state| state.trim() == "up")
+                        .unwrap_or(false);
+
                 // Get IP address using ip command for this specific interface
-                let ip_address = self.get_interface_ip(&interface_name).unwrap_or_else(|| "127.0.0.1".parse().unwrap());
-                
+                let ip_address = self
+                    .get_interface_ip(&interface_name)
+                    .unwrap_or(LOOPBACK_IPV4);
+
                 let interface_type = self.determine_linux_interface_type(&interface_name);
-                
+
                 interfaces.push(NetworkInterface {
                     name: interface_name,
                     ip_address,
@@ -441,38 +481,45 @@ impl LinuxNetworkManager {
                 });
             }
         }
-        
+
         Ok(interfaces)
     }
-    
+
     /// Check if we're running in a Docker container
     fn is_running_in_docker(&self) -> bool {
         // Check for Docker-specific files
-        std::path::Path::new("/.dockerenv").exists() || 
-        std::fs::read_to_string("/proc/1/cgroup")
-            .map(|content| content.contains("docker") || content.contains("containerd"))
-            .unwrap_or(false)
+        std::path::Path::new("/.dockerenv").exists()
+            || std::fs::read_to_string("/proc/1/cgroup")
+                .map(|content| content.contains("docker") || content.contains("containerd"))
+                .unwrap_or(false)
     }
 
     /// Alternative method to get network interfaces when standard detection fails
     fn get_interfaces_alternative_method(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
-        
+
         // Priority 1: If we have VUIO_SERVER_IP configured and we're in Docker, use it directly
         if self.is_running_in_docker() {
             if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Find the interface that should be used for this IP
-                    let interface_name = std::env::var("VUIO_SSDP_INTERFACE")
-                        .unwrap_or_else(|_| {
+                    let interface_name =
+                        std::env::var("VUIO_SSDP_INTERFACE").unwrap_or_else(|_| {
                             // Try to determine from routing table
-                            if let Ok(output) = Command::new("ip").args(&["route", "get", &server_ip_str]).output() {
+                            if let Ok(output) = Command::new("ip")
+                                .args(["route", "get", &server_ip_str])
+                                .output()
+                            {
                                 let output_str = String::from_utf8_lossy(&output.stdout);
-                                output_str.lines()
+                                output_str
+                                    .lines()
                                     .find_map(|line| {
                                         if line.contains("dev") {
-                                            let parts: Vec<&str> = line.split_whitespace().collect();
-                                            if let Some(dev_idx) = parts.iter().position(|&x| x == "dev") {
+                                            let parts: Vec<&str> =
+                                                line.split_whitespace().collect();
+                                            if let Some(dev_idx) =
+                                                parts.iter().position(|&x| x == "dev")
+                                            {
                                                 parts.get(dev_idx + 1).map(|s| s.to_string())
                                             } else {
                                                 None
@@ -486,7 +533,7 @@ impl LinuxNetworkManager {
                                 "enp12s0".to_string()
                             }
                         });
-                    
+
                     let interface_type = self.determine_linux_interface_type(&interface_name);
                     interfaces.push(NetworkInterface {
                         name: interface_name.clone(),
@@ -496,15 +543,21 @@ impl LinuxNetworkManager {
                         supports_multicast: true,
                         interface_type,
                     });
-                    
-                    info!("Docker detected: Using configured server IP {} for interface {}", server_ip, interface_name);
+
+                    info!(
+                        "Docker detected: Using configured server IP {} for interface {}",
+                        server_ip, interface_name
+                    );
                     return Ok(interfaces);
                 }
             }
         }
-        
+
         // Priority 2: Try to get the default route interface and its IP
-        if let Ok(output) = Command::new("ip").args(&["route", "show", "default"]).output() {
+        if let Ok(output) = Command::new("ip")
+            .args(["route", "show", "default"])
+            .output()
+        {
             if output.status.success() {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 for line in output_str.lines() {
@@ -514,7 +567,8 @@ impl LinuxNetworkManager {
                         if let Some(dev_idx) = parts.iter().position(|&x| x == "dev") {
                             if let Some(interface_name) = parts.get(dev_idx + 1) {
                                 if let Some(ip) = self.get_interface_ip_robust(interface_name) {
-                                    let interface_type = self.determine_linux_interface_type(interface_name);
+                                    let interface_type =
+                                        self.determine_linux_interface_type(interface_name);
                                     interfaces.push(NetworkInterface {
                                         name: interface_name.to_string(),
                                         ip_address: ip,
@@ -530,15 +584,19 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
-        // Priority 3: If still no interfaces, try to use the configured server IP with best guess interface  
+
+        // Priority 3: If still no interfaces, try to use the configured server IP with best guess interface
         if interfaces.is_empty() {
             if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {
                     // Find the most likely interface name
-                    let interface_name = if let Ok(output) = Command::new("ip").args(&["route", "get", &server_ip_str]).output() {
+                    let interface_name = if let Ok(output) = Command::new("ip")
+                        .args(["route", "get", &server_ip_str])
+                        .output()
+                    {
                         let output_str = String::from_utf8_lossy(&output.stdout);
-                        output_str.lines()
+                        output_str
+                            .lines()
                             .find_map(|line| {
                                 if line.contains("dev") {
                                     let parts: Vec<&str> = line.split_whitespace().collect();
@@ -555,7 +613,7 @@ impl LinuxNetworkManager {
                     } else {
                         "enp12s0".to_string()
                     };
-                    
+
                     let interface_type = self.determine_linux_interface_type(&interface_name);
                     interfaces.push(NetworkInterface {
                         name: interface_name,
@@ -568,10 +626,10 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
+
         Ok(interfaces)
     }
-    
+
     /// Get IP address for a specific interface with more robust methods
     fn get_interface_ip_robust(&self, interface_name: &str) -> Option<IpAddr> {
         // First check if we're in Docker and have a configured server IP
@@ -581,30 +639,36 @@ impl LinuxNetworkManager {
                     // Check if this interface should use the configured server IP
                     if let Ok(ssdp_interface) = std::env::var("VUIO_SSDP_INTERFACE") {
                         if interface_name == ssdp_interface {
-                            debug!("Using configured server IP {} for Docker interface {}", server_ip, interface_name);
+                            debug!(
+                                "Using configured server IP {} for Docker interface {}",
+                                server_ip, interface_name
+                            );
                             return Some(server_ip);
                         }
                     } else {
                         // If no specific SSDP interface is configured, use server IP for primary interfaces
                         if interface_name.starts_with("enp") || interface_name.starts_with("eth") {
-                            debug!("Using configured server IP {} for Docker interface {}", server_ip, interface_name);
+                            debug!(
+                                "Using configured server IP {} for Docker interface {}",
+                                server_ip, interface_name
+                            );
                             return Some(server_ip);
                         }
                     }
                 }
             }
         }
-        
+
         // First try the standard method
         if let Some(ip) = self.get_interface_ip(interface_name) {
             if !ip.is_loopback() {
                 return Some(ip);
             }
         }
-        
+
         // Try using ip route to find the source IP for this interface
         if let Ok(output) = Command::new("ip")
-            .args(&["route", "show", "dev", interface_name])
+            .args(["route", "show", "dev", interface_name])
             .output()
         {
             if output.status.success() {
@@ -625,14 +689,14 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
+
         None
     }
 
     /// Get IP address for a specific interface
     fn get_interface_ip(&self, interface_name: &str) -> Option<IpAddr> {
         match Command::new("ip")
-            .args(&["addr", "show", interface_name])
+            .args(["addr", "show", interface_name])
             .output()
         {
             Ok(output) if output.status.success() => {
@@ -655,7 +719,7 @@ impl LinuxNetworkManager {
             _ => None,
         }
     }
-    
+
     /// Determine interface type based on Linux interface name
     fn determine_linux_interface_type(&self, name: &str) -> InterfaceType {
         if name.starts_with("eth") || name.starts_with("enp") || name.starts_with("eno") {
@@ -670,11 +734,11 @@ impl LinuxNetworkManager {
             InterfaceType::Other(name.to_string())
         }
     }
-    
+
     /// Get available network namespaces
     fn get_network_namespaces(&self) -> Vec<String> {
         let mut namespaces = Vec::new();
-        
+
         // Read from /var/run/netns if available
         if let Ok(entries) = std::fs::read_dir("/var/run/netns") {
             for entry in entries.flatten() {
@@ -683,7 +747,7 @@ impl LinuxNetworkManager {
                 }
             }
         }
-        
+
         namespaces
     }
 }
@@ -692,22 +756,26 @@ impl LinuxNetworkManager {
     ///  bind to INADDR_ANY:1900
     async fn create_receive_socket(&self, port: u16) -> PlatformResult<UdpSocket> {
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port)); // INADDR_ANY
-        
-        let socket = UdpSocket::bind(socket_addr).await
-            .map_err(|e| PlatformError::NetworkConfig(format!("Failed to bind receive socket to {}: {}", socket_addr, e)))?;
-        
+
+        let socket = UdpSocket::bind(socket_addr).await.map_err(|e| {
+            PlatformError::NetworkConfig(format!(
+                "Failed to bind receive socket to {}: {}",
+                socket_addr, e
+            ))
+        })?;
+
         self.apply_receive_socket_options(&socket)?;
-        
+
         info!("Created receive socket bound to {}", socket_addr);
         Ok(socket)
     }
-    
+
     /// Apply receive socket options
     fn apply_receive_socket_options(&self, socket: &UdpSocket) -> PlatformResult<()> {
         use std::os::unix::io::AsRawFd;
-        
+
         let fd = socket.as_raw_fd();
-        
+
         // SO_REUSEADDR (critical for multiple binds)
         let optval: libc::c_int = 1;
         let ret = unsafe {
@@ -720,7 +788,10 @@ impl LinuxNetworkManager {
             )
         };
         if ret != 0 {
-            warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
+            warn!(
+                "Failed to set SO_REUSEADDR: {}",
+                std::io::Error::last_os_error()
+            );
         }
 
         // This is necessary to prevent the "Address in use" error when creating the announcement socket.
@@ -737,24 +808,31 @@ impl LinuxNetworkManager {
             };
             if ret_port != 0 {
                 // Log as a warning, as older kernels might not support this, but it's crucial for modern systems.
-                warn!("Failed to set SO_REUSEPORT: {}. This might cause issues in some environments.", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set SO_REUSEPORT: {}. This might cause issues in some environments.",
+                    std::io::Error::last_os_error()
+                );
             }
         }
-        
+
         debug!("Applied receive socket options");
         Ok(())
     }
-    
+
     /// Join multicast membership on specific interface
-    async fn join_multicast_on_interface(&self, socket: &UdpSocket, interface: &NetworkInterface) -> PlatformResult<()> {
+    async fn join_multicast_on_interface(
+        &self,
+        socket: &UdpSocket,
+        interface: &NetworkInterface,
+    ) -> PlatformResult<()> {
         use std::os::unix::io::AsRawFd;
-        
+
         let fd = socket.as_raw_fd();
-        
+
         // Use IP_ADD_MEMBERSHIP with specific interface address
         if let IpAddr::V4(interface_ip) = interface.ip_address {
-            let multicast_addr = "239.255.255.250".parse::<std::net::Ipv4Addr>().unwrap();
-            
+            let multicast_addr = SSDP_MULTICAST_IPV4;
+
             // Create ip_mreq structure
             let mreq = libc::ip_mreq {
                 imr_multiaddr: libc::in_addr {
@@ -764,7 +842,7 @@ impl LinuxNetworkManager {
                     s_addr: u32::from(interface_ip).to_be(),
                 },
             };
-            
+
             let ret = unsafe {
                 libc::setsockopt(
                     fd,
@@ -774,21 +852,23 @@ impl LinuxNetworkManager {
                     std::mem::size_of_val(&mreq) as libc::socklen_t,
                 )
             };
-            
+
             if ret < 0 {
                 let error = std::io::Error::last_os_error();
                 return Err(PlatformError::NetworkConfig(format!(
-                    "Failed to join multicast group on interface {} ({}): {}", 
+                    "Failed to join multicast group on interface {} ({}): {}",
                     interface.name, interface_ip, error
                 )));
             }
-            
-            info!("Successfully joined multicast 239.255.255.250 on interface {} ({})", 
-                  interface.name, interface_ip);
+
+            info!(
+                "Successfully joined multicast 239.255.255.250 on interface {} ({})",
+                interface.name, interface_ip
+            );
             Ok(())
         } else {
             Err(PlatformError::NetworkConfig(format!(
-                "Interface {} has IPv6 address, multicast IPv4 not supported", 
+                "Interface {} has IPv6 address, multicast IPv4 not supported",
                 interface.name
             )))
         }
@@ -800,22 +880,28 @@ impl NetworkManager for LinuxNetworkManager {
     async fn create_ssdp_socket(&self) -> PlatformResult<SsdpSocket> {
         self.create_ssdp_socket_with_config(&self.config).await
     }
-    
+
     /// Create SSDP socket with Docker compatibility
-    async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket> {
+    async fn create_ssdp_socket_with_config(
+        &self,
+        config: &SsdpConfig,
+    ) -> PlatformResult<SsdpSocket> {
         // Create receive socket bound to INADDR_ANY:1900
         let receive_socket = self.create_receive_socket(config.primary_port).await?;
-        
+
         // Get all available network interfaces
         let interfaces = self.get_local_interfaces().await?;
-        let suitable_interfaces: Vec<_> = interfaces.into_iter()
+        let suitable_interfaces: Vec<_> = interfaces
+            .into_iter()
             .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
             .collect();
-        
+
         if suitable_interfaces.is_empty() {
-            return Err(PlatformError::NetworkConfig("No suitable network interfaces found on Linux".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "No suitable network interfaces found on Linux".to_string(),
+            ));
         }
-        
+
         // Create SSDP socket with receive socket
         let mut ssdp_socket = SsdpSocket {
             socket: receive_socket,
@@ -823,30 +909,44 @@ impl NetworkManager for LinuxNetworkManager {
             interfaces: suitable_interfaces.clone(),
             multicast_enabled: false,
         };
-        
+
         // Join multicast membership on each interface
         for interface in &suitable_interfaces {
-            if let Err(e) = self.join_multicast_on_interface(&ssdp_socket.socket, interface).await {
-                warn!("Failed to join multicast on interface {}: {}", interface.name, e);
+            if let Err(e) = self
+                .join_multicast_on_interface(&ssdp_socket.socket, interface)
+                .await
+            {
+                warn!(
+                    "Failed to join multicast on interface {}: {}",
+                    interface.name, e
+                );
             } else {
-                info!("Joined multicast group on interface {} ({})", interface.name, interface.ip_address);
+                info!(
+                    "Joined multicast group on interface {} ({})",
+                    interface.name, interface.ip_address
+                );
                 ssdp_socket.multicast_enabled = true;
             }
         }
-        
+
         if !ssdp_socket.multicast_enabled {
-            return Err(PlatformError::NetworkConfig("Failed to join multicast on any interface".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "Failed to join multicast on any interface".to_string(),
+            ));
         }
-        
+
         Ok(ssdp_socket)
     }
-    
+
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         // Check if we have cached interfaces first
         {
             let cached = self.cached_interfaces.read().await;
             if let Some(ref interfaces) = *cached {
-                debug!("Using cached network interfaces (count: {})", interfaces.len());
+                debug!(
+                    "Using cached network interfaces (count: {})",
+                    interfaces.len()
+                );
                 return Ok(interfaces.clone());
             }
         }
@@ -854,24 +954,25 @@ impl NetworkManager for LinuxNetworkManager {
         // No cached interfaces, detect them and cache the result
         info!("Detecting network interfaces for the first time...");
         let interfaces = self.get_linux_interfaces().await?;
-        
+
         // Cache the result
         {
             let mut cached = self.cached_interfaces.write().await;
             *cached = Some(interfaces.clone());
         }
-        
+
         Ok(interfaces)
     }
-    
+
     async fn get_primary_interface(&self) -> PlatformResult<NetworkInterface> {
         let interfaces = self.get_local_interfaces().await?;
-        
+
         // Filter and prioritize interfaces
-        let mut suitable: Vec<_> = interfaces.into_iter()
+        let mut suitable: Vec<_> = interfaces
+            .into_iter()
             .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
             .collect();
-        
+
         // Sort by preference: Ethernet > WiFi > VPN > Other
         suitable.sort_by_key(|iface| match iface.interface_type {
             InterfaceType::Ethernet => 0,
@@ -880,30 +981,41 @@ impl NetworkManager for LinuxNetworkManager {
             InterfaceType::Other(_) => 3,
             InterfaceType::Loopback => 4,
         });
-        
-        suitable.into_iter().next()
-            .ok_or_else(|| PlatformError::NetworkConfig("No suitable primary interface found on Linux".to_string()))
+
+        suitable.into_iter().next().ok_or_else(|| {
+            PlatformError::NetworkConfig("No suitable primary interface found on Linux".to_string())
+        })
     }
-    
-    async fn join_multicast_group(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
+
+    async fn join_multicast_group(
+        &self,
+        socket: &mut SsdpSocket,
+        group: IpAddr,
+        interface: Option<&NetworkInterface>,
+    ) -> PlatformResult<()> {
         // multicast membership is already set up during socket creation
         // This method just verifies that multicast is enabled
-        
+
         if socket.multicast_enabled {
             info!("Multicast already enabled on socket");
             return Ok(());
         }
-        
+
         // If not enabled yet, try to enable it on specified interface or all interfaces
         let mut successful_joins = 0;
         let mut last_error = None;
-        
+
         if let Some(specific_interface) = interface {
             // Join on specific interface only
-            match self.join_multicast_on_interface(&socket.socket, specific_interface).await {
+            match self
+                .join_multicast_on_interface(&socket.socket, specific_interface)
+                .await
+            {
                 Ok(()) => {
-                    info!("Successfully joined multicast group {} on interface {}", 
-                          group, specific_interface.name);
+                    info!(
+                        "Successfully joined multicast group {} on interface {}",
+                        group, specific_interface.name
+                    );
                     socket.multicast_enabled = true;
                     return Ok(());
                 }
@@ -916,42 +1028,65 @@ impl NetworkManager for LinuxNetworkManager {
             let interfaces = socket.interfaces.clone();
             for iface in &interfaces {
                 if !iface.is_loopback && iface.is_up && iface.supports_multicast {
-                    match self.join_multicast_on_interface(&socket.socket, iface).await {
+                    match self
+                        .join_multicast_on_interface(&socket.socket, iface)
+                        .await
+                    {
                         Ok(()) => {
-                            info!("Successfully joined multicast group {} on interface {}", 
-                                  group, iface.name);
+                            info!(
+                                "Successfully joined multicast group {} on interface {}",
+                                group, iface.name
+                            );
                             successful_joins += 1;
                         }
                         Err(e) => {
-                            warn!("Failed to join multicast group {} on interface {}: {}", 
-                                  group, iface.name, e);
+                            warn!(
+                                "Failed to join multicast group {} on interface {}: {}",
+                                group, iface.name, e
+                            );
                             last_error = Some(e);
                         }
                     }
                 }
             }
-            
+
             if successful_joins > 0 {
-                info!("Successfully joined multicast on {}/{} interfaces", 
-                      successful_joins, interfaces.len());
+                info!(
+                    "Successfully joined multicast on {}/{} interfaces",
+                    successful_joins,
+                    interfaces.len()
+                );
                 socket.multicast_enabled = true;
                 return Ok(());
             } else {
-                return Err(last_error.unwrap_or_else(|| 
-                    PlatformError::NetworkConfig("Failed to join multicast on any interface".to_string())
-                ));
+                return Err(last_error.unwrap_or_else(|| {
+                    PlatformError::NetworkConfig(
+                        "Failed to join multicast on any interface".to_string(),
+                    )
+                }));
             }
         }
     }
-    
-    async fn send_multicast(&self, socket: &SsdpSocket, data: &[u8], group: SocketAddr) -> PlatformResult<()> {
+
+    async fn send_multicast(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        group: SocketAddr,
+    ) -> PlatformResult<()> {
         if !socket.multicast_enabled {
-            return Err(PlatformError::NetworkConfig("Multicast not enabled on Linux socket".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "Multicast not enabled on Linux socket".to_string(),
+            ));
         }
-        
+
         match socket.send_to(data, group).await {
             Ok(_) => {
-                debug!("Sent {} bytes to multicast group {} on Linux", data.len(), group);
+                debug!(
+                    "Sent {} bytes to multicast group {} on Linux",
+                    data.len(),
+                    group
+                );
                 Ok(())
             }
             Err(e) => {
@@ -960,19 +1095,25 @@ impl NetworkManager for LinuxNetworkManager {
             }
         }
     }
-    
-    async fn send_unicast_fallback(&self, socket: &SsdpSocket, data: &[u8], interfaces: &[NetworkInterface]) -> PlatformResult<()> {
+
+    async fn send_unicast_fallback(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        interfaces: &[NetworkInterface],
+    ) -> PlatformResult<()> {
         let mut success_count = 0;
         let mut last_error = None;
-        
+
         for interface in interfaces {
             // Calculate broadcast address for Linux
             let broadcast_addr = match interface.ip_address {
                 IpAddr::V4(ipv4) => {
-                    // Simple broadcast calculation - in real implementation, 
+                    // Simple broadcast calculation - in real implementation,
                     // you would use route command or netlink to get proper subnet info
                     let octets = ipv4.octets();
-                    let broadcast_ip = std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
+                    let broadcast_ip =
+                        std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
                     SocketAddr::from((broadcast_ip, socket.port))
                 }
                 IpAddr::V6(_) => {
@@ -980,47 +1121,55 @@ impl NetworkManager for LinuxNetworkManager {
                     continue;
                 }
             };
-            
+
             match socket.send_to(data, broadcast_addr).await {
                 Ok(_) => {
                     success_count += 1;
-                    debug!("Sent Linux unicast fallback to {} via interface {}", broadcast_addr, interface.name);
+                    debug!(
+                        "Sent Linux unicast fallback to {} via interface {}",
+                        broadcast_addr, interface.name
+                    );
                 }
                 Err(e) => {
-                    warn!("Failed to send Linux unicast fallback via interface {}: {}", interface.name, e);
+                    warn!(
+                        "Failed to send Linux unicast fallback via interface {}: {}",
+                        interface.name, e
+                    );
                     last_error = Some(e);
                 }
             }
         }
-        
+
         if success_count > 0 {
-            info!("Linux unicast fallback succeeded on {} interfaces", success_count);
+            info!(
+                "Linux unicast fallback succeeded on {} interfaces",
+                success_count
+            );
             Ok(())
         } else {
-            Err(last_error.unwrap_or_else(|| 
-                PlatformError::NetworkConfig("No Linux interfaces available for unicast fallback".to_string())
-            ))
+            Err(last_error.unwrap_or_else(|| {
+                PlatformError::NetworkConfig(
+                    "No Linux interfaces available for unicast fallback".to_string(),
+                )
+            }))
         }
     }
-    
+
     async fn is_port_available(&self, port: u16) -> bool {
-        match self.try_bind_port_linux(port).await {
-            Ok(_) => true,
-            Err(_) => false,
-        }
+        self.try_bind_port_linux(port).await.is_ok()
     }
-    
+
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {
         let interfaces = self.get_local_interfaces().await.unwrap_or_default();
         let mut interface_status = Vec::new();
         let mut available_ports = Vec::new();
         let mut diagnostic_messages = Vec::new();
-        
+
         // Test interfaces
         for interface in interfaces {
             let multicast_capable = self.test_multicast(&interface).await.unwrap_or(false);
             let reachable = interface.is_up && !interface.is_loopback;
-            
+
             let error_message = if !reachable {
                 Some("Interface is down or unreachable".to_string())
             } else if !multicast_capable {
@@ -1028,7 +1177,7 @@ impl NetworkManager for LinuxNetworkManager {
             } else {
                 None
             };
-            
+
             interface_status.push(InterfaceStatus {
                 interface,
                 reachable,
@@ -1036,67 +1185,83 @@ impl NetworkManager for LinuxNetworkManager {
                 error_message,
             });
         }
-        
+
         // Test common ports
         for &port in &[1900, 8080, 8081, 8082, 9090] {
             if self.is_port_available(port).await {
                 available_ports.push(port);
             } else if port < 1024 && !self.is_elevated() {
-                diagnostic_messages.push(format!("Port {} requires root privileges on Linux", port));
+                diagnostic_messages
+                    .push(format!("Port {} requires root privileges on Linux", port));
             }
         }
-        
+
         // Add Linux-specific diagnostic messages
         if available_ports.is_empty() {
-            diagnostic_messages.push("No common ports are available for binding on Linux".to_string());
+            diagnostic_messages
+                .push("No common ports are available for binding on Linux".to_string());
             if !self.is_elevated() {
-                diagnostic_messages.push("Consider running with sudo to access privileged ports".to_string());
+                diagnostic_messages
+                    .push("Consider running with sudo to access privileged ports".to_string());
             }
         }
-        
-        if interface_status.iter().all(|status| !status.multicast_capable) {
+
+        if interface_status
+            .iter()
+            .all(|status| !status.multicast_capable)
+        {
             diagnostic_messages.push("No Linux interfaces support multicast".to_string());
-            diagnostic_messages.push("Check network interface configuration and kernel modules".to_string());
+            diagnostic_messages
+                .push("Check network interface configuration and kernel modules".to_string());
         }
-        
+
         // Check for network namespaces
         let namespaces = self.get_network_namespaces();
         if !namespaces.is_empty() {
             diagnostic_messages.push(format!("Network namespaces detected: {:?}", namespaces));
-            diagnostic_messages.push("Consider running in the correct network namespace".to_string());
+            diagnostic_messages
+                .push("Consider running in the correct network namespace".to_string());
         }
-        
+
         // Get firewall status
         let firewall_status = Some(self.detect_firewall_status().await);
-        
+
         Ok(NetworkDiagnostics {
-            multicast_working: interface_status.iter().any(|status| status.multicast_capable),
+            multicast_working: interface_status
+                .iter()
+                .any(|status| status.multicast_capable),
             available_ports,
             interface_status,
             diagnostic_messages,
             firewall_status,
         })
     }
-    
+
     async fn test_multicast(&self, interface: &NetworkInterface) -> PlatformResult<bool> {
         // Basic test for Linux - check if interface supports multicast
         if !interface.supports_multicast || !interface.is_up || interface.is_loopback {
             return Ok(false);
         }
-        
+
         // Try to create a test socket and join multicast group
         match UdpSocket::bind("0.0.0.0:0").await {
             Ok(test_socket) => {
                 match interface.ip_address {
                     IpAddr::V4(local_v4) => {
-                        let multicast_addr = "239.255.255.250".parse::<std::net::Ipv4Addr>().unwrap();
+                        let multicast_addr = SSDP_MULTICAST_IPV4;
                         match test_socket.join_multicast_v4(multicast_addr, local_v4) {
                             Ok(()) => {
-                                debug!("Multicast test successful on Linux interface {}", interface.name);
+                                debug!(
+                                    "Multicast test successful on Linux interface {}",
+                                    interface.name
+                                );
                                 Ok(true)
                             }
                             Err(e) => {
-                                debug!("Multicast test failed on Linux interface {}: {}", interface.name, e);
+                                debug!(
+                                    "Multicast test failed on Linux interface {}: {}",
+                                    interface.name, e
+                                );
                                 Ok(false)
                             }
                         }
@@ -1121,13 +1286,13 @@ impl Default for LinuxNetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_linux_network_manager_creation() {
         let manager = LinuxNetworkManager::new();
         assert_eq!(manager.config.primary_port, 1900);
     }
-    
+
     #[test]
     fn test_requires_elevation() {
         let manager = LinuxNetworkManager::new();
@@ -1136,53 +1301,52 @@ mod tests {
         assert!(!manager.requires_elevation(8080));
         assert!(!manager.requires_elevation(9090));
     }
-    
+
     #[test]
     fn test_interface_type_determination() {
         let manager = LinuxNetworkManager::new();
-        
+
         assert_eq!(
             manager.determine_linux_interface_type("eth0"),
             InterfaceType::Ethernet
         );
-        
+
         assert_eq!(
             manager.determine_linux_interface_type("enp0s3"),
             InterfaceType::Ethernet
         );
-        
+
         assert_eq!(
             manager.determine_linux_interface_type("wlan0"),
             InterfaceType::WiFi
         );
-        
+
         assert_eq!(
             manager.determine_linux_interface_type("wlp2s0"),
             InterfaceType::WiFi
         );
-        
+
         assert_eq!(
             manager.determine_linux_interface_type("tun0"),
             InterfaceType::VPN
         );
-        
+
         assert_eq!(
             manager.determine_linux_interface_type("lo"),
             InterfaceType::Loopback
         );
     }
-    
+
     #[tokio::test]
     async fn test_port_availability_check() {
         let manager = LinuxNetworkManager::new();
-        
+
         // Test with a high port that should be available
         let available = manager.is_port_available(8080).await;
         // This might fail in test environment, but we can at least verify the method works
         println!("Port 8080 available: {}", available);
     }
-    
-    
+
     #[test]
     fn test_network_namespaces() {
         let manager = LinuxNetworkManager::new();

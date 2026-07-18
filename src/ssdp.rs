@@ -1,5 +1,7 @@
 use crate::config::AppConfig;
-use crate::platform::network::{NetworkManager, PlatformNetworkManager, SsdpConfig, SsdpSocket};
+use crate::platform::network::{
+    NetworkManager, PlatformNetworkManager, SsdpConfig, SsdpSocket, SSDP_MULTICAST_IP,
+};
 use crate::platform::NetworkInterface;
 use crate::state::AppState;
 use anyhow::Result;
@@ -9,7 +11,6 @@ use tokio::time::interval;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
-const SSDP_MULTICAST_ADDR: &str = "239.255.255.250";
 const SSDP_PORT: u16 = 1900;
 const ANNOUNCE_INTERVAL_SECS: u64 = 300; // Announce every 5 minutes
 
@@ -18,16 +19,19 @@ const ANNOUNCE_INTERVAL_SECS: u64 = 300; // Announce every 5 minutes
 pub trait SsdpPlatformAdapter: Send + Sync {
     /// Configure socket with platform-specific options
     async fn configure_socket(&self, socket: &mut SsdpSocket) -> Result<()>;
-    
+
     /// Get network interfaces suitable for this platform
-    async fn get_suitable_interfaces(&self, network_manager: &dyn NetworkManager) -> Result<Vec<NetworkInterface>>;
-    
+    async fn get_suitable_interfaces(
+        &self,
+        network_manager: &dyn NetworkManager,
+    ) -> Result<Vec<NetworkInterface>>;
+
     /// Determine if this platform should bind to a specific interface
     fn should_bind_to_specific_interface(&self) -> bool;
-    
+
     /// Get server IP address using platform-specific logic
     fn get_server_ip(&self, state: &AppState) -> String;
-    
+
     /// Get platform-specific SSDP configuration
     fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig;
 }
@@ -70,22 +74,26 @@ impl UnifiedSsdpService {
         tokio::task::JoinHandle<()>,
     )> {
         info!("Starting unified SSDP service");
-        
+
         let server_ip = self.platform_adapter.get_server_ip(&self.state);
         info!("SSDP service using server IP: {}", server_ip);
 
         // Create SSDP socket with platform-specific configuration
         let ssdp_config = self.platform_adapter.get_ssdp_config(&self.state);
-        let mut socket = self.network_manager.create_ssdp_socket_with_config(&ssdp_config).await
+        let mut socket = self
+            .network_manager
+            .create_ssdp_socket_with_config(&ssdp_config)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to create SSDP socket: {}", e))?;
 
         // Apply platform-specific socket configuration
         self.platform_adapter.configure_socket(&mut socket).await?;
 
         // Join multicast group
-        let multicast_addr = SSDP_MULTICAST_ADDR.parse().unwrap();
+        let multicast_addr = SSDP_MULTICAST_IP;
         let primary_interface = self.state.platform_info.get_primary_interface().cloned();
-        if let Err(e) = self.network_manager
+        if let Err(e) = self
+            .network_manager
             .join_multicast_group(&mut socket, multicast_addr, primary_interface.as_ref())
             .await
         {
@@ -152,12 +160,18 @@ impl UnifiedSsdpService {
                     Ok(result) => result,
                     Err(e) => {
                         consecutive_errors += 1;
-                        error!("Error receiving SSDP data (consecutive errors: {}): {}", consecutive_errors, e);
-                        
+                        error!(
+                            "Error receiving SSDP data (consecutive errors: {}): {}",
+                            consecutive_errors, e
+                        );
+
                         if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                             error!("Too many consecutive errors, recreating socket");
                             let ssdp_config = SsdpConfig::default();
-                            match network_manager.create_ssdp_socket_with_config(&ssdp_config).await {
+                            match network_manager
+                                .create_ssdp_socket_with_config(&ssdp_config)
+                                .await
+                            {
                                 Ok(new_socket) => {
                                     *socket_guard = new_socket;
                                     consecutive_errors = 0;
@@ -168,7 +182,7 @@ impl UnifiedSsdpService {
                                 }
                             }
                         }
-                        
+
                         tokio::time::sleep(Duration::from_millis(1000)).await;
                         continue;
                     }
@@ -213,23 +227,30 @@ impl UnifiedSsdpService {
         let response_count = response_types.len();
         for response_type in response_types {
             let response = Self::create_ssdp_response(state, response_type);
-            
+
             let socket_guard = socket.lock().await;
             for retry in 0..3 {
                 match socket_guard.send_to(response.as_bytes(), addr).await {
                     Ok(_) => {
-                        debug!("Successfully sent M-SEARCH response to {} for {}", addr, response_type);
+                        debug!(
+                            "Successfully sent M-SEARCH response to {} for {}",
+                            addr, response_type
+                        );
                         break;
                     }
                     Err(e) => {
-                        warn!("Failed to send M-SEARCH response (attempt {}): {}", retry + 1, e);
+                        warn!(
+                            "Failed to send M-SEARCH response (attempt {}): {}",
+                            retry + 1,
+                            e
+                        );
                         if retry < 2 {
                             tokio::time::sleep(Duration::from_millis(100 * (1 << retry))).await;
                         }
                     }
                 }
             }
-            
+
             if response_count > 1 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
@@ -255,8 +276,11 @@ impl UnifiedSsdpService {
                 }
                 Err(e) => {
                     consecutive_failures += 1;
-                    error!("Failed to send SSDP announcements (failure {}): {}", consecutive_failures, e);
-                    
+                    error!(
+                        "Failed to send SSDP announcements (failure {}): {}",
+                        consecutive_failures, e
+                    );
+
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                         error!("Too many consecutive announcement failures, resetting counter");
                         consecutive_failures = 0;
@@ -282,25 +306,41 @@ impl UnifiedSsdpService {
             "urn:schemas-upnp-org:service:ContentDirectory:1",
         ];
 
-        let multicast_addr = format!("{}:{}", SSDP_MULTICAST_ADDR, SSDP_PORT).parse::<SocketAddr>()?;
+        let multicast_addr = SocketAddr::new(SSDP_MULTICAST_IP, SSDP_PORT);
 
         for service_type in &service_types {
             let message = Self::create_notify_message(state, &server_ip, service_type);
-            
+
             let socket_guard = socket.lock().await;
-            match network_manager.send_multicast(&*socket_guard, message.as_bytes(), multicast_addr).await {
+            match network_manager
+                .send_multicast(&socket_guard, message.as_bytes(), multicast_addr)
+                .await
+            {
                 Ok(()) => {
                     info!("Successfully sent SSDP NOTIFY for {}", service_type);
                 }
                 Err(e) => {
-                    warn!("Multicast NOTIFY for {} failed: {}, trying unicast fallback", service_type, e);
-                    
-                    if let Err(e) = network_manager.send_unicast_fallback(&*socket_guard, message.as_bytes(), &socket_guard.interfaces).await {
-                        error!("Both multicast and unicast fallback failed for {}: {}", service_type, e);
+                    warn!(
+                        "Multicast NOTIFY for {} failed: {}, trying unicast fallback",
+                        service_type, e
+                    );
+
+                    if let Err(e) = network_manager
+                        .send_unicast_fallback(
+                            &socket_guard,
+                            message.as_bytes(),
+                            &socket_guard.interfaces,
+                        )
+                        .await
+                    {
+                        error!(
+                            "Both multicast and unicast fallback failed for {}: {}",
+                            service_type, e
+                        );
                     }
                 }
             }
-            
+
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
 
@@ -319,15 +359,24 @@ impl UnifiedSsdpService {
             ),
             "urn:schemas-upnp-org:device:MediaServer:1" => (
                 "urn:schemas-upnp-org:device:MediaServer:1".to_string(),
-                format!("uuid:{}::urn:schemas-upnp-org:device:MediaServer:1", config.server.uuid),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:device:MediaServer:1",
+                    config.server.uuid
+                ),
             ),
             "urn:schemas-upnp-org:service:ContentDirectory:1" => (
                 "urn:schemas-upnp-org:service:ContentDirectory:1".to_string(),
-                format!("uuid:{}::urn:schemas-upnp-org:service:ContentDirectory:1", config.server.uuid),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:service:ContentDirectory:1",
+                    config.server.uuid
+                ),
             ),
             _ => (
                 "urn:schemas-upnp-org:device:MediaServer:1".to_string(),
-                format!("uuid:{}::urn:schemas-upnp-org:device:MediaServer:1", config.server.uuid),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:device:MediaServer:1",
+                    config.server.uuid
+                ),
             ),
         };
 
@@ -355,11 +404,17 @@ impl UnifiedSsdpService {
             ),
             "urn:schemas-upnp-org:device:MediaServer:1" => (
                 "urn:schemas-upnp-org:device:MediaServer:1".to_string(),
-                format!("uuid:{}::urn:schemas-upnp-org:device:MediaServer:1", config.server.uuid),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:device:MediaServer:1",
+                    config.server.uuid
+                ),
             ),
             "urn:schemas-upnp-org:service:ContentDirectory:1" => (
                 "urn:schemas-upnp-org:service:ContentDirectory:1".to_string(),
-                format!("uuid:{}::urn:schemas-upnp-org:service:ContentDirectory:1", config.server.uuid),
+                format!(
+                    "uuid:{}::urn:schemas-upnp-org:service:ContentDirectory:1",
+                    config.server.uuid
+                ),
             ),
             _ => return String::new(),
         };
@@ -374,7 +429,7 @@ impl UnifiedSsdpService {
             SERVER: VuIO/1.0 UPnP/1.0\r\n\
             USN: {}\r\n\
             \r\n",
-            SSDP_MULTICAST_ADDR, SSDP_PORT, server_ip, config.server.port, nt, usn
+            SSDP_MULTICAST_IP, SSDP_PORT, server_ip, config.server.port, nt, usn
         )
     }
 
@@ -414,12 +469,18 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
     async fn configure_socket(&self, _socket: &mut SsdpSocket) -> Result<()> {
         Ok(())
     }
-    
-    async fn get_suitable_interfaces(&self, network_manager: &dyn NetworkManager) -> Result<Vec<NetworkInterface>> {
-        let interfaces = network_manager.get_local_interfaces().await
+
+    async fn get_suitable_interfaces(
+        &self,
+        network_manager: &dyn NetworkManager,
+    ) -> Result<Vec<NetworkInterface>> {
+        let interfaces = network_manager
+            .get_local_interfaces()
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to get interfaces: {}", e))?;
-        
-        let suitable: Vec<_> = interfaces.into_iter()
+
+        let suitable: Vec<_> = interfaces
+            .into_iter()
             .filter(|iface| {
                 let basic = !iface.is_loopback && iface.is_up;
                 if self.require_multicast_support {
@@ -429,23 +490,23 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
                 }
             })
             .collect();
-            
+
         Ok(suitable)
     }
-    
+
     fn should_bind_to_specific_interface(&self) -> bool {
         false
     }
-    
+
     fn get_server_ip(&self, state: &AppState) -> String {
         state.get_server_ip()
     }
-    
+
     fn get_ssdp_config(&self, state: &AppState) -> SsdpConfig {
         SsdpConfig {
             primary_port: SSDP_PORT,
             fallback_ports: self.fallback_ports.clone(),
-            multicast_address: SSDP_MULTICAST_ADDR.parse().unwrap(),
+            multicast_address: SSDP_MULTICAST_IP,
             announce_interval: Duration::from_secs(state.config.network.announce_interval_seconds),
             max_retries: 3,
             interfaces: Vec::new(),

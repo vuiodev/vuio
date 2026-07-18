@@ -67,7 +67,7 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
     let filesystem_manager: Arc<dyn crate::platform::filesystem::FileSystemManager> =
         Arc::from(create_platform_filesystem_manager());
     let resolved_log_file =
-        log_file_path.unwrap_or_else(|| crate::config::AppConfig::get_platform_log_file_path());
+        log_file_path.unwrap_or_else(crate::config::AppConfig::get_platform_log_file_path);
     let lifecycle_stats = Arc::new(ApplicationStats::new());
     let app_state = AppState {
         config: config.clone(),
@@ -77,6 +77,9 @@ async fn run_application(cli_args: LaunchOptions) -> anyhow::Result<()> {
         filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
         web_metrics: Arc::new(crate::web::diagnostics::WebHandlerMetrics::new()),
+        runtime_diagnostics: Arc::new(
+            crate::platform::diagnostics::SystemDiagnosticsSampler::new(),
+        ),
         lifecycle_stats: lifecycle_stats.clone(),
         bookmarks: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::BookmarkRegistry::new(

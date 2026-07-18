@@ -151,7 +151,6 @@ impl RedbDatabase {
                             &mut directory_files,
                             &mut directory_mime_counts,
                             &next_directory_id,
-                            *id,
                             file,
                         )?;
                         Self::add_file_indexes(

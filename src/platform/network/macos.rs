@@ -1,5 +1,8 @@
 use crate::platform::{
-    network::{NetworkDiagnostics, NetworkManager, SsdpConfig, SsdpSocket, InterfaceStatus, FirewallStatus},
+    network::{
+        FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager, SsdpConfig,
+        SsdpSocket, SSDP_MULTICAST_IPV4, UNSPECIFIED_IPV4,
+    },
     InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
@@ -22,10 +25,10 @@ impl MacOSNetworkManager {
             cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
     }
-    
+
     /// Create a new macOS network manager with custom configuration
     pub fn with_config(config: SsdpConfig) -> Self {
-        Self { 
+        Self {
             config,
             cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
@@ -37,25 +40,25 @@ impl MacOSNetworkManager {
         *cached = None;
         debug!("Cleared network interface cache");
     }
-    
+
     /// Check if running with sudo privileges
     fn is_elevated(&self) -> bool {
         std::env::var("USER")
             .map(|user| user == "root")
-            .unwrap_or(false) ||
-        std::env::var("SUDO_USER").is_ok()
+            .unwrap_or(false)
+            || std::env::var("SUDO_USER").is_ok()
     }
-    
+
     /// Check if a port requires sudo privileges on macOS
     fn requires_elevation(&self, port: u16) -> bool {
         // Ports below 1024 require root privileges on macOS
         port < 1024
     }
-    
+
     /// Try to bind to a port with macOS-specific handling
     async fn try_bind_port_macos(&self, port: u16) -> PlatformResult<UdpSocket> {
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port));
-        
+
         match UdpSocket::bind(socket_addr).await {
             Ok(socket) => {
                 debug!("Successfully bound to port {} on macOS", port);
@@ -77,13 +80,13 @@ impl MacOSNetworkManager {
             }
         }
     }
-    
+
     /// Detect macOS firewall status
     async fn detect_firewall_status(&self) -> FirewallStatus {
         let mut detected = false;
         let mut blocking_ssdp = None;
         let mut suggestions = Vec::new();
-        
+
         // Check if the application firewall is enabled
         match Command::new("defaults")
             .args(["read", "/Library/Preferences/com.apple.alf", "globalstate"])
@@ -94,17 +97,25 @@ impl MacOSNetworkManager {
                 let state = output_str.trim();
                 // 0 = disabled, 1 = enabled for specific services, 2 = enabled for essential services
                 detected = state != "0";
-                
+
                 if detected {
                     info!("macOS Application Firewall detected (state: {})", state);
-                    
+
                     // For SSDP, we generally assume it might be blocked if firewall is on
                     blocking_ssdp = Some(state == "2"); // More restrictive mode
-                    
+
                     if state != "0" {
-                        suggestions.push("Check macOS System Preferences > Security & Privacy > Firewall".to_string());
-                        suggestions.push("Add your DLNA application to the firewall exceptions".to_string());
-                        suggestions.push("Consider temporarily disabling the firewall to test connectivity".to_string());
+                        suggestions.push(
+                            "Check macOS System Preferences > Security & Privacy > Firewall"
+                                .to_string(),
+                        );
+                        suggestions.push(
+                            "Add your DLNA application to the firewall exceptions".to_string(),
+                        );
+                        suggestions.push(
+                            "Consider temporarily disabling the firewall to test connectivity"
+                                .to_string(),
+                        );
                     }
                 } else {
                     blocking_ssdp = Some(false);
@@ -115,23 +126,23 @@ impl MacOSNetworkManager {
                 suggestions.push("Unable to detect firewall status. Check System Preferences > Security & Privacy > Firewall".to_string());
             }
         }
-        
+
         if detected {
             suggestions.push("Use 'sudo pfctl -s rules' to check packet filter rules".to_string());
             suggestions.push("Ensure network interfaces allow multicast traffic".to_string());
         }
-        
+
         FirewallStatus {
             detected,
             blocking_ssdp,
             suggestions,
         }
     }
-    
+
     /// Get network interfaces using macOS-specific methods
     async fn get_macos_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
-        
+
         // Use ifconfig to get interface information
         match Command::new("ifconfig").output() {
             Ok(output) if output.status.success() => {
@@ -143,35 +154,44 @@ impl MacOSNetworkManager {
                 warn!("Failed to get network interfaces using ifconfig");
             }
         }
-        
+
         // Filter out loopback interfaces
         interfaces.retain(|iface| !iface.name.starts_with("lo"));
-        
+
         // If we didn't find any suitable interfaces, try to create a minimal fallback
         if interfaces.is_empty() {
             warn!("No interfaces found via ifconfig, attempting fallback detection");
-            
+
             // Try to get the default route interface
             if let Ok(route_output) = Command::new("route").args(["get", "default"]).output() {
                 let route_str = String::from_utf8_lossy(&route_output.stdout);
-                if let Some(interface_line) = route_str.lines().find(|line| line.trim().starts_with("interface:")) {
+                if let Some(interface_line) = route_str
+                    .lines()
+                    .find(|line| line.trim().starts_with("interface:"))
+                {
                     if let Some(iface_name) = interface_line.split(':').nth(1) {
                         let iface_name = iface_name.trim();
-                        
+
                         // Try to get IP for this interface
                         if let Ok(ip_output) = Command::new("ifconfig").arg(iface_name).output() {
                             let ip_str = String::from_utf8_lossy(&ip_output.stdout);
-                            if let Some(inet_line) = ip_str.lines().find(|line| line.trim().starts_with("inet ") && !line.contains("inet6")) {
+                            if let Some(inet_line) = ip_str.lines().find(|line| {
+                                line.trim().starts_with("inet ") && !line.contains("inet6")
+                            }) {
                                 if let Some(ip_part) = inet_line.split_whitespace().nth(1) {
                                     if let Ok(ip) = ip_part.parse::<IpAddr>() {
-                                        info!("Found fallback interface {} with IP {}", iface_name, ip);
+                                        info!(
+                                            "Found fallback interface {} with IP {}",
+                                            iface_name, ip
+                                        );
                                         interfaces.push(NetworkInterface {
                                             name: iface_name.to_string(),
                                             ip_address: ip,
                                             is_loopback: false,
                                             is_up: true,
                                             supports_multicast: true,
-                                            interface_type: self.determine_macos_interface_type(iface_name),
+                                            interface_type: self
+                                                .determine_macos_interface_type(iface_name),
                                         });
                                     }
                                 }
@@ -181,16 +201,18 @@ impl MacOSNetworkManager {
                 }
             }
         }
-        
+
         // Log what we found
         for iface in &interfaces {
-            info!("Found interface: {} ({}) - up: {}, multicast: {}", 
-                  iface.name, iface.ip_address, iface.is_up, iface.supports_multicast);
+            info!(
+                "Found interface: {} ({}) - up: {}, multicast: {}",
+                iface.name, iface.ip_address, iface.is_up, iface.supports_multicast
+            );
         }
-        
+
         Ok(interfaces)
     }
-    
+
     /// Parse ifconfig output to extract network interface information
     fn parse_ifconfig_output(&self, output: &str) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
@@ -198,20 +220,25 @@ impl MacOSNetworkManager {
         let mut current_ip: Option<IpAddr> = None;
         let mut is_up = false;
         let mut supports_multicast = false;
-        
+
         for line in output.lines() {
             // Detect interface name (starts at beginning of line and ends with colon)
-            if !line.starts_with('\t') && !line.starts_with(' ') && line.contains(':') && line.contains("flags=") {
+            if !line.starts_with('\t')
+                && !line.starts_with(' ')
+                && line.contains(':')
+                && line.contains("flags=")
+            {
                 // Save previous interface if we have one
-                if let Some(name) = &current_interface {
-                    if !name.starts_with("lo") && current_ip.is_some() { // Skip loopback
+                if let (Some(name), Some(ip_address)) = (&current_interface, current_ip) {
+                    if !name.starts_with("lo") {
+                        // Skip loopback
                         let interface_type = self.determine_macos_interface_type(name);
                         // FIX: Rely only on the <UP> flag. `status: active` is too strict.
                         let final_is_up = is_up;
-                        
+
                         interfaces.push(NetworkInterface {
                             name: name.clone(),
-                            ip_address: current_ip.unwrap(),
+                            ip_address,
                             is_loopback: name.starts_with("lo"),
                             is_up: final_is_up,
                             supports_multicast,
@@ -219,14 +246,14 @@ impl MacOSNetworkManager {
                         });
                     }
                 }
-                
+
                 // Start new interface
                 let interface_name = line.split(':').next().unwrap_or("unknown").to_string();
                 current_interface = Some(interface_name);
                 current_ip = None;
                 is_up = false;
                 supports_multicast = false;
-                
+
                 // Check flags in the same line
                 if line.contains("UP") {
                     is_up = true;
@@ -235,7 +262,7 @@ impl MacOSNetworkManager {
                     supports_multicast = true;
                 }
             }
-            
+
             // Look for IPv4 address (skip IPv6)
             if line.trim().starts_with("inet ") && !line.contains("inet6") {
                 let parts: Vec<&str> = line.split_whitespace().collect();
@@ -245,21 +272,22 @@ impl MacOSNetworkManager {
                     }
                 }
             }
-            
+
             // Note: We used to check for "status: active" but this is too strict
             // and causes many valid interfaces to be ignored. The UP flag is sufficient.
         }
-        
+
         // Don't forget the last interface
-        if let Some(name) = current_interface {
-            if !name.starts_with("lo") && current_ip.is_some() { // Skip loopback
+        if let (Some(name), Some(ip_address)) = (current_interface, current_ip) {
+            if !name.starts_with("lo") {
+                // Skip loopback
                 let interface_type = self.determine_macos_interface_type(&name);
                 // FIX: Rely only on the <UP> flag. `status: active` is too strict.
                 let final_is_up = is_up;
-                
+
                 interfaces.push(NetworkInterface {
                     name,
-                    ip_address: current_ip.unwrap(),
+                    ip_address,
                     is_loopback: false,
                     is_up: final_is_up,
                     supports_multicast,
@@ -267,10 +295,10 @@ impl MacOSNetworkManager {
                 });
             }
         }
-        
+
         Ok(interfaces)
     }
-    
+
     /// Determine interface type based on macOS interface name
     fn determine_macos_interface_type(&self, name: &str) -> InterfaceType {
         if name.starts_with("en") {
@@ -298,14 +326,18 @@ impl MacOSNetworkManager {
             InterfaceType::Other(name.to_string())
         }
     }
-    
+
     /// Get the preferred network interface for multicast on macOS
-    fn get_preferred_multicast_interface<'a>(&self, interfaces: &'a [NetworkInterface]) -> Option<&'a NetworkInterface> {
+    fn get_preferred_multicast_interface<'a>(
+        &self,
+        interfaces: &'a [NetworkInterface],
+    ) -> Option<&'a NetworkInterface> {
         // Prioritize active interfaces with IP addresses, then by type
-        interfaces.iter()
+        interfaces
+            .iter()
             .filter(|iface| {
-                !iface.is_loopback && 
-                iface.is_up && 
+                !iface.is_loopback &&
+                iface.is_up &&
                 iface.supports_multicast &&
                 // Ensure we have a real IP address (not just link-local)
                 match iface.ip_address {
@@ -315,58 +347,84 @@ impl MacOSNetworkManager {
             })
             .min_by_key(|iface| {
                 match (&iface.interface_type, iface.name.as_str()) {
-                    (InterfaceType::WiFi, "en0") => 0,     // Primary interface (often WiFi on modern Macs)
+                    (InterfaceType::WiFi, "en0") => 0, // Primary interface (often WiFi on modern Macs)
                     (InterfaceType::Ethernet, _) if iface.name.starts_with("en") => 1, // Other en interfaces
-                    (InterfaceType::WiFi, "awdl0") => 2,   // Apple Wireless Direct Link
-                    (InterfaceType::WiFi, _) => 3,         // Other WiFi
-                    (InterfaceType::VPN, _) => 4,          // VPN
-                    _ => 5,                                // Other
+                    (InterfaceType::WiFi, "awdl0") => 2, // Apple Wireless Direct Link
+                    (InterfaceType::WiFi, _) => 3,       // Other WiFi
+                    (InterfaceType::VPN, _) => 4,        // VPN
+                    _ => 5,                              // Other
                 }
             })
     }
-    
+
     /// Enable multicast on macOS socket with proper interface selection
-    async fn enable_multicast_macos(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
+    async fn enable_multicast_macos(
+        &self,
+        socket: &mut SsdpSocket,
+        group: IpAddr,
+        interface: Option<&NetworkInterface>,
+    ) -> PlatformResult<()> {
         let (local_addr, interface_name) = if let Some(iface) = interface {
             (iface.ip_address, iface.name.clone())
         } else {
             // Use the preferred interface for multicast
-            let selected_interface = self.get_preferred_multicast_interface(&socket.interfaces)
-                .ok_or_else(|| PlatformError::NetworkConfig("No suitable interface for multicast on macOS".to_string()))?;
-            (selected_interface.ip_address, selected_interface.name.clone())
+            let selected_interface = self
+                .get_preferred_multicast_interface(&socket.interfaces)
+                .ok_or_else(|| {
+                    PlatformError::NetworkConfig(
+                        "No suitable interface for multicast on macOS".to_string(),
+                    )
+                })?;
+            (
+                selected_interface.ip_address,
+                selected_interface.name.clone(),
+            )
         };
-        
+
         // Try to enable multicast with better error handling
         match socket.enable_multicast(group, local_addr).await {
             Ok(()) => {
-                info!("Successfully enabled multicast on macOS for group {} via interface {} ({})", 
-                      group, interface_name, local_addr);
+                info!(
+                    "Successfully enabled multicast on macOS for group {} via interface {} ({})",
+                    group, interface_name, local_addr
+                );
                 Ok(())
             }
             Err(e) => {
                 warn!("Primary multicast enable failed on macOS: {}", e);
-                
+
                 // Try with 0.0.0.0 as fallback for interface binding
-                match socket.enable_multicast(group, "0.0.0.0".parse().unwrap()).await {
+                match socket.enable_multicast(group, UNSPECIFIED_IPV4).await {
                     Ok(()) => {
                         info!("Successfully enabled multicast on macOS using fallback binding for group {}", group);
                         Ok(())
                     }
                     Err(fallback_error) => {
-                        warn!("Fallback multicast enable also failed on macOS: {}", fallback_error);
-                        
+                        warn!(
+                            "Fallback multicast enable also failed on macOS: {}",
+                            fallback_error
+                        );
+
                         // Provide macOS-specific troubleshooting advice
-                        let mut error_msg = format!("Multicast failed on macOS (tried {} and fallback): {} / {}", 
-                                                   local_addr, e, fallback_error);
-                        
+                        let mut error_msg = format!(
+                            "Multicast failed on macOS (tried {} and fallback): {} / {}",
+                            local_addr, e, fallback_error
+                        );
+
                         if !self.is_elevated() && self.requires_elevation(socket.port) {
-                            error_msg.push_str("\nTip: Try running with sudo if using a privileged port.");
+                            error_msg.push_str(
+                                "\nTip: Try running with sudo if using a privileged port.",
+                            );
                         }
-                        
+
                         error_msg.push_str("\nTip: Check macOS System Preferences > Security & Privacy > Firewall settings.");
-                        error_msg.push_str("\nTip: Ensure the network interface supports multicast.");
-                        error_msg.push_str(&format!("\nTip: Interface {} ({}) may not support multicast properly.", interface_name, local_addr));
-                        
+                        error_msg
+                            .push_str("\nTip: Ensure the network interface supports multicast.");
+                        error_msg.push_str(&format!(
+                            "\nTip: Interface {} ({}) may not support multicast properly.",
+                            interface_name, local_addr
+                        ));
+
                         Err(PlatformError::NetworkConfig(error_msg))
                     }
                 }
@@ -380,8 +438,11 @@ impl NetworkManager for MacOSNetworkManager {
     async fn create_ssdp_socket(&self) -> PlatformResult<SsdpSocket> {
         self.create_ssdp_socket_with_config(&self.config).await
     }
-    
-    async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket> {
+
+    async fn create_ssdp_socket_with_config(
+        &self,
+        config: &SsdpConfig,
+    ) -> PlatformResult<SsdpSocket> {
         // Try primary port first
         match self.try_bind_port_macos(config.primary_port).await {
             Ok(socket) => {
@@ -417,11 +478,13 @@ impl NetworkManager for MacOSNetworkManager {
                         let interfaces = self.get_local_interfaces().await?;
                         let suitable_interfaces: Vec<_> = interfaces
                             .into_iter()
-                            .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
+                            .filter(|iface| {
+                                !iface.is_loopback && iface.is_up && iface.supports_multicast
+                            })
                             .collect();
-                        
+
                         if suitable_interfaces.is_empty() {
-                             return Err(PlatformError::NetworkConfig(
+                            return Err(PlatformError::NetworkConfig(
                                 "No suitable network interfaces found on macOS".to_string(),
                             ));
                         }
@@ -434,19 +497,22 @@ impl NetworkManager for MacOSNetworkManager {
                         });
                     }
                 }
-                
+
                 // If all fallbacks also fail, return the original error from the primary port
                 Err(primary_error)
             }
         }
     }
-    
+
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         // Check if we have cached interfaces first
         {
             let cached = self.cached_interfaces.read().await;
             if let Some(ref interfaces) = *cached {
-                debug!("Using cached network interfaces (count: {})", interfaces.len());
+                debug!(
+                    "Using cached network interfaces (count: {})",
+                    interfaces.len()
+                );
                 return Ok(interfaces.clone());
             }
         }
@@ -454,37 +520,57 @@ impl NetworkManager for MacOSNetworkManager {
         // No cached interfaces, detect them and cache the result
         info!("Detecting network interfaces for the first time...");
         let interfaces = self.get_macos_interfaces().await?;
-        
+
         // Cache the result
         {
             let mut cached = self.cached_interfaces.write().await;
             *cached = Some(interfaces.clone());
         }
-        
+
         Ok(interfaces)
     }
-    
+
     async fn get_primary_interface(&self) -> PlatformResult<NetworkInterface> {
         let interfaces = self.get_local_interfaces().await?;
-        
+
         // Use the preferred multicast interface
         self.get_preferred_multicast_interface(&interfaces)
             .cloned()
-            .ok_or_else(|| PlatformError::NetworkConfig("No suitable primary interface found on macOS".to_string()))
+            .ok_or_else(|| {
+                PlatformError::NetworkConfig(
+                    "No suitable primary interface found on macOS".to_string(),
+                )
+            })
     }
-    
-    async fn join_multicast_group(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
+
+    async fn join_multicast_group(
+        &self,
+        socket: &mut SsdpSocket,
+        group: IpAddr,
+        interface: Option<&NetworkInterface>,
+    ) -> PlatformResult<()> {
         self.enable_multicast_macos(socket, group, interface).await
     }
-    
-    async fn send_multicast(&self, socket: &SsdpSocket, data: &[u8], group: SocketAddr) -> PlatformResult<()> {
+
+    async fn send_multicast(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        group: SocketAddr,
+    ) -> PlatformResult<()> {
         if !socket.multicast_enabled {
-            return Err(PlatformError::NetworkConfig("Multicast not enabled on macOS socket".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "Multicast not enabled on macOS socket".to_string(),
+            ));
         }
-        
+
         match socket.send_to(data, group).await {
             Ok(_) => {
-                debug!("Sent {} bytes to multicast group {} on macOS", data.len(), group);
+                debug!(
+                    "Sent {} bytes to multicast group {} on macOS",
+                    data.len(),
+                    group
+                );
                 Ok(())
             }
             Err(e) => {
@@ -493,19 +579,25 @@ impl NetworkManager for MacOSNetworkManager {
             }
         }
     }
-    
-    async fn send_unicast_fallback(&self, socket: &SsdpSocket, data: &[u8], interfaces: &[NetworkInterface]) -> PlatformResult<()> {
+
+    async fn send_unicast_fallback(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        interfaces: &[NetworkInterface],
+    ) -> PlatformResult<()> {
         let mut success_count = 0;
         let mut last_error = None;
-        
+
         for interface in interfaces {
             // Calculate broadcast address for macOS
             let broadcast_addr = match interface.ip_address {
                 IpAddr::V4(ipv4) => {
-                    // Simple broadcast calculation - in real implementation, 
+                    // Simple broadcast calculation - in real implementation,
                     // you would use route command or system APIs to get proper subnet info
                     let octets = ipv4.octets();
-                    let broadcast_ip = std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
+                    let broadcast_ip =
+                        std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
                     SocketAddr::from((broadcast_ip, socket.port))
                 }
                 IpAddr::V6(_) => {
@@ -513,44 +605,55 @@ impl NetworkManager for MacOSNetworkManager {
                     continue;
                 }
             };
-            
+
             match socket.send_to(data, broadcast_addr).await {
                 Ok(_) => {
                     success_count += 1;
-                    debug!("Sent macOS unicast fallback to {} via interface {}", broadcast_addr, interface.name);
+                    debug!(
+                        "Sent macOS unicast fallback to {} via interface {}",
+                        broadcast_addr, interface.name
+                    );
                 }
                 Err(e) => {
-                    warn!("Failed to send macOS unicast fallback via interface {}: {}", interface.name, e);
+                    warn!(
+                        "Failed to send macOS unicast fallback via interface {}: {}",
+                        interface.name, e
+                    );
                     last_error = Some(e);
                 }
             }
         }
-        
+
         if success_count > 0 {
-            info!("macOS unicast fallback succeeded on {} interfaces", success_count);
+            info!(
+                "macOS unicast fallback succeeded on {} interfaces",
+                success_count
+            );
             Ok(())
         } else {
-            Err(last_error.unwrap_or_else(|| 
-                PlatformError::NetworkConfig("No macOS interfaces available for unicast fallback".to_string())
-            ))
+            Err(last_error.unwrap_or_else(|| {
+                PlatformError::NetworkConfig(
+                    "No macOS interfaces available for unicast fallback".to_string(),
+                )
+            }))
         }
     }
-    
+
     async fn is_port_available(&self, port: u16) -> bool {
         (self.try_bind_port_macos(port).await).is_ok()
     }
-    
+
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {
         let interfaces = self.get_local_interfaces().await.unwrap_or_default();
         let mut interface_status = Vec::new();
         let mut available_ports = Vec::new();
         let mut diagnostic_messages = Vec::new();
-        
+
         // Test interfaces
         for interface in interfaces {
             let multicast_capable = self.test_multicast(&interface).await.unwrap_or(false);
             let reachable = interface.is_up && !interface.is_loopback;
-            
+
             let error_message = if !reachable {
                 Some("Interface is down or unreachable".to_string())
             } else if !multicast_capable {
@@ -558,7 +661,7 @@ impl NetworkManager for MacOSNetworkManager {
             } else {
                 None
             };
-            
+
             interface_status.push(InterfaceStatus {
                 interface,
                 reachable,
@@ -566,66 +669,87 @@ impl NetworkManager for MacOSNetworkManager {
                 error_message,
             });
         }
-        
+
         // Test common ports
         for &port in &[1900, 8080, 8081, 8082, 9090] {
             if self.is_port_available(port).await {
                 available_ports.push(port);
             } else if port < 1024 && !self.is_elevated() {
-                diagnostic_messages.push(format!("Port {} requires sudo privileges on macOS", port));
+                diagnostic_messages
+                    .push(format!("Port {} requires sudo privileges on macOS", port));
             }
         }
-        
+
         // Add macOS-specific diagnostic messages
         if available_ports.is_empty() {
-            diagnostic_messages.push("No common ports are available for binding on macOS".to_string());
+            diagnostic_messages
+                .push("No common ports are available for binding on macOS".to_string());
             if !self.is_elevated() {
-                diagnostic_messages.push("Consider running with sudo to access privileged ports".to_string());
+                diagnostic_messages
+                    .push("Consider running with sudo to access privileged ports".to_string());
             }
         }
-        
-        if interface_status.iter().all(|status| !status.multicast_capable) {
+
+        if interface_status
+            .iter()
+            .all(|status| !status.multicast_capable)
+        {
             diagnostic_messages.push("No macOS interfaces support multicast".to_string());
-            diagnostic_messages.push("Check network interface configuration and drivers".to_string());
+            diagnostic_messages
+                .push("Check network interface configuration and drivers".to_string());
         }
-        
+
         // Check for preferred interface
-        let interfaces_vec: Vec<NetworkInterface> = interface_status.iter().map(|s| s.interface.clone()).collect();
+        let interfaces_vec: Vec<NetworkInterface> = interface_status
+            .iter()
+            .map(|s| s.interface.clone())
+            .collect();
         if let Some(preferred) = self.get_preferred_multicast_interface(&interfaces_vec) {
-            diagnostic_messages.push(format!("Preferred multicast interface: {} ({})", preferred.name, preferred.ip_address));
+            diagnostic_messages.push(format!(
+                "Preferred multicast interface: {} ({})",
+                preferred.name, preferred.ip_address
+            ));
         }
-        
+
         // Get firewall status
         let firewall_status = Some(self.detect_firewall_status().await);
-        
+
         Ok(NetworkDiagnostics {
-            multicast_working: interface_status.iter().any(|status| status.multicast_capable),
+            multicast_working: interface_status
+                .iter()
+                .any(|status| status.multicast_capable),
             available_ports,
             interface_status,
             diagnostic_messages,
             firewall_status,
         })
     }
-    
+
     async fn test_multicast(&self, interface: &NetworkInterface) -> PlatformResult<bool> {
         // Basic test for macOS - check if interface supports multicast
         if !interface.supports_multicast || !interface.is_up || interface.is_loopback {
             return Ok(false);
         }
-        
+
         // Try to create a test socket and join multicast group
         match UdpSocket::bind("0.0.0.0:0").await {
             Ok(test_socket) => {
                 match interface.ip_address {
                     IpAddr::V4(local_v4) => {
-                        let multicast_addr = "239.255.255.250".parse::<std::net::Ipv4Addr>().unwrap();
+                        let multicast_addr = SSDP_MULTICAST_IPV4;
                         match test_socket.join_multicast_v4(multicast_addr, local_v4) {
                             Ok(()) => {
-                                debug!("Multicast test successful on macOS interface {}", interface.name);
+                                debug!(
+                                    "Multicast test successful on macOS interface {}",
+                                    interface.name
+                                );
                                 Ok(true)
                             }
                             Err(e) => {
-                                debug!("Multicast test failed on macOS interface {}: {}", interface.name, e);
+                                debug!(
+                                    "Multicast test failed on macOS interface {}: {}",
+                                    interface.name, e
+                                );
                                 Ok(false)
                             }
                         }
@@ -650,13 +774,13 @@ impl Default for MacOSNetworkManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_macos_network_manager_creation() {
         let manager = MacOSNetworkManager::new();
         assert_eq!(manager.config.primary_port, 1900);
     }
-    
+
     #[test]
     fn test_requires_elevation() {
         let manager = MacOSNetworkManager::new();
@@ -665,46 +789,46 @@ mod tests {
         assert!(!manager.requires_elevation(8080));
         assert!(!manager.requires_elevation(9090));
     }
-    
+
     #[test]
     fn test_interface_type_determination() {
         let manager = MacOSNetworkManager::new();
-        
+
         assert_eq!(
             manager.determine_macos_interface_type("en0"),
             InterfaceType::WiFi
         );
-        
+
         assert_eq!(
             manager.determine_macos_interface_type("en1"),
             InterfaceType::Ethernet
         );
-        
+
         assert_eq!(
             manager.determine_macos_interface_type("utun0"),
             InterfaceType::VPN
         );
-        
+
         assert_eq!(
             manager.determine_macos_interface_type("lo0"),
             InterfaceType::Loopback
         );
     }
-    
+
     #[tokio::test]
     async fn test_port_availability_check() {
         let manager = MacOSNetworkManager::new();
-        
+
         // Test with a high port that should be available
         let available = manager.is_port_available(8080).await;
         // This might fail in test environment, but we can at least verify the method works
         println!("Port 8080 available: {}", available);
     }
-    
+
     #[test]
     fn test_ifconfig_parsing() {
         let manager = MacOSNetworkManager::new();
-        
+
         let sample_output = r#"
 lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384
 	inet 127.0.0.1 netmask 0xff000000
@@ -715,27 +839,27 @@ en1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
 	inet 192.168.1.101 netmask 0xffffff00 broadcast 192.168.1.255
 	status: active
 "#;
-        
+
         let interfaces = manager.parse_ifconfig_output(sample_output).unwrap();
         assert_eq!(interfaces.len(), 2); // lo0 should be filtered out
-        
+
         let en0 = &interfaces[0];
         assert_eq!(en0.name, "en0");
         assert_eq!(en0.ip_address, "192.168.1.100".parse::<IpAddr>().unwrap());
         assert_eq!(en0.interface_type, InterfaceType::WiFi);
         assert!(en0.is_up);
         assert!(en0.supports_multicast);
-        
+
         let en1 = &interfaces[1];
         assert_eq!(en1.name, "en1");
         assert_eq!(en1.ip_address, "192.168.1.101".parse::<IpAddr>().unwrap());
         assert_eq!(en1.interface_type, InterfaceType::Ethernet);
     }
-    
+
     #[test]
     fn test_preferred_interface_selection() {
         let manager = MacOSNetworkManager::new();
-        
+
         let interfaces = vec![
             NetworkInterface {
                 name: "en1".to_string(),
@@ -762,7 +886,7 @@ en1: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500
                 interface_type: InterfaceType::VPN,
             },
         ];
-        
+
         let preferred = manager.get_preferred_multicast_interface(&interfaces);
         assert!(preferred.is_some());
         assert_eq!(preferred.unwrap().name, "en0"); // Should prefer en0 (WiFi on modern Macs)

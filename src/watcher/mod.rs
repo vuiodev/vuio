@@ -459,15 +459,11 @@ impl FileSystemWatcher for CrossPlatformWatcher {
     }
 
     async fn take_event_receiver(&self) -> Result<mpsc::Receiver<FileSystemEvent>> {
-        self.event_receiver
-            .write()
-            .await
-            .take()
-            .ok_or_else(|| {
-                crate::error::AppError::Internal(anyhow::anyhow!(
-                    "file-system event receiver has already been taken"
-                ))
-            })
+        self.event_receiver.write().await.take().ok_or_else(|| {
+            crate::error::AppError::Internal(anyhow::anyhow!(
+                "file-system event receiver has already been taken"
+            ))
+        })
     }
 
     async fn add_watch_path(&self, path: &Path) -> Result<()> {

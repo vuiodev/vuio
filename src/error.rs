@@ -1,9 +1,9 @@
+use crate::platform::{ConfigurationError, DatabaseError, PlatformError};
 use axum::{
     http::{Error as HttpError, StatusCode},
     response::{IntoResponse, Response},
 };
 use thiserror::Error;
-use crate::platform::{PlatformError, DatabaseError, ConfigurationError};
 
 pub type Result<T> = std::result::Result<T, AppError>;
 
@@ -44,7 +44,7 @@ pub enum AppError {
 
     #[error("File serving error: {0}")]
     FileServing(String),
-    
+
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 }
@@ -93,7 +93,15 @@ impl AppError {
             AppError::Internal(_) => false,
             AppError::Io(io_err) => {
                 // Some I/O errors are recoverable (temporary network issues, etc.)
-                matches!(io_err.kind(), std::io::ErrorKind::TimedOut | std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock | std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::NotConnected)
+                matches!(
+                    io_err.kind(),
+                    std::io::ErrorKind::TimedOut
+                        | std::io::ErrorKind::Interrupted
+                        | std::io::ErrorKind::WouldBlock
+                        | std::io::ErrorKind::ConnectionRefused
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::NotConnected
+                )
             }
             AppError::Http(_) => false,
             AppError::Watcher(_) => true, // File watcher can often be restarted
@@ -105,7 +113,7 @@ impl AppError {
             AppError::FileServing(_) => true, // File serving issues might be temporary
         }
     }
-    
+
     /// Get suggested recovery actions for the error
     pub fn recovery_actions(&self) -> Vec<String> {
         match self {
@@ -165,17 +173,17 @@ impl AppError {
             ],
         }
     }
-    
+
     /// Get a user-friendly error message with context and guidance
     pub fn user_friendly_message(&self) -> String {
         match self {
             AppError::Platform(platform_err) => platform_err.user_message(),
             AppError::Database(db_err) => {
-                format!("Database Error: {}\n\nWhat this means: The application's database encountered an issue.\nRecovery: {}", 
+                format!("Database Error: {}\n\nWhat this means: The application's database encountered an issue.\nRecovery: {}",
                     db_err, db_err.recovery_strategy())
             }
             AppError::Configuration(config_err) => {
-                format!("Configuration Error: {}\n\nWhat this means: There's an issue with the application configuration.\nSolution: {}", 
+                format!("Configuration Error: {}\n\nWhat this means: There's an issue with the application configuration.\nSolution: {}",
                     config_err, config_err.solution_guide())
             }
             AppError::MediaScan(msg) => {
@@ -196,14 +204,17 @@ impl AppError {
             _ => format!("Application Error: {}\n\nSuggestion: Try restarting the application or check the logs for more details.", self),
         }
     }
-    
+
     /// Log the error with appropriate level and context
     pub fn log_error(&self) {
         match self {
             AppError::Platform(platform_err) => {
                 tracing::error!("Platform error: {}", platform_err);
                 if platform_err.is_recoverable() {
-                    tracing::info!("Recovery actions available: {:?}", platform_err.recovery_actions());
+                    tracing::info!(
+                        "Recovery actions available: {:?}",
+                        platform_err.recovery_actions()
+                    );
                 }
             }
             AppError::Database(db_err) => {
@@ -245,56 +256,57 @@ impl AppError {
     }
 }
 
-
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::{ConfigurationError, DatabaseError, WindowsError};
     use axum::body::to_bytes;
-    use crate::platform::{WindowsError, DatabaseError, ConfigurationError};
     use std::path::PathBuf;
-    
+
     #[test]
     fn test_error_recoverability() {
         let recoverable_error = AppError::MediaScan("temporary failure".to_string());
         assert!(recoverable_error.is_recoverable());
-        
+
         let non_recoverable_error = AppError::NotFound;
         assert!(!non_recoverable_error.is_recoverable());
     }
-    
+
     #[test]
     fn test_platform_error_integration() {
-        let windows_error = PlatformError::Windows(WindowsError::PrivilegedPortAccess { port: 1900 });
+        let windows_error =
+            PlatformError::Windows(WindowsError::PrivilegedPortAccess { port: 1900 });
         let app_error = AppError::Platform(windows_error);
-        
+
         assert!(app_error.is_recoverable());
         assert!(!app_error.recovery_actions().is_empty());
     }
-    
+
     #[test]
     fn test_database_error_integration() {
-        let db_error = DatabaseError::CorruptionDetected { 
-            location: "media_table".to_string() 
+        let db_error = DatabaseError::CorruptionDetected {
+            location: "media_table".to_string(),
         };
         let app_error = AppError::Database(db_error);
-        
+
         assert!(app_error.is_recoverable());
         let message = app_error.user_friendly_message();
         assert!(message.contains("Database Error"));
         assert!(message.contains("Recovery"));
     }
-    
+
     #[test]
     fn test_configuration_error_integration() {
-        let config_error = ConfigurationError::FileNotFound { 
-            path: PathBuf::from("/etc/vuio/config.toml") 
+        let config_error = ConfigurationError::FileNotFound {
+            path: PathBuf::from("/etc/vuio/config.toml"),
         };
         let app_error = AppError::Configuration(config_error);
-        
+
         assert!(app_error.is_recoverable());
         let actions = app_error.recovery_actions();
-        assert!(actions.iter().any(|action| action.contains("default configuration")));
+        assert!(actions
+            .iter()
+            .any(|action| action.contains("default configuration")));
     }
 
     #[tokio::test]
@@ -312,13 +324,11 @@ mod tests {
 
     #[tokio::test]
     async fn service_unavailable_responses_are_stable() {
-        let response = AppError::NetworkDiscovery("private network details".to_string())
-            .into_response();
+        let response =
+            AppError::NetworkDiscovery("private network details".to_string()).into_response();
 
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"Service Unavailable");
     }
-    
-
 }

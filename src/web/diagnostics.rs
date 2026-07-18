@@ -9,6 +9,32 @@ use axum::{
 use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::error;
 
+async fn collect_runtime_diagnostics(
+    state: &AppState,
+) -> (
+    Option<crate::platform::diagnostics::RuntimeDiagnostics>,
+    usize,
+    usize,
+) {
+    let directories = state.media_directories.read().await.clone();
+    let checks = directories
+        .iter()
+        .map(|directory| async move { tokio::fs::read_dir(&directory.path).await.is_ok() });
+    let accessible_directories = futures_util::future::join_all(checks)
+        .await
+        .into_iter()
+        .filter(|accessible| *accessible)
+        .count();
+    let diagnostics = match state.runtime_diagnostics.snapshot().await {
+        Ok(snapshot) => Some(snapshot),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to collect runtime diagnostics");
+            None
+        }
+    };
+    (diagnostics, directories.len(), accessible_directories)
+}
+
 /// Atomic performance tracking for web handlers
 pub struct WebHandlerMetrics {
     pub browse_requests: AtomicU64,
@@ -91,6 +117,12 @@ impl WebHandlerMetrics {
     }
 }
 
+impl Default for WebHandlerMetrics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct WebHandlerStats {
     pub browse_requests: u64,
@@ -108,7 +140,11 @@ pub struct WebHandlerStats {
 pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
 
-    let db_stats = match state.database.get_stats().await {
+    let (database_result, runtime) = tokio::join!(
+        state.database.get_stats(),
+        collect_runtime_diagnostics(&state)
+    );
+    let db_stats = match database_result {
         Ok(s) => s,
         Err(_) => crate::database::DatabaseStats {
             total_files: 0,
@@ -125,6 +161,7 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
         let mut casts = state.active_casts.lock().await;
         casts.snapshot()
     };
+    let (runtime_diagnostics, monitored_directory_count, accessible_directory_count) = runtime;
 
     let metrics_json = serde_json::json!({
         "web_handler_metrics": {
@@ -147,6 +184,15 @@ pub async fn get_web_metrics(State(state): State<AppState>) -> impl IntoResponse
             "audio_files": db_stats.audio_files,
             "image_files": db_stats.image_files,
             "playlists": db_stats.playlists,
+        },
+        "runtime_diagnostics": {
+            "snapshot": runtime_diagnostics,
+            "monitored_directory_count": monitored_directory_count,
+            "accessible_directory_count": accessible_directory_count,
+            "watch_for_changes": state.config.media.watch_for_changes,
+            "scan_on_startup": state.config.media.scan_on_startup,
+            "platform": state.platform_info.os_type.display_name(),
+            "architecture": std::env::consts::ARCH,
         },
         "active_casts": active_casts
     });
@@ -218,6 +264,7 @@ pub async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse 
 pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoResponse {
     let stats = state.web_metrics.get_stats();
 
+    let runtime = collect_runtime_diagnostics(&state).await;
     let (db_files, db_total_size, db_size, db_video, db_audio, db_image, db_playlists) =
         match state.database.get_stats().await {
             Ok(s) => (
@@ -327,6 +374,81 @@ pub async fn get_prometheus_metrics(State(state): State<AppState>) -> impl IntoR
     body.push_str("# HELP vuio_database_playlists Total playlists imported in database\n");
     body.push_str("# TYPE vuio_database_playlists gauge\n");
     body.push_str(&format!("vuio_database_playlists {}\n", db_playlists));
+
+    let (runtime_diagnostics, monitored_directory_count, accessible_directory_count) = runtime;
+    body.push_str("\n# HELP vuio_monitored_directories Configured monitored directories\n");
+    body.push_str("# TYPE vuio_monitored_directories gauge\n");
+    body.push_str(&format!(
+        "vuio_monitored_directories {monitored_directory_count}\n"
+    ));
+    body.push_str("# HELP vuio_accessible_directories Accessible monitored directories\n");
+    body.push_str("# TYPE vuio_accessible_directories gauge\n");
+    body.push_str(&format!(
+        "vuio_accessible_directories {accessible_directory_count}\n"
+    ));
+
+    if let Some(runtime) = runtime_diagnostics {
+        body.push_str("# HELP vuio_system_uptime_seconds System uptime in seconds\n");
+        body.push_str("# TYPE vuio_system_uptime_seconds gauge\n");
+        body.push_str(&format!(
+            "vuio_system_uptime_seconds {}\n",
+            runtime.system.uptime_seconds
+        ));
+        body.push_str("# HELP vuio_system_memory_bytes Total system memory in bytes\n");
+        body.push_str("# TYPE vuio_system_memory_bytes gauge\n");
+        body.push_str(&format!(
+            "vuio_system_memory_bytes {}\n",
+            runtime.system.total_memory_bytes
+        ));
+        body.push_str(
+            "# HELP vuio_system_available_memory_bytes Available system memory in bytes\n",
+        );
+        body.push_str("# TYPE vuio_system_available_memory_bytes gauge\n");
+        body.push_str(&format!(
+            "vuio_system_available_memory_bytes {}\n",
+            runtime.system.available_memory_bytes
+        ));
+        body.push_str("# HELP vuio_process_memory_bytes VuIO resident memory in bytes\n");
+        body.push_str("# TYPE vuio_process_memory_bytes gauge\n");
+        if let Some(memory) = runtime.process.memory_bytes {
+            body.push_str(&format!("vuio_process_memory_bytes {memory}\n"));
+        }
+        body.push_str("# HELP vuio_process_cpu_usage_percent VuIO process CPU usage percentage\n");
+        body.push_str("# TYPE vuio_process_cpu_usage_percent gauge\n");
+        if let Some(cpu) = runtime.process.cpu_usage_percent {
+            body.push_str(&format!("vuio_process_cpu_usage_percent {cpu}\n"));
+        }
+        body.push_str("# HELP vuio_disk_total_bytes Aggregate filesystem capacity in bytes\n");
+        body.push_str("# TYPE vuio_disk_total_bytes gauge\n");
+        body.push_str(&format!(
+            "vuio_disk_total_bytes {}\n",
+            runtime.disks.total_bytes
+        ));
+        body.push_str(
+            "# HELP vuio_disk_available_bytes Aggregate available filesystem capacity in bytes\n",
+        );
+        body.push_str("# TYPE vuio_disk_available_bytes gauge\n");
+        body.push_str(&format!(
+            "vuio_disk_available_bytes {}\n",
+            runtime.disks.available_bytes
+        ));
+        body.push_str(
+            "# HELP vuio_network_received_bytes Total bytes received by all interfaces\n",
+        );
+        body.push_str("# TYPE vuio_network_received_bytes counter\n");
+        body.push_str(&format!(
+            "vuio_network_received_bytes {}\n",
+            runtime.network.total_received_bytes
+        ));
+        body.push_str(
+            "# HELP vuio_network_transmitted_bytes Total bytes transmitted by all interfaces\n",
+        );
+        body.push_str("# TYPE vuio_network_transmitted_bytes counter\n");
+        body.push_str(&format!(
+            "vuio_network_transmitted_bytes {}\n",
+            runtime.network.total_transmitted_bytes
+        ));
+    }
 
     (
         StatusCode::OK,

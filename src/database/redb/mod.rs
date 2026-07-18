@@ -167,28 +167,22 @@ impl RedbDatabase {
             let mut max_file: i64 = 0;
             let mut total_files_c: u64 = 0;
             let mut total_size_s: u64 = 0;
-            for result in files_table.iter()? {
-                if let Ok((k, v)) = result {
-                    max_file = max_file.max(k.value());
-                    total_files_c += 1;
-                    if let Ok(file) = Self::deserialize_media_file(v.value()) {
-                        total_size_s += file.size;
-                    }
+            for (key, value) in files_table.iter()?.flatten() {
+                max_file = max_file.max(key.value());
+                total_files_c += 1;
+                if let Ok(file) = Self::deserialize_media_file(value.value()) {
+                    total_size_s += file.size;
                 }
             }
 
             let mut max_playlist: i64 = 0;
-            for result in playlists_table.iter()? {
-                if let Ok((k, _)) = result {
-                    max_playlist = max_playlist.max(k.value());
-                }
+            for (key, _) in playlists_table.iter()?.flatten() {
+                max_playlist = max_playlist.max(key.value());
             }
 
             let mut max_directory = 0_u64;
-            for result in directories_table.iter()? {
-                if let Ok((key, _)) = result {
-                    max_directory = max_directory.max(key.value());
-                }
+            for (key, _) in directories_table.iter()?.flatten() {
+                max_directory = max_directory.max(key.value());
             }
 
             (
@@ -384,9 +378,11 @@ impl RedbDatabase {
         directory_files: &mut redb::MultimapTable<u64, i64>,
         counts: &mut redb::Table<&str, u64>,
         next_directory_id: &AtomicU64,
-        file_id: i64,
         file: &V,
     ) -> Result<()> {
+        let file_id = file
+            .id()
+            .ok_or_else(|| anyhow!("cannot index directory membership without a file ID"))?;
         let directory_path = Self::get_dir_key_str(file.path());
         let directory_id =
             Self::ensure_directory(paths, records, children, next_directory_id, &directory_path)?;
@@ -899,7 +895,9 @@ mod tests {
                 let mut files = write.open_table(FILES_TABLE).unwrap();
                 files.insert(42, &[1_u8, 2, 3][..]).unwrap();
                 let mut metadata = write.open_table(METADATA_TABLE).unwrap();
-                metadata.insert("schema_version", SCHEMA_VERSION - 1).unwrap();
+                metadata
+                    .insert("schema_version", SCHEMA_VERSION - 1)
+                    .unwrap();
             }
             write.commit().unwrap();
         }

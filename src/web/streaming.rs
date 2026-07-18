@@ -73,10 +73,10 @@ pub async fn serve_media(
         })?;
 
     if file_info.mime_type == "audio/radio" {
-        return Ok(axum::response::Redirect::temporary(
-            &file_info.path.to_string_lossy().to_string(),
-        )
-        .into_response());
+        return Ok(
+            axum::response::Redirect::temporary(file_info.path.to_string_lossy().as_ref())
+                .into_response(),
+        );
     }
 
     // Record dynamic client telemetry for GET requests (playing)
@@ -321,41 +321,6 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
     }
 }
 
-#[cfg(test)]
-mod range_tests {
-    use super::*;
-
-    #[test]
-    fn empty_files_reject_every_range_without_underflowing() {
-        for range in ["bytes=0-", "bytes=-1", "bytes=0-0"] {
-            assert!(matches!(
-                parse_range_header(range, 0),
-                Err(AppError::InvalidRange)
-            ));
-        }
-    }
-
-    #[test]
-    fn parses_valid_bounded_open_and_suffix_ranges() {
-        assert_eq!(parse_range_header("bytes=2-5", 10).unwrap(), (2, 5));
-        assert_eq!(parse_range_header("bytes=7-", 10).unwrap(), (7, 9));
-        assert_eq!(parse_range_header("bytes=-3", 10).unwrap(), (7, 9));
-        assert_eq!(parse_range_header("bytes=7-99", 10).unwrap(), (7, 9));
-    }
-
-    #[test]
-    fn rejects_ranges_outside_the_file() {
-        assert!(matches!(
-            parse_range_header("bytes=10-", 10),
-            Err(AppError::InvalidRange)
-        ));
-        assert!(matches!(
-            parse_range_header("bytes=8-3", 10),
-            Err(AppError::InvalidRange)
-        ));
-    }
-}
-
 pub async fn serve_subtitle(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -479,4 +444,39 @@ pub async fn serve_cover(
     }
 
     Err(AppError::NotFound)
+}
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    #[test]
+    fn empty_files_reject_every_range_without_underflowing() {
+        for range in ["bytes=0-", "bytes=-1", "bytes=0-0"] {
+            assert!(matches!(
+                parse_range_header(range, 0),
+                Err(AppError::InvalidRange)
+            ));
+        }
+    }
+
+    #[test]
+    fn parses_valid_bounded_open_and_suffix_ranges() {
+        assert_eq!(parse_range_header("bytes=2-5", 10).unwrap(), (2, 5));
+        assert_eq!(parse_range_header("bytes=7-", 10).unwrap(), (7, 9));
+        assert_eq!(parse_range_header("bytes=-3", 10).unwrap(), (7, 9));
+        assert_eq!(parse_range_header("bytes=7-99", 10).unwrap(), (7, 9));
+    }
+
+    #[test]
+    fn rejects_ranges_outside_the_file() {
+        assert!(matches!(
+            parse_range_header("bytes=10-", 10),
+            Err(AppError::InvalidRange)
+        ));
+        assert!(matches!(
+            parse_range_header("bytes=8-3", 10),
+            Err(AppError::InvalidRange)
+        ));
+    }
 }

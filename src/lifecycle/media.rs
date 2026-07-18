@@ -587,7 +587,7 @@ async fn handle_file_system_event(
                         stats.record_directory_scanned();
                         stats.record_files_processed(scan_result.new_files.len() as u64);
 
-                        info!("Added {} media files from new directory using ReDB bulk operations: {}", 
+                        info!("Added {} media files from new directory using ReDB bulk operations: {}",
                               scan_result.new_files.len(), path.display());
 
                         // Increment update ID to notify DLNA clients
@@ -678,9 +678,8 @@ async fn handle_file_system_event(
             let summary = database
                 .remove_media_under_path(&path)
                 .await
-                .map_err(|error| {
+                .inspect_err(|_error| {
                     stats.record_error();
-                    error
                 })?;
             stats.record_files_processed(summary.removed_files as u64);
             info!(
@@ -782,7 +781,9 @@ async fn handle_file_system_event(
                         increment_content_update_id(app_state).await;
                     }
                     MediaRenameKind::Remove => {
-                        let removed = database.bulk_remove_media_files(&[from.clone()]).await?;
+                        let removed = database
+                            .bulk_remove_media_files(std::slice::from_ref(&from))
+                            .await?;
                         if removed > 0 {
                             stats.record_files_processed(removed as u64);
                             info!(
@@ -795,7 +796,9 @@ async fn handle_file_system_event(
                         }
                     }
                     MediaRenameKind::Replace => {
-                        let removed = database.bulk_remove_media_files(&[from.clone()]).await?;
+                        let removed = database
+                            .bulk_remove_media_files(std::slice::from_ref(&from))
+                            .await?;
                         if removed == 0 {
                             debug!(
                                 "Media rename source was absent; destination will still be indexed: {}",

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use quick_xml::Reader;
 use quick_xml::events::Event;
+use quick_xml::Reader;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::net::UdpSocket;
@@ -65,7 +65,10 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
         }
     }
 
-    debug!("Discovered {} potential MediaRenderer location(s)", locations.len());
+    debug!(
+        "Discovered {} potential MediaRenderer location(s)",
+        locations.len()
+    );
 
     let mut tvs = Vec::new();
     let client = reqwest::Client::builder()
@@ -79,7 +82,10 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
                 tvs.push(tv);
             }
             Ok(None) => {
-                debug!("Location {} is not a MediaRenderer with AVTransport", location);
+                debug!(
+                    "Location {} is not a MediaRenderer with AVTransport",
+                    location
+                );
             }
             Err(e) => {
                 warn!("Failed to fetch TV info from {}: {}", location, e);
@@ -115,7 +121,11 @@ async fn fetch_tv_info(
                 current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
             }
             Ok(Event::Text(e)) => {
-                let text = reader.decoder().decode(e.as_ref()).unwrap_or_default().to_string();
+                let text = reader
+                    .decoder()
+                    .decode(e.as_ref())
+                    .unwrap_or_default()
+                    .to_string();
                 match current_element.as_str() {
                     "friendlyName" if friendly_name.is_empty() => {
                         friendly_name = text;
@@ -192,14 +202,25 @@ async fn fetch_tv_info(
 
 fn extract_base_url(url: &str) -> Option<String> {
     // Parse "http://192.168.1.100:8080/path/desc.xml" -> "http://192.168.1.100:8080"
-    let without_scheme = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"))?;
-    let scheme = if url.starts_with("https") { "https" } else { "http" };
+    let without_scheme = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"))?;
+    let scheme = if url.starts_with("https") {
+        "https"
+    } else {
+        "http"
+    };
     let host_port = without_scheme.split('/').next()?;
     Some(format!("{}://{}", scheme, host_port))
 }
 
 /// Cast a media file to a TV by sending SOAP SetAVTransportURI + Play
-pub async fn cast_media(control_url: &str, media_url: &str, title: &str, mime_type: &str) -> Result<()> {
+pub async fn cast_media(
+    control_url: &str,
+    media_url: &str,
+    title: &str,
+    mime_type: &str,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
@@ -238,7 +259,10 @@ pub async fn cast_media(control_url: &str, media_url: &str, title: &str, mime_ty
     let resp = client
         .post(control_url)
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"")
+        .header(
+            "SOAPAction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
+        )
         .body(set_uri_body)
         .send()
         .await?;
@@ -303,7 +327,12 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
 }
 
 /// Queue the next media file to a TV by sending SOAP SetNextAVTransportURI
-pub async fn set_next_media(control_url: &str, media_url: &str, title: &str, mime_type: &str) -> Result<()> {
+pub async fn set_next_media(
+    control_url: &str,
+    media_url: &str,
+    title: &str,
+    mime_type: &str,
+) -> Result<()> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()?;
@@ -341,7 +370,10 @@ pub async fn set_next_media(control_url: &str, media_url: &str, title: &str, mim
     let resp = client
         .post(control_url)
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#SetNextAVTransportURI\"")
+        .header(
+            "SOAPAction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#SetNextAVTransportURI\"",
+        )
         .body(body)
         .send()
         .await?;
@@ -349,7 +381,11 @@ pub async fn set_next_media(control_url: &str, media_url: &str, title: &str, mim
     if !resp.status().is_success() {
         let status = resp.status();
         let err_body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("SetNextAVTransportURI failed (HTTP {}): {}", status, err_body);
+        anyhow::bail!(
+            "SetNextAVTransportURI failed (HTTP {}): {}",
+            status,
+            err_body
+        );
     }
 
     debug!("SetNextAVTransportURI succeeded on {}", control_url);
@@ -375,7 +411,10 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
     let resp = client
         .post(control_url)
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo\"")
+        .header(
+            "SOAPAction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo\"",
+        )
         .body(body)
         .send()
         .await?;
@@ -387,7 +426,7 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
     }
 
     let text = resp.text().await?;
-    
+
     // Extract TrackURI
     if let Some(uri_part) = text.split("<TrackURI>").nth(1) {
         if let Some(uri) = uri_part.split("</TrackURI>").next() {
@@ -417,7 +456,10 @@ pub async fn get_transport_state(control_url: &str) -> Result<String> {
     let resp = client
         .post(control_url)
         .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"")
+        .header(
+            "SOAPAction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"",
+        )
         .body(body)
         .send()
         .await?;
@@ -437,8 +479,6 @@ pub async fn get_transport_state(control_url: &str) -> Result<String> {
 
     Ok("STOPPED".to_string())
 }
-
-
 
 #[cfg(test)]
 mod tests {

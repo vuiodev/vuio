@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tempfile::tempdir;
 
-use vuio::config::AppConfig;
+use vuio::config::{AppConfig, MonitoredDirectoryConfig, ValidationMode};
 use vuio::database::redb::RedbDatabase;
 use vuio::database::{DatabaseManager, MediaFile, MediaRepository, PlaylistRepository};
 use vuio::platform::filesystem::create_platform_filesystem_manager;
@@ -47,7 +47,17 @@ async fn test_metrics_endpoints_data() {
     assert!(playlist_id > 0);
 
     // 2. Setup mock AppState
-    let config = Arc::new(AppConfig::default());
+    let private_media_path = temp_dir.path().join("private-media-location");
+    tokio::fs::create_dir(&private_media_path).await.unwrap();
+    let mut config = AppConfig::default();
+    config.media.directories = vec![MonitoredDirectoryConfig {
+        path: private_media_path.to_string_lossy().into_owned(),
+        recursive: true,
+        extensions: None,
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Warn,
+    }];
+    let config = Arc::new(config);
     let platform_info = Arc::new(PlatformInfo::detect().await.unwrap());
     let filesystem_manager = Arc::from(create_platform_filesystem_manager());
     let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
@@ -69,13 +79,20 @@ async fn test_metrics_endpoints_data() {
         filesystem_manager,
         content_update_id,
         web_metrics,
+        runtime_diagnostics: Arc::new(vuio::platform::diagnostics::SystemDiagnosticsSampler::new()),
         lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES))),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES),
+        )),
         log_file_path: temp_dir.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BrowseResponseCache::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::BrowseResponseCache::new(),
+        )),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::ActiveCastRegistry::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::ActiveCastRegistry::new(),
+        )),
         discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),
@@ -108,6 +125,16 @@ async fn test_metrics_endpoints_data() {
     assert_eq!(web_stats["cache_hits"], 1);
     assert_eq!(web_stats["cache_misses"], 1);
 
+    // Runtime diagnostics expose operational values, not configured filesystem paths.
+    let runtime = &json_val["runtime_diagnostics"];
+    assert_eq!(runtime["monitored_directory_count"], 1);
+    assert_eq!(runtime["accessible_directory_count"], 1);
+    assert!(runtime["snapshot"]["system"]["cpu_count"]
+        .as_u64()
+        .is_some_and(|count| count > 0));
+    assert_eq!(runtime["snapshot"]["process"]["pid"], std::process::id());
+    assert!(!body_str.contains(private_media_path.to_string_lossy().as_ref()));
+
     // 4. Test get_prometheus_metrics handler (exposition text format)
     let prom_resp = get_prometheus_metrics(State(app_state))
         .await
@@ -125,4 +152,9 @@ async fn test_metrics_endpoints_data() {
     assert!(prom_str.contains("vuio_database_image_files 1"));
     assert!(prom_str.contains("vuio_database_playlists 1"));
     assert!(prom_str.contains("vuio_web_browse_requests_total 2"));
+    assert!(prom_str.contains("vuio_monitored_directories 1"));
+    assert!(prom_str.contains("vuio_accessible_directories 1"));
+    assert!(prom_str.contains("vuio_system_uptime_seconds"));
+    assert!(prom_str.contains("vuio_process_memory_bytes"));
+    assert!(!prom_str.contains(private_media_path.to_string_lossy().as_ref()));
 }

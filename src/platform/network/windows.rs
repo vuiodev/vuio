@@ -1,9 +1,12 @@
 use crate::platform::{
-    network::{NetworkDiagnostics, NetworkManager, SsdpConfig, SsdpSocket, InterfaceStatus, FirewallStatus},
+    network::{
+        FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager, SsdpConfig,
+        SsdpSocket, SSDP_MULTICAST_IPV4, UNSPECIFIED_IPV4,
+    },
     InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
-use std::net::{IpAddr, SocketAddr, Ipv6Addr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::process::Command;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
@@ -42,7 +45,7 @@ impl WindowsNetworkManager {
 
     /// Create a new Windows network manager with custom configuration
     pub fn with_config(config: SsdpConfig) -> Self {
-        Self { 
+        Self {
             config,
             cached_interfaces: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
         }
@@ -96,8 +99,6 @@ impl WindowsNetworkManager {
         }
     }
 
-
-
     /// Detect Windows firewall status
     async fn detect_firewall_status(&self) -> FirewallStatus {
         let mut detected = false;
@@ -120,7 +121,10 @@ impl WindowsNetworkManager {
                     // This is a simplified check - real implementation would be more thorough
                     if output_str.contains("Block") {
                         blocking_ssdp = Some(true);
-                        suggestions.push("Consider adding a firewall rule for SSDP traffic (UDP port 1900)".to_string());
+                        suggestions.push(
+                            "Consider adding a firewall rule for SSDP traffic (UDP port 1900)"
+                                .to_string(),
+                        );
                         suggestions.push("Run: netsh advfirewall firewall add rule name=\"DLNA SSDP\" dir=in action=allow protocol=UDP localport=1900".to_string());
                     } else {
                         blocking_ssdp = Some(false);
@@ -135,7 +139,10 @@ impl WindowsNetworkManager {
 
         if detected {
             suggestions.push("Open Windows Defender Firewall with Advanced Security".to_string());
-            suggestions.push("Create inbound rules for UDP ports 1900 (SSDP) and your HTTP server port".to_string());
+            suggestions.push(
+                "Create inbound rules for UDP ports 1900 (SSDP) and your HTTP server port"
+                    .to_string(),
+            );
         }
 
         FirewallStatus {
@@ -148,22 +155,24 @@ impl WindowsNetworkManager {
     /// Get network interfaces using Windows API directly.
     async fn get_windows_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         use std::net::{Ipv4Addr, Ipv6Addr};
-        use windows::Win32::NetworkManagement::IpHelper::{
-            GetAdaptersAddresses, IP_ADAPTER_ADDRESSES_LH, GAA_FLAG_INCLUDE_PREFIX,
-            GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_DNS_SERVER,
-            IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK,
-            IF_TYPE_TUNNEL,
-        };
         use windows::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS, WIN32_ERROR};
+        use windows::Win32::NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, GAA_FLAG_SKIP_ANYCAST,
+            GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_ETHERNET_CSMACD,
+            IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IP_ADAPTER_ADDRESSES_LH,
+        };
         use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
-        
+
         let mut interfaces = Vec::new();
         let mut buffer_size = 15000u32; // Start with 15KB buffer
         let mut buffer: Vec<u8> = vec![0; buffer_size as usize];
-        
+
         // Call GetAdaptersAddresses to get network interface information
-        let flags = GAA_FLAG_INCLUDE_PREFIX | GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER;
-        
+        let flags = GAA_FLAG_INCLUDE_PREFIX
+            | GAA_FLAG_SKIP_ANYCAST
+            | GAA_FLAG_SKIP_MULTICAST
+            | GAA_FLAG_SKIP_DNS_SERVER;
+
         let result = unsafe {
             GetAdaptersAddresses(
                 0, // AF_UNSPEC - get both IPv4 and IPv6
@@ -173,7 +182,7 @@ impl WindowsNetworkManager {
                 &mut buffer_size,
             )
         };
-        
+
         match WIN32_ERROR(result) {
             ERROR_BUFFER_OVERFLOW => {
                 // Buffer too small, resize and try again
@@ -200,13 +209,13 @@ impl WindowsNetworkManager {
                 return self.fallback_interface_detection().await;
             }
         }
-        
+
         // Parse the adapter information
         let mut current_adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
-        
+
         while !current_adapter.is_null() {
             let adapter = unsafe { &*current_adapter };
-            
+
             // Get adapter name
             let adapter_name = if !adapter.FriendlyName.is_null() {
                 unsafe {
@@ -219,7 +228,7 @@ impl WindowsNetworkManager {
             } else {
                 "Unknown".to_string()
             };
-            
+
             // Determine interface type
             let interface_type = match adapter.IfType {
                 IF_TYPE_ETHERNET_CSMACD => InterfaceType::Ethernet,
@@ -228,26 +237,28 @@ impl WindowsNetworkManager {
                 IF_TYPE_TUNNEL => InterfaceType::VPN,
                 _ => InterfaceType::Other(format!("Type_{}", adapter.IfType)),
             };
-            
+
             // Check if interface is up (1 = IfOperStatusUp)
             let is_up = adapter.OperStatus.0 == 1;
             let is_loopback = adapter.IfType == IF_TYPE_SOFTWARE_LOOPBACK;
-            
+
             // Parse IP addresses
             let mut unicast_addr = adapter.FirstUnicastAddress;
             while !unicast_addr.is_null() {
                 let addr_info = unsafe { &*unicast_addr };
                 let socket_addr = addr_info.Address.lpSockaddr;
-                
+
                 if !socket_addr.is_null() {
                     let addr_family = unsafe { (*socket_addr).sa_family };
-                    
+
                     match addr_family {
                         AF_INET => {
                             let sockaddr_in = socket_addr as *const SOCKADDR_IN;
-                            let ip_bytes = unsafe { (*sockaddr_in).sin_addr.S_un.S_addr.to_ne_bytes() };
-                            let ip = Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
-                            
+                            let ip_bytes =
+                                unsafe { (*sockaddr_in).sin_addr.S_un.S_addr.to_ne_bytes() };
+                            let ip =
+                                Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
+
                             interfaces.push(NetworkInterface {
                                 name: adapter_name.clone(),
                                 ip_address: IpAddr::V4(ip),
@@ -261,7 +272,7 @@ impl WindowsNetworkManager {
                             let sockaddr_in6 = socket_addr as *const SOCKADDR_IN6;
                             let ip_bytes = unsafe { (*sockaddr_in6).sin6_addr.u.Byte };
                             let ip = Ipv6Addr::from(ip_bytes);
-                            
+
                             // Skip link-local IPv6 addresses for now
                             if !ip.is_loopback() && !is_link_local_ipv6(&ip) {
                                 interfaces.push(NetworkInterface {
@@ -279,13 +290,13 @@ impl WindowsNetworkManager {
                         }
                     }
                 }
-                
+
                 unicast_addr = addr_info.Next;
             }
-            
+
             current_adapter = adapter.Next;
         }
-        
+
         // If no interfaces found, add loopback as fallback
         if interfaces.is_empty() {
             interfaces.push(NetworkInterface {
@@ -297,23 +308,28 @@ impl WindowsNetworkManager {
                 interface_type: InterfaceType::Loopback,
             });
         }
-        
-        info!("Detected {} network interfaces using Windows API", interfaces.len());
+
+        info!(
+            "Detected {} network interfaces using Windows API",
+            interfaces.len()
+        );
         for interface in &interfaces {
-            debug!("Interface: {} ({}) - Up: {}, Multicast: {}", 
-                   interface.name, interface.ip_address, interface.is_up, interface.supports_multicast);
+            debug!(
+                "Interface: {} ({}) - Up: {}, Multicast: {}",
+                interface.name, interface.ip_address, interface.is_up, interface.supports_multicast
+            );
         }
-        
+
         Ok(interfaces)
     }
-    
+
     /// Fallback interface detection using system commands
     async fn fallback_interface_detection(&self) -> PlatformResult<Vec<NetworkInterface>> {
         use std::net::Ipv4Addr;
-        
+
         warn!("Using fallback interface detection method");
         let mut interfaces = Vec::new();
-        
+
         // Add localhost interface
         interfaces.push(NetworkInterface {
             name: "Loopback".to_string(),
@@ -323,43 +339,50 @@ impl WindowsNetworkManager {
             supports_multicast: false,
             interface_type: InterfaceType::Loopback,
         });
-        
+
         // Try to detect other interfaces using system commands
         if let Ok(output) = Command::new("ipconfig").arg("/all").output() {
             let output_str = String::from_utf8_lossy(&output.stdout);
             let mut current_adapter_name = String::new();
-            
+
             for line in output_str.lines() {
                 let line = line.trim();
-                
+
                 // Look for adapter names
                 if line.contains("adapter") && line.ends_with(':') {
-                    current_adapter_name = line.replace("adapter", "").replace(':', "").trim().to_string();
+                    current_adapter_name = line
+                        .replace("adapter", "")
+                        .replace(':', "")
+                        .trim()
+                        .to_string();
                 }
-                
+
                 // Look for IPv4 addresses
                 if line.contains("IPv4 Address") {
                     if let Some(ip_part) = line.split(':').nth(1) {
                         let ip_str = ip_part.trim().replace("(Preferred)", "");
                         if let Ok(ip) = ip_str.parse::<Ipv4Addr>() {
                             if !ip.is_loopback() {
-                                let interface_type = if current_adapter_name.to_lowercase().contains("ethernet") {
-                                    InterfaceType::Ethernet
-                                } else if current_adapter_name.to_lowercase().contains("wi-fi") || 
-                                         current_adapter_name.to_lowercase().contains("wireless") {
-                                    InterfaceType::WiFi
-                                } else if current_adapter_name.to_lowercase().contains("vpn") ||
-                                         current_adapter_name.to_lowercase().contains("tunnel") {
-                                    InterfaceType::VPN
-                                } else {
-                                    InterfaceType::Other(current_adapter_name.clone())
-                                };
-                                
+                                let interface_type =
+                                    if current_adapter_name.to_lowercase().contains("ethernet") {
+                                        InterfaceType::Ethernet
+                                    } else if current_adapter_name.to_lowercase().contains("wi-fi")
+                                        || current_adapter_name.to_lowercase().contains("wireless")
+                                    {
+                                        InterfaceType::WiFi
+                                    } else if current_adapter_name.to_lowercase().contains("vpn")
+                                        || current_adapter_name.to_lowercase().contains("tunnel")
+                                    {
+                                        InterfaceType::VPN
+                                    } else {
+                                        InterfaceType::Other(current_adapter_name.clone())
+                                    };
+
                                 interfaces.push(NetworkInterface {
-                                    name: if current_adapter_name.is_empty() { 
-                                        "Network Interface".to_string() 
-                                    } else { 
-                                        current_adapter_name.clone() 
+                                    name: if current_adapter_name.is_empty() {
+                                        "Network Interface".to_string()
+                                    } else {
+                                        current_adapter_name.clone()
                                     },
                                     ip_address: IpAddr::V4(ip),
                                     is_loopback: false,
@@ -373,7 +396,7 @@ impl WindowsNetworkManager {
                 }
             }
         }
-        
+
         Ok(interfaces)
     }
 
@@ -393,7 +416,7 @@ impl WindowsNetworkManager {
                 .iter()
                 .find(|iface| !iface.is_loopback && iface.is_up)
                 .map(|iface| iface.ip_address)
-                .unwrap_or_else(|| "0.0.0.0".parse().unwrap())
+                .unwrap_or(UNSPECIFIED_IPV4)
         };
 
         match socket.enable_multicast(group, local_addr).await {
@@ -509,7 +532,10 @@ impl NetworkManager for WindowsNetworkManager {
         {
             let cached = self.cached_interfaces.read().await;
             if let Some(ref interfaces) = *cached {
-                debug!("Using cached network interfaces (count: {})", interfaces.len());
+                debug!(
+                    "Using cached network interfaces (count: {})",
+                    interfaces.len()
+                );
                 return Ok(interfaces.clone());
             }
         }
@@ -517,13 +543,13 @@ impl NetworkManager for WindowsNetworkManager {
         // No cached interfaces, detect them and cache the result
         info!("Detecting network interfaces for the first time...");
         let interfaces = self.get_windows_interfaces().await?;
-        
+
         // Cache the result
         {
             let mut cached = self.cached_interfaces.write().await;
             *cached = Some(interfaces.clone());
         }
-        
+
         Ok(interfaces)
     }
 
@@ -561,7 +587,8 @@ impl NetworkManager for WindowsNetworkManager {
         group: IpAddr,
         interface: Option<&NetworkInterface>,
     ) -> PlatformResult<()> {
-        self.enable_multicast_windows(socket, group, interface).await
+        self.enable_multicast_windows(socket, group, interface)
+            .await
     }
 
     async fn send_multicast(
@@ -687,8 +714,10 @@ impl NetworkManager for WindowsNetworkManager {
             if self.is_port_available(port).await {
                 available_ports.push(port);
             } else if port < 1024 && !self.is_elevated() {
-                diagnostic_messages
-                    .push(format!("Port {} requires administrator privileges on Windows", port));
+                diagnostic_messages.push(format!(
+                    "Port {} requires administrator privileges on Windows",
+                    port
+                ));
             }
         }
 
@@ -697,8 +726,9 @@ impl NetworkManager for WindowsNetworkManager {
             diagnostic_messages
                 .push("No common ports are available for binding on Windows".to_string());
             if !self.is_elevated() {
-                diagnostic_messages
-                    .push("Consider running as administrator to access privileged ports".to_string());
+                diagnostic_messages.push(
+                    "Consider running as administrator to access privileged ports".to_string(),
+                );
             }
         }
 
@@ -735,7 +765,7 @@ impl NetworkManager for WindowsNetworkManager {
         match UdpSocket::bind("0.0.0.0:0").await {
             Ok(test_socket) => match interface.ip_address {
                 IpAddr::V4(local_v4) => {
-                    let multicast_addr = "239.255.255.250".parse::<std::net::Ipv4Addr>().unwrap();
+                    let multicast_addr = SSDP_MULTICAST_IPV4;
                     match test_socket.join_multicast_v4(multicast_addr, local_v4) {
                         Ok(()) => {
                             debug!(

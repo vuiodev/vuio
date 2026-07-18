@@ -14,15 +14,15 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use crate::tv_control;
+use crate::web::format::format_bytes;
 use crate::{
     database::{
-        DatabaseReadSession, MediaFileQuery, MediaFileView, MediaRepository,
-        PlaylistRepository, StatsRepository,
+        DatabaseReadSession, MediaFileQuery, MediaFileView, MediaRepository, PlaylistRepository,
+        StatsRepository,
     },
     state::AppState,
 };
-use crate::tv_control;
-use crate::web::format::format_bytes;
 
 // ──────────────────────────────────────────
 // JSON-RPC 2.0 types
@@ -362,18 +362,13 @@ pub async fn sse_handler(
 
     let endpoint_url = format!("/mcp/message?client_id={}", client_id);
 
-    let initial_event = Event::default()
-        .event("endpoint")
-        .data(endpoint_url);
+    let initial_event = Event::default().event("endpoint").data(endpoint_url);
 
-    let rx_stream = ReceiverStream::new(rx).map(|msg| {
-        Ok(Event::default().event("message").data(msg))
-    });
+    let rx_stream =
+        ReceiverStream::new(rx).map(|msg| Ok(Event::default().event("message").data(msg)));
 
-    let stream = futures_util::stream::once(async move {
-        Ok::<_, Infallible>(initial_event)
-    })
-    .chain(rx_stream);
+    let stream = futures_util::stream::once(async move { Ok::<_, Infallible>(initial_event) })
+        .chain(rx_stream);
 
     // Sender::closed resolves as soon as Axum drops the SSE receiver, so stale
     // clients are removed immediately rather than by a coarse timeout.
@@ -416,15 +411,8 @@ pub async fn message_handler(
     let request: JsonRpcRequest = match serde_json::from_str(&body) {
         Ok(r) => r,
         Err(e) => {
-            let err_response = JsonRpcResponse::error(
-                None,
-                -32700,
-                format!("Parse error: {}", e),
-            );
-            return (
-                StatusCode::OK,
-                axum::Json(err_response),
-            ).into_response();
+            let err_response = JsonRpcResponse::error(None, -32700, format!("Parse error: {}", e));
+            return (StatusCode::OK, axum::Json(err_response)).into_response();
         }
     };
 
@@ -521,7 +509,10 @@ async fn handle_tools_call(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     };
 
     let tool_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let arguments = params.get("arguments").cloned().unwrap_or(serde_json::json!({}));
+    let arguments = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
 
     let result = match tool_name {
         "search_media" => tool_search_media(state, &arguments).await,
@@ -580,14 +571,8 @@ async fn tool_search_media(
         .to_string();
     let limit = requested_limit(args, 50);
     let after_id = cursor_after_id(args)?;
-    let (matches_json, next_cursor) = query_media_page(
-        state,
-        after_id,
-        None,
-        Some(query),
-        limit,
-    )
-    .await?;
+    let (matches_json, next_cursor) =
+        query_media_page(state, after_id, None, Some(query), limit).await?;
 
     Ok(serde_json::json!({
         "total_matches": matches_json.len(),
@@ -635,7 +620,7 @@ async fn tool_browse_folder(
         })
         .collect();
 
-    let file_list: Vec<serde_json::Value> = files.iter().map(|f| media_file_to_json(f)).collect();
+    let file_list: Vec<serde_json::Value> = files.iter().map(media_file_to_json).collect();
 
     Ok(serde_json::json!({
         "path": path_str,
@@ -714,7 +699,9 @@ async fn tool_get_server_stats(state: &AppState) -> Result<serde_json::Value, St
 }
 
 async fn tool_list_renderers(state: &AppState) -> Result<serde_json::Value, String> {
-    let renderers = state.discovered_tvs.get_or_refresh()
+    let renderers = state
+        .discovered_tvs
+        .get_or_refresh()
         .await
         .map_err(|e| format!("Renderer discovery error: {}", e))?;
 
@@ -758,7 +745,9 @@ async fn tool_cast_media_to_renderer(
         .map_err(|e| format!("Database error: {}", e))?
         .ok_or(format!("File with ID {} not found", file_id))?;
 
-    let renderers = state.discovered_tvs.get_or_refresh()
+    let renderers = state
+        .discovered_tvs
+        .get_or_refresh()
         .await
         .map_err(|e| format!("Renderer discovery error: {}", e))?;
 
@@ -768,7 +757,8 @@ async fn tool_cast_media_to_renderer(
         .ok_or(format!(
             "No renderer found with ID '{}'. Available renderers: {}",
             renderer_id,
-            renderers.iter()
+            renderers
+                .iter()
                 .map(|tv| tv.friendly_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -784,10 +774,7 @@ async fn tool_cast_media_to_renderer(
         file.id.unwrap_or(file_id)
     );
 
-    let title = file
-        .title
-        .as_deref()
-        .unwrap_or(&file.filename);
+    let title = file.title.as_deref().unwrap_or(&file.filename);
 
     // Cast
     tv_control::cast_media(&matched_tv.control_url, &media_url, title, &file.mime_type)
@@ -803,7 +790,10 @@ async fn tool_cast_media_to_renderer(
     }))
 }
 
-async fn tool_control_renderer(state: &AppState, args: &serde_json::Value) -> Result<serde_json::Value, String> {
+async fn tool_control_renderer(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
     let renderer_id = args
         .get("renderer_id")
         .and_then(|v| v.as_str())
@@ -818,10 +808,17 @@ async fn tool_control_renderer(state: &AppState, args: &serde_json::Value) -> Re
         "play" => "Play",
         "pause" => "Pause",
         "stop" => "Stop",
-        _ => return Err(format!("Unknown action '{}'. Use play, pause, or stop.", action)),
+        _ => {
+            return Err(format!(
+                "Unknown action '{}'. Use play, pause, or stop.",
+                action
+            ))
+        }
     };
 
-    let renderers = state.discovered_tvs.get_or_refresh()
+    let renderers = state
+        .discovered_tvs
+        .get_or_refresh()
         .await
         .map_err(|e| format!("Renderer discovery error: {}", e))?;
 
@@ -831,7 +828,8 @@ async fn tool_control_renderer(state: &AppState, args: &serde_json::Value) -> Re
         .ok_or(format!(
             "No renderer found with ID '{}'. Available renderers: {}",
             renderer_id,
-            renderers.iter()
+            renderers
+                .iter()
                 .map(|tv| tv.friendly_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -881,9 +879,7 @@ async fn tool_create_playlist(
         .get("name")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'name' parameter")?;
-    let description = args
-        .get("description")
-        .and_then(|v| v.as_str());
+    let description = args.get("description").and_then(|v| v.as_str());
 
     let id = state
         .database
@@ -939,7 +935,9 @@ async fn tool_add_to_playlist(
 
     let mut ids_to_add = Vec::new();
     for (pos, val) in media_file_ids.iter().enumerate() {
-        let id = val.as_i64().ok_or("Invalid media_file_id, must be integer")?;
+        let id = val
+            .as_i64()
+            .ok_or("Invalid media_file_id, must be integer")?;
         ids_to_add.push((id, pos as u32));
     }
 
@@ -1004,10 +1002,7 @@ async fn tool_get_playlist_tracks(
         .await
         .map_err(|e| format!("Database error: {}", e))?;
 
-    let list: Vec<serde_json::Value> = tracks
-        .iter()
-        .map(|f| media_file_to_json(f))
-        .collect();
+    let list: Vec<serde_json::Value> = tracks.iter().map(media_file_to_json).collect();
 
     Ok(serde_json::json!({
         "playlist_id": playlist_id,
@@ -1017,7 +1012,9 @@ async fn tool_get_playlist_tracks(
 }
 
 pub async fn cached_renderers(state: &AppState) -> Result<Vec<tv_control::DiscoveredTv>, String> {
-    state.discovered_tvs.get_or_refresh()
+    state
+        .discovered_tvs
+        .get_or_refresh()
         .await
         .map_err(|e| format!("TV discovery error: {}", e))
 }
@@ -1028,7 +1025,6 @@ pub async fn cast_playlist_helper(
     renderer_id: &str,
     track_index: usize,
 ) -> Result<serde_json::Value, String> {
-
     // Get playlist tracks
     let tracks = state
         .database
@@ -1060,7 +1056,8 @@ pub async fn cast_playlist_helper(
         .ok_or(format!(
             "No renderer found with ID '{}'. Available renderers: {}",
             renderer_id,
-            renderers.iter()
+            renderers
+                .iter()
                 .map(|tv| tv.friendly_name.as_str())
                 .collect::<Vec<_>>()
                 .join(", ")
@@ -1069,12 +1066,7 @@ pub async fn cast_playlist_helper(
     // Build the media URL
     let server_ip = state.get_server_ip();
     let port = state.config.server.port;
-    let media_url = format!(
-        "http://{}:{}/media/{}",
-        server_ip,
-        port,
-        file_id
-    );
+    let media_url = format!("http://{}:{}/media/{}", server_ip, port, file_id);
 
     let title = selected_track
         .title
@@ -1082,9 +1074,14 @@ pub async fn cast_playlist_helper(
         .unwrap_or(&selected_track.filename);
 
     // Cast selected track
-    tv_control::cast_media(&matched_tv.control_url, &media_url, title, &selected_track.mime_type)
-        .await
-        .map_err(|e| format!("Cast error: {}", e))?;
+    tv_control::cast_media(
+        &matched_tv.control_url,
+        &media_url,
+        title,
+        &selected_track.mime_type,
+    )
+    .await
+    .map_err(|e| format!("Cast error: {}", e))?;
 
     // Register active cast in global state
     {
@@ -1109,24 +1106,18 @@ pub async fn cast_playlist_helper(
     if track_index + 1 < tracks.len() {
         let next_track = &tracks[track_index + 1];
         if let Some(next_id) = next_track.id {
-            let next_media_url = format!(
-                "http://{}:{}/media/{}",
-                server_ip,
-                port,
-                next_id
-            );
-            let next_title = next_track
-                .title
-                .as_deref()
-                .unwrap_or(&next_track.filename);
-            
+            let next_media_url = format!("http://{}:{}/media/{}", server_ip, port, next_id);
+            let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
+
             // Queue on the TV and log/ignore failures on non-compliant devices
             match tv_control::set_next_media(
                 &matched_tv.control_url,
                 &next_media_url,
                 next_title,
                 &next_track.mime_type,
-            ).await {
+            )
+            .await
+            {
                 Ok(_) => {
                     queued_file = Some(next_track.filename.clone());
                 }
@@ -1162,11 +1153,11 @@ pub async fn cast_playlist_helper(
     let server_ip_clone = server_ip.clone();
     let matched_tv_friendly_name = matched_tv.friendly_name.clone();
     let matched_renderer_id = matched_tv.id.clone();
-    
+
     state.background_tasks.spawn(async move {
         let mut current_idx = track_index;
         let mut consecutive_stopped = 0;
-        
+
         'monitor: loop {
             // Check cancellation or sleep 4s
             tokio::select! {
@@ -1176,7 +1167,7 @@ pub async fn cast_playlist_helper(
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(4)) => {}
             }
-            
+
             // Poll TV current playing track URI and transport state
             let current_uri = match tokio::select! {
                 _ = monitor_cancellation.cancelled() => break,
@@ -1188,7 +1179,7 @@ pub async fn cast_playlist_helper(
                     continue;
                 }
             };
-            
+
             let transport_state = match tokio::select! {
                 _ = monitor_cancellation.cancelled() => break,
                 result = tv_control::get_transport_state(&control_url_clone) => result,
@@ -1196,7 +1187,7 @@ pub async fn cast_playlist_helper(
                 Ok(st) => st,
                 Err(_) => "STOPPED".to_string(),
             };
-            
+
             // Fetch playlist tracks from DB to get the latest list
             let latest_tracks = match tokio::select! {
                 _ = monitor_cancellation.cancelled() => break,
@@ -1205,11 +1196,11 @@ pub async fn cast_playlist_helper(
                 Ok(t) => t,
                 Err(_) => break,
             };
-            
+
             if latest_tracks.is_empty() {
                 break;
             }
-            
+
             // If current track URI matches a track URL, check if the TV transitioned
             let mut matched_any = false;
             for (idx, track) in latest_tracks.iter().enumerate() {
@@ -1220,7 +1211,7 @@ pub async fn cast_playlist_helper(
                         if idx != current_idx {
                             info!("Queue monitor: TV transitioned to track index {} ({})", idx, track.filename);
                             current_idx = idx;
-                            
+
                             // Update active cast state with new playing file
                             {
                                 let mut casts = state_clone.active_casts.lock().await;
@@ -1258,7 +1249,7 @@ pub async fn cast_playlist_helper(
                     }
                 }
             }
-            
+
             // If TV is stopped and not playing any of our tracks, increment stop checks count
             if matched_any {
                 consecutive_stopped = 0;
@@ -1435,7 +1426,8 @@ mod tests {
 
     #[test]
     fn test_json_rpc_response_success() {
-        let resp = JsonRpcResponse::success(Some(serde_json::json!(1)), serde_json::json!({"ok": true}));
+        let resp =
+            JsonRpcResponse::success(Some(serde_json::json!(1)), serde_json::json!({"ok": true}));
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
         assert!(json.contains("\"ok\":true"));
@@ -1444,7 +1436,11 @@ mod tests {
 
     #[test]
     fn test_json_rpc_response_error() {
-        let resp = JsonRpcResponse::error(Some(serde_json::json!(2)), -32601, "Method not found".to_string());
+        let resp = JsonRpcResponse::error(
+            Some(serde_json::json!(2)),
+            -32601,
+            "Method not found".to_string(),
+        );
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains("-32601"));
         assert!(json.contains("Method not found"));

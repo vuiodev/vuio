@@ -14,10 +14,10 @@ pub mod windows;
 pub trait PathNormalizer: Send + Sync {
     /// Convert any path to canonical database format (lowercase, absolute paths with forward slashes)
     fn to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError>;
-    
+
     /// Convert canonical format back to platform path
-    fn from_canonical(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError>;
-    
+    fn canonical_to_platform(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError>;
+
     /// Normalize path for database queries (same as to_canonical but with explicit intent)
     fn normalize_for_query(&self, path: &Path) -> Result<String, PathNormalizationError>;
 }
@@ -27,16 +27,16 @@ pub trait PathNormalizer: Send + Sync {
 pub enum PathNormalizationError {
     #[error("Invalid path format: {path}")]
     InvalidFormat { path: String },
-    
+
     #[error("Path canonicalization failed: {path} - {error}")]
     CanonicalizationFailed { path: String, error: String },
-    
+
     #[error("Unsupported path type: {path}")]
     UnsupportedType { path: String },
-    
+
     #[error("Path contains invalid characters: {path}")]
     InvalidCharacters { path: String },
-    
+
     #[error("Path is too long: {path}")]
     PathTooLong { path: String },
 }
@@ -48,18 +48,18 @@ impl WindowsPathNormalizer {
     pub fn new() -> Self {
         Self
     }
-    
+
     /// Convert Windows path to canonical format (lowercase, forward slashes)
     fn normalize_to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
         let path_str = path.to_string_lossy();
-        
+
         // Validate path length
         if path_str.len() > 4096 {
             return Err(PathNormalizationError::PathTooLong {
                 path: path_str.to_string(),
             });
         }
-        
+
         // Check for invalid characters
         let invalid_chars = ['\0', '<', '>', '"', '|', '?', '*'];
         for &invalid_char in &invalid_chars {
@@ -69,16 +69,16 @@ impl WindowsPathNormalizer {
                 });
             }
         }
-        
+
         // Convert to lowercase and use forward slashes
         let mut canonical = path_str.to_lowercase();
         canonical = canonical.replace('\\', "/");
-        
+
         // Deduplicate slashes
         if canonical.starts_with("//") {
             // UNC path: preserve leading double slash, clean the rest
             let rest = canonical[2..].replace("//", "/");
-             // Iterate until stable to handle multiple consecutive slashes
+            // Iterate until stable to handle multiple consecutive slashes
             let mut cleaned = rest;
             while cleaned.contains("//") {
                 cleaned = cleaned.replace("//", "/");
@@ -90,7 +90,7 @@ impl WindowsPathNormalizer {
                 canonical = canonical.replace("//", "/");
             }
         }
-        
+
         // Handle UNC paths - preserve the leading double slash
         if canonical.starts_with("//") {
             // UNC path: //server/share/path
@@ -107,7 +107,7 @@ impl WindowsPathNormalizer {
             Ok(canonical)
         }
     }
-    
+
     /// Convert canonical format back to Windows path format
     fn canonical_to_windows(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
         if canonical.is_empty() {
@@ -115,15 +115,15 @@ impl WindowsPathNormalizer {
                 path: canonical.to_string(),
             });
         }
-        
+
         // Convert forward slashes back to backslashes
         let windows_path = canonical.replace('/', "\\");
-        
+
         // Handle UNC paths
         if windows_path.starts_with("\\\\") {
             return Ok(PathBuf::from(windows_path));
         }
-        
+
         // Handle drive letter paths
         if windows_path.len() >= 2 && windows_path.chars().nth(1) == Some(':') {
             // Ensure drive letter is uppercase for consistency
@@ -134,7 +134,7 @@ impl WindowsPathNormalizer {
             let normalized_windows: String = chars.into_iter().collect();
             return Ok(PathBuf::from(normalized_windows));
         }
-        
+
         // For other paths, return as-is
         Ok(PathBuf::from(windows_path))
     }
@@ -144,11 +144,11 @@ impl PathNormalizer for WindowsPathNormalizer {
     fn to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
         self.normalize_to_canonical(path)
     }
-    
-    fn from_canonical(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
+
+    fn canonical_to_platform(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
         self.canonical_to_windows(canonical)
     }
-    
+
     fn normalize_for_query(&self, path: &Path) -> Result<String, PathNormalizationError> {
         // Same as to_canonical - explicit method for query context
         self.normalize_to_canonical(path)
@@ -163,25 +163,25 @@ impl UnixPathNormalizer {
     pub fn new() -> Self {
         Self
     }
-    
+
     /// Convert Unix path to canonical format (preserves case, uses forward slashes, and resolves symlinks/private paths)
     fn normalize_to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
         let path_str = path.to_string_lossy();
-        
+
         // Validate path length
         if path_str.len() > 4096 {
             return Err(PathNormalizationError::PathTooLong {
                 path: path_str.to_string(),
             });
         }
-        
+
         // Check for null bytes (invalid on Unix)
         if path_str.contains('\0') {
             return Err(PathNormalizationError::InvalidCharacters {
                 path: path_str.to_string(),
             });
         }
-        
+
         // On Unix/macOS, we resolve symlinks (e.g. /var -> /private/var) to ensure consistency
         // between the initial scanner paths and directory watcher events.
         // If the path itself does not exist (e.g., a Deleted event), we resolve the longest
@@ -189,7 +189,7 @@ impl UnixPathNormalizer {
         let mut resolved_path = std::path::PathBuf::new();
         let mut components = Vec::new();
         let mut current = path;
-        
+
         while !current.as_os_str().is_empty() {
             if let Ok(canonical) = std::fs::canonicalize(current) {
                 resolved_path = canonical;
@@ -204,7 +204,7 @@ impl UnixPathNormalizer {
                 break;
             }
         }
-        
+
         let final_path = if resolved_path.as_os_str().is_empty() {
             path.to_path_buf()
         } else {
@@ -214,11 +214,11 @@ impl UnixPathNormalizer {
             }
             p
         };
-        
+
         let canonical = final_path.to_string_lossy().to_string();
         Ok(canonical)
     }
-    
+
     /// Convert canonical format back to Unix path format
     fn canonical_to_unix(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
         if canonical.is_empty() {
@@ -226,9 +226,15 @@ impl UnixPathNormalizer {
                 path: canonical.to_string(),
             });
         }
-        
+
         // Unix canonical format is already the correct format
         Ok(PathBuf::from(canonical))
+    }
+}
+
+impl Default for UnixPathNormalizer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -236,11 +242,11 @@ impl PathNormalizer for UnixPathNormalizer {
     fn to_canonical(&self, path: &Path) -> Result<String, PathNormalizationError> {
         self.normalize_to_canonical(path)
     }
-    
-    fn from_canonical(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
+
+    fn canonical_to_platform(&self, canonical: &str) -> Result<PathBuf, PathNormalizationError> {
         self.canonical_to_unix(canonical)
     }
-    
+
     fn normalize_for_query(&self, path: &Path) -> Result<String, PathNormalizationError> {
         // Same as to_canonical - explicit method for query context
         self.normalize_to_canonical(path)
@@ -259,7 +265,7 @@ pub fn create_platform_path_normalizer() -> Box<dyn PathNormalizer> {
     {
         Box::new(WindowsPathNormalizer::new())
     }
-    
+
     #[cfg(not(target_os = "windows"))]
     {
         Box::new(UnixPathNormalizer::new())
@@ -271,28 +277,28 @@ pub fn create_platform_path_normalizer() -> Box<dyn PathNormalizer> {
 pub trait FileSystemManager: Send + Sync {
     /// Scan a media directory and return all media files
     async fn scan_media_directory(&self, path: &Path) -> Result<Vec<MediaFile>, FileSystemError>;
-    
+
     /// Normalize a path for the current platform
     fn normalize_path(&self, path: &Path) -> PathBuf;
-    
+
     /// Get canonical string representation of a path for database storage
     fn get_canonical_path(&self, path: &Path) -> Result<String, PathNormalizationError>;
-    
+
     /// Check if a path is accessible with current permissions
     async fn is_accessible(&self, path: &Path) -> bool;
-    
+
     /// Get detailed file information
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError>;
-    
+
     /// Check if two paths refer to the same file (handles case sensitivity)
     fn paths_equal(&self, path1: &Path, path2: &Path) -> bool;
-    
+
     /// Validate that a path is safe to access (security check)
     fn validate_path(&self, path: &Path) -> Result<(), FileSystemError>;
-    
+
     /// Get the canonical form of a path (resolves symbolic links before normalization)
     async fn canonicalize_path(&self, path: &Path) -> Result<String, FileSystemError>;
-    
+
     /// Check if a file matches the given extensions (case-insensitive on Windows)
     fn matches_extension(&self, path: &Path, extensions: &[String]) -> bool;
 }
@@ -302,47 +308,38 @@ pub trait FileSystemManager: Send + Sync {
 pub enum FileSystemError {
     #[error("Path not found: {path}")]
     PathNotFound { path: String },
-    
+
     #[error("Access denied: {path} - {reason}")]
     AccessDenied { path: String, reason: String },
-    
+
     #[error("Invalid path: {path} - {reason}")]
     InvalidPath { path: String, reason: String },
-    
+
     #[error("Path contains invalid Windows character '{character}': {path} - {reason}")]
     InvalidWindowsCharacter {
         path: String,
         character: char,
         reason: String,
     },
-    
+
     #[error("Invalid colon usage in Windows path: {path} - {details}")]
-    InvalidColonUsage {
-        path: String,
-        details: String,
-    },
-    
+    InvalidColonUsage { path: String, details: String },
+
     #[error("Path exceeds maximum length: {path} - {details}")]
-    PathTooLong {
-        path: String,
-        details: String,
-    },
-    
+    PathTooLong { path: String, details: String },
+
     #[error("Path contains reserved name: {path} - {reserved_name}")]
-    ReservedName {
-        path: String,
-        reserved_name: String,
-    },
-    
+    ReservedName { path: String, reserved_name: String },
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
-    
+
     #[error("Permission error: {path} - {details}")]
     Permission { path: String, details: String },
-    
+
     #[error("Encoding error: {path} - {details}")]
     Encoding { path: String, details: String },
-    
+
     #[error("Platform-specific error: {0}")]
     Platform(String),
 }
@@ -369,7 +366,11 @@ impl FileSystemError {
                     path, reason
                 )
             }
-            FileSystemError::InvalidWindowsCharacter { path, character, reason } => {
+            FileSystemError::InvalidWindowsCharacter {
+                path,
+                character,
+                reason,
+            } => {
                 format!(
                     "Invalid Windows path character '{}': {}\nReason: {}\n\nWhat this means: Windows paths cannot contain certain special characters.\nSuggestion: Remove or replace the invalid character '{}' from your path.",
                     character, path, reason, character
@@ -387,7 +388,10 @@ impl FileSystemError {
                     path, details
                 )
             }
-            FileSystemError::ReservedName { path, reserved_name } => {
+            FileSystemError::ReservedName {
+                path,
+                reserved_name,
+            } => {
                 format!(
                     "Reserved name in path: {}\nReserved name: {}\n\nWhat this means: Windows reserves certain names that cannot be used as file or directory names.\nReserved names include: CON, PRN, AUX, NUL, COM1-9, LPT1-9\nSuggestion: Choose a different name that is not reserved by Windows.",
                     path, reserved_name
@@ -419,7 +423,7 @@ impl FileSystemError {
             }
         }
     }
-    
+
     /// Get recovery suggestions for the error
     pub fn recovery_suggestions(&self) -> Vec<String> {
         match self {
@@ -491,12 +495,12 @@ impl FileSystemError {
             ],
         }
     }
-    
+
     /// Check if the error is recoverable
     pub fn is_recoverable(&self) -> bool {
         match self {
-            FileSystemError::PathNotFound { .. } => true,  // Path might be created
-            FileSystemError::AccessDenied { .. } => true,  // Permissions might be fixed
+            FileSystemError::PathNotFound { .. } => true, // Path might be created
+            FileSystemError::AccessDenied { .. } => true, // Permissions might be fixed
             FileSystemError::InvalidPath { .. } => false, // Path format is fundamentally wrong
             FileSystemError::InvalidWindowsCharacter { .. } => false, // Character is invalid
             FileSystemError::InvalidColonUsage { .. } => false, // Colon usage is invalid
@@ -508,7 +512,7 @@ impl FileSystemError {
             FileSystemError::Platform(_) => false,        // Platform issues are usually permanent
         }
     }
-    
+
     /// Get the severity level of the error
     pub fn severity(&self) -> ErrorSeverity {
         match self {
@@ -540,19 +544,19 @@ pub enum ErrorSeverity {
 pub struct FileInfo {
     /// File size in bytes
     pub size: u64,
-    
+
     /// Last modified time
     pub modified: SystemTime,
-    
+
     /// File permissions information
     pub permissions: FilePermissions,
-    
+
     /// MIME type based on file extension
     pub mime_type: String,
-    
+
     /// Whether the file is hidden
     pub is_hidden: bool,
-    
+
     /// Platform-specific metadata
     pub metadata: HashMap<String, String>,
 }
@@ -562,13 +566,13 @@ pub struct FileInfo {
 pub struct FilePermissions {
     /// Whether the file is readable
     pub readable: bool,
-    
+
     /// Whether the file is writable
     pub writable: bool,
-    
+
     /// Whether the file is executable
     pub executable: bool,
-    
+
     /// Platform-specific permission details
     pub platform_details: HashMap<String, String>,
 }
@@ -614,7 +618,7 @@ pub const SUPPORTED_MEDIA_TYPES: &[(&str, &str)] = &[
 /// Get MIME type for a file based on its extension
 pub fn get_mime_type_for_extension(extension: &str) -> String {
     use std::sync::LazyLock;
-    
+
     static MIME_MAP: LazyLock<HashMap<String, &'static str>> = LazyLock::new(|| {
         let mut m = HashMap::with_capacity(SUPPORTED_MEDIA_TYPES.len());
         for &(ext, mime) in SUPPORTED_MEDIA_TYPES {
@@ -624,7 +628,11 @@ pub fn get_mime_type_for_extension(extension: &str) -> String {
     });
 
     let ext_lower = extension.to_lowercase();
-    MIME_MAP.get(&ext_lower).copied().unwrap_or("application/octet-stream").to_string()
+    MIME_MAP
+        .get(&ext_lower)
+        .copied()
+        .unwrap_or("application/octet-stream")
+        .to_string()
 }
 
 /// Check if a file extension is supported for media serving
@@ -632,7 +640,10 @@ pub fn is_supported_media_extension(extension: &str) -> bool {
     use std::sync::LazyLock;
 
     static SUPPORTED_EXTENSIONS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-        SUPPORTED_MEDIA_TYPES.iter().map(|(ext, _)| ext.to_lowercase()).collect()
+        SUPPORTED_MEDIA_TYPES
+            .iter()
+            .map(|(ext, _)| ext.to_lowercase())
+            .collect()
     });
 
     let ext_lower = extension.to_lowercase();
@@ -644,7 +655,10 @@ pub fn get_supported_extensions() -> &'static HashSet<String> {
     use std::sync::LazyLock;
 
     static SUPPORTED_EXTENSIONS: LazyLock<HashSet<String>> = LazyLock::new(|| {
-        SUPPORTED_MEDIA_TYPES.iter().map(|(ext, _)| ext.to_string()).collect()
+        SUPPORTED_MEDIA_TYPES
+            .iter()
+            .map(|(ext, _)| ext.to_string())
+            .collect()
     });
 
     &SUPPORTED_EXTENSIONS
@@ -661,20 +675,20 @@ pub struct BaseFileSystemManager {
 impl BaseFileSystemManager {
     /// Create a new base file system manager
     pub fn new(case_sensitive: bool) -> Self {
-        Self { 
+        Self {
             case_sensitive,
             path_normalizer: create_platform_path_normalizer(),
         }
     }
-    
+
     /// Create a new base file system manager with custom path normalizer
     pub fn with_normalizer(case_sensitive: bool, path_normalizer: Box<dyn PathNormalizer>) -> Self {
-        Self { 
+        Self {
             case_sensitive,
             path_normalizer,
         }
     }
-    
+
     /// Common path validation logic
     pub fn validate_path_common(&self, path: &Path) -> Result<(), FileSystemError> {
         // Check for null bytes
@@ -684,7 +698,7 @@ impl BaseFileSystemManager {
                 reason: "Path contains null bytes".to_string(),
             });
         }
-        
+
         // Check for excessively long paths
         if path.to_string_lossy().len() > 4096 {
             return Err(FileSystemError::InvalidPath {
@@ -692,7 +706,7 @@ impl BaseFileSystemManager {
                 reason: "Path is too long".to_string(),
             });
         }
-        
+
         // Check for directory traversal attempts
         let path_str = path.to_string_lossy();
         if path_str.contains("..") {
@@ -701,10 +715,10 @@ impl BaseFileSystemManager {
                 reason: "Path contains directory traversal".to_string(),
             });
         }
-        
+
         Ok(())
     }
-    
+
     /// Common file info extraction
     pub async fn get_file_info_common(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
         // Enforce read-only access to media files
@@ -715,26 +729,26 @@ impl BaseFileSystemManager {
             .await?
             .metadata()
             .await?;
-        
+
         let permissions = FilePermissions {
-            readable: true, // Always readable for media files
-            writable: false, // Enforce read-only access to media files
+            readable: true,    // Always readable for media files
+            writable: false,   // Enforce read-only access to media files
             executable: false, // Will be overridden by platform-specific implementations
             platform_details: HashMap::new(),
         };
-        
+
         let mime_type = path
             .extension()
             .and_then(|ext| ext.to_str())
             .map(get_mime_type_for_extension)
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        
+
         let is_hidden = path
             .file_name()
             .and_then(|name| name.to_str())
             .map(|name| name.starts_with('.'))
             .unwrap_or(false);
-        
+
         Ok(FileInfo {
             size: metadata.len(),
             modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
@@ -744,26 +758,29 @@ impl BaseFileSystemManager {
             metadata: HashMap::new(),
         })
     }
-    
+
     /// Common media file scanning logic
-    pub async fn scan_directory_common(&self, path: &Path) -> Result<Vec<MediaFile>, FileSystemError> {
+    pub async fn scan_directory_common(
+        &self,
+        path: &Path,
+    ) -> Result<Vec<MediaFile>, FileSystemError> {
         let mut media_files = Vec::new();
         let mut entries = fs::read_dir(path).await?;
-        
+
         while let Some(entry) = entries.next_entry().await? {
             let entry_path = entry.path();
-            
+
             // Skip directories
             if entry_path.is_dir() {
                 continue;
             }
-            
+
             // Check if it's a supported media file
             if let Some(extension) = entry_path.extension().and_then(|ext| ext.to_str()) {
                 if !is_supported_media_extension(extension) {
                     continue;
                 }
-                
+
                 // Get file metadata
                 let metadata = entry.metadata().await?;
                 let filename = entry_path
@@ -771,7 +788,7 @@ impl BaseFileSystemManager {
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                
+
                 let mime_type = get_mime_type_for_extension(extension);
                 let now = SystemTime::now();
                 let subtitle_available = tokio::fs::try_exists(entry_path.with_extension("srt"))
@@ -791,7 +808,7 @@ impl BaseFileSystemManager {
                     // child therefore needs no additional filesystem lookup.
                     entry_path.clone()
                 };
-                
+
                 let mut media_file = MediaFile {
                     id: None,
                     path: storage_path,
@@ -811,18 +828,22 @@ impl BaseFileSystemManager {
                     created_at: now,
                     updated_at: now,
                 };
-                
+
                 // Extract metadata if this is an audio file
                 if media_file.mime_type.starts_with("audio/") {
                     if let Err(e) = extract_audio_metadata(&mut media_file).await {
-                        debug!("Failed to extract metadata for {}: {}", media_file.path.display(), e);
+                        debug!(
+                            "Failed to extract metadata for {}: {}",
+                            media_file.path.display(),
+                            e
+                        );
                     }
                 }
-                
+
                 media_files.push(media_file);
             }
         }
-        
+
         Ok(media_files)
     }
 }
@@ -831,26 +852,26 @@ impl BaseFileSystemManager {
 impl FileSystemManager for BaseFileSystemManager {
     async fn scan_media_directory(&self, path: &Path) -> Result<Vec<MediaFile>, FileSystemError> {
         self.validate_path_common(path)?;
-        
+
         if !self.is_accessible(path).await {
             return Err(FileSystemError::AccessDenied {
                 path: path.display().to_string(),
                 reason: "Directory is not accessible".to_string(),
             });
         }
-        
+
         self.scan_directory_common(path).await
     }
-    
+
     fn normalize_path(&self, path: &Path) -> PathBuf {
         // Basic normalization - platform-specific implementations will override
         path.to_path_buf()
     }
-    
+
     fn get_canonical_path(&self, path: &Path) -> Result<String, PathNormalizationError> {
         self.path_normalizer.to_canonical(path)
     }
-    
+
     async fn is_accessible(&self, path: &Path) -> bool {
         // For directories, check if we can read the directory
         if path.is_dir() {
@@ -865,11 +886,11 @@ impl FileSystemManager for BaseFileSystemManager {
                 .is_ok()
         }
     }
-    
+
     async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
         self.get_file_info_common(path).await
     }
-    
+
     fn paths_equal(&self, path1: &Path, path2: &Path) -> bool {
         if self.case_sensitive {
             path1 == path2
@@ -877,20 +898,23 @@ impl FileSystemManager for BaseFileSystemManager {
             path1.to_string_lossy().to_lowercase() == path2.to_string_lossy().to_lowercase()
         }
     }
-    
+
     fn validate_path(&self, path: &Path) -> Result<(), FileSystemError> {
         self.validate_path_common(path)
     }
-    
+
     async fn canonicalize_path(&self, path: &Path) -> Result<String, FileSystemError> {
         // First resolve symbolic links and relative components
-        let canonical_path = fs::canonicalize(path).await.map_err(FileSystemError::from)?;
-        
+        let canonical_path = fs::canonicalize(path)
+            .await
+            .map_err(FileSystemError::from)?;
+
         // Then apply path normalization to the resolved path
-        self.path_normalizer.to_canonical(&canonical_path)
+        self.path_normalizer
+            .to_canonical(&canonical_path)
             .map_err(|e| FileSystemError::Platform(format!("Path normalization failed: {}", e)))
     }
-    
+
     fn matches_extension(&self, path: &Path, extensions: &[String]) -> bool {
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             let ext_to_check = if self.case_sensitive {
@@ -898,7 +922,7 @@ impl FileSystemManager for BaseFileSystemManager {
             } else {
                 ext.to_lowercase()
             };
-            
+
             extensions.iter().any(|allowed| {
                 let allowed_ext = if self.case_sensitive {
                     allowed.clone()
@@ -919,17 +943,17 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
     {
         Box::new(windows::WindowsFileSystemManager::new())
     }
-    
+
     #[cfg(target_os = "macos")]
     {
         Box::new(BaseFileSystemManager::new(true)) // macOS is case-sensitive
     }
-    
+
     #[cfg(target_os = "linux")]
     {
         Box::new(BaseFileSystemManager::new(true)) // Linux is case-sensitive
     }
-    
+
     #[cfg(target_os = "freebsd")]
     {
         Box::new(BaseFileSystemManager::new(true)) // FreeBSD is case-sensitive
@@ -937,17 +961,18 @@ pub fn create_platform_filesystem_manager() -> Box<dyn FileSystemManager> {
 }
 
 /// Extract audio metadata using audiotags library
-pub(crate) async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) async fn extract_audio_metadata(
+    media_file: &mut MediaFile,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Duration;
-    
+
     // Clone the path for the blocking operation
     let path = media_file.path.clone();
-    
+
     // Wrap the synchronous I/O operation in spawn_blocking to prevent blocking the async runtime
-    let metadata_result = tokio::task::spawn_blocking(move || {
-        audiotags::Tag::new().read_from_path(&path)
-    }).await;
-    
+    let metadata_result =
+        tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
+
     // Handle the result from spawn_blocking
     match metadata_result {
         Ok(Ok(tag)) => {
@@ -955,34 +980,34 @@ pub(crate) async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result
             if let Some(title) = tag.title() {
                 media_file.title = Some(title.to_string());
             }
-            
+
             if let Some(artist) = tag.artist() {
                 media_file.artist = Some(artist.to_string());
             }
-            
+
             if let Some(album) = tag.album_title() {
                 media_file.album = Some(album.to_string());
             }
-            
+
             if let Some(genre) = tag.genre() {
                 media_file.genre = Some(genre.to_string());
             }
-            
+
             // Extract track number
             if let Some(track_num) = tag.track_number() {
                 media_file.track_number = Some(track_num as u32);
             }
-            
+
             // Extract year
             if let Some(year) = tag.year() {
                 media_file.year = Some(year as u32);
             }
-            
+
             // Extract album artist
             if let Some(album_artist) = tag.album_artist() {
                 media_file.album_artist = Some(album_artist.to_string());
             }
-            
+
             // Extract duration if available
             if let Some(duration) = tag.duration() {
                 media_file.duration = Some(Duration::from_secs(duration as u64));
@@ -990,17 +1015,25 @@ pub(crate) async fn extract_audio_metadata(media_file: &mut MediaFile) -> Result
         }
         Ok(Err(e)) => {
             // Failed to parse tags, but we still apply fallback filename parsing
-            debug!("Failed to extract metadata for {}: {}", media_file.path.display(), e);
+            debug!(
+                "Failed to extract metadata for {}: {}",
+                media_file.path.display(),
+                e
+            );
         }
         Err(e) => {
             // spawn_blocking failed
-            debug!("Failed to execute blocking metadata extraction for {}: {}", media_file.path.display(), e);
+            debug!(
+                "Failed to execute blocking metadata extraction for {}: {}",
+                media_file.path.display(),
+                e
+            );
         }
     }
-    
+
     // Always fall back to parsing from filename for missing fields
     fallback_parse_filename(media_file);
-    
+
     Ok(())
 }
 
@@ -1010,7 +1043,8 @@ fn fallback_parse_filename(media_file: &mut MediaFile) {
         return;
     }
 
-    let filename_sans_ext = media_file.path
+    let filename_sans_ext = media_file
+        .path
         .file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| media_file.filename.clone());
@@ -1026,7 +1060,7 @@ fn fallback_parse_filename(media_file: &mut MediaFile) {
                     track_num = Some(num);
                 }
             }
-            
+
             if track_num.is_some() {
                 if media_file.track_number.is_none() {
                     media_file.track_number = track_num;
@@ -1044,7 +1078,7 @@ fn fallback_parse_filename(media_file: &mut MediaFile) {
         } else if parts.len() == 2 {
             let part0 = parts[0].trim();
             let part1 = parts[1].trim();
-            
+
             let clean_track: String = part0.chars().filter(|c| c.is_ascii_digit()).collect();
             if !clean_track.is_empty() && clean_track == part0 {
                 if let Ok(num) = clean_track.parse::<u32>() {
@@ -1066,7 +1100,7 @@ fn fallback_parse_filename(media_file: &mut MediaFile) {
                         }
                     }
                 }
-                
+
                 if media_file.artist.is_none() {
                     media_file.artist = Some(artist_name.trim().to_string());
                 }
@@ -1078,7 +1112,7 @@ fn fallback_parse_filename(media_file: &mut MediaFile) {
         }
     } else {
         let mut title_part = filename_sans_ext.as_str();
-        
+
         if let Some(first_space) = filename_sans_ext.find(' ') {
             let maybe_num = &filename_sans_ext[..first_space].trim_end_matches('.');
             let clean: String = maybe_num.chars().filter(|c| c.is_ascii_digit()).collect();
@@ -1091,24 +1125,26 @@ fn fallback_parse_filename(media_file: &mut MediaFile) {
                 }
             }
         }
-        
+
         media_file.title = Some(title_part.trim().to_string());
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_mime_type_detection() {
         assert_eq!(get_mime_type_for_extension("mp4"), "video/mp4");
         assert_eq!(get_mime_type_for_extension("MP4"), "video/mp4");
         assert_eq!(get_mime_type_for_extension("mp3"), "audio/mpeg");
-        assert_eq!(get_mime_type_for_extension("unknown"), "application/octet-stream");
+        assert_eq!(
+            get_mime_type_for_extension("unknown"),
+            "application/octet-stream"
+        );
     }
-    
+
     #[test]
     fn test_supported_extension_check() {
         assert!(is_supported_media_extension("mp4"));
@@ -1117,44 +1153,52 @@ mod tests {
         assert!(!is_supported_media_extension("txt"));
         assert!(!is_supported_media_extension("unknown"));
     }
-    
+
     #[test]
     fn test_path_validation() {
         let manager = BaseFileSystemManager::new(true);
-        
+
         // Valid paths
-        assert!(manager.validate_path_common(Path::new("/valid/path")).is_ok());
-        assert!(manager.validate_path_common(Path::new("relative/path")).is_ok());
-        
+        assert!(manager
+            .validate_path_common(Path::new("/valid/path"))
+            .is_ok());
+        assert!(manager
+            .validate_path_common(Path::new("relative/path"))
+            .is_ok());
+
         // Invalid paths
-        assert!(manager.validate_path_common(Path::new("path/with/\0/null")).is_err());
-        assert!(manager.validate_path_common(Path::new("path/../traversal")).is_err());
+        assert!(manager
+            .validate_path_common(Path::new("path/with/\0/null"))
+            .is_err());
+        assert!(manager
+            .validate_path_common(Path::new("path/../traversal"))
+            .is_err());
     }
-    
+
     #[test]
     fn test_case_sensitivity() {
         let case_sensitive = BaseFileSystemManager::new(true);
         let case_insensitive = BaseFileSystemManager::new(false);
-        
+
         let path1 = Path::new("/Test/Path");
         let path2 = Path::new("/test/path");
-        
+
         assert!(!case_sensitive.paths_equal(path1, path2));
         assert!(case_insensitive.paths_equal(path1, path2));
     }
-    
+
     #[test]
     fn test_extension_matching() {
         let case_sensitive = BaseFileSystemManager::new(true);
         let case_insensitive = BaseFileSystemManager::new(false);
-        
+
         let path = Path::new("test.MP4");
         let extensions = vec!["mp4".to_string(), "avi".to_string()];
-        
+
         assert!(!case_sensitive.matches_extension(path, &extensions));
         assert!(case_insensitive.matches_extension(path, &extensions));
     }
-    
+
     #[test]
     fn test_fallback_parse_filename() {
         use std::path::PathBuf;
@@ -1236,126 +1280,144 @@ mod tests {
     // PathNormalizer tests
     mod path_normalizer_tests {
         use super::*;
-        
+
         #[test]
         fn test_windows_path_normalization_basic() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test basic Windows path with backslashes
-            let result = normalizer.to_canonical(Path::new(r"C:\Users\Media")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new(r"C:\Users\Media"))
+                .unwrap();
             assert_eq!(result, "c:/users/media");
-            
+
             // Test mixed case
-            let result = normalizer.to_canonical(Path::new(r"C:\Users\MEDIA\Videos")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new(r"C:\Users\MEDIA\Videos"))
+                .unwrap();
             assert_eq!(result, "c:/users/media/videos");
-            
+
             // Test forward slashes (already normalized)
-            let result = normalizer.to_canonical(Path::new("C:/Users/Media")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new("C:/Users/Media"))
+                .unwrap();
             assert_eq!(result, "c:/users/media");
         }
-        
+
         #[test]
         fn test_windows_path_normalization_mixed_separators() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test mixed separators
-            let result = normalizer.to_canonical(Path::new(r"C:\Users/Media\Videos")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new(r"C:\Users/Media\Videos"))
+                .unwrap();
             assert_eq!(result, "c:/users/media/videos");
-            
+
             // Test multiple consecutive separators
-            let result = normalizer.to_canonical(Path::new(r"C:\Users\\Media")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new(r"C:\Users\\Media"))
+                .unwrap();
             assert_eq!(result, "c:/users/media");
         }
-        
+
         #[test]
         fn test_windows_path_normalization_unc_paths() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test UNC path
-            let result = normalizer.to_canonical(Path::new(r"\\Server\Share\Media")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new(r"\\Server\Share\Media"))
+                .unwrap();
             assert_eq!(result, "//server/share/media");
-            
+
             // Test UNC path with port
-            let result = normalizer.to_canonical(Path::new(r"\\192.168.1.100\Media")).unwrap();
+            let result = normalizer
+                .to_canonical(Path::new(r"\\192.168.1.100\Media"))
+                .unwrap();
             assert_eq!(result, "//192.168.1.100/media");
         }
-        
+
         #[test]
         fn test_windows_path_normalization_edge_cases() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test drive letter only
             let result = normalizer.to_canonical(Path::new("C:")).unwrap();
             assert_eq!(result, "c:");
-            
+
             // Test root path
             let result = normalizer.to_canonical(Path::new(r"C:\")).unwrap();
             assert_eq!(result, "c:/");
-            
+
             // Test relative path
             let result = normalizer.to_canonical(Path::new(r"Media\Videos")).unwrap();
             assert_eq!(result, "media/videos");
         }
-        
+
         #[test]
         fn test_canonical_to_windows_conversion() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test basic conversion
-            let result = normalizer.from_canonical("c:/users/media").unwrap();
+            let result = normalizer.canonical_to_platform("c:/users/media").unwrap();
             assert_eq!(result, PathBuf::from(r"C:\users\media"));
-            
+
             // Test UNC path conversion
-            let result = normalizer.from_canonical("//server/share/media").unwrap();
+            let result = normalizer
+                .canonical_to_platform("//server/share/media")
+                .unwrap();
             assert_eq!(result, PathBuf::from(r"\\server\share\media"));
-            
+
             // Test drive letter capitalization
-            let result = normalizer.from_canonical("d:/media/videos").unwrap();
+            let result = normalizer.canonical_to_platform("d:/media/videos").unwrap();
             assert_eq!(result, PathBuf::from(r"D:\media\videos"));
         }
-        
+
         #[test]
         fn test_normalize_for_query() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Should be identical to to_canonical
             let path = Path::new(r"C:\Users\Media");
             let canonical = normalizer.to_canonical(path).unwrap();
             let query_normalized = normalizer.normalize_for_query(path).unwrap();
-            
+
             assert_eq!(canonical, query_normalized);
             assert_eq!(query_normalized, "c:/users/media");
         }
-        
+
         #[test]
         fn test_path_normalization_invalid_characters() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test null byte
             assert!(normalizer.to_canonical(Path::new("C:\\path\0")).is_err());
-            
+
             // Test invalid Windows characters
             assert!(normalizer.to_canonical(Path::new("C:\\path<file")).is_err());
             assert!(normalizer.to_canonical(Path::new("C:\\path>file")).is_err());
-            assert!(normalizer.to_canonical(Path::new("C:\\path\"file")).is_err());
+            assert!(normalizer
+                .to_canonical(Path::new("C:\\path\"file"))
+                .is_err());
             assert!(normalizer.to_canonical(Path::new("C:\\path|file")).is_err());
             assert!(normalizer.to_canonical(Path::new("C:\\path?file")).is_err());
             assert!(normalizer.to_canonical(Path::new("C:\\path*file")).is_err());
         }
-        
+
         #[test]
         fn test_path_normalization_too_long() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Create a very long path
             let long_path = "C:\\".to_string() + &"a".repeat(5000);
             assert!(normalizer.to_canonical(Path::new(&long_path)).is_err());
         }
-        
+
         #[test]
         fn test_canonical_format_consistency() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Different representations of the same path should normalize to the same canonical form
             let paths = vec![
                 r"C:\Users\Media",
@@ -1364,76 +1426,76 @@ mod tests {
                 r"c:/users/media",
                 r"C:\Users/Media",
             ];
-            
+
             let mut canonical_results = Vec::new();
             for path_str in paths {
                 let canonical = normalizer.to_canonical(Path::new(path_str)).unwrap();
                 canonical_results.push(canonical);
             }
-            
+
             // All should be the same
             let expected = "c:/users/media";
             for result in canonical_results {
                 assert_eq!(result, expected);
             }
         }
-        
+
         #[test]
         fn test_roundtrip_conversion() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             let test_paths = vec![
                 r"C:\Users\Media\Videos",
                 r"D:\Music\Albums",
                 r"\\Server\Share\Media",
                 r"E:\",
             ];
-            
+
             for original_path in test_paths {
                 let canonical = normalizer.to_canonical(Path::new(original_path)).unwrap();
-                let back_to_windows = normalizer.from_canonical(&canonical).unwrap();
-                
+                let back_to_windows = normalizer.canonical_to_platform(&canonical).unwrap();
+
                 // The roundtrip should preserve the essential path structure
                 // (though case and separator format may change)
                 let re_canonical = normalizer.to_canonical(&back_to_windows).unwrap();
                 assert_eq!(canonical, re_canonical);
             }
         }
-        
+
         #[test]
         fn test_filesystem_manager_path_normalization_integration() {
             let manager = create_platform_filesystem_manager();
-            
+
             // Test that normalize_path still works as expected (returns PathBuf)
             let test_path = Path::new("test/path");
             let normalized = manager.normalize_path(test_path);
             assert!(normalized.is_absolute() || normalized.is_relative());
-            
+
             // Test that get_canonical_path returns the canonical string format
             let canonical_result = manager.get_canonical_path(test_path);
             assert!(canonical_result.is_ok());
-            
+
             let canonical = canonical_result.unwrap();
-            assert!(canonical.contains("/") || canonical.len() > 0); // Should be forward-slash format
+            assert!(canonical.contains('/') || !canonical.is_empty()); // Should be forward-slash format
         }
-        
+
         #[tokio::test]
         async fn test_canonicalize_path_resolves_before_normalization() {
             // This test verifies that canonicalize_path resolves symbolic links before normalization
             // Note: This is a unit test that verifies the method signature and basic functionality
             // Integration tests would verify actual symbolic link resolution
-            
+
             let manager = create_platform_filesystem_manager();
-            
+
             // Test with a simple path (this will likely fail since the path doesn't exist,
             // but we're testing the method signature and error handling)
             let test_path = Path::new("nonexistent/test/path");
             let result = manager.canonicalize_path(test_path).await;
-            
+
             // Should return an error since the path doesn't exist, but the error should be
             // a FileSystemError, not a compilation error
             assert!(result.is_err());
-            
+
             // The return type should be Result<String, FileSystemError> (canonical format)
             match result {
                 Err(FileSystemError::PathNotFound { .. }) => {
@@ -1451,23 +1513,23 @@ mod tests {
                 }
             }
         }
-        
+
         #[test]
         fn test_empty_and_invalid_canonical_paths() {
             let normalizer = WindowsPathNormalizer::new();
-            
+
             // Test empty canonical path
-            assert!(normalizer.from_canonical("").is_err());
-            
+            assert!(normalizer.canonical_to_platform("").is_err());
+
             // Test valid canonical paths
-            assert!(normalizer.from_canonical("c:/users/media").is_ok());
-            assert!(normalizer.from_canonical("//server/share").is_ok());
+            assert!(normalizer.canonical_to_platform("c:/users/media").is_ok());
+            assert!(normalizer.canonical_to_platform("//server/share").is_ok());
         }
-        
+
         #[test]
         fn test_platform_path_normalizer_creation() {
             let normalizer = create_platform_path_normalizer();
-            
+
             // Should be able to normalize a basic path
             let result = normalizer.to_canonical(Path::new("C:/Test/Path"));
             assert!(result.is_ok());

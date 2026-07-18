@@ -212,7 +212,7 @@ impl RedbDatabase {
             }
 
             // Sort subdirectories case-insensitively
-            directories.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            directories.sort_by_cached_key(|directory| directory.name.to_lowercase());
 
             // Sort files by track number if available, then case-insensitively by filename
             files.sort_by(|a, b| match (a.track_number, b.track_number) {
@@ -706,7 +706,6 @@ impl RedbDatabase {
                             &mut directory_files,
                             &mut directory_mime_counts,
                             &next_directory_id,
-                            file_id,
                             &file_with_id,
                         )?;
                         Self::add_file_indexes(
@@ -988,10 +987,7 @@ impl RedbDatabase {
         &self,
         existing_canonical_paths: &HashSet<String>,
     ) -> Result<usize> {
-        let paths_vec: Vec<PathBuf> = existing_canonical_paths
-            .iter()
-            .map(|s| PathBuf::from(s))
-            .collect();
+        let paths_vec: Vec<PathBuf> = existing_canonical_paths.iter().map(PathBuf::from).collect();
         self.cleanup_missing_files_impl(&paths_vec).await
     }
 
@@ -1000,7 +996,7 @@ impl RedbDatabase {
         existing_canonical_paths: &[String],
     ) -> Result<usize> {
         let existing_set: HashSet<String> = existing_canonical_paths.iter().cloned().collect();
-        let paths_vec: Vec<PathBuf> = existing_set.iter().map(|s| PathBuf::from(s)).collect();
+        let paths_vec: Vec<PathBuf> = existing_set.iter().map(PathBuf::from).collect();
         self.cleanup_missing_files_impl(&paths_vec).await
     }
 

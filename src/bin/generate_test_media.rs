@@ -1,15 +1,17 @@
+use audiotags::Tag;
 use std::fs;
 use std::path::Path;
-use audiotags::Tag;
 
 fn decode_base64(s: &str) -> Vec<u8> {
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut bytes = Vec::new();
     let mut buffer = 0u32;
     let mut bits = 0;
-    
+
     for c in s.chars() {
-        if c == '=' { break; }
+        if c == '=' {
+            break;
+        }
         if let Some(pos) = CHARSET.iter().position(|&x| x == c as u8) {
             buffer = (buffer << 6) | pos as u32;
             bits += 6;

@@ -2,7 +2,8 @@
 use super::{InterfaceType, PlatformResult};
 use std::collections::HashMap;
 use windows::Win32::NetworkManagement::IpHelper::{
-    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_SOFTWARE_LOOPBACK, IF_TYPE_TUNNEL, IF_TYPE_PPP,
+    IF_TYPE_ETHERNET_CSMACD, IF_TYPE_IEEE80211, IF_TYPE_PPP, IF_TYPE_SOFTWARE_LOOPBACK,
+    IF_TYPE_TUNNEL,
 };
 
 /// Get Windows version information
@@ -107,15 +108,19 @@ mod tests {
             Ok(ifaces) => {
                 println!("Detected {} interfaces", ifaces.len());
                 assert!(!ifaces.is_empty(), "Should detect at least one interface");
-                
+
                 // Check that we have at least a loopback interface
                 let has_loopback = ifaces.iter().any(|iface| iface.is_loopback);
                 assert!(has_loopback, "Should have at least a loopback interface");
-                
+
                 for iface in &ifaces {
                     println!(
                         "  - {}: {} ({:?}) - Up: {}, Multicast: {}",
-                        iface.name, iface.ip_address, iface.interface_type, iface.is_up, iface.supports_multicast
+                        iface.name,
+                        iface.ip_address,
+                        iface.interface_type,
+                        iface.is_up,
+                        iface.supports_multicast
                     );
                     // Don't assert that all interfaces are up since some may be disabled/disconnected
                     // Don't assert !iface.is_loopback since in test environments
@@ -131,11 +136,17 @@ mod tests {
 
     #[test]
     fn test_interface_type_mapping() {
-        assert_eq!(map_windows_if_type(IF_TYPE_ETHERNET_CSMACD), InterfaceType::Ethernet);
+        assert_eq!(
+            map_windows_if_type(IF_TYPE_ETHERNET_CSMACD),
+            InterfaceType::Ethernet
+        );
         assert_eq!(map_windows_if_type(IF_TYPE_IEEE80211), InterfaceType::WiFi);
-        assert_eq!(map_windows_if_type(IF_TYPE_SOFTWARE_LOOPBACK), InterfaceType::Loopback);
+        assert_eq!(
+            map_windows_if_type(IF_TYPE_SOFTWARE_LOOPBACK),
+            InterfaceType::Loopback
+        );
         assert_eq!(map_windows_if_type(IF_TYPE_TUNNEL), InterfaceType::VPN);
-        
+
         match map_windows_if_type(999) {
             InterfaceType::Other(desc) => assert_eq!(desc, "ifType 999"),
             _ => panic!("Expected Other type"),

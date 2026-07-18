@@ -308,13 +308,20 @@ async fn test_cover_art_retrieval_and_xml() {
         filesystem_manager,
         content_update_id,
         web_metrics,
+        runtime_diagnostics: Arc::new(vuio::platform::diagnostics::SystemDiagnosticsSampler::new()),
         lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES))),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES),
+        )),
         log_file_path: temp_dir.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BrowseResponseCache::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::BrowseResponseCache::new(),
+        )),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::ActiveCastRegistry::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::ActiveCastRegistry::new(),
+        )),
         discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),
@@ -322,8 +329,14 @@ async fn test_cover_art_retrieval_and_xml() {
     };
 
     // 7. Verify UPnP XML response generation contains upnp:albumArtURI
-    let xml_response =
-        generate_browse_response("audio", &[], &[db_file.clone()], &app_state, "127.0.0.1").await;
+    let xml_response = generate_browse_response(
+        "audio",
+        &[],
+        std::slice::from_ref(&db_file),
+        &app_state,
+        "127.0.0.1",
+    )
+    .await;
 
     let expected_url = format!(
         "http://127.0.0.1:{}/media/{}/cover",
@@ -446,13 +459,20 @@ https://cast1.asurahosting.com/proxy/julien/stream
         filesystem_manager,
         content_update_id,
         web_metrics,
+        runtime_diagnostics: Arc::new(vuio::platform::diagnostics::SystemDiagnosticsSampler::new()),
         lifecycle_stats: Arc::new(vuio::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES))),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::BookmarkRegistry::new(vuio::runtime_state::BOOKMARK_MAX_ENTRIES),
+        )),
         log_file_path: temp_dir.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::BrowseResponseCache::new())),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::BrowseResponseCache::new(),
+        )),
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(vuio::runtime_state::ActiveCastRegistry::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            vuio::runtime_state::ActiveCastRegistry::new(),
+        )),
         discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),

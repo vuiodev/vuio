@@ -2,7 +2,11 @@
 
 use crate::{state::SoapCacheKey, tv_control::DiscoveredTv};
 use axum::body::Bytes;
-use std::{collections::HashMap, hash::Hash, time::{Duration, Instant}};
+use std::{
+    collections::HashMap,
+    hash::Hash,
+    time::{Duration, Instant},
+};
 
 pub const BROWSE_CACHE_MAX_ENTRIES: usize = 256;
 pub const BROWSE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -101,6 +105,11 @@ impl BrowseResponseCache {
     }
 
     #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[cfg(test)]
     pub fn total_bytes(&self) -> usize {
         self.total_bytes
     }
@@ -183,6 +192,10 @@ impl<K: Eq + Hash + Clone, V> BoundedRegistry<K, V> {
     pub fn len(&self) -> usize {
         self.entries.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 pub type BookmarkRegistry = BoundedRegistry<i64, u32>;
@@ -214,8 +227,7 @@ impl ActiveCastRegistry {
                 self.entries.remove(&oldest);
             }
         }
-        self.entries
-            .insert(key, (device, filename, Instant::now()));
+        self.entries.insert(key, (device, filename, Instant::now()));
     }
 
     pub fn remove(&mut self, device: &str) {
@@ -237,6 +249,10 @@ impl ActiveCastRegistry {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

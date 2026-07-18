@@ -29,7 +29,7 @@ async fn start_http_server_task(
     // Parse server interface address
     let interface_addr =
         if config.server.interface == "0.0.0.0" || config.server.interface.is_empty() {
-            "0.0.0.0".parse().unwrap()
+            std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
         } else {
             config.server.interface.parse().with_context(|| {
                 format!(

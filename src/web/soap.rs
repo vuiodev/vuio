@@ -39,21 +39,21 @@ struct BrowseParams {
     requested_count: u32,
 }
 
-fn soap_action(headers: &HeaderMap, body: &str) -> Result<String, Response> {
+fn soap_action(headers: &HeaderMap, body: &str) -> Result<String, Box<Response>> {
     let header_action = headers
         .get("soapaction")
         .and_then(|value| value.to_str().ok())
         .and_then(parse_soap_action_header);
     let body_action = match body_soap_action(body) {
         Ok(action) => action,
-        Err(message) => return Err(invalid_soap_request(message)),
+        Err(message) => return Err(Box::new(invalid_soap_request(message))),
     };
 
     if let Some(header_action) = header_action {
         if header_action != body_action {
-            return Err(invalid_soap_request(
+            return Err(Box::new(invalid_soap_request(
                 "SOAPAction header does not match the SOAP body",
-            ));
+            )));
         }
         Ok(header_action)
     } else {
@@ -619,7 +619,7 @@ pub async fn content_directory_control(
     crate::web::client::CURRENT_CLIENT.scope(client, async move {
         let action = match soap_action(&headers, &body) {
             Ok(action) => action,
-            Err(response) => return response,
+            Err(response) => return *response,
         };
         if action == "Browse" {
             let params = parse_browse_params(&body);
@@ -756,20 +756,17 @@ impl ContentDirectoryHandler {
         state: &AppState,
         audio_path: &str,
     ) -> Response {
-        let db1 = state.database.clone();
-        let db2 = state.database.clone();
+        let database = state.database.clone();
         handle_generic_category_browse(
             params,
             state,
             audio_path,
-            "audio/artists",
             "artists",
-            move || async move { db1.get_artists().await },
+            move || async move { database.get_artists().await },
             |artist| crate::database::MediaDirectory {
                 path: std::path::PathBuf::from(format!("audio/artists/{}", artist.name)),
                 name: format!("{} ({})", artist.name, artist.count),
             },
-            move |artist_name| async move { db2.get_music_by_artist(&artist_name).await },
         )
         .await
     }
@@ -780,20 +777,17 @@ impl ContentDirectoryHandler {
         state: &AppState,
         audio_path: &str,
     ) -> Response {
-        let db1 = state.database.clone();
-        let db2 = state.database.clone();
+        let database = state.database.clone();
         handle_generic_category_browse(
             params,
             state,
             audio_path,
-            "audio/albums",
             "albums",
-            move || async move { db1.get_albums(None).await },
+            move || async move { database.get_albums(None).await },
             |album| crate::database::MediaDirectory {
                 path: std::path::PathBuf::from(format!("audio/albums/{}", album.name)),
                 name: format!("{} ({})", album.name, album.count),
             },
-            move |album_name| async move { db2.get_music_by_album(&album_name, None).await },
         )
         .await
     }
@@ -805,20 +799,17 @@ async fn handle_genres_browse(
     state: &AppState,
     audio_path: &str,
 ) -> Response {
-    let db1 = state.database.clone();
-    let db2 = state.database.clone();
+    let database = state.database.clone();
     handle_generic_category_browse(
         params,
         state,
         audio_path,
-        "audio/genres",
         "genres",
-        move || async move { db1.get_genres().await },
+        move || async move { database.get_genres().await },
         |genre| crate::database::MediaDirectory {
             path: std::path::PathBuf::from(format!("audio/genres/{}", genre.name)),
             name: format!("{} ({})", genre.name, genre.count),
         },
-        move |genre_name| async move { db2.get_music_by_genre(&genre_name).await },
     )
     .await
 }
@@ -829,25 +820,16 @@ async fn handle_years_browse(
     state: &AppState,
     audio_path: &str,
 ) -> Response {
-    let db1 = state.database.clone();
-    let db2 = state.database.clone();
+    let database = state.database.clone();
     handle_generic_category_browse(
         params,
         state,
         audio_path,
-        "audio/years",
         "years",
-        move || async move { db1.get_years().await },
+        move || async move { database.get_years().await },
         |year| crate::database::MediaDirectory {
             path: std::path::PathBuf::from(format!("audio/years/{}", year.name)),
             name: format!("{} ({})", year.name, year.count),
-        },
-        move |year_str| async move {
-            if let Ok(year) = year_str.parse::<u32>() {
-                db2.get_music_by_year(year).await
-            } else {
-                Err(anyhow::anyhow!("Invalid year format"))
-            }
         },
     )
     .await
@@ -859,46 +841,33 @@ async fn handle_playlists_browse(
     state: &AppState,
     audio_path: &str,
 ) -> Response {
-    let db1 = state.database.clone();
-    let db2 = state.database.clone();
+    let database = state.database.clone();
     handle_generic_category_browse(
         params,
         state,
         audio_path,
-        "audio/playlists",
         "playlists",
-        move || async move { db1.get_playlists().await },
+        move || async move { database.get_playlists().await },
         |playlist| crate::database::MediaDirectory {
             path: std::path::PathBuf::from(format!("audio/playlists/{}", playlist.id.unwrap_or(0))),
             name: playlist.name,
-        },
-        move |playlist_id_str| async move {
-            if let Ok(playlist_id) = playlist_id_str.parse::<i64>() {
-                db2.get_playlist_tracks(playlist_id).await
-            } else {
-                Err(anyhow::anyhow!("Invalid playlist ID format"))
-            }
         },
     )
     .await
 }
 
 /// Helper function to perform generic music category browsing
-async fn handle_generic_category_browse<C, F, FFuture, G, GFuture>(
+async fn handle_generic_category_browse<C, F, FFuture>(
     params: &BrowseParams,
     state: &AppState,
     audio_path: &str,
-    _category_prefix: &str,
     category_name: &str,
     list_categories_fn: F,
     map_category_fn: impl Fn(C) -> crate::database::MediaDirectory,
-    _list_items_fn: G,
 ) -> Response
 where
     F: FnOnce() -> FFuture,
     FFuture: std::future::Future<Output = Result<Vec<C>, anyhow::Error>>,
-    G: FnOnce(String) -> GFuture,
-    GFuture: std::future::Future<Output = Result<Vec<crate::database::MediaFile>, anyhow::Error>>,
 {
     use crate::web::xml::generate_browse_response;
 
@@ -1193,7 +1162,7 @@ fn build_soap_response(action: &str, service_type: &str, content: &str) -> Respo
     xml.push_str("\">\n");
     xml.push_str("            ");
     xml.push_str(content);
-    xml.push_str("\n");
+    xml.push('\n');
     xml.push_str("        </u:");
     xml.push_str(action);
     xml.push_str("Response>\n");
@@ -1236,7 +1205,7 @@ pub async fn connection_manager_control(
 ) -> Response {
     let action = match soap_action(&headers, &body) {
         Ok(action) => action,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if action == "GetProtocolInfo" {
         let content = r#"<Source>http-get:*:video/x-msvideo:*,http-get:*:video/mp4:*,http-get:*:video/x-matroska:*,http-get:*:video/x-mkv:*,http-get:*:video/mpeg:*,http-get:*:video/divx:*,http-get:*:audio/mpeg:*,http-get:*:audio/x-flac:*,http-get:*:audio/wav:*,http-get:*:audio/mp4:*,http-get:*:image/jpeg:*,http-get:*:image/png:*,http-get:*:image/gif:*</Source><Sink></Sink>"#;
@@ -1276,7 +1245,7 @@ pub async fn media_receiver_registrar_control(
 ) -> Response {
     let action = match soap_action(&headers, &body) {
         Ok(action) => action,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if action == "IsAuthorized" {
         let content = "<Result>1</Result>";

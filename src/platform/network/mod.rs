@@ -1,17 +1,22 @@
 use crate::platform::{NetworkInterface, PlatformError, PlatformResult};
 use async_trait::async_trait;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::UdpSocket;
+
+pub const SSDP_MULTICAST_IPV4: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
+pub const SSDP_MULTICAST_IP: IpAddr = IpAddr::V4(SSDP_MULTICAST_IPV4);
+pub const UNSPECIFIED_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);
+pub const LOOPBACK_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 use tracing::{debug, info, warn};
 
 // Platform-specific network manager implementations
-#[cfg(target_os = "windows")]
-pub mod windows;
-#[cfg(target_os = "macos")]
-pub mod macos;
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
+#[cfg(target_os = "windows")]
+pub mod windows;
 
 // Re-export platform-specific managers
 #[cfg(target_os = "windows")]
@@ -54,17 +59,20 @@ impl SsdpSocket {
     pub async fn new(port: u16, interfaces: Vec<NetworkInterface>) -> PlatformResult<Self> {
         // Bind to INADDR_ANY for receive socket
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port));
-        let socket = UdpSocket::bind(socket_addr)
-            .await
-            .map_err(|e| PlatformError::NetworkConfig(format!("Failed to bind to port {}: {}", port, e)))?;
-        
+        let socket = UdpSocket::bind(socket_addr).await.map_err(|e| {
+            PlatformError::NetworkConfig(format!("Failed to bind to port {}: {}", port, e))
+        })?;
+
         // Apply optimized socket options
         if let Err(e) = Self::configure_socket_optimized(&socket) {
             warn!("Failed to configure socket options: {}", e);
         }
-        
-        debug!("Created SSDP socket bound to port {} with optimized configuration", port);
-        
+
+        debug!(
+            "Created SSDP socket bound to port {} with optimized configuration",
+            port
+        );
+
         Ok(SsdpSocket {
             socket,
             port,
@@ -72,15 +80,15 @@ impl SsdpSocket {
             multicast_enabled: false,
         })
     }
-    
+
     /// Configure socket with optimized options for multicast support
     fn configure_socket_optimized(socket: &UdpSocket) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            
+
             let fd = socket.as_raw_fd();
-            
+
             // Enable SO_REUSEADDR (critical for Docker containers)
             let optval: libc::c_int = 1;
             let ret = unsafe {
@@ -93,11 +101,14 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set SO_REUSEADDR: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set SO_REUSEADDR: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Enabled SO_REUSEADDR");
             }
-            
+
             // Enable SO_BROADCAST for better compatibility
             let bcast: libc::c_int = 1;
             let ret = unsafe {
@@ -110,26 +121,29 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set SO_BROADCAST: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set SO_BROADCAST: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Enabled SO_BROADCAST");
             }
-            
+
             debug!("Applied optimized socket configuration");
         }
-        
+
         #[cfg(windows)]
         {
             // Windows socket configuration using platform-specific APIs
             use std::os::windows::io::AsRawSocket;
-            
+
             let socket_handle = socket.as_raw_socket();
-            
+
             // Windows socket constants
             const SOL_SOCKET: i32 = 0xffff;
             const SO_REUSEADDR: i32 = 0x0004;
             const SO_BROADCAST: i32 = 0x0020;
-            
+
             // Enable SO_REUSEADDR on Windows
             let optval: i32 = 1;
             let ret = unsafe {
@@ -142,11 +156,14 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set SO_REUSEADDR on Windows: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set SO_REUSEADDR on Windows: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Enabled SO_REUSEADDR on Windows");
             }
-            
+
             // Enable SO_BROADCAST on Windows
             let bcast: i32 = 1;
             let ret = unsafe {
@@ -159,19 +176,26 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set SO_BROADCAST on Windows: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set SO_BROADCAST on Windows: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Enabled SO_BROADCAST on Windows");
             }
-            
+
             debug!("Applied optimized socket configuration on Windows");
         }
-        
+
         Ok(())
     }
-    
+
     /// Enable multicast on this socket for the specified group
-    pub async fn enable_multicast(&mut self, multicast_addr: IpAddr, local_addr: IpAddr) -> PlatformResult<()> {
+    pub async fn enable_multicast(
+        &mut self,
+        multicast_addr: IpAddr,
+        local_addr: IpAddr,
+    ) -> PlatformResult<()> {
         match (multicast_addr, local_addr) {
             (IpAddr::V4(multi_v4), IpAddr::V4(local_v4)) => {
                 // For receive socket, join multicast on each interface
@@ -182,39 +206,60 @@ impl SsdpSocket {
                 } else {
                     local_v4
                 };
-                
+
                 // Apply additional optimized socket options for multicast
                 if let Err(e) = Self::configure_multicast_socket_options(&self.socket, bind_addr) {
                     warn!("Failed to configure multicast socket options: {}", e);
                 }
-                
-                self.socket.join_multicast_v4(multi_v4, bind_addr)
-                    .map_err(|e| PlatformError::NetworkConfig(format!("Failed to join multicast group: {}", e)))?;
+
+                self.socket
+                    .join_multicast_v4(multi_v4, bind_addr)
+                    .map_err(|e| {
+                        PlatformError::NetworkConfig(format!(
+                            "Failed to join multicast group: {}",
+                            e
+                        ))
+                    })?;
                 self.multicast_enabled = true;
-                info!("Enabled multicast on {}:{} for group {} (bind addr: {})", local_v4, self.port, multi_v4, bind_addr);
+                info!(
+                    "Enabled multicast on {}:{} for group {} (bind addr: {})",
+                    local_v4, self.port, multi_v4, bind_addr
+                );
                 Ok(())
             }
             (IpAddr::V6(multi_v6), _) => {
                 // For IPv6, we need to specify the interface index
                 // This is a simplified implementation - platform-specific implementations should handle this properly
-                self.socket.join_multicast_v6(&multi_v6, 0)
-                    .map_err(|e| PlatformError::NetworkConfig(format!("Failed to join IPv6 multicast group: {}", e)))?;
+                self.socket.join_multicast_v6(&multi_v6, 0).map_err(|e| {
+                    PlatformError::NetworkConfig(format!(
+                        "Failed to join IPv6 multicast group: {}",
+                        e
+                    ))
+                })?;
                 self.multicast_enabled = true;
-                info!("Enabled IPv6 multicast on port {} for group {}", self.port, multi_v6);
+                info!(
+                    "Enabled IPv6 multicast on port {} for group {}",
+                    self.port, multi_v6
+                );
                 Ok(())
             }
-            _ => Err(PlatformError::NetworkConfig("IP version mismatch for multicast".to_string()))
+            _ => Err(PlatformError::NetworkConfig(
+                "IP version mismatch for multicast".to_string(),
+            )),
         }
     }
-    
+
     /// Configure multicast-specific socket options
-    fn configure_multicast_socket_options(socket: &UdpSocket, bind_addr: std::net::Ipv4Addr) -> Result<(), Box<dyn std::error::Error>> {
+    fn configure_multicast_socket_options(
+        socket: &UdpSocket,
+        bind_addr: std::net::Ipv4Addr,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         #[cfg(unix)]
         {
             use std::os::unix::io::AsRawFd;
-            
+
             let fd = socket.as_raw_fd();
-            
+
             // Set multicast TTL to 4 for standard range
             let ttl: libc::c_int = 4;
             let ret = unsafe {
@@ -227,11 +272,14 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set IP_MULTICAST_TTL: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set IP_MULTICAST_TTL: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Set multicast TTL to 4");
             }
-            
+
             // Disable multicast loopback for efficiency
             let loop_val: libc::c_int = 0;
             let ret = unsafe {
@@ -244,14 +292,19 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set IP_MULTICAST_LOOP: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set IP_MULTICAST_LOOP: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Disabled multicast loopback");
             }
-            
+
             // Set multicast interface if not INADDR_ANY
             if !bind_addr.is_unspecified() {
-                let mc_if = libc::in_addr { s_addr: u32::from(bind_addr).to_be() };
+                let mc_if = libc::in_addr {
+                    s_addr: u32::from(bind_addr).to_be(),
+                };
                 let ret = unsafe {
                     libc::setsockopt(
                         fd,
@@ -262,28 +315,31 @@ impl SsdpSocket {
                     )
                 };
                 if ret != 0 {
-                    warn!("Failed to set IP_MULTICAST_IF: {}", std::io::Error::last_os_error());
+                    warn!(
+                        "Failed to set IP_MULTICAST_IF: {}",
+                        std::io::Error::last_os_error()
+                    );
                 } else {
                     debug!("Set multicast interface to {}", bind_addr);
                 }
             }
-            
+
             debug!("Applied optimized multicast socket configuration");
         }
-        
+
         #[cfg(windows)]
         {
             // Windows multicast socket configuration
             use std::os::windows::io::AsRawSocket;
-            
+
             let socket_handle = socket.as_raw_socket();
-            
+
             // Windows IP protocol constants
             const IPPROTO_IP: i32 = 0;
             const IP_MULTICAST_TTL: i32 = 10;
             const IP_MULTICAST_LOOP: i32 = 11;
             const IP_MULTICAST_IF: i32 = 9;
-            
+
             // Set multicast TTL to 4 for standard range on Windows
             let ttl: u32 = 4;
             let ret = unsafe {
@@ -296,11 +352,14 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set IP_MULTICAST_TTL on Windows: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set IP_MULTICAST_TTL on Windows: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Set multicast TTL to 4 on Windows");
             }
-            
+
             // Disable multicast loopback for efficiency on Windows
             let loop_val: u32 = 0;
             let ret = unsafe {
@@ -313,11 +372,14 @@ impl SsdpSocket {
                 )
             };
             if ret != 0 {
-                warn!("Failed to set IP_MULTICAST_LOOP on Windows: {}", std::io::Error::last_os_error());
+                warn!(
+                    "Failed to set IP_MULTICAST_LOOP on Windows: {}",
+                    std::io::Error::last_os_error()
+                );
             } else {
                 debug!("Disabled multicast loopback on Windows");
             }
-            
+
             // Set multicast interface if not INADDR_ANY (Windows specific)
             if !bind_addr.is_unspecified() {
                 let addr_bytes = bind_addr.octets();
@@ -332,37 +394,45 @@ impl SsdpSocket {
                     )
                 };
                 if ret != 0 {
-                    warn!("Failed to set IP_MULTICAST_IF on Windows: {}", std::io::Error::last_os_error());
+                    warn!(
+                        "Failed to set IP_MULTICAST_IF on Windows: {}",
+                        std::io::Error::last_os_error()
+                    );
                 } else {
                     debug!("Set multicast interface to {} on Windows", bind_addr);
                 }
             }
-            
+
             debug!("Applied optimized multicast socket configuration on Windows");
         }
-        
+
         Ok(())
     }
-    
+
     /// Send data to a specific address
     pub async fn send_to(&self, data: &[u8], addr: SocketAddr) -> PlatformResult<usize> {
-        self.socket.send_to(data, addr)
+        self.socket
+            .send_to(data, addr)
             .await
             .map_err(|e| PlatformError::NetworkConfig(format!("Failed to send data: {}", e)))
     }
-    
+
     /// Receive data from the socket
     pub async fn recv_from(&self, buf: &mut [u8]) -> PlatformResult<(usize, SocketAddr)> {
-        self.socket.recv_from(buf)
+        self.socket
+            .recv_from(buf)
             .await
             .map_err(|e| PlatformError::NetworkConfig(format!("Failed to receive data: {}", e)))
     }
-    
+
     /// Set socket timeout for receive operations
     pub async fn set_read_timeout(&self, timeout: Option<Duration>) -> PlatformResult<()> {
         // Note: tokio UdpSocket doesn't have a direct timeout method
         // Platform-specific implementations should handle this appropriately
-        debug!("Read timeout set to {:?} (implementation may vary by platform)", timeout);
+        debug!(
+            "Read timeout set to {:?} (implementation may vary by platform)",
+            timeout
+        );
         Ok(())
     }
 }
@@ -389,7 +459,7 @@ impl Default for SsdpConfig {
         Self {
             primary_port: 1900,
             fallback_ports: vec![8080, 8081, 8082, 9090],
-            multicast_address: "239.255.255.250".parse().unwrap(),
+            multicast_address: SSDP_MULTICAST_IP,
             announce_interval: Duration::from_secs(300), // 5 minutes
             max_retries: 3,
             interfaces: Vec::new(),
@@ -402,31 +472,49 @@ impl Default for SsdpConfig {
 pub trait NetworkManager: Send + Sync {
     /// Create an SSDP socket with platform-specific optimizations
     async fn create_ssdp_socket(&self) -> PlatformResult<SsdpSocket>;
-    
+
     /// Create an SSDP socket with custom configuration
-    async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket>;
-    
+    async fn create_ssdp_socket_with_config(
+        &self,
+        config: &SsdpConfig,
+    ) -> PlatformResult<SsdpSocket>;
+
     /// Get all available network interfaces
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>>;
-    
+
     /// Get the best network interface for DLNA operations
     async fn get_primary_interface(&self) -> PlatformResult<NetworkInterface>;
-    
+
     /// Join a multicast group on the specified socket
-    async fn join_multicast_group(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()>;
-    
+    async fn join_multicast_group(
+        &self,
+        socket: &mut SsdpSocket,
+        group: IpAddr,
+        interface: Option<&NetworkInterface>,
+    ) -> PlatformResult<()>;
+
     /// Send multicast data
-    async fn send_multicast(&self, socket: &SsdpSocket, data: &[u8], group: SocketAddr) -> PlatformResult<()>;
-    
+    async fn send_multicast(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        group: SocketAddr,
+    ) -> PlatformResult<()>;
+
     /// Send unicast data as fallback when multicast fails
-    async fn send_unicast_fallback(&self, socket: &SsdpSocket, data: &[u8], interfaces: &[NetworkInterface]) -> PlatformResult<()>;
-    
+    async fn send_unicast_fallback(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        interfaces: &[NetworkInterface],
+    ) -> PlatformResult<()>;
+
     /// Check if a port is available for binding
     async fn is_port_available(&self, port: u16) -> bool;
-    
+
     /// Get platform-specific network diagnostics
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics>;
-    
+
     /// Test multicast functionality
     async fn test_multicast(&self, interface: &NetworkInterface) -> PlatformResult<bool>;
 }
@@ -482,29 +570,35 @@ impl BaseNetworkManager {
             config: SsdpConfig::default(),
         }
     }
-    
+
     /// Create a new base network manager with custom configuration
     pub fn with_config(config: SsdpConfig) -> Self {
         Self { config }
     }
-    
+
     /// Try to bind to a specific port
     async fn try_bind_port(&self, port: u16) -> PlatformResult<UdpSocket> {
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port));
-        UdpSocket::bind(socket_addr)
-            .await
-            .map_err(|e| PlatformError::NetworkConfig(format!("Failed to bind to port {}: {}", port, e)))
+        UdpSocket::bind(socket_addr).await.map_err(|e| {
+            PlatformError::NetworkConfig(format!("Failed to bind to port {}: {}", port, e))
+        })
     }
-    
+
     /// Find an available port from the configuration
     async fn find_available_port(&self) -> PlatformResult<u16> {
         // Try primary port first
-        if self.is_port_available_internal(self.config.primary_port).await {
+        if self
+            .is_port_available_internal(self.config.primary_port)
+            .await
+        {
             return Ok(self.config.primary_port);
         }
-        
-        warn!("Primary port {} is not available, trying fallback ports", self.config.primary_port);
-        
+
+        warn!(
+            "Primary port {} is not available, trying fallback ports",
+            self.config.primary_port
+        );
+
         // Try fallback ports
         for &port in &self.config.fallback_ports {
             if self.is_port_available_internal(port).await {
@@ -512,32 +606,39 @@ impl BaseNetworkManager {
                 return Ok(port);
             }
         }
-        
-        Err(PlatformError::NetworkConfig(
-            format!("No available ports found. Tried primary port {} and fallback ports {:?}", 
-                   self.config.primary_port, self.config.fallback_ports)
-        ))
+
+        Err(PlatformError::NetworkConfig(format!(
+            "No available ports found. Tried primary port {} and fallback ports {:?}",
+            self.config.primary_port, self.config.fallback_ports
+        )))
     }
-    
+
     /// Internal method to check if a port is available
     async fn is_port_available_internal(&self, port: u16) -> bool {
         (self.try_bind_port(port).await).is_ok()
     }
-    
+
     /// Filter interfaces to find suitable ones for DLNA
-    fn filter_suitable_interfaces(&self, interfaces: Vec<NetworkInterface>) -> Vec<NetworkInterface> {
-        interfaces.into_iter()
+    fn filter_suitable_interfaces(
+        &self,
+        interfaces: Vec<NetworkInterface>,
+    ) -> Vec<NetworkInterface> {
+        interfaces
+            .into_iter()
             .filter(|iface| {
                 // Filter out loopback and down interfaces
                 !iface.is_loopback && iface.is_up && iface.supports_multicast
             })
             .collect()
     }
-    
+
     /// Prioritize interfaces by type and reliability
-    fn prioritize_interfaces(&self, mut interfaces: Vec<NetworkInterface>) -> Vec<NetworkInterface> {
+    fn prioritize_interfaces(
+        &self,
+        mut interfaces: Vec<NetworkInterface>,
+    ) -> Vec<NetworkInterface> {
         use crate::platform::InterfaceType;
-        
+
         interfaces.sort_by_key(|iface| match iface.interface_type {
             InterfaceType::Ethernet => 0,
             InterfaceType::WiFi => 1,
@@ -545,7 +646,7 @@ impl BaseNetworkManager {
             InterfaceType::Other(_) => 3,
             InterfaceType::Loopback => 4, // Should be filtered out
         });
-        
+
         interfaces
     }
 }
@@ -555,72 +656,97 @@ impl NetworkManager for BaseNetworkManager {
     async fn create_ssdp_socket(&self) -> PlatformResult<SsdpSocket> {
         self.create_ssdp_socket_with_config(&self.config).await
     }
-    
-    async fn create_ssdp_socket_with_config(&self, config: &SsdpConfig) -> PlatformResult<SsdpSocket> {
+
+    async fn create_ssdp_socket_with_config(
+        &self,
+        config: &SsdpConfig,
+    ) -> PlatformResult<SsdpSocket> {
         let port = if config.interfaces.is_empty() {
             self.find_available_port().await?
         } else {
             config.primary_port
         };
-        
+
         let interfaces = if config.interfaces.is_empty() {
             self.get_local_interfaces().await?
         } else {
             config.interfaces.clone()
         };
-        
+
         let suitable_interfaces = self.filter_suitable_interfaces(interfaces);
         if suitable_interfaces.is_empty() {
-            return Err(PlatformError::NetworkConfig("No suitable network interfaces found".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "No suitable network interfaces found".to_string(),
+            ));
         }
-        
+
         SsdpSocket::new(port, suitable_interfaces).await
     }
-    
+
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         // This is a base implementation that should be overridden by platform-specific implementations
         // For now, return an error indicating platform-specific implementation is needed
         Err(PlatformError::UnsupportedFeature(
-            "get_local_interfaces requires platform-specific implementation".to_string()
+            "get_local_interfaces requires platform-specific implementation".to_string(),
         ))
     }
-    
+
     async fn get_primary_interface(&self) -> PlatformResult<NetworkInterface> {
         let interfaces = self.get_local_interfaces().await?;
         let suitable = self.filter_suitable_interfaces(interfaces);
         let prioritized = self.prioritize_interfaces(suitable);
-        
-        prioritized.into_iter().next()
-            .ok_or_else(|| PlatformError::NetworkConfig("No suitable primary interface found".to_string()))
+
+        prioritized.into_iter().next().ok_or_else(|| {
+            PlatformError::NetworkConfig("No suitable primary interface found".to_string())
+        })
     }
-    
-    async fn join_multicast_group(&self, socket: &mut SsdpSocket, group: IpAddr, interface: Option<&NetworkInterface>) -> PlatformResult<()> {
+
+    async fn join_multicast_group(
+        &self,
+        socket: &mut SsdpSocket,
+        group: IpAddr,
+        interface: Option<&NetworkInterface>,
+    ) -> PlatformResult<()> {
         let local_addr = if let Some(iface) = interface {
             iface.ip_address
         } else {
             // Use the first available interface
-            socket.interfaces.first()
+            socket
+                .interfaces
+                .first()
                 .map(|iface| iface.ip_address)
-                .unwrap_or_else(|| "0.0.0.0".parse().unwrap())
+                .unwrap_or(UNSPECIFIED_IPV4)
         };
-        
+
         socket.enable_multicast(group, local_addr).await
     }
-    
-    async fn send_multicast(&self, socket: &SsdpSocket, data: &[u8], group: SocketAddr) -> PlatformResult<()> {
+
+    async fn send_multicast(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        group: SocketAddr,
+    ) -> PlatformResult<()> {
         if !socket.multicast_enabled {
-            return Err(PlatformError::NetworkConfig("Multicast not enabled on socket".to_string()));
+            return Err(PlatformError::NetworkConfig(
+                "Multicast not enabled on socket".to_string(),
+            ));
         }
-        
+
         socket.send_to(data, group).await?;
         debug!("Sent {} bytes to multicast group {}", data.len(), group);
         Ok(())
     }
-    
-    async fn send_unicast_fallback(&self, socket: &SsdpSocket, data: &[u8], interfaces: &[NetworkInterface]) -> PlatformResult<()> {
+
+    async fn send_unicast_fallback(
+        &self,
+        socket: &SsdpSocket,
+        data: &[u8],
+        interfaces: &[NetworkInterface],
+    ) -> PlatformResult<()> {
         let mut success_count = 0;
         let mut last_error = None;
-        
+
         for interface in interfaces {
             // Calculate broadcast address for the interface's subnet
             // This is a simplified implementation - platform-specific versions should be more sophisticated
@@ -628,7 +754,8 @@ impl NetworkManager for BaseNetworkManager {
                 IpAddr::V4(ipv4) => {
                     // Simple broadcast to .255 - real implementation should calculate proper broadcast address
                     let octets = ipv4.octets();
-                    let broadcast_ip = std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
+                    let broadcast_ip =
+                        std::net::Ipv4Addr::new(octets[0], octets[1], octets[2], 255);
                     SocketAddr::from((broadcast_ip, socket.port))
                 }
                 IpAddr::V6(_) => {
@@ -636,44 +763,52 @@ impl NetworkManager for BaseNetworkManager {
                     continue;
                 }
             };
-            
+
             match socket.send_to(data, broadcast_addr).await {
                 Ok(_) => {
                     success_count += 1;
-                    debug!("Sent unicast fallback to {} via interface {}", broadcast_addr, interface.name);
+                    debug!(
+                        "Sent unicast fallback to {} via interface {}",
+                        broadcast_addr, interface.name
+                    );
                 }
                 Err(e) => {
-                    warn!("Failed to send unicast fallback via interface {}: {}", interface.name, e);
+                    warn!(
+                        "Failed to send unicast fallback via interface {}: {}",
+                        interface.name, e
+                    );
                     last_error = Some(e);
                 }
             }
         }
-        
+
         if success_count > 0 {
             info!("Unicast fallback succeeded on {} interfaces", success_count);
             Ok(())
         } else {
-            Err(last_error.unwrap_or_else(|| 
-                PlatformError::NetworkConfig("No interfaces available for unicast fallback".to_string())
-            ))
+            Err(last_error.unwrap_or_else(|| {
+                PlatformError::NetworkConfig(
+                    "No interfaces available for unicast fallback".to_string(),
+                )
+            }))
         }
     }
-    
+
     async fn is_port_available(&self, port: u16) -> bool {
         self.is_port_available_internal(port).await
     }
-    
+
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {
         let interfaces = self.get_local_interfaces().await.unwrap_or_default();
         let mut interface_status = Vec::new();
         let mut available_ports = Vec::new();
         let mut diagnostic_messages = Vec::new();
-        
+
         // Test interfaces
         for interface in interfaces {
             let multicast_capable = self.test_multicast(&interface).await.unwrap_or(false);
             let reachable = interface.is_up && !interface.is_loopback;
-            
+
             interface_status.push(InterfaceStatus {
                 interface,
                 reachable,
@@ -681,32 +816,37 @@ impl NetworkManager for BaseNetworkManager {
                 error_message: None,
             });
         }
-        
+
         // Test common ports
         for &port in &[1900, 8080, 8081, 8082, 9090] {
             if self.is_port_available(port).await {
                 available_ports.push(port);
             }
         }
-        
+
         // Add diagnostic messages
         if available_ports.is_empty() {
             diagnostic_messages.push("No common ports are available for binding".to_string());
         }
-        
-        if interface_status.iter().all(|status| !status.multicast_capable) {
+
+        if interface_status
+            .iter()
+            .all(|status| !status.multicast_capable)
+        {
             diagnostic_messages.push("No interfaces support multicast".to_string());
         }
-        
+
         Ok(NetworkDiagnostics {
-            multicast_working: interface_status.iter().any(|status| status.multicast_capable),
+            multicast_working: interface_status
+                .iter()
+                .any(|status| status.multicast_capable),
             available_ports,
             interface_status,
             diagnostic_messages,
             firewall_status: None, // Platform-specific implementations should detect this
         })
     }
-    
+
     async fn test_multicast(&self, interface: &NetworkInterface) -> PlatformResult<bool> {
         // Basic test - just check if the interface claims to support multicast
         // Platform-specific implementations should do actual multicast testing
@@ -724,8 +864,12 @@ impl Default for BaseNetworkManager {
 mod tests {
     use super::*;
     use crate::platform::InterfaceType;
-    
-    fn create_test_interface(name: &str, ip: &str, interface_type: InterfaceType) -> NetworkInterface {
+
+    fn create_test_interface(
+        name: &str,
+        ip: &str,
+        interface_type: InterfaceType,
+    ) -> NetworkInterface {
         NetworkInterface {
             name: name.to_string(),
             ip_address: ip.parse().unwrap(),
@@ -735,24 +879,29 @@ mod tests {
             interface_type,
         }
     }
-    
+
     #[test]
     fn test_ssdp_config_default() {
         let config = SsdpConfig::default();
         assert_eq!(config.primary_port, 1900);
         assert!(!config.fallback_ports.is_empty());
-        assert_eq!(config.multicast_address, "239.255.255.250".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            config.multicast_address,
+            "239.255.255.250".parse::<IpAddr>().unwrap()
+        );
     }
-    
+
     #[tokio::test]
     async fn test_ssdp_socket_creation() {
-        let interfaces = vec![
-            create_test_interface("eth0", "192.168.1.100", InterfaceType::Ethernet)
-        ];
-        
+        let interfaces = vec![create_test_interface(
+            "eth0",
+            "192.168.1.100",
+            InterfaceType::Ethernet,
+        )];
+
         // Try to create socket on a high port to avoid permission issues
         let result = SsdpSocket::new(8080, interfaces).await;
-        
+
         // This might fail in test environment, but we can at least verify the structure
         match result {
             Ok(socket) => {
@@ -765,11 +914,11 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_interface_filtering() {
         let manager = BaseNetworkManager::new();
-        
+
         let interfaces = vec![
             NetworkInterface {
                 name: "lo".to_string(),
@@ -789,22 +938,22 @@ mod tests {
                 interface_type: InterfaceType::Ethernet,
             },
         ];
-        
+
         let filtered = manager.filter_suitable_interfaces(interfaces);
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].name, "eth0");
     }
-    
+
     #[test]
     fn test_interface_prioritization() {
         let manager = BaseNetworkManager::new();
-        
+
         let interfaces = vec![
             create_test_interface("vpn0", "10.0.0.1", InterfaceType::VPN),
             create_test_interface("wlan0", "192.168.1.100", InterfaceType::WiFi),
             create_test_interface("eth0", "192.168.1.101", InterfaceType::Ethernet),
         ];
-        
+
         let prioritized = manager.prioritize_interfaces(interfaces);
         assert_eq!(prioritized[0].name, "eth0"); // Ethernet should be first
         assert_eq!(prioritized[1].name, "wlan0"); // WiFi should be second

@@ -20,14 +20,12 @@ pub fn get_macos_version() -> PlatformResult<String> {
     }
 }
 
-
-
 /// Gather macOS-specific metadata
 pub fn gather_macos_metadata() -> PlatformResult<HashMap<String, String>> {
     let mut metadata = HashMap::new();
-    
+
     metadata.insert("platform".to_string(), "macOS".to_string());
-    
+
     // Get system information using system_profiler or sw_vers
     if let Ok(output) = std::process::Command::new("sw_vers").output() {
         if output.status.success() {
@@ -41,18 +39,15 @@ pub fn gather_macos_metadata() -> PlatformResult<HashMap<String, String>> {
             }
         }
     }
-    
+
     // Get hardware information
-    if let Ok(output) = std::process::Command::new("uname")
-        .arg("-m")
-        .output()
-    {
+    if let Ok(output) = std::process::Command::new("uname").arg("-m").output() {
         if output.status.success() {
             let arch = String::from_utf8_lossy(&output.stdout).trim().to_string();
             metadata.insert("hardware_architecture".to_string(), arch);
         }
     }
-    
+
     // Get hostname
     if let Ok(output) = std::process::Command::new("hostname").output() {
         if output.status.success() {
@@ -60,23 +55,21 @@ pub fn gather_macos_metadata() -> PlatformResult<HashMap<String, String>> {
             metadata.insert("hostname".to_string(), hostname);
         }
     }
-    
+
     Ok(metadata)
 }
-
-
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[test]
     fn test_macos_version_detection() {
         let version = get_macos_version();
         assert!(version.is_ok());
         assert!(version.unwrap().contains("macOS"));
     }
-    
+
     #[tokio::test]
     async fn test_macos_interface_detection() {
         use crate::platform::network::macos::MacOSNetworkManager;
@@ -89,7 +82,7 @@ mod tests {
         // It's okay if it falls back.
         // The important part is that it doesn't fail catastrophically.
     }
-    
+
     #[test]
     fn test_macos_metadata() {
         let metadata = gather_macos_metadata();

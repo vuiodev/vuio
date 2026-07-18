@@ -43,6 +43,7 @@ pub fn create_router(state: AppState) -> Router {
 
     Router::new()
         .route("/", get(ui::root_handler))
+        .route("/api/server-info", get(ui::server_info_handler))
         .route("/api/media", get(ui::media_page_handler))
         .route("/description.xml", get(soap::description_handler))
         .route("/ContentDirectory.xml", get(soap::content_directory_scpd))
