@@ -402,7 +402,7 @@ mod filesystem_integration_tests {
 
             // Try junction first (doesn't require admin privileges)
             let junction_dir = temp_dir.path().join("junction_dir");
-            let junction_result = fs::symlink_dir(&original_file.parent().unwrap(), &junction_dir);
+            let junction_result = fs::symlink_dir(original_file.parent().unwrap(), &junction_dir);
 
             if junction_result.is_ok() {
                 let junction_file = junction_dir.join("original_video.mp4");
