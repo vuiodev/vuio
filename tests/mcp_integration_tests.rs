@@ -36,6 +36,7 @@ async fn test_mcp_initialize_and_tools_list() {
         track_number: Some(4),
         year: Some(1971),
         album_artist: None,
+        subtitle_available: false,
         created_at: std::time::SystemTime::now(),
         updated_at: std::time::SystemTime::now(),
     };

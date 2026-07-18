@@ -1,39 +1,58 @@
 // src\web\xml.rs
 use crate::{
-    database::{MediaDirectory, MediaFile},
+    database::{
+        DatabaseReadSession, MediaDirectory, MediaFile, MediaFileQuery, MediaFileView,
+    },
     state::AppState,
 };
+use anyhow::Result;
+use axum::body::Bytes;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 
-/// XML escape helper with enhanced Unicode support
-fn xml_escape(s: &str) -> std::borrow::Cow<'_, str> {
-    fn needs_escaping(c: char) -> bool {
-        matches!(c, '&' | '<' | '>' | '"' | '\'')
-            || ((c as u32) < 32 && c != '\t' && c != '\n' && c != '\r')
-    }
-
-    if !s.chars().any(needs_escaping) {
-        return std::borrow::Cow::Borrowed(s);
-    }
-
-    let mut result = String::with_capacity(s.len() + s.len() / 4);
-    for ch in s.chars() {
+fn write_xml_escaped<W: std::fmt::Write>(target: &mut W, value: &str) -> std::fmt::Result {
+    for ch in value.chars() {
         match ch {
-            '&' => result.push_str("&amp;"),
-            '<' => result.push_str("&lt;"),
-            '>' => result.push_str("&gt;"),
-            '"' => result.push_str("&quot;"),
-            '\'' => result.push_str("&#39;"),
-            // Handle control characters (except tab, newline, carriage return)
+            '&' => target.write_str("&amp;")?,
+            '<' => target.write_str("&lt;")?,
+            '>' => target.write_str("&gt;")?,
+            '"' => target.write_str("&quot;")?,
+            '\'' => target.write_str("&#39;")?,
             c if (c as u32) < 32 && c != '\t' && c != '\n' && c != '\r' => {
-                use std::fmt::Write;
-                let _ = write!(&mut result, "&#{};", c as u32);
+                write!(target, "&#{};", c as u32)?;
             }
-            // Handle other potentially problematic characters
-            c => result.push(c),
+            c => target.write_char(c)?,
         }
     }
+    Ok(())
+}
 
-    std::borrow::Cow::Owned(result)
+struct XmlEscaped<'a>(&'a str);
+
+impl std::fmt::Display for XmlEscaped<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write_xml_escaped(formatter, self.0)
+    }
+}
+
+fn xml_escape(value: &str) -> XmlEscaped<'_> {
+    XmlEscaped(value)
+}
+
+/// Writes a complete DIDL document as the escaped text of SOAP's `<Result>`
+/// directly into the final response buffer.
+struct SoapResultWriter<'a>(&'a mut String);
+
+impl SoapResultWriter<'_> {
+    fn push_str(&mut self, value: &str) {
+        let _ = std::fmt::Write::write_str(self, value);
+    }
+}
+
+impl std::fmt::Write for SoapResultWriter<'_> {
+    fn write_str(&mut self, value: &str) -> std::fmt::Result {
+        write_xml_escaped(self.0, value)
+    }
 }
 
 /// Get the appropriate UPnP class for a given MIME type.
@@ -55,6 +74,247 @@ fn format_duration(duration_seconds: u64) -> String {
     let minutes = (duration_seconds % 3600) / 60;
     let seconds = duration_seconds % 60;
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
+}
+
+#[derive(Clone)]
+pub struct BrowseRenderContext {
+    pub client: crate::web::client::DlnaClientProfile,
+    pub server_ip: String,
+    pub server_port: u16,
+    pub autoplay_enabled: bool,
+    pub update_id: u32,
+    pub bookmarks: HashMap<i64, u32>,
+}
+
+fn write_directory<W: std::fmt::Write>(
+    output: &mut W,
+    object_id: &str,
+    container: &MediaDirectory,
+    client: crate::web::client::DlnaClientProfile,
+) -> std::fmt::Result {
+    let path = container.path.to_string_lossy();
+    let container_id = if path.starts_with("audio/")
+        || path.starts_with("video/")
+        || path.starts_with("image/")
+        || path == "audio"
+        || path == "video"
+        || path == "image"
+    {
+        path.into_owned()
+    } else if path.starts_with('d') && path[1..].chars().all(|c| c.is_ascii_digit()) {
+        format!("{}/{}", object_id.trim_end_matches('/'), path)
+    } else {
+        format!("{}/{}", object_id.trim_end_matches('/'), container.name)
+    };
+    write!(
+        output,
+        r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>"#,
+        xml_escape(&container_id),
+        xml_escape(object_id),
+        xml_escape(&container.name)
+    )?;
+    if matches!(
+        client,
+        crate::web::client::DlnaClientProfile::SonyBdp
+            | crate::web::client::DlnaClientProfile::SonyBravia
+            | crate::web::client::DlnaClientProfile::PlayStation
+    ) {
+        let class = if container_id.contains("audio") || container_id.contains("music") {
+            "A"
+        } else if container_id.contains("image") || container_id.contains("picture") {
+            "P"
+        } else {
+            "V"
+        };
+        write!(output, r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{class}</av:mediaClass>"#)?;
+    }
+    output.write_str("</container>")
+}
+
+fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
+    output: &mut W,
+    object_id: &str,
+    file: &V,
+    context: &BrowseRenderContext,
+) -> std::fmt::Result {
+    let Some(file_id) = file.id().filter(|id| *id > 0) else {
+        return Ok(());
+    };
+    let mime = file.mime_type();
+    let is_radio = mime == "audio/radio";
+    let has_srt = file.subtitle_available();
+    let title = file.title().unwrap_or(file.filename());
+    write!(
+        output,
+        r#"<item id="{}" parentID="{}" restricted="1"><dc:title>{}"#,
+        file_id,
+        xml_escape(object_id),
+        xml_escape(title)
+    )?;
+    if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
+        output.write_char('.')?;
+    }
+    output.write_str("</dc:title>")?;
+
+    if mime.starts_with("audio/") {
+        if let Some(value) = file.artist() {
+            write!(output, "<upnp:artist>{}</upnp:artist>", xml_escape(value))?;
+        }
+        if let Some(value) = file.album() {
+            write!(output, "<upnp:album>{}</upnp:album>", xml_escape(value))?;
+        }
+        if let Some(value) = file.genre() {
+            write!(output, "<upnp:genre>{}</upnp:genre>", xml_escape(value))?;
+        }
+        if let Some(value) = file.track_number() {
+            write!(output, "<upnp:originalTrackNumber>{value}</upnp:originalTrackNumber>")?;
+        }
+        if let Some(value) = file.year() {
+            write!(output, "<dc:date>{value}-01-01</dc:date>")?;
+        }
+        if let Some(value) = file.album_artist() {
+            write!(output, "<upnp:albumArtist>{}</upnp:albumArtist>", xml_escape(value))?;
+        }
+        write!(
+            output,
+            "<upnp:albumArtURI>http://{}:{}/media/{}/cover</upnp:albumArtURI>",
+            context.server_ip, context.server_port, file_id
+        )?;
+    }
+    write!(output, "<upnp:class>{}</upnp:class>", get_upnp_class(mime))?;
+
+    let flags = if context.autoplay_enabled {
+        "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"
+    } else {
+        "DLNA.ORG_OP=11;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=00D00000000000000000000000000000"
+    };
+    let wire_mime = if is_radio {
+        "audio/mpeg"
+    } else {
+        match context.client {
+            crate::web::client::DlnaClientProfile::SamsungTv
+            | crate::web::client::DlnaClientProfile::SamsungTvQ
+                if mime == "video/x-matroska" => "video/x-mkv",
+            crate::web::client::DlnaClientProfile::SamsungTv
+            | crate::web::client::DlnaClientProfile::SamsungTvQ
+                if mime == "video/x-msvideo" => "video/mpeg",
+            crate::web::client::DlnaClientProfile::SonyBdp
+                if mime == "video/x-matroska" || mime == "video/mpeg" => "video/divx",
+            crate::web::client::DlnaClientProfile::Xbox if mime == "video/x-msvideo" => "video/avi",
+            _ => mime,
+        }
+    };
+    write!(
+        output,
+        r#"<res protocolInfo="http-get:*:{wire_mime}:{flags}" size="{}""#,
+        if is_radio { 0 } else { file.size() }
+    )?;
+    if !is_radio && (mime.starts_with("video/") || mime.starts_with("audio/")) {
+        if let Some(seconds) = file.duration_secs().map(|value| value as u64) {
+            write!(
+                output,
+                r#" duration="{:02}:{:02}:{:02}""#,
+                seconds / 3600,
+                (seconds % 3600) / 60,
+                seconds % 60
+            )?;
+        }
+    }
+    if matches!(
+        context.client,
+        crate::web::client::DlnaClientProfile::LgTv
+            | crate::web::client::DlnaClientProfile::PanasonicTv
+    ) && has_srt
+    {
+        write!(output, r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#, context.server_ip, context.server_port, file_id)?;
+    }
+    write!(output, ">http://{}:{}/media/{}</res>", context.server_ip, context.server_port, file_id)?;
+    if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
+        write!(output, r#"<res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#, context.server_ip, context.server_port, file_id)?;
+    }
+    if matches!(context.client, crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ) && has_srt {
+        write!(output, r#"<sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#, context.server_ip, context.server_port, file_id)?;
+    }
+    if matches!(context.client, crate::web::client::DlnaClientProfile::SamsungTv | crate::web::client::DlnaClientProfile::SamsungTvQ) {
+        let mut bookmark = context.bookmarks.get(&file_id).copied().unwrap_or(0);
+        if context.client == crate::web::client::DlnaClientProfile::SamsungTvQ {
+            bookmark = bookmark.saturating_mul(1000);
+        }
+        write!(output, "<sec:dcmInfo>CREATIONDATE=0,FOLDER={},BM={bookmark}</sec:dcmInfo>", xml_escape(file.filename()))?;
+    }
+    output.write_str("</item>")
+}
+
+pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
+    session: &mut S,
+    canonical_parent: &str,
+    mime_family: &str,
+    object_id: &str,
+    starting_index: usize,
+    requested_count: usize,
+    context: BrowseRenderContext,
+) -> Result<Bytes> {
+    let mut directories = session.direct_subdirectories(
+        canonical_parent,
+        (!mime_family.is_empty()).then_some(mime_family),
+    )?;
+    directories.sort_by_cached_key(|directory| directory.name.to_lowercase());
+    let directory_count = directories.len();
+    let selected_directories = directories
+        .iter()
+        .skip(starting_index)
+        .take(requested_count)
+        .collect::<Vec<_>>();
+    let file_offset = starting_index.saturating_sub(directory_count);
+    let file_limit = requested_count.saturating_sub(selected_directories.len());
+
+    let mut response = String::with_capacity(750 + requested_count.saturating_mul(500));
+    response.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#);
+    let mut result = SoapResultWriter(&mut response);
+    result.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
+    for directory in &selected_directories {
+        write_directory(&mut result, object_id, directory, context.client)?;
+    }
+    let query = MediaFileQuery::Directory {
+        path: canonical_parent.to_owned(),
+        mime_family: (!mime_family.is_empty()).then(|| mime_family.to_owned()),
+    };
+    let summary = session.visit_files(&query, file_offset, file_limit, |file| {
+        write_media_view(&mut result, object_id, &file, &context)
+            .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))
+    })?;
+    result.push_str("</DIDL-Lite>");
+    drop(result);
+    let returned = selected_directories.len() + summary.visited;
+    let total = directory_count + summary.matched;
+    write!(&mut response, "</Result><NumberReturned>{returned}</NumberReturned><TotalMatches>{total}</TotalMatches><UpdateID>{}</UpdateID></u:BrowseResponse></s:Body></s:Envelope>", context.update_id)?;
+    Ok(Bytes::from(response))
+}
+
+pub fn generate_indexed_items_response<S: DatabaseReadSession>(
+    session: &mut S,
+    query: MediaFileQuery,
+    object_id: &str,
+    starting_index: usize,
+    requested_count: usize,
+    context: BrowseRenderContext,
+) -> Result<Bytes> {
+    let mut response = String::with_capacity(750 + requested_count.saturating_mul(500));
+    response.push_str(r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#);
+    let mut result = SoapResultWriter(&mut response);
+    result.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
+    let summary = session.visit_files(&query, starting_index, requested_count, |file| {
+        write_media_view(&mut result, object_id, &file, &context)
+            .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))
+    })?;
+    result.push_str("</DIDL-Lite>");
+    drop(result);
+    write!(&mut response, "</Result><NumberReturned>{}</NumberReturned><TotalMatches>{}</TotalMatches><UpdateID>{}</UpdateID></u:BrowseResponse></s:Body></s:Envelope>", summary.visited, summary.matched, context.update_id)?;
+    Ok(Bytes::from(response))
 }
 
 pub async fn generate_description_xml(state: &AppState) -> String {
@@ -248,9 +508,18 @@ pub async fn generate_browse_response_with_totals(
         client
     );
 
-    let estimated_capacity = 250 + subdirectories.len() * 250 + files.len() * 500;
-    let mut didl = String::with_capacity(estimated_capacity);
-    didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/">"#);
+    let estimated_capacity = 750 + subdirectories.len() * 250 + files.len() * 500;
+    let mut final_response = String::with_capacity(estimated_capacity);
+    final_response.push_str(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+            <Result>"#,
+    );
+    let result_start = final_response.len();
+    let mut didl = SoapResultWriter(&mut final_response);
+    didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
 
     let number_returned = if object_id == "0" {
         // Root directory: show containers for media types
@@ -359,7 +628,7 @@ pub async fn generate_browse_response_with_totals(
 
             let upnp_class = get_upnp_class(&file.mime_type);
 
-            let has_srt = file.path.with_extension("srt").exists();
+            let has_srt = file.subtitle_available;
             let mut title = file.title.clone().unwrap_or_else(|| file.filename.clone());
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
                 title.push('.');
@@ -571,6 +840,7 @@ pub async fn generate_browse_response_with_totals(
     };
 
     didl.push_str("</DIDL-Lite>");
+    drop(didl);
     let final_total_matches = total_matches.unwrap_or(number_returned);
 
     let update_id = state
@@ -580,26 +850,20 @@ pub async fn generate_browse_response_with_totals(
     debug!(
         "Browse response completed: {} items, DIDL size: {} bytes, total matches: {}",
         number_returned,
-        didl.len(),
+        final_response.len() - result_start,
         final_total_matches
     );
 
-    let final_response = format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
-    <s:Body>
-        <u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
-            <Result>{}</Result>
+    let _ = write!(
+        &mut final_response,
+        r#"</Result>
             <NumberReturned>{}</NumberReturned>
             <TotalMatches>{}</TotalMatches>
             <UpdateID>{}</UpdateID>
         </u:BrowseResponse>
     </s:Body>
 </s:Envelope>"#,
-        xml_escape(&didl),
-        number_returned,
-        final_total_matches,
-        update_id
+        number_returned, final_total_matches, update_id
     );
 
     debug!("Final XML response size: {} bytes", final_response.len());

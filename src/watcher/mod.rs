@@ -29,6 +29,25 @@ pub enum FileSystemEvent {
     Renamed { from: PathBuf, to: PathBuf },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaRenameKind {
+    Ignore,
+    Create,
+    Remove,
+    Replace,
+}
+
+/// Classify a file rename using both endpoints. Any unindexed non-media staging
+/// name promoted to any supported media extension is treated as a creation.
+pub fn classify_media_rename(from: &Path, to: &Path) -> MediaRenameKind {
+    match (is_media_file(from), is_media_file(to)) {
+        (false, false) => MediaRenameKind::Ignore,
+        (false, true) => MediaRenameKind::Create,
+        (true, false) => MediaRenameKind::Remove,
+        (true, true) => MediaRenameKind::Replace,
+    }
+}
+
 /// Trait for cross-platform file system watching
 #[async_trait]
 pub trait FileSystemWatcher: Send + Sync {
@@ -99,6 +118,14 @@ fn is_media_file(path: &Path) -> bool {
     false
 }
 
+fn is_watched_file(path: &Path) -> bool {
+    is_media_file(path)
+        || path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case("srt"))
+}
+
 /// Convert notify events to our FileSystemEvent enum (helper)
 fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
     let mut fs_events = Vec::with_capacity(events.len()); // Pre-allocate capacity
@@ -114,7 +141,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                             path.display()
                         );
                         fs_events.push(FileSystemEvent::Created(path.clone()));
-                    } else if is_media_file(path) {
+                    } else if is_watched_file(path) {
                         debug!(
                             "Media file created (detected by watcher): {}",
                             path.display()
@@ -140,7 +167,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                         } else {
                             for path in &event.event.paths {
                                 if path.exists() {
-                                    if path.is_dir() || is_media_file(path) {
+                                    if path.is_dir() || is_watched_file(path) {
                                         fs_events.push(FileSystemEvent::Created(path.clone()));
                                     }
                                 } else {
@@ -158,7 +185,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                             .event
                             .paths
                             .iter()
-                            .filter(|path| is_media_file(path))
+                            .filter(|path| is_watched_file(path))
                             .collect();
 
                         for path in media_paths {
@@ -188,7 +215,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                     .event
                     .paths
                     .iter()
-                    .filter(|path| is_media_file(path))
+                    .filter(|path| is_watched_file(path))
                     .collect();
 
                 for path in media_paths {
@@ -202,7 +229,7 @@ fn convert_watcher_events(events: Vec<DebouncedEvent>) -> Vec<FileSystemEvent> {
                     .event
                     .paths
                     .iter()
-                    .filter(|path| is_media_file(path))
+                    .filter(|path| is_watched_file(path))
                     .collect();
 
                 for path in media_paths {
@@ -282,7 +309,7 @@ impl CrossPlatformWatcher {
                                     // Include media files
                                     if let Some(extension) = path.extension() {
                                         if let Some(ext_str) = extension.to_str() {
-                                            if crate::platform::filesystem::is_supported_media_extension(ext_str) {
+                                            if crate::platform::filesystem::is_supported_media_extension(ext_str) || ext_str.eq_ignore_ascii_case("srt") {
                                                 debug!("Including media file event for path: {}", path.display());
                                                 return true;
                                             }
@@ -555,6 +582,44 @@ mod tests {
         assert!(watcher.is_media_file(Path::new("test.jpg")));
         assert!(!watcher.is_media_file(Path::new("test.txt")));
         assert!(!watcher.is_media_file(Path::new("test")));
+    }
+
+    #[test]
+    fn classifies_media_rename_transitions() {
+        for extension in crate::platform::filesystem::get_supported_extensions() {
+            let completed = format!("download.{extension}");
+            assert_eq!(
+                classify_media_rename(Path::new("download.staging"), Path::new(&completed)),
+                MediaRenameKind::Create,
+                "staging -> {completed}"
+            );
+        }
+
+        for (staging, completed) in [
+            ("movie.crdownload", "movie.mkv"),
+            ("track.download", "track.flac"),
+            ("image.tmp", "image.webp"),
+            ("download", "clip.webm"),
+            ("archive.partial", "recording.MP4"),
+        ] {
+            assert_eq!(
+                classify_media_rename(Path::new(staging), Path::new(completed)),
+                MediaRenameKind::Create,
+                "{staging} -> {completed}"
+            );
+        }
+        assert_eq!(
+            classify_media_rename(Path::new("old.mp4"), Path::new("new.mp4")),
+            MediaRenameKind::Replace
+        );
+        assert_eq!(
+            classify_media_rename(Path::new("movie.mp4"), Path::new("movie.tmp")),
+            MediaRenameKind::Remove
+        );
+        assert_eq!(
+            classify_media_rename(Path::new("old.tmp"), Path::new("new.tmp")),
+            MediaRenameKind::Ignore
+        );
     }
 
     #[tokio::test]

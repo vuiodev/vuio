@@ -1,6 +1,6 @@
 [package]
 name = "vuio"
-version = "0.0.32"
+version = "0.0.33"
 edition = "2021"
 authors = ["vyrti"]
 description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
@@ -26,13 +26,13 @@ path = "src/lib.rs"
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1.52", features = ["rt", "net", "fs", "time", "sync", "macros", "io-util", "signal", "process"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "net", "fs", "time", "sync", "macros", "io-util", "signal", "process"] }
 serde = { version = "1.0", features = ["derive"] }
-bitcode = { version = "0.6", features = ["serde"] }
-uuid = { version = "1.23", features = ["v4"] }
+uuid = { version = "1.24", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
 thiserror = "2.0"
 anyhow = "1.0"
+rkyv = { version = "0.8", features = ["bytecheck", "unaligned", "little_endian", "pointer_width_32"] }
 clap = { version = "4.6", features = ["derive"] }
 async-trait = "0.1"
 tracing = "0.1"

@@ -1,7 +1,11 @@
 use anyhow::Context;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
-use std::{net::SocketAddr, path::PathBuf, sync::Arc};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tracing::{debug, error, info, warn};
 use vuio::{
     config::{
@@ -16,7 +20,10 @@ use vuio::{
     },
     ssdp,
     state::AppState,
-    watcher::{CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher},
+    watcher::{
+        classify_media_rename, CrossPlatformWatcher, FileSystemEvent, FileSystemWatcher,
+        MediaRenameKind,
+    },
     web,
 };
 
@@ -193,7 +200,7 @@ fn parse_args_once() -> anyhow::Result<CommandLineArgs> {
     })
 }
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Parse command line arguments once and get configuration overrides
     let cli_args = parse_args_once().context("Failed to parse command line arguments")?;
@@ -240,7 +247,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize database manager
     let database = match initialize_database(&config).await {
-        Ok(db) => Arc::new(db) as Arc<dyn DatabaseManager>,
+        Ok(db) => Arc::new(db),
         Err(e) => {
             error!("Failed to initialize database: {}", e);
             return Err(e);
@@ -255,18 +262,6 @@ async fn main() -> anyhow::Result<()> {
             return Err(e);
         }
     };
-
-    // Perform initial media scan (database only, no in-memory cache)
-    if let Err(e) = perform_initial_media_scan(&config, &database).await {
-        error!("Failed to perform initial media scan: {}", e);
-        return Err(e);
-    }
-
-    // Perform initial playlist file scan (after media scan so referenced files exist)
-    if let Err(e) = perform_initial_playlist_scan(&config, &database).await {
-        // Log warning but don't fail startup - playlists are not critical
-        warn!("Failed to scan playlist files: {}", e);
-    }
 
     // Create shared application state
     let filesystem_manager: Arc<dyn vuio::platform::filesystem::FileSystemManager> =
@@ -310,6 +305,20 @@ async fn main() -> anyhow::Result<()> {
     if let Err(e) = start_file_monitoring(file_watcher.clone(), app_state.clone()).await {
         warn!("Failed to start file system monitoring: {}", e);
         warn!("Continuing without real-time file monitoring");
+    }
+
+    // Scan only after the watcher is active. This closes the startup blind
+    // window: a download that lands while the scan is running is either found
+    // by the scan or delivered by the watcher (and duplicate upserts are safe).
+    if let Err(e) = perform_initial_media_scan(&config, &database).await {
+        error!("Failed to perform initial media scan: {}", e);
+        return Err(e);
+    }
+
+    // Perform initial playlist file scan after media scan so referenced files exist.
+    if let Err(e) = perform_initial_playlist_scan(&config, &database).await {
+        // Log warning but don't fail startup - playlists are not critical
+        warn!("Failed to scan playlist files: {}", e);
     }
 
     // Start runtime platform adaptation services
@@ -809,26 +818,28 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
     let db_path = config.get_database_path();
     // Change extension from .db to .redb
     let db_path = db_path.with_extension("redb");
+    let cache_size_mb = config.database.redb_cache_mb;
     info!("Database path: {}", db_path.display());
 
     // Create Redb database manager
-    let mut database = match database::redb::RedbDatabase::new(db_path.clone()).await {
-        Ok(database) => database,
-        Err(error) => {
-            error!("Failed to open ReDB database: {}", error);
-            preserve_failed_database(&db_path)?;
-            database::redb::RedbDatabase::new(db_path.clone())
-                .await
-                .context("Failed to create replacement ReDB database")?
-        }
-    };
+    let mut database =
+        match database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb).await {
+            Ok(database) => database,
+            Err(error) => {
+                error!("Failed to open ReDB database: {}", error);
+                preserve_failed_database(&db_path)?;
+                database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
+                    .await
+                    .context("Failed to create replacement ReDB database")?
+            }
+        };
 
     // Initialize database schema
     if let Err(error) = database.initialize().await {
         error!("Failed to initialize ReDB schema: {}", error);
         drop(database);
         preserve_failed_database(&db_path)?;
-        database = database::redb::RedbDatabase::new(db_path.clone())
+        database = database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
             .await
             .context("Failed to create replacement ReDB database")?;
         database
@@ -845,7 +856,7 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
             error!("Database index rebuild failed: {}", repair_error);
             drop(database);
             preserve_failed_database(&db_path)?;
-            database = database::redb::RedbDatabase::new(db_path.clone())
+            database = database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
                 .await
                 .context("Failed to create replacement ReDB database")?;
             database.initialize().await?;
@@ -904,7 +915,7 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
 /// Initialize file system watcher for real-time media monitoring
 async fn initialize_file_watcher(
     config: &AppConfig,
-    _database: Arc<dyn DatabaseManager>,
+    _database: Arc<database::redb::RedbDatabase>,
 ) -> anyhow::Result<CrossPlatformWatcher> {
     info!("Initializing file system watcher...");
 
@@ -947,7 +958,7 @@ async fn initialize_file_watcher(
 /// 1. Stream all files and collect paths to delete (read lock)
 /// 2. Drop stream, then bulk delete (write lock)
 async fn validate_and_cleanup_deleted_files(
-    database: Arc<dyn DatabaseManager>,
+    database: Arc<database::redb::RedbDatabase>,
     monitored_roots: &[PathBuf],
 ) -> anyhow::Result<usize> {
     use futures_util::StreamExt;
@@ -1004,7 +1015,7 @@ async fn validate_and_cleanup_deleted_files(
 }
 
 async fn hide_unavailable_media_roots(
-    database: &Arc<dyn DatabaseManager>,
+    database: &Arc<database::redb::RedbDatabase>,
     roots: &[PathBuf],
 ) -> anyhow::Result<usize> {
     let mut removed = 0;
@@ -1021,7 +1032,7 @@ async fn hide_unavailable_media_roots(
 /// Perform initial media scan, using database cache when possible
 async fn perform_initial_media_scan(
     config: &AppConfig,
-    database: &Arc<dyn DatabaseManager>,
+    database: &Arc<database::redb::RedbDatabase>,
 ) -> anyhow::Result<()> {
     info!("Performing initial media scan...");
 
@@ -1127,7 +1138,7 @@ async fn perform_initial_media_scan(
 /// Perform initial playlist file scan
 async fn perform_initial_playlist_scan(
     config: &AppConfig,
-    database: &Arc<dyn DatabaseManager>,
+    database: &Arc<database::redb::RedbDatabase>,
 ) -> anyhow::Result<()> {
     if !config.media.scan_playlists {
         info!("Playlist scanning disabled in configuration");
@@ -1265,12 +1276,14 @@ async fn start_file_monitoring(
                     }
                 }
                 _ = reconciliation.tick() => {
-                    let configured_directories = app_state_clone
+                    let configured_roots = app_state_clone
                         .media_directories
                         .read()
                         .await
+                        .clone();
+                    let configured_directories = configured_roots
                         .iter()
-                        .map(|directory| PathBuf::from(&directory.path))
+                        .map(|root| PathBuf::from(&root.path))
                         .collect::<Vec<_>>();
                     match hide_unavailable_media_roots(
                         &app_state_clone.database,
@@ -1290,22 +1303,43 @@ async fn start_file_monitoring(
                         if root.is_dir() && !watcher_clone.is_watching(root).await {
                             if let Err(error) = watcher_clone.add_watch_path(root).await {
                                 error!("Failed to restore watch for {}: {}", root.display(), error);
-                            } else {
-                                let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                                if scanner.scan_directory_recursive(root).await.is_ok() {
-                                    increment_content_update_id(&app_state_clone).await;
-                                }
                             }
                         }
                     }
-                    for root in watcher_clone.take_dirty_roots() {
-                        if root.is_dir() {
-                            let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                            match scanner.scan_directory_recursive(&root).await {
-                                Ok(result) if result.total_changes() > 0 => increment_content_update_id(&app_state_clone).await,
-                                Ok(_) => {}
-                                Err(error) => error!("Dirty-root reconciliation failed for {}: {}", root.display(), error),
+
+                    let dirty_roots = watcher_clone.take_dirty_roots();
+                    if !dirty_roots.is_empty() {
+                        warn!(
+                            "Reconciling after dropped watcher events in {} root(s)",
+                            dirty_roots.len()
+                        );
+                    }
+
+                    // Watchers are advisory: some network filesystems and backend
+                    // overflows can lose every event for a download. Sweep every
+                    // configured root so any supported file is eventually found
+                    // even when no Create/Rename/Modify event reaches the app.
+                    let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
+                    for root in &configured_roots {
+                        let path = PathBuf::from(&root.path);
+                        if !path.is_dir() {
+                            continue;
+                        }
+                        let result = if root.recursive {
+                            scanner.scan_directory_recursive(&path).await
+                        } else {
+                            scanner.scan_directory(&path).await
+                        };
+                        match result {
+                            Ok(result) if result.total_changes() > 0 => {
+                                increment_content_update_id(&app_state_clone).await
                             }
+                            Ok(_) => {}
+                            Err(error) => error!(
+                                "Periodic media discovery failed for {}: {}",
+                                path.display(),
+                                error
+                            ),
                         }
                     }
                     match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
@@ -1418,7 +1452,65 @@ fn get_app_stats() -> &'static AtomicAppStats {
     APP_STATS.get_or_init(|| AtomicAppStats::new())
 }
 
-/// Handle individual file system events with ReDB bulk operations
+fn is_srt_path(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("srt"))
+}
+
+async fn update_subtitle_index(
+    subtitle_path: &std::path::Path,
+    available: bool,
+    app_state: &AppState,
+) -> anyhow::Result<bool> {
+    let Some(parent) = subtitle_path.parent() else {
+        return Ok(false);
+    };
+    let subtitle_stem = subtitle_path.file_stem();
+    let mut changed = Vec::new();
+    for mut file in app_state.database.get_files_in_directory(parent).await? {
+        if file.path.file_stem() == subtitle_stem && file.subtitle_available != available {
+            file.subtitle_available = available;
+            file.updated_at = SystemTime::now();
+            changed.push(file);
+        }
+    }
+    if changed.is_empty() {
+        return Ok(false);
+    }
+    app_state.database.bulk_update_media_files(&changed).await?;
+    increment_content_update_id(app_state).await;
+    Ok(true)
+}
+
+fn is_supported_media_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(crate::platform::filesystem::is_supported_media_extension)
+}
+
+/// Upsert a supported media path from its current filesystem metadata.
+async fn index_media_file_path<D: DatabaseManager + ?Sized>(
+    database: &D,
+    path: &Path,
+) -> anyhow::Result<i64> {
+    let metadata = tokio::fs::metadata(path).await?;
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or("");
+    let mime_type = crate::platform::filesystem::get_mime_type_for_extension(extension);
+    let mut media_file = database::MediaFile::new(path.to_path_buf(), metadata.len(), mime_type);
+    media_file.modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+
+    database
+        .bulk_store_media_files(&[media_file])
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("media upsert returned no ID for {}", path.display()))
+}
+
 async fn handle_file_system_event(
     event: FileSystemEvent,
     app_state: &AppState,
@@ -1431,6 +1523,10 @@ async fn handle_file_system_event(
 
     match event {
         FileSystemEvent::Created(path) => {
+            if is_srt_path(&path) {
+                update_subtitle_index(&path, true, app_state).await?;
+                return Ok(());
+            }
             // Check if this is a directory or a file
             if path.is_dir() {
                 info!("Directory created: {}", path.display());
@@ -1467,37 +1563,12 @@ async fn handle_file_system_event(
                 // Handle individual media file creation using bulk operations (single-item batch)
                 info!("Media file created: {}", path.display());
 
-                // Check if it's actually a media file
-                let is_media_file = if let Some(extension) = path.extension() {
-                    if let Some(ext_str) = extension.to_str() {
-                        crate::platform::filesystem::is_supported_media_extension(ext_str)
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
-
-                if !is_media_file {
+                if !is_supported_media_path(&path) {
                     debug!("Not a supported media file, ignoring: {}", path.display());
                     return Ok(());
                 }
 
-                // Create MediaFile record
-                let metadata = tokio::fs::metadata(&path).await?;
-                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
-                let mut media_file =
-                    database::MediaFile::new(path.clone(), metadata.len(), mime_type);
-                media_file.modified = metadata.modified().unwrap_or(std::time::SystemTime::now());
-
-                // Store in database using ReDB bulk operation (single-item batch for atomic consistency)
-                let file_ids = database
-                    .bulk_store_media_files(&[media_file.clone()])
-                    .await?;
-                if let Some(file_id) = file_ids.first() {
-                    media_file.id = Some(*file_id);
-                }
+                index_media_file_path(database.as_ref(), &path).await?;
 
                 // Record atomic statistics
                 stats.record_files_processed(1);
@@ -1510,9 +1581,20 @@ async fn handle_file_system_event(
         }
 
         FileSystemEvent::Modified(path) => {
+            if is_srt_path(&path) {
+                update_subtitle_index(&path, true, app_state).await?;
+                return Ok(());
+            }
             info!("Media file modified: {}", path.display());
 
-            // Update database record using ReDB bulk operation
+            if !is_supported_media_path(&path) {
+                debug!("Not a supported media file, ignoring: {}", path.display());
+                return Ok(());
+            }
+
+            // A downloader or platform backend may report only Modify/CloseWrite,
+            // without a preceding Create. Upsert missing paths so those event
+            // shapes cannot leave a completed download absent from the database.
             if let Some(mut existing_file) = database.get_file_by_path(&path).await? {
                 let metadata = tokio::fs::metadata(&path).await?;
                 existing_file.size = metadata.len();
@@ -1530,10 +1612,27 @@ async fn handle_file_system_event(
 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state).await;
+            } else if path.is_file() {
+                index_media_file_path(database.as_ref(), &path).await?;
+                stats.record_files_processed(1);
+                info!(
+                    "Indexed media file first observed through a modification event: {}",
+                    path.display()
+                );
+                increment_content_update_id(app_state).await;
+            } else {
+                debug!(
+                    "Modified media path disappeared before it could be indexed: {}",
+                    path.display()
+                );
             }
         }
 
         FileSystemEvent::Deleted { path, is_directory } => {
+            if is_srt_path(&path) {
+                update_subtitle_index(&path, false, app_state).await?;
+                return Ok(());
+            }
             info!("Path deleted: {}", path.display());
             let derived_removed = database.remove_derived_content_by_source(&path).await?;
             let summary = database
@@ -1559,6 +1658,15 @@ async fn handle_file_system_event(
         }
 
         FileSystemEvent::Renamed { from, to } => {
+            if is_srt_path(&from) || is_srt_path(&to) {
+                if is_srt_path(&from) {
+                    update_subtitle_index(&from, false, app_state).await?;
+                }
+                if is_srt_path(&to) {
+                    update_subtitle_index(&to, true, app_state).await?;
+                }
+                return Ok(());
+            }
             info!("Path renamed: {} -> {}", from.display(), to.display());
 
             // Check if the destination is a directory or file
@@ -1611,55 +1719,58 @@ async fn handle_file_system_event(
                     }
                 }
             } else {
-                // Handle individual file rename using ReDB bulk operations
+                // Handle individual file renames based on both endpoints. Any
+                // non-media staging name promoted to any supported media type is
+                // a create because the staging source is intentionally unindexed.
                 info!("File renamed: {} -> {}", from.display(), to.display());
 
-                // Check if it's a media file
-                let is_media_file = if let Some(extension) = to.extension() {
-                    if let Some(ext_str) = extension.to_str() {
-                        crate::platform::filesystem::is_supported_media_extension(ext_str)
-                    } else {
-                        false
+                match classify_media_rename(&from, &to) {
+                    MediaRenameKind::Ignore => {
+                        debug!(
+                            "Rename has no supported media endpoint, ignoring: {} -> {}",
+                            from.display(),
+                            to.display()
+                        );
                     }
-                } else {
-                    false
-                };
-
-                if !is_media_file {
-                    debug!(
-                        "Renamed file is not a media file, ignoring: {}",
-                        to.display()
-                    );
-                    return Ok(());
-                }
-
-                // Remove old file and add new file using ReDB bulk operations for atomic consistency
-                let removed_count = database.bulk_remove_media_files(&[from.clone()]).await?;
-
-                if removed_count > 0 {
-                    // Create MediaFile record for new location
-                    let metadata = tokio::fs::metadata(&to).await?;
-                    let ext = to.extension().and_then(|e| e.to_str()).unwrap_or("");
-                    let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
-                    let media_file =
-                        database::MediaFile::new(to.clone(), metadata.len(), mime_type);
-
-                    // Store in database using ReDB bulk operation
-                    let _file_ids = database.bulk_store_media_files(&[media_file]).await?;
-
-                    info!(
-                        "Renamed media file using ReDB atomic operations: {} -> {}",
-                        from.display(),
-                        to.display()
-                    );
-
-                    // Increment update ID to notify DLNA clients
-                    increment_content_update_id(app_state).await;
-                } else {
-                    warn!(
-                        "Original file not found in database for rename: {}",
-                        from.display()
-                    );
+                    MediaRenameKind::Create => {
+                        index_media_file_path(database.as_ref(), &to).await?;
+                        stats.record_files_processed(1);
+                        info!(
+                            "Indexed completed media file after download rename: {}",
+                            to.display()
+                        );
+                        increment_content_update_id(app_state).await;
+                    }
+                    MediaRenameKind::Remove => {
+                        let removed = database.bulk_remove_media_files(&[from.clone()]).await?;
+                        if removed > 0 {
+                            stats.record_files_processed(removed as u64);
+                            info!(
+                                "Removed media file renamed to non-media path: {}",
+                                from.display()
+                            );
+                            increment_content_update_id(app_state).await;
+                        } else {
+                            debug!("Media rename source was already absent: {}", from.display());
+                        }
+                    }
+                    MediaRenameKind::Replace => {
+                        let removed = database.bulk_remove_media_files(&[from.clone()]).await?;
+                        if removed == 0 {
+                            debug!(
+                                "Media rename source was absent; destination will still be indexed: {}",
+                                from.display()
+                            );
+                        }
+                        index_media_file_path(database.as_ref(), &to).await?;
+                        stats.record_files_processed(1);
+                        info!(
+                            "Renamed media file: {} -> {}",
+                            from.display(),
+                            to.display()
+                        );
+                        increment_content_update_id(app_state).await;
+                    }
                 }
             }
         }
@@ -1669,7 +1780,9 @@ async fn handle_file_system_event(
 }
 
 /// Perform graceful shutdown with ReDB atomic state persistence
-async fn perform_graceful_shutdown(database: &Arc<dyn DatabaseManager>) -> anyhow::Result<()> {
+async fn perform_graceful_shutdown(
+    database: &Arc<database::redb::RedbDatabase>,
+) -> anyhow::Result<()> {
     info!("Performing graceful shutdown with atomic state persistence...");
 
     let stats = get_app_stats();
@@ -1715,7 +1828,7 @@ async fn perform_graceful_shutdown(database: &Arc<dyn DatabaseManager>) -> anyho
 
 /// Start atomic application statistics monitoring
 async fn start_atomic_monitoring(
-    database: Arc<dyn DatabaseManager>,
+    database: Arc<database::redb::RedbDatabase>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     info!("Starting atomic application statistics monitoring...");
 
@@ -1848,4 +1961,48 @@ async fn start_http_server_task(
     });
 
     Ok(handle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn downloaded_media_paths_are_indexed_and_persisted() {
+        let temp = tempdir().unwrap();
+        let downloads = [
+            ("movie.mkv", "video/x-matroska"),
+            ("track.flac", "audio/flac"),
+            ("cover.webp", "image/webp"),
+        ];
+
+        let database_path = temp.path().join("media.redb");
+        let database = database::redb::RedbDatabase::new(database_path.clone())
+            .await
+            .unwrap();
+        database.initialize().await.unwrap();
+        for (filename, _) in downloads {
+            let completed = temp.path().join(filename);
+            tokio::fs::write(&completed, b"media").await.unwrap();
+            index_media_file_path(&database, &completed).await.unwrap();
+        }
+        drop(database);
+
+        let reopened = database::redb::RedbDatabase::new(database_path)
+            .await
+            .unwrap();
+        reopened.initialize().await.unwrap();
+        for (filename, mime_type) in downloads {
+            let completed = temp.path().join(filename);
+            let indexed = reopened
+                .get_file_by_path(&completed)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(indexed.path, completed.canonicalize().unwrap());
+            assert_eq!(indexed.size, 5);
+            assert_eq!(indexed.mime_type, mime_type);
+        }
+    }
 }

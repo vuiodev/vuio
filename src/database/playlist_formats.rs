@@ -59,13 +59,30 @@ impl PlaylistFileManager {
         });
 
         let base_dir = file_path.parent().unwrap_or_else(|| Path::new(""));
+        let source_path = crate::platform::filesystem::create_platform_path_normalizer()
+            .to_canonical(file_path)
+            .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
 
         let playlist_id = match format {
             PlaylistFormat::M3U => {
-                Self::import_m3u(database, &file_content, &playlist_name, base_dir).await
+                Self::import_m3u(
+                    database,
+                    &file_content,
+                    &playlist_name,
+                    base_dir,
+                    &source_path,
+                )
+                .await
             }
             PlaylistFormat::PLS => {
-                Self::import_pls(database, &file_content, &playlist_name, base_dir).await
+                Self::import_pls(
+                    database,
+                    &file_content,
+                    &playlist_name,
+                    base_dir,
+                    &source_path,
+                )
+                .await
             }
         }?;
         database.set_playlist_source(playlist_id, file_path).await?;
@@ -98,6 +115,7 @@ impl PlaylistFileManager {
         content: &str,
         playlist_name: &str,
         base_dir: &Path,
+        source_path: &str,
     ) -> Result<i64> {
         debug!("Importing M3U playlist: {}", playlist_name);
 
@@ -124,13 +142,11 @@ impl PlaylistFileManager {
                 i += 1;
                 if i < lines.len() {
                     let file_path_str = lines[i].trim();
-                    let resolved = resolve_playlist_path(base_dir, file_path_str);
-                    track_paths.push(resolved.to_string_lossy().to_string());
+                    track_paths.push(resolve_playlist_entry(base_dir, file_path_str));
                 }
             } else if !line.starts_with('#') {
                 // Simple M3U format - just file paths
-                let resolved = resolve_playlist_path(base_dir, line);
-                track_paths.push(resolved.to_string_lossy().to_string());
+                track_paths.push(resolve_playlist_entry(base_dir, line));
             }
 
             i += 1;
@@ -145,8 +161,13 @@ impl PlaylistFileManager {
 
         // Add all tracks to playlist in batch operation
         let added_count =
-            Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions)
-                .await?;
+            Self::batch_add_tracks_to_playlist(
+                database,
+                playlist_id,
+                &file_paths_with_positions,
+                Some(source_path),
+            )
+            .await?;
 
         debug!(
             "Imported {} tracks to playlist '{}'",
@@ -161,6 +182,7 @@ impl PlaylistFileManager {
         content: &str,
         playlist_name: &str,
         base_dir: &Path,
+        source_path: &str,
     ) -> Result<i64> {
         debug!("Importing PLS playlist: {}", playlist_name);
 
@@ -178,8 +200,7 @@ impl PlaylistFileManager {
 
                     // Extract the number from "File1", "File2", etc.
                     if let Ok(track_num) = key[4..].parse::<u32>() {
-                        let resolved = resolve_playlist_path(base_dir, value);
-                        tracks.push((track_num, resolved.to_string_lossy().to_string()));
+                        tracks.push((track_num, resolve_playlist_entry(base_dir, value.trim())));
                     }
                 }
             }
@@ -197,8 +218,13 @@ impl PlaylistFileManager {
 
         // Add all tracks to playlist in batch operation
         let added_count =
-            Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions)
-                .await?;
+            Self::batch_add_tracks_to_playlist(
+                database,
+                playlist_id,
+                &file_paths_with_positions,
+                Some(source_path),
+            )
+            .await?;
 
         debug!(
             "Imported {} tracks to playlist '{}'",
@@ -302,6 +328,7 @@ impl PlaylistFileManager {
         database: &D,
         playlist_id: i64,
         file_paths_with_positions: &[(String, u32)],
+        source_path: Option<&str>,
     ) -> Result<usize> {
         if file_paths_with_positions.is_empty() {
             return Ok(0);
@@ -322,6 +349,25 @@ impl PlaylistFileManager {
             if let Some(file_id) = media_file.id {
                 path_to_file.insert(media_file.path.clone(), file_id);
             }
+        }
+
+        // Streams are valid playlist entries even though they are not present on
+        // the local filesystem. Materialize missing HTTP(S) entries as virtual
+        // radio files before building the playlist entry batch.
+        for (location, _) in file_paths_with_positions {
+            if !is_http_stream(location) {
+                continue;
+            }
+            let path = PathBuf::from(location);
+            if path_to_file.contains_key(&path) {
+                continue;
+            }
+
+            let mut stream = MediaFile::new(path.clone(), 0, "audio/radio".to_string());
+            stream.title = Some(location.clone());
+            stream.album = source_path.map(str::to_owned);
+            let file_id = database.store_media_file(&stream).await?;
+            path_to_file.insert(path, file_id);
         }
 
         // Build list of (media_file_id, position) pairs for files that exist in database
@@ -362,8 +408,13 @@ impl PlaylistFileManager {
     ) -> Result<()> {
         // Use batch method for single track
         let file_paths_with_positions = vec![(file_path_str.to_string(), position)];
-        Self::batch_add_tracks_to_playlist(database, playlist_id, &file_paths_with_positions)
-            .await?;
+        Self::batch_add_tracks_to_playlist(
+            database,
+            playlist_id,
+            &file_paths_with_positions,
+            None,
+        )
+        .await?;
         Ok(())
     }
 
@@ -391,13 +442,19 @@ impl PlaylistFileManager {
             
             if path.is_file() {
                 if let Some(_format) = PlaylistFormat::from_extension(&path) {
-                    match Self::import_playlist(database, &path, None).await {
-                        Ok(playlist_id) => {
-                            debug!("Successfully imported playlist: {}", path.display());
-                            imported_playlists.push(playlist_id);
+                    if is_radio_playlist_path(&path) {
+                        if let Err(e) = Self::import_radio_playlist(database, &path).await {
+                            warn!("Failed to import radio playlist {}: {}", path.display(), e);
                         }
-                        Err(e) => {
-                            warn!("Failed to import playlist {}: {}", path.display(), e);
+                    } else {
+                        match Self::import_playlist(database, &path, None).await {
+                            Ok(playlist_id) => {
+                                debug!("Successfully imported playlist: {}", path.display());
+                                imported_playlists.push(playlist_id);
+                            }
+                            Err(e) => {
+                                warn!("Failed to import playlist {}: {}", path.display(), e);
+                            }
                         }
                     }
                 }
@@ -451,20 +508,7 @@ impl PlaylistFileManager {
                     }
                 } else if path.is_file() {
                     if PlaylistFormat::from_extension(&path).is_some() {
-                        // Check if the playlist is located inside a "radio" or "Radio" directory under the watched root
-                        let is_radio = if let Ok(rel_path) = path.strip_prefix(directory) {
-                            if let Some(first_component) = rel_path.components().next() {
-                                let name =
-                                    first_component.as_os_str().to_string_lossy().to_lowercase();
-                                name == "radio"
-                            } else {
-                                false
-                            }
-                        } else {
-                            false
-                        };
-
-                        if is_radio {
+                        if is_radio_playlist_path(&path) {
                             if let Err(e) = Self::import_radio_playlist(database, &path).await {
                                 warn!("Failed to import radio playlist {}: {}", path.display(), e);
                             }
@@ -527,12 +571,12 @@ impl PlaylistFileManager {
                         i += 1;
                         if i < lines.len() {
                             let url = lines[i].trim().to_string();
-                            if url.starts_with("http://") || url.starts_with("https://") {
+                            if is_http_stream(&url) {
                                 stations.push((name, url));
                             }
                         }
                     } else if !line.starts_with('#') && !line.is_empty() {
-                        if line.starts_with("http://") || line.starts_with("https://") {
+                        if is_http_stream(line) {
                             stations.push((line.to_string(), line.to_string()));
                         }
                     }
@@ -549,7 +593,7 @@ impl PlaylistFileManager {
                         if let Some(eq_pos) = line.find('=') {
                             if let Ok(num) = line[4..eq_pos].parse::<u32>() {
                                 let val = line[eq_pos + 1..].trim().to_string();
-                                if val.starts_with("http://") || val.starts_with("https://") {
+                                if is_http_stream(&val) {
                                     urls.insert(num, val);
                                 }
                             }
@@ -633,6 +677,38 @@ impl PlaylistFileManager {
             .replace("  ", " ");
         
         format!("{}.{}", safe_name, format.extension())
+    }
+}
+
+fn is_http_stream(location: &str) -> bool {
+    let location = location.trim();
+    location
+        .get(..7)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+        || location
+            .get(..8)
+            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+}
+
+fn is_radio_playlist_path(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.eq_ignore_ascii_case("radio"))
+        })
+    })
+}
+
+fn resolve_playlist_entry(base_dir: &Path, entry: &str) -> String {
+    let entry = entry.trim();
+    if is_http_stream(entry) {
+        entry.to_string()
+    } else {
+        resolve_playlist_path(base_dir, entry)
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -731,6 +807,83 @@ mod tests {
     }
 
     #[test]
+    fn test_stream_entries_are_not_resolved_as_filesystem_paths() {
+        let base_dir = Path::new("/Users/alex/Downloads/radio");
+        let url = "https://cast1.asurahosting.com/proxy/julien/stream";
+
+        assert_eq!(resolve_playlist_entry(base_dir, url), url);
+        assert!(is_radio_playlist_path(Path::new(
+            "/Users/alex/Downloads/radio/stations.m3u"
+        )));
+    }
+
+    #[tokio::test]
+    async fn test_generic_playlist_import_materializes_http_stream() {
+        use crate::database::redb::RedbDatabase;
+        use crate::database::DatabaseManager;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let playlist_path = temp.path().join("stations.m3u");
+        let url = "https://cast1.asurahosting.com/proxy/julien/stream";
+        fs::write(&playlist_path, format!("#EXTM3U\n{url}\n")).unwrap();
+
+        let database = RedbDatabase::new(temp.path().join("playlist.redb"))
+            .await
+            .unwrap();
+        database.initialize().await.unwrap();
+        let playlist_id = PlaylistFileManager::import_playlist(&database, &playlist_path, None)
+            .await
+            .unwrap();
+
+        let tracks = database.get_playlist_tracks(playlist_id).await.unwrap();
+        assert_eq!(tracks.len(), 1);
+        assert_eq!(tracks[0].path, PathBuf::from(url));
+        assert_eq!(tracks[0].mime_type, "audio/radio");
+        assert!(database
+            .get_file_by_path(Path::new(
+                "/Users/alex/Downloads/radio/https:/cast1.asurahosting.com/proxy/julien/stream"
+            ))
+            .await
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_non_recursive_radio_root_uses_radio_importer() {
+        use crate::database::redb::RedbDatabase;
+        use crate::database::DatabaseManager;
+        use tempfile::tempdir;
+
+        let temp = tempdir().unwrap();
+        let radio_dir = temp.path().join("radio");
+        fs::create_dir(&radio_dir).unwrap();
+        let playlist_path = radio_dir.join("stations.m3u");
+        let url = "https://radio.example/stream";
+        fs::write(
+            &playlist_path,
+            format!("#EXTM3U\n#EXTINF:-1,Example Radio\n{url}\n"),
+        )
+        .unwrap();
+
+        let database = RedbDatabase::new(temp.path().join("radio.redb"))
+            .await
+            .unwrap();
+        database.initialize().await.unwrap();
+        PlaylistFileManager::scan_and_import_playlists(&database, &radio_dir)
+            .await
+            .unwrap();
+
+        let station = database
+            .get_file_by_path(Path::new(url))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(station.filename, "Example Radio");
+        assert_eq!(station.mime_type, "audio/radio");
+    }
+
+    #[test]
     fn test_m3u_parsing() {
         let m3u_content = r#"#EXTM3U
 #EXTINF:123,Artist Name - Song Title
@@ -801,6 +954,7 @@ Version=2
                 track_number: Some(1),
                 year: Some(2023),
             album_artist: Some("Test Artist".to_string()),
+            subtitle_available: false,
             created_at: std::time::SystemTime::now(),
             updated_at: std::time::SystemTime::now(),
         }];
@@ -817,68 +971,4 @@ Version=2
         assert!(content.contains("/test/song1.mp3"));
     }
 
-    // DISABLED: This test uses SqliteDatabase which has been removed
-    // TODO: Update to use ReDBDatabase
-    /*
-    #[tokio::test]
-    async fn test_batch_add_tracks_to_playlist() {
-        use crate::database::DatabaseManager;
-        use tempfile::tempdir;
-
-        // Create temporary database
-        let temp_dir = tempdir().unwrap();
-        let db_path = temp_dir.path().join("test.db");
-        let db = SqliteDatabase::new(db_path).await.unwrap();
-        db.initialize().await.unwrap();
-
-        // Create test media files
-        let file1 = crate::database::MediaFile::new(
-            PathBuf::from("/test/song1.mp3"),
-            1000,
-            "audio/mpeg".to_string(),
-        );
-        let file2 = crate::database::MediaFile::new(
-            PathBuf::from("/test/song2.mp3"),
-            2000,
-            "audio/mpeg".to_string(),
-        );
-        let file3 = crate::database::MediaFile::new(
-            PathBuf::from("/test/song3.mp3"),
-            3000,
-            "audio/mpeg".to_string(),
-        );
-
-        // Store files in database
-        let _file1_id = db.store_media_file(&file1).await.unwrap();
-        let _file2_id = db.store_media_file(&file2).await.unwrap();
-        let _file3_id = db.store_media_file(&file3).await.unwrap();
-
-        // Create a playlist
-        let playlist_id = db.create_playlist("Test Batch Playlist", None).await.unwrap();
-
-        // Test batch add tracks
-        let file_paths_with_positions = vec![
-            ("/test/song1.mp3".to_string(), 0),
-            ("/test/song2.mp3".to_string(), 1),
-            ("/test/song3.mp3".to_string(), 2),
-        ];
-
-        let added_count = PlaylistFileManager::batch_add_tracks_to_playlist(
-            &db,
-            playlist_id,
-            &file_paths_with_positions,
-        ).await.unwrap();
-
-        assert_eq!(added_count, 3);
-
-        // Verify tracks were added to playlist
-        let playlist_tracks = db.get_playlist_tracks(playlist_id).await.unwrap();
-        assert_eq!(playlist_tracks.len(), 3);
-        
-        // Verify order is maintained
-        assert_eq!(playlist_tracks[0].path, PathBuf::from("/test/song1.mp3"));
-        assert_eq!(playlist_tracks[1].path, PathBuf::from("/test/song2.mp3"));
-        assert_eq!(playlist_tracks[2].path, PathBuf::from("/test/song3.mp3"));
-    }
-    */
 }

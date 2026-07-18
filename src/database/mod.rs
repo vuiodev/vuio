@@ -84,6 +84,7 @@ pub struct MediaFile {
     pub track_number: Option<u32>,
     pub year: Option<u32>,
     pub album_artist: Option<String>,
+    pub subtitle_available: bool,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
 }
@@ -113,15 +114,156 @@ impl MediaFile {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: false,
             created_at: now,
             updated_at: now,
         }
     }
 }
 
+impl MediaFileView for MediaFile {
+    fn id(&self) -> Option<i64> { self.id }
+    fn path(&self) -> &str { self.path.to_str().unwrap_or_default() }
+    fn filename(&self) -> &str { &self.filename }
+    fn size(&self) -> u64 { self.size }
+    fn modified_secs(&self) -> u64 { self.modified.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() }
+    fn mime_type(&self) -> &str { &self.mime_type }
+    fn duration_secs(&self) -> Option<f64> { self.duration.map(|value| value.as_secs_f64()) }
+    fn title(&self) -> Option<&str> { self.title.as_deref() }
+    fn artist(&self) -> Option<&str> { self.artist.as_deref() }
+    fn album(&self) -> Option<&str> { self.album.as_deref() }
+    fn genre(&self) -> Option<&str> { self.genre.as_deref() }
+    fn track_number(&self) -> Option<u32> { self.track_number }
+    fn year(&self) -> Option<u32> { self.year }
+    fn album_artist(&self) -> Option<&str> { self.album_artist.as_deref() }
+    fn subtitle_available(&self) -> bool { self.subtitle_available }
+    fn created_at_secs(&self) -> u64 { self.created_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() }
+    fn updated_at_secs(&self) -> u64 { self.updated_at.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() }
+}
+
+/// Borrowed, backend-neutral view of one media record.
+///
+/// Implementations may point directly into a database page. Callers must not
+/// retain any returned string beyond the scoped read-session callback.
+pub trait MediaFileView {
+    fn id(&self) -> Option<i64>;
+    fn path(&self) -> &str;
+    fn filename(&self) -> &str;
+    fn size(&self) -> u64;
+    fn modified_secs(&self) -> u64;
+    fn mime_type(&self) -> &str;
+    fn duration_secs(&self) -> Option<f64>;
+    fn title(&self) -> Option<&str>;
+    fn artist(&self) -> Option<&str>;
+    fn album(&self) -> Option<&str>;
+    fn genre(&self) -> Option<&str>;
+    fn track_number(&self) -> Option<u32>;
+    fn year(&self) -> Option<u32>;
+    fn album_artist(&self) -> Option<&str>;
+    fn subtitle_available(&self) -> bool;
+    fn created_at_secs(&self) -> u64;
+    fn updated_at_secs(&self) -> u64;
+
+    fn to_owned_media_file(&self) -> MediaFile {
+        MediaFile {
+            id: self.id(),
+            path: PathBuf::from(self.path()),
+            filename: self.filename().to_owned(),
+            size: self.size(),
+            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
+            mime_type: self.mime_type().to_owned(),
+            duration: self.duration_secs().map(Duration::from_secs_f64),
+            title: self.title().map(str::to_owned),
+            artist: self.artist().map(str::to_owned),
+            album: self.album().map(str::to_owned),
+            genre: self.genre().map(str::to_owned),
+            track_number: self.track_number(),
+            year: self.year(),
+            album_artist: self.album_artist().map(str::to_owned),
+            subtitle_available: self.subtitle_available(),
+            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.created_at_secs()),
+            updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.updated_at_secs()),
+        }
+    }
+}
+
+pub trait PlaylistView {
+    fn id(&self) -> Option<i64>;
+    fn name(&self) -> &str;
+    fn description(&self) -> Option<&str>;
+    fn created_at_secs(&self) -> u64;
+    fn updated_at_secs(&self) -> u64;
+}
+
+#[derive(Clone, Debug)]
+pub enum MediaFileQuery {
+    All,
+    Id(i64),
+    Path(String),
+    Directory {
+        path: String,
+        mime_family: Option<String>,
+    },
+    Artist(String),
+    Album {
+        album: String,
+        artist: Option<String>,
+    },
+    Genre(String),
+    Year(u32),
+    AlbumArtist(String),
+    Playlist(i64),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct VisitSummary {
+    pub matched: usize,
+    pub visited: usize,
+}
+
+/// Backend-owned read transaction with lending record views.
+pub trait DatabaseReadSession {
+    type File<'a>: MediaFileView
+    where
+        Self: 'a;
+    type Playlist<'a>: PlaylistView
+    where
+        Self: 'a;
+
+    fn visit_files<F>(
+        &mut self,
+        query: &MediaFileQuery,
+        offset: usize,
+        limit: usize,
+        visitor: F,
+    ) -> Result<VisitSummary>
+    where
+        F: for<'a> FnMut(Self::File<'a>) -> Result<()>;
+
+    fn direct_subdirectories(
+        &mut self,
+        canonical_parent: &str,
+        mime_family: Option<&str>,
+    ) -> Result<Vec<MediaDirectory>>;
+
+    fn visit_playlists<F>(&mut self, offset: usize, limit: usize, visitor: F) -> Result<VisitSummary>
+    where
+        F: for<'a> FnMut(Self::Playlist<'a>) -> Result<()>;
+}
+
 /// Database manager trait for media file operations
 #[async_trait]
 pub trait DatabaseManager: Send + Sync {
+    type ReadSession: DatabaseReadSession + Send + 'static;
+
+    /// Execute a complete scoped read operation. Implementations choose their
+    /// scheduling strategy; ReDB runs this closure on Tokio's blocking pool.
+    async fn read<R, F>(self: std::sync::Arc<Self>, operation: F) -> Result<R>
+    where
+        Self: Sized + 'static,
+        R: Send + 'static,
+        F: FnOnce(&mut Self::ReadSession) -> Result<R> + Send + 'static;
+
     /// Initialize the database and create tables if needed
     async fn initialize(&self) -> Result<()>;
 
@@ -129,15 +271,15 @@ pub trait DatabaseManager: Send + Sync {
     async fn store_media_file(&self, file: &MediaFile) -> Result<i64>;
 
     /// Stream all media files from the database (memory efficient)
-    /// 
+    ///
     /// This method provides a memory-efficient way to process all media files without
     /// loading them all into memory at once. Use this instead of `get_all_media_files()`
     /// for large media libraries.
-    /// 
+    ///
     /// # Example
     /// ```rust,ignore
     /// use futures_util::StreamExt;
-    /// 
+    ///
     /// let mut stream = database.stream_all_media_files();
     /// while let Some(result) = stream.next().await {
     ///     match result {
@@ -161,14 +303,14 @@ pub trait DatabaseManager: Send + Sync {
     /// Use this only for testing or when you need all files at once.
     async fn collect_all_media_files(&self) -> Result<Vec<MediaFile>> {
         use futures_util::StreamExt;
-        
+
         let mut stream = self.stream_all_media_files();
         let mut files = Vec::new();
-        
+
         while let Some(result) = stream.next().await {
             files.push(result?);
         }
-        
+
         Ok(files)
     }
 

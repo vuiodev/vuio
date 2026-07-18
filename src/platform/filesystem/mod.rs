@@ -774,6 +774,9 @@ impl BaseFileSystemManager {
                 
                 let mime_type = get_mime_type_for_extension(extension);
                 let now = SystemTime::now();
+                let subtitle_available = tokio::fs::try_exists(entry_path.with_extension("srt"))
+                    .await
+                    .unwrap_or(false);
                 
                 let mut media_file = MediaFile {
                     id: None,
@@ -790,6 +793,7 @@ impl BaseFileSystemManager {
                     track_number: None,
                     year: None,
                     album_artist: None,
+                    subtitle_available,
                     created_at: now,
                     updated_at: now,
                 };
@@ -1157,6 +1161,7 @@ mod tests {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: false,
             created_at: SystemTime::UNIX_EPOCH,
             updated_at: SystemTime::UNIX_EPOCH,
         };
@@ -1180,6 +1185,7 @@ mod tests {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: false,
             created_at: SystemTime::UNIX_EPOCH,
             updated_at: SystemTime::UNIX_EPOCH,
         };
@@ -1203,6 +1209,7 @@ mod tests {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: false,
             created_at: SystemTime::UNIX_EPOCH,
             updated_at: SystemTime::UNIX_EPOCH,
         };

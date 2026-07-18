@@ -34,19 +34,19 @@ pub mod state {
         pub consecutive_failures: u8,
     }
 
-    #[derive(Clone)]
-    pub struct AppState {
+    pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
         pub config: Arc<AppConfig>,
         pub media_directories:
             Arc<tokio::sync::RwLock<Vec<crate::config::MonitoredDirectoryConfig>>>,
-        pub database: Arc<dyn DatabaseManager>,
+        pub database: Arc<D>,
         pub platform_info: Arc<PlatformInfo>,
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
         pub web_metrics: Arc<crate::web::handlers::WebHandlerMetrics>,
         pub bookmarks: Arc<tokio::sync::Mutex<std::collections::HashMap<i64, u32>>>,
         pub log_file_path: std::path::PathBuf,
-        pub browse_cache: Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, String>>>,
+        pub browse_cache:
+            Arc<tokio::sync::Mutex<std::collections::HashMap<SoapCacheKey, axum::body::Bytes>>>,
         pub mcp_clients: Arc<
             tokio::sync::Mutex<
                 std::collections::HashMap<String, tokio::sync::mpsc::Sender<String>>,
@@ -63,7 +63,29 @@ pub mod state {
             Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
     }
 
-    impl AppState {
+    impl<D: DatabaseManager> Clone for AppState<D> {
+        fn clone(&self) -> Self {
+            Self {
+                config: self.config.clone(),
+                media_directories: self.media_directories.clone(),
+                database: self.database.clone(),
+                platform_info: self.platform_info.clone(),
+                filesystem_manager: self.filesystem_manager.clone(),
+                content_update_id: self.content_update_id.clone(),
+                web_metrics: self.web_metrics.clone(),
+                bookmarks: self.bookmarks.clone(),
+                log_file_path: self.log_file_path.clone(),
+                browse_cache: self.browse_cache.clone(),
+                mcp_clients: self.mcp_clients.clone(),
+                active_monitors: self.active_monitors.clone(),
+                active_casts: self.active_casts.clone(),
+                discovered_tvs: self.discovered_tvs.clone(),
+                upnp_subscriptions: self.upnp_subscriptions.clone(),
+            }
+        }
+    }
+
+    impl<D: DatabaseManager> AppState<D> {
         /// Get the server's IP address using unified logic from platform_info
         pub fn get_server_ip(&self) -> String {
             // Check if server IP is explicitly configured (important for Docker)

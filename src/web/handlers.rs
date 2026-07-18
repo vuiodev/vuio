@@ -1,5 +1,5 @@
 use crate::{
-    database::MediaDirectory,
+    database::{DatabaseManager, MediaDirectory},
     error::AppError,
     state::AppState,
     web::xml::{generate_description_xml, generate_scpd_xml},
@@ -2537,7 +2537,7 @@ impl ContentDirectoryHandler {
                     name,
                 });
             }
-            (subdirs, Vec::new())
+            (subdirs, Vec::<crate::database::MediaFile>::new())
         } else if !browse_path.is_dir() {
             // Configured/removable roots are hidden while unavailable. The watcher
             // recovery loop will rescan and republish them when they return.
@@ -2556,46 +2556,72 @@ impl ContentDirectoryHandler {
                 }
             };
 
-            // Query the ReDB database for the directory listing
-            let query_future = state
-                .database
-                .get_directory_listing(&canonical_browse_path, media_type_filter);
-            let timeout_duration = std::time::Duration::from_secs(30); // 30 second timeout
+            let requested_count = if params.requested_count == 0 {
+                2000
+            } else {
+                std::cmp::min(params.requested_count as usize, 2000)
+            };
+            let bookmarks = if matches!(
+                client,
+                crate::web::client::DlnaClientProfile::SamsungTv
+                    | crate::web::client::DlnaClientProfile::SamsungTvQ
+            ) {
+                state.bookmarks.lock().await.clone()
+            } else {
+                std::collections::HashMap::new()
+            };
+            let context = crate::web::xml::BrowseRenderContext {
+                client,
+                server_ip: state.get_server_ip(),
+                server_port: state.config.server.port,
+                autoplay_enabled: state.config.media.autoplay_enabled,
+                update_id: current_update_id,
+                bookmarks,
+            };
+            let canonical_parent = canonical_browse_path.to_string_lossy().into_owned();
+            let mime_family = media_type_filter.to_owned();
+            let object_id = params.object_id.clone();
+            let starting_index = params.starting_index as usize;
+            let database = state.database.clone();
+            let query = database.read(move |session| {
+                crate::web::xml::generate_indexed_browse_response(
+                    session,
+                    &canonical_parent,
+                    &mime_family,
+                    &object_id,
+                    starting_index,
+                    requested_count,
+                    context,
+                )
+            });
 
-            match tokio::time::timeout(timeout_duration, query_future).await {
-                Ok(Ok(res)) => res,
-                Ok(Err(e)) => {
-                    error!(
-                        "ReDB database error getting directory listing for {}: {}",
-                        params.object_id, e
-                    );
+            let response = match tokio::time::timeout(std::time::Duration::from_secs(30), query).await {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) => {
+                    error!("ReDB browse failed for {}: {}", params.object_id, error);
                     state.web_metrics.record_error();
-                    let response_time = start_time.elapsed().as_micros() as u64;
-                    state
-                        .web_metrics
-                        .record_browse_request(response_time, false);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Error browsing content".to_string(),
-                    )
-                        .into_response();
+                    return (StatusCode::INTERNAL_SERVER_ERROR, "Error browsing content").into_response();
                 }
                 Err(_) => {
                     error!("Database query timed out for {}", params.object_id);
                     state.web_metrics.record_error();
-                    let response_time = start_time.elapsed().as_micros() as u64;
-                    state
-                        .web_metrics
-                        .record_browse_request(response_time, false);
-                    return (
-                        StatusCode::REQUEST_TIMEOUT,
-                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                        "Request timeout - directory too large".to_string(),
-                    )
-                        .into_response();
+                    return (StatusCode::REQUEST_TIMEOUT, "Request timeout - directory too large").into_response();
                 }
-            }
+            };
+
+            let response_time = start_time.elapsed().as_micros() as u64;
+            state.web_metrics.record_browse_request(response_time, false);
+            state.web_metrics.record_directory_listing(response_time);
+            state.browse_cache.lock().await.insert(cache_key, response.clone());
+            return (
+                StatusCode::OK,
+                [
+                    (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
+                    (header::HeaderName::from_static("ext"), ""),
+                ],
+                response,
+            )
+                .into_response();
         };
 
         debug!(
@@ -2704,7 +2730,7 @@ impl ContentDirectoryHandler {
             if needs_clear {
                 cache.clear();
             }
-            cache.insert(cache_key, response.clone());
+            cache.insert(cache_key, response.clone().into());
         }
 
         (
@@ -3553,7 +3579,7 @@ async fn handle_generic_category_browse<C, F, FFuture, G, GFuture>(
     category_name: &str,
     list_categories_fn: F,
     map_category_fn: impl Fn(C) -> crate::database::MediaDirectory,
-    list_items_fn: G,
+    _list_items_fn: G,
 ) -> Response
 where
     F: FnOnce() -> FFuture,
@@ -3659,7 +3685,7 @@ where
                     if needs_clear {
                         cache.clear();
                     }
-                    cache.insert(cache_key.clone(), response.clone());
+                    cache.insert(cache_key.clone(), response.clone().into());
                 }
 
                 (
@@ -3690,25 +3716,74 @@ where
             }
         }
     } else if let Some(key_str) = key_str_opt {
-        match list_items_fn(key_str.clone()).await {
-            Ok(files) => {
+        let query = match category_name {
+            "artists" => crate::database::MediaFileQuery::Artist(key_str.clone()),
+            "albums" => crate::database::MediaFileQuery::Album {
+                album: key_str.clone(),
+                artist: None,
+            },
+            "genres" => crate::database::MediaFileQuery::Genre(key_str.clone()),
+            "years" => match key_str.parse() {
+                Ok(year) => crate::database::MediaFileQuery::Year(year),
+                Err(_) => return (StatusCode::BAD_REQUEST, "Invalid year").into_response(),
+            },
+            "playlists" => match key_str.parse() {
+                Ok(id) => crate::database::MediaFileQuery::Playlist(id),
+                Err(_) => return (StatusCode::BAD_REQUEST, "Invalid playlist ID").into_response(),
+            },
+            _ => return (StatusCode::BAD_REQUEST, "Unknown category").into_response(),
+        };
+        let requested_count = if params.requested_count == 0 {
+            2000
+        } else {
+            std::cmp::min(params.requested_count as usize, 2000)
+        };
+        let bookmarks = if matches!(
+            client,
+            crate::web::client::DlnaClientProfile::SamsungTv
+                | crate::web::client::DlnaClientProfile::SamsungTvQ
+        ) {
+            state.bookmarks.lock().await.clone()
+        } else {
+            std::collections::HashMap::new()
+        };
+        let context = crate::web::xml::BrowseRenderContext {
+            client,
+            server_ip: state.get_server_ip(),
+            server_port: state.config.server.port,
+            autoplay_enabled: state.config.media.autoplay_enabled,
+            update_id: current_update_id,
+            bookmarks,
+        };
+        let object_id = params.object_id.clone();
+        let starting_index = params.starting_index as usize;
+        let database = state.database.clone();
+        match database
+            .read(move |session| {
+                crate::web::xml::generate_indexed_items_response(
+                    session,
+                    query,
+                    &object_id,
+                    starting_index,
+                    requested_count,
+                    context,
+                )
+            })
+            .await
+        {
+            Ok(response) => {
                 let response_time = start_time.elapsed().as_micros() as u64;
                 state
                     .web_metrics
-                    .record_browse_request(response_time, !files.is_empty());
+                    .record_browse_request(response_time, true);
 
                 debug!(
                     "ReDB retrieved {} tracks for {} '{}' in {}ms",
-                    files.len(),
+                    "zero-copy",
                     category_name,
                     key_str,
                     response_time
                 );
-
-                let server_ip = state.get_server_ip();
-                let response =
-                    generate_browse_response(&params.object_id, &[], &files, state, &server_ip)
-                        .await;
 
                 // Cache insert
                 if state.content_update_id.load(Ordering::SeqCst) == current_update_id {

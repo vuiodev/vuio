@@ -6,21 +6,21 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
-use crate::database::{DatabaseManager, MediaFile};
+use crate::database::{redb::RedbDatabase, DatabaseManager, MediaFile};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Batch size for database operations during parallel scanning
 const BATCH_SIZE: usize = 1000;
 
 /// Media scanner that uses the file system manager and database for efficient scanning
-pub struct MediaScanner {
+pub struct MediaScanner<D: DatabaseManager = RedbDatabase> {
     filesystem_manager: Box<dyn FileSystemManager>,
-    database_manager: Arc<dyn DatabaseManager>,
+    database_manager: Arc<D>,
 }
 
-impl MediaScanner {
+impl<D: DatabaseManager> MediaScanner<D> {
     /// Create a new media scanner with database manager
-    pub fn with_database(database_manager: Arc<dyn DatabaseManager>) -> Self {
+    pub fn with_database(database_manager: Arc<D>) -> Self {
         Self {
             filesystem_manager: create_platform_filesystem_manager(),
             database_manager,
@@ -150,7 +150,7 @@ impl MediaScanner {
     /// Create a media scanner with a custom file system manager (for testing)
     pub fn with_filesystem_manager(
         filesystem_manager: Box<dyn FileSystemManager>,
-        database_manager: Arc<dyn DatabaseManager>,
+        database_manager: Arc<D>,
     ) -> Self {
         Self {
             filesystem_manager,
@@ -756,6 +756,9 @@ impl MediaScanner {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: tokio::fs::try_exists(path.with_extension("srt"))
+                .await
+                .unwrap_or(false),
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
         };
@@ -968,6 +971,7 @@ mod tests {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: false,
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
         });
@@ -989,6 +993,7 @@ mod tests {
             track_number: None,
             year: None,
             album_artist: None,
+            subtitle_available: false,
             created_at: SystemTime::now(),
             updated_at: SystemTime::now(),
         });

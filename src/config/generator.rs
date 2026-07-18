@@ -351,9 +351,10 @@ mod tests {
                 supported_extensions: vec!["mp4".to_string(), "avi".to_string()],
             },
             database: DatabaseConfig {
-                path: Some("/test/db.sqlite".to_string()),
+                path: Some("/test/vuio.redb".to_string()),
                 vacuum_on_startup: true,
                 backup_enabled: false,
+                redb_cache_mb: 128,
             },
         };
         
@@ -375,7 +376,7 @@ mod tests {
         assert!(toml_content.contains("path = \"/test/media\""));
         assert!(toml_content.contains("recursive = true"));
         assert!(toml_content.contains("validation_mode = \"Strict\""));
-        assert!(toml_content.contains("path = \"/test/db.sqlite\""));
+        assert!(toml_content.contains("path = \"/test/vuio.redb\""));
         assert!(toml_content.contains("vacuum_on_startup = true"));
         assert!(toml_content.contains("backup_enabled = false"));
         
@@ -406,7 +407,7 @@ mod tests {
         assert_eq!(parsed_config.media.directories[0].path, "/test/media");
         assert!(parsed_config.media.directories[0].recursive);
         assert_eq!(parsed_config.media.directories[0].validation_mode, ValidationMode::Strict);
-        assert_eq!(parsed_config.database.path, Some("/test/db.sqlite".to_string()));
+        assert_eq!(parsed_config.database.path, Some("/test/vuio.redb".to_string()));
         assert!(parsed_config.database.vacuum_on_startup);
         assert!(!parsed_config.database.backup_enabled);
     }
@@ -450,6 +451,7 @@ mod tests {
                 path: None, // Test None case
                 vacuum_on_startup: false,
                 backup_enabled: true,
+                redb_cache_mb: 128,
             },
         };
         
