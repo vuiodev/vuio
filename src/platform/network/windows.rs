@@ -107,7 +107,7 @@ impl WindowsNetworkManager {
 
         // Check if Windows Defender Firewall is running
         match Command::new("netsh")
-            .args(&["advfirewall", "show", "allprofiles", "state"])
+            .args(["advfirewall", "show", "allprofiles", "state"])
             .output()
         {
             Ok(output) if output.status.success() => {
@@ -614,7 +614,7 @@ impl NetworkManager for WindowsNetworkManager {
             }
             Err(e) => {
                 error!("Failed to send multicast on Windows: {}", e);
-                Err(PlatformError::from(e))
+                Err(e)
             }
         }
     }

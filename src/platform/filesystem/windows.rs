@@ -68,17 +68,16 @@ impl WindowsFileSystemManager {
         }
 
         // Handle drive letter paths - preserve uppercase drive letter
-        if self.has_drive_letter(Path::new(&with_backslashes))
-            || self.looks_like_drive_letter(&with_backslashes)
+        if (self.has_drive_letter(Path::new(&with_backslashes))
+            || self.looks_like_drive_letter(&with_backslashes))
+            && with_backslashes.len() >= 2
         {
-            if with_backslashes.len() >= 2 {
-                let Some(drive_letter) = with_backslashes.chars().next() else {
-                    return PathBuf::from(with_backslashes);
-                };
-                let drive_letter = drive_letter.to_ascii_uppercase();
-                let rest = &with_backslashes[1..].to_lowercase();
-                return PathBuf::from(format!("{}{}", drive_letter, rest));
-            }
+            let Some(drive_letter) = with_backslashes.chars().next() else {
+                return PathBuf::from(with_backslashes);
+            };
+            let drive_letter = drive_letter.to_ascii_uppercase();
+            let rest = &with_backslashes[1..].to_lowercase();
+            return PathBuf::from(format!("{}{}", drive_letter, rest));
         }
 
         // For other paths, convert to lowercase
@@ -105,14 +104,12 @@ impl WindowsFileSystemManager {
         }
 
         // Handle colon validation separately with proper logic
-        if path_str.contains(':') {
-            if !self.is_valid_colon_usage(path) {
-                let colon_details = self.get_colon_validation_details(path);
-                return Err(FileSystemError::InvalidColonUsage {
-                    path: path.display().to_string(),
-                    details: colon_details,
-                });
-            }
+        if path_str.contains(':') && !self.is_valid_colon_usage(path) {
+            let colon_details = self.get_colon_validation_details(path);
+            return Err(FileSystemError::InvalidColonUsage {
+                path: path.display().to_string(),
+                details: colon_details,
+            });
         }
 
         // Check for reserved Windows names

@@ -689,6 +689,8 @@ mod tests {
     use crate::database::redb::RedbDatabase;
     use crate::database::MediaRepository;
     use crate::platform::filesystem::BaseFileSystemManager;
+    #[cfg(target_os = "windows")]
+    use crate::platform::filesystem::WindowsPathNormalizer;
     use std::sync::Arc;
     use tempfile::tempdir;
 
