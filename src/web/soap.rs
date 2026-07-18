@@ -39,6 +39,24 @@ struct BrowseParams {
     requested_count: u32,
 }
 
+const MAX_BROWSE_ITEMS_PER_RESPONSE: usize = 2_000;
+
+fn browse_page_limit(params: &BrowseParams) -> usize {
+    if params.requested_count == 0 {
+        MAX_BROWSE_ITEMS_PER_RESPONSE
+    } else {
+        (params.requested_count as usize).min(MAX_BROWSE_ITEMS_PER_RESPONSE)
+    }
+}
+
+fn browse_page_bounds(params: &BrowseParams, total_matches: usize) -> std::ops::Range<usize> {
+    let start = (params.starting_index as usize).min(total_matches);
+    let end = start
+        .saturating_add(browse_page_limit(params))
+        .min(total_matches);
+    start..end
+}
+
 fn soap_action(headers: &HeaderMap, body: &str) -> Result<String, Box<Response>> {
     let header_action = headers
         .get("soapaction")
@@ -362,11 +380,7 @@ impl ContentDirectoryHandler {
                 }
             };
 
-            let requested_count = if params.requested_count == 0 {
-                2000
-            } else {
-                std::cmp::min(params.requested_count as usize, 2000)
-            };
+            let requested_count = browse_page_limit(params);
             let bookmarks = if matches!(
                 client,
                 crate::web::client::DlnaClientProfile::SamsungTv
@@ -451,14 +465,6 @@ impl ContentDirectoryHandler {
         );
 
         // Apply pagination if requested
-        let starting_index = params.starting_index as usize;
-        let requested_count = if params.requested_count == 0 {
-            // If RequestedCount is 0, return all items (but limit to prevent hanging)
-            2000
-        } else {
-            std::cmp::min(params.requested_count as usize, 2000)
-        };
-
         // Combine directories and files for pagination with atomic counting
         let mut all_items = Vec::new();
         for subdir in &subdirectories {
@@ -475,31 +481,12 @@ impl ContentDirectoryHandler {
         }
 
         let total_matches = all_items.len();
-        let end_index = std::cmp::min(starting_index + requested_count, total_matches);
-
-        if starting_index >= total_matches {
-            // Starting index is beyond available items - record metrics and return empty
-            let response_time = start_time.elapsed().as_micros() as u64;
-            state
-                .web_metrics
-                .record_browse_request(response_time, cache_hit);
-
-            let server_ip = state.get_server_ip();
-            let response =
-                generate_browse_response(&params.object_id, &[], &[], state, &server_ip).await;
-            return (
-                StatusCode::OK,
-                [
-                    (header::CONTENT_TYPE, "text/xml; charset=utf-8"),
-                    (header::HeaderName::from_static("ext"), ""),
-                ],
-                response,
-            )
-                .into_response();
-        }
+        let page = browse_page_bounds(params, total_matches);
+        let starting_index = page.start;
+        let end_index = page.end;
 
         // Extract paginated items with zero-copy operations
-        let paginated_items = &all_items[starting_index..end_index];
+        let paginated_items = &all_items[page];
         let mut paginated_subdirs = Vec::new();
         let mut paginated_files = Vec::new();
 
@@ -534,6 +521,7 @@ impl ContentDirectoryHandler {
             &paginated_files,
             state,
             &server_ip,
+            total_matches,
         )
         .await;
 
@@ -561,14 +549,38 @@ impl ContentDirectoryHandler {
     }
 
     /// Handle root browse request (ObjectID "0")
-    async fn handle_root_browse(_params: &BrowseParams, state: &AppState) -> Response {
+    async fn handle_root_browse(params: &BrowseParams, state: &AppState) -> Response {
         use crate::web::xml::generate_browse_response;
 
-        // For the root, we typically return the top-level containers (Video, Audio, Image).
-        // The generate_browse_response function should be smart enough to create these
-        // when given an object_id of "0" and empty lists of subdirectories and files.
+        let containers = [
+            MediaDirectory {
+                path: PathBuf::from("video"),
+                name: "Video".to_string(),
+            },
+            MediaDirectory {
+                path: PathBuf::from("audio"),
+                name: "Music".to_string(),
+            },
+            MediaDirectory {
+                path: PathBuf::from("image"),
+                name: "Pictures".to_string(),
+            },
+            MediaDirectory {
+                path: PathBuf::from("radio"),
+                name: "Radio".to_string(),
+            },
+        ];
+        let page = browse_page_bounds(params, containers.len());
         let server_ip = state.get_server_ip();
-        let response = generate_browse_response("0", &[], &[], state, &server_ip).await;
+        let response = generate_browse_response(
+            "0",
+            &containers[page],
+            &[],
+            state,
+            &server_ip,
+            containers.len(),
+        )
+        .await;
         (
             StatusCode::OK,
             [
@@ -581,7 +593,7 @@ impl ContentDirectoryHandler {
     }
 
     /// Handle radio browse request
-    async fn handle_radio_browse(_params: &BrowseParams, state: &AppState) -> Response {
+    async fn handle_radio_browse(params: &BrowseParams, state: &AppState) -> Response {
         use crate::web::xml::generate_browse_response;
         use futures_util::StreamExt;
 
@@ -594,10 +606,20 @@ impl ContentDirectoryHandler {
                 }
             }
         }
+        radio_files.sort_by_cached_key(|file| file.filename.to_lowercase());
 
+        let total_matches = radio_files.len();
+        let page = browse_page_bounds(params, total_matches);
         let server_ip = state.get_server_ip();
-        let response =
-            generate_browse_response("radio", &[], &radio_files, state, &server_ip).await;
+        let response = generate_browse_response(
+            "radio",
+            &[],
+            &radio_files[page],
+            state,
+            &server_ip,
+            total_matches,
+        )
+        .await;
         (
             StatusCode::OK,
             [
@@ -735,9 +757,18 @@ async fn handle_audio_root_browse(params: &BrowseParams, state: &AppState) -> Re
         })
         .collect();
 
+    let total_matches = subdirectories.len();
+    let page = browse_page_bounds(params, total_matches);
     let server_ip = state.get_server_ip();
-    let response =
-        generate_browse_response(&params.object_id, &subdirectories, &[], state, &server_ip).await;
+    let response = generate_browse_response(
+        &params.object_id,
+        &subdirectories[page],
+        &[],
+        state,
+        &server_ip,
+        total_matches,
+    )
+    .await;
     (
         StatusCode::OK,
         [
@@ -933,6 +964,8 @@ where
                 let has_data = !categories.is_empty();
                 let subdirectories: Vec<crate::database::MediaDirectory> =
                     categories.into_iter().map(map_category_fn).collect();
+                let total_matches = subdirectories.len();
+                let page = browse_page_bounds(params, total_matches);
 
                 let response_time = start_time.elapsed().as_micros() as u64;
                 state
@@ -949,10 +982,11 @@ where
                 let server_ip = state.get_server_ip();
                 let response = generate_browse_response(
                     &params.object_id,
-                    &subdirectories,
+                    &subdirectories[page],
                     &[],
                     state,
                     &server_ip,
+                    total_matches,
                 )
                 .await;
 
@@ -1013,11 +1047,7 @@ where
             },
             _ => return (StatusCode::BAD_REQUEST, "Unknown category").into_response(),
         };
-        let requested_count = if params.requested_count == 0 {
-            2000
-        } else {
-            std::cmp::min(params.requested_count as usize, 2000)
-        };
+        let requested_count = browse_page_limit(params);
         let bookmarks = if matches!(
             client,
             crate::web::client::DlnaClientProfile::SamsungTv

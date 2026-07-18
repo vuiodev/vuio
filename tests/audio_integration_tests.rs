@@ -335,6 +335,7 @@ async fn test_cover_art_retrieval_and_xml() {
         std::slice::from_ref(&db_file),
         &app_state,
         "127.0.0.1",
+        1,
     )
     .await;
 
@@ -482,7 +483,25 @@ https://cast1.asurahosting.com/proxy/julien/stream
     // 5. Test UPnP XML Browse response
     // Root container browse (ObjectID "0")
     let server_ip = app_state.get_server_ip();
-    let root_xml = generate_browse_response("0", &[], &[], &app_state, &server_ip).await;
+    let root_containers = [
+        ("video", "Video"),
+        ("audio", "Music"),
+        ("image", "Pictures"),
+        ("radio", "Radio"),
+    ]
+    .map(|(path, name)| vuio::database::MediaDirectory {
+        path: std::path::PathBuf::from(path),
+        name: name.to_string(),
+    });
+    let root_xml = generate_browse_response(
+        "0",
+        &root_containers,
+        &[],
+        &app_state,
+        &server_ip,
+        root_containers.len(),
+    )
+    .await;
     assert!(
         root_xml.contains("id=&quot;radio&quot;"),
         "Root XML did not contain radio container: {}",
@@ -490,8 +509,15 @@ https://cast1.asurahosting.com/proxy/julien/stream
     );
 
     // Radio container browse (ObjectID "radio")
-    let radio_xml =
-        generate_browse_response("radio", &[], &radio_files, &app_state, &server_ip).await;
+    let radio_xml = generate_browse_response(
+        "radio",
+        &[],
+        &radio_files,
+        &app_state,
+        &server_ip,
+        radio_files.len(),
+    )
+    .await;
     assert!(
         radio_xml.contains("ABC Chill"),
         "Radio XML did not contain ABC Chill stream: {}",

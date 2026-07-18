@@ -105,9 +105,11 @@ fn write_directory<W: std::fmt::Write>(
     let container_id = if path.starts_with("audio/")
         || path.starts_with("video/")
         || path.starts_with("image/")
+        || path.starts_with("radio/")
         || path == "audio"
         || path == "video"
         || path == "image"
+        || path == "radio"
     {
         path.into_owned()
     } else if path.starts_with('d') && path[1..].chars().all(|c| c.is_ascii_digit()) {
@@ -535,18 +537,7 @@ pub async fn generate_browse_response(
     files: &[MediaFile],
     state: &AppState,
     server_ip: &str,
-) -> String {
-    generate_browse_response_with_totals(object_id, subdirectories, files, state, server_ip, None)
-        .await
-}
-
-pub async fn generate_browse_response_with_totals(
-    object_id: &str,
-    subdirectories: &[MediaDirectory],
-    files: &[MediaFile],
-    state: &AppState,
-    server_ip: &str,
-    total_matches: Option<usize>,
+    total_matches: usize,
 ) -> String {
     use std::fmt::Write;
     use tracing::{debug, warn};
@@ -576,14 +567,7 @@ pub async fn generate_browse_response_with_totals(
     let mut didl = SoapResultWriter(&mut final_response);
     didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
 
-    let number_returned = if object_id == "0" {
-        // Root directory: show containers for media types
-        didl.push_str(r#"<container id="video" parentID="0" restricted="1"><dc:title>Video</dc:title><upnp:class>object.container</upnp:class></container>"#);
-        didl.push_str(r#"<container id="audio" parentID="0" restricted="1"><dc:title>Music</dc:title><upnp:class>object.container</upnp:class></container>"#);
-        didl.push_str(r#"<container id="image" parentID="0" restricted="1"><dc:title>Pictures</dc:title><upnp:class>object.container</upnp:class></container>"#);
-        didl.push_str(r#"<container id="radio" parentID="0" restricted="1"><dc:title>Radio</dc:title><upnp:class>object.container</upnp:class></container>"#);
-        4
-    } else {
+    let number_returned = {
         // Add sub-containers to DIDL
         for (idx, container) in subdirectories.iter().enumerate() {
             if idx % 100 == 0 && idx > 0 {
@@ -599,9 +583,11 @@ pub async fn generate_browse_response_with_totals(
             let container_id = if path_str.starts_with("audio/")
                 || path_str.starts_with("video/")
                 || path_str.starts_with("image/")
+                || path_str.starts_with("radio/")
                 || path_str == "audio"
                 || path_str == "video"
                 || path_str == "image"
+                || path_str == "radio"
             {
                 path_str.into_owned()
             } else if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit())
@@ -895,8 +881,6 @@ pub async fn generate_browse_response_with_totals(
     };
 
     didl.push_str("</DIDL-Lite>");
-    let final_total_matches = total_matches.unwrap_or(number_returned);
-
     let update_id = state
         .content_update_id
         .load(std::sync::atomic::Ordering::SeqCst);
@@ -905,7 +889,7 @@ pub async fn generate_browse_response_with_totals(
         "Browse response completed: {} items, DIDL size: {} bytes, total matches: {}",
         number_returned,
         final_response.len() - result_start,
-        final_total_matches
+        total_matches
     );
 
     let _ = write!(
@@ -917,7 +901,7 @@ pub async fn generate_browse_response_with_totals(
         </u:BrowseResponse>
     </s:Body>
 </s:Envelope>"#,
-        number_returned, final_total_matches, update_id
+        number_returned, total_matches, update_id
     );
 
     debug!("Final XML response size: {} bytes", final_response.len());
