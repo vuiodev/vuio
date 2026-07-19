@@ -1,0 +1,29 @@
+{
+  "settings": {
+    "skip": {
+      "patterns": {
+        "scanning": [
+          "**/target/**",
+          "**/.git/**",
+          "**/LICENSE-*"
+        ]
+      }
+    }
+  },
+  "bom": {
+    "remove": [
+      {
+        "purl": "pkg:github/vuiodev/vuio",
+        "comment": "Ignore self-matches to our own repository"
+      },
+      {
+        "purl": "pkg:github/stan-smith/slingshot",
+        "comment": "Ignore false positive snippet match on format_bytes helper"
+      },
+      {
+        "purl": "pkg:github/vectorhawk/vectorhawkd",
+        "comment": "Ignore false positive snippet match on generic JSON-RPC 2.0 structures"
+      }
+    ]
+  }
+}

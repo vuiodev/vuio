@@ -1,5 +1,9 @@
 # VuIO Media Server
 
+[![SCANOSS](https://img.shields.io/badge/SCANOSS-0%20matches-brightgreen)](https://scanoss.com)
+[![cargo audit](https://img.shields.io/badge/security-cargo%20audit%20passing-brightgreen)](https://github.com/rustsec/rustsec)
+[![cargo deny](https://img.shields.io/badge/licensing-cargo%20deny%20passing-brightgreen)](https://github.com/embark-studios/cargo-deny)
+
 A cross-platform DLNA/UPnP media server written in Rust. Streams video, audio, and images to any DLNA-compatible device (smart TVs, receivers, game consoles).
 Less than 8Mb of RAM needed
 
