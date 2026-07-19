@@ -7,13 +7,6 @@ Built with Tokio, Axum, and Redb for high performance and reliability.
 
 **Supported platforms:** Windows, Linux, macOS, Docker (x64 and ARM64)
 
-```bash
-git clone https://github.com/vuiodev/vuio.git
-cd vuio
-cargo build --release
-./target/release/vuio /path/to/media
-```
-
 ## Features
 
 - **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
@@ -28,6 +21,20 @@ cargo build --release
 - **Real-time Monitoring** - Detects file changes and updates database automatically
 - **Cross-platform** - Native integration for Windows, macOS, Linux
 - **Redb Database** - Embedded ACID-compliant database with crash recovery
+
+## Homebrew (macOS & Linux)
+
+You can install VuIO using our official Homebrew Tap:
+
+```bash
+brew tap vuiodev/vuio
+brew install vuio
+```
+
+Once installed, start the server using:
+```bash
+vuio /path/to/media
+```
 
 For a detailed guide on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](api.md).
 
@@ -73,20 +80,6 @@ Options:
       --update             Update binary to the latest version from GitHub
   -h, --help               Print help
   -V, --version            Print version
-```
-
-## Homebrew (macOS & Linux)
-
-You can install VuIO using our official Homebrew Tap:
-
-```bash
-brew tap vuiodev/vuio
-brew install vuio
-```
-
-Once installed, start the server using:
-```bash
-vuio /path/to/media
 ```
 
 ### Self-Updater
