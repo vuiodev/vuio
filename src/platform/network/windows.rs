@@ -14,9 +14,11 @@ use tracing::{debug, error, info, warn};
 /// Helper function to calculate the length of a wide string
 unsafe fn wcslen(mut s: *const u16) -> usize {
     let mut len = 0;
-    while *s != 0 {
-        len += 1;
-        s = s.add(1);
+    unsafe {
+        while *s != 0 {
+            len += 1;
+            s = s.add(1);
+        }
     }
     len
 }
