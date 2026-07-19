@@ -14,6 +14,26 @@ use tracing::{debug, error};
 
 use super::diagnostics::WebHandlerMetrics;
 
+fn content_disposition(filename: &str) -> String {
+    let mut fallback = String::with_capacity(filename.len().min(255));
+    for character in filename.chars() {
+        if character.is_ascii_alphanumeric() || matches!(character, ' ' | '.' | '_' | '-') {
+            fallback.push(character);
+        } else if !matches!(character, '\r' | '\n') {
+            fallback.push('_');
+        }
+    }
+    let fallback = fallback.trim();
+    let fallback = if fallback.is_empty() {
+        "media"
+    } else {
+        fallback
+    };
+    let encoded =
+        percent_encoding::utf8_percent_encode(filename, percent_encoding::NON_ALPHANUMERIC);
+    format!("inline; filename=\"{fallback}\"; filename*=UTF-8''{encoded}")
+}
+
 struct MetricsTrackingReader<R> {
     inner: R,
     metrics: std::sync::Arc<WebHandlerMetrics>,
@@ -153,16 +173,7 @@ pub async fn serve_media<D: DatabaseManager>(
         _ => file_info.mime_type.clone(),
     };
 
-    let encoded_filename = percent_encoding::utf8_percent_encode(
-        &file_info.filename,
-        percent_encoding::NON_ALPHANUMERIC,
-    )
-    .to_string();
-    let content_disposition = format!(
-        "inline; filename=\"{}\"; filename*=UTF-8''{}",
-        file_info.filename.replace('"', "\\\""),
-        encoded_filename
-    );
+    let content_disposition = content_disposition(&file_info.filename);
 
     let mut response_builder = Response::builder()
         .header(header::CONTENT_TYPE, &mime_override)
@@ -180,16 +191,10 @@ pub async fn serve_media<D: DatabaseManager>(
         .and_then(|h| h.to_str().ok())
     {
         if caption_req == "1" && file_info.subtitle_available {
-            let server_ip = headers
-                .get(header::HOST)
-                .and_then(|h| h.to_str().ok())
-                .and_then(|h| h.split(':').next())
-                .unwrap_or("127.0.0.1");
             let srt_url = format!(
-                "http://{}:{}/media/{}/subtitle",
-                server_ip,
-                state.current_config().server.port,
-                file_id
+                "{}/media/{}/subtitle",
+                state.advertised_http_origin(),
+                file_id,
             );
             debug!(
                 "Injecting Samsung subtitle header CaptionInfo.sec: {}",
@@ -448,6 +453,15 @@ pub async fn serve_cover<D: DatabaseManager>(
 #[cfg(test)]
 mod range_tests {
     use super::*;
+
+    #[test]
+    fn content_disposition_has_safe_ascii_and_utf8_names() {
+        let value = content_disposition("résumé\"\r\n.mkv");
+        assert!(value.starts_with("inline; filename=\"r_sum__.mkv\""));
+        assert!(value.contains("filename*=UTF-8''r%C3%A9sum%C3%A9%22%0D%0A%2Emkv"));
+        assert!(!value.split("filename*=",).next().unwrap().contains('\r'));
+        assert!(!value.split("filename*=",).next().unwrap().contains('\n'));
+    }
 
     #[test]
     fn empty_files_reject_every_range_without_underflowing() {

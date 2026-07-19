@@ -53,6 +53,7 @@ async fn test_metrics_endpoints_data() {
     config.media.directories = vec![MonitoredDirectoryConfig {
         path: private_media_path.to_string_lossy().into_owned(),
         recursive: true,
+        case_sensitive: None,
         extensions: None,
         exclude_patterns: None,
         validation_mode: ValidationMode::Warn,

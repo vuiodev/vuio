@@ -433,6 +433,7 @@ mod tests {
                 directories: vec![MonitoredDirectoryConfig {
                     path: "/test/media".to_string(),
                     recursive: true,
+                    case_sensitive: None,
                     extensions: Some(vec!["mp4".to_string(), "mkv".to_string()]),
                     exclude_patterns: Some(vec!["*.tmp".to_string()]),
                     validation_mode: ValidationMode::Strict,
@@ -540,6 +541,7 @@ mod tests {
                 directories: vec![MonitoredDirectoryConfig {
                     path: "/media".to_string(),
                     recursive: true,
+                    case_sensitive: None,
                     extensions: None,       // Test None case
                     exclude_patterns: None, // Test None case
                     validation_mode: ValidationMode::Warn,

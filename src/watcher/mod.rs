@@ -76,10 +76,32 @@ pub struct CrossPlatformWatcher {
     debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, FileIdMap>>>>,
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
-    watched_paths: Arc<std::sync::Mutex<HashMap<PathBuf, bool>>>,
+    watched_paths: Arc<std::sync::Mutex<HashMap<PathBuf, WatchRegistration>>>,
     policies: Arc<std::sync::RwLock<Vec<ScanPolicy>>>,
     dirty_roots: Arc<std::sync::Mutex<HashSet<PathBuf>>>,
     debounce_duration: Duration,
+}
+
+#[derive(Debug, Clone)]
+struct WatchRegistration {
+    path: PathBuf,
+    recursive: bool,
+}
+
+fn normalized_watch_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| {
+        let mut normalized = PathBuf::new();
+        for component in path.components() {
+            match component {
+                std::path::Component::CurDir => {}
+                std::path::Component::ParentDir => {
+                    normalized.pop();
+                }
+                _ => normalized.push(component.as_os_str()),
+            }
+        }
+        normalized
+    })
 }
 
 impl CrossPlatformWatcher {
@@ -142,8 +164,13 @@ impl CrossPlatformWatcher {
                 .watched_paths
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if watched.contains_key(path) {
-                return Ok(());
+            let key = normalized_watch_key(path);
+            if let Some(existing) = watched.get(&key) {
+                if existing.recursive == recursive {
+                    return Ok(());
+                }
+                debouncer.unwatch(&existing.path)?;
+                watched.remove(&key);
             }
             let mode = if recursive {
                 RecursiveMode::Recursive
@@ -151,7 +178,13 @@ impl CrossPlatformWatcher {
                 RecursiveMode::NonRecursive
             };
             debouncer.watch(path, mode)?;
-            watched.insert(path.to_path_buf(), recursive);
+            watched.insert(
+                key,
+                WatchRegistration {
+                    path: path.to_path_buf(),
+                    recursive,
+                },
+            );
             info!(
                 "Added {} watch path: {}",
                 if recursive {
@@ -525,7 +558,13 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 };
                 match debouncer.watch(directory, mode) {
                     Ok(()) => {
-                        watched_paths.insert(directory.clone(), recursive);
+                        watched_paths.insert(
+                            normalized_watch_key(directory),
+                            WatchRegistration {
+                                path: directory.clone(),
+                                recursive,
+                            },
+                        );
                         info!("Started watching directory: {}", directory.display());
 
                         // Test if directory is accessible
@@ -595,14 +634,15 @@ impl FileSystemWatcher for CrossPlatformWatcher {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
 
-            if !watched_paths.contains_key(path) {
+            let key = normalized_watch_key(path);
+            let Some(registration) = watched_paths.get(&key).cloned() else {
                 debug!("Path not being watched: {}", path.display());
                 return Ok(());
-            }
+            };
 
-            match debouncer.unwatch(path) {
+            match debouncer.unwatch(&registration.path) {
                 Ok(()) => {
-                    watched_paths.remove(path);
+                    watched_paths.remove(&key);
                     info!("Removed watch path: {}", path.display());
                     Ok(())
                 }
@@ -621,10 +661,11 @@ impl FileSystemWatcher for CrossPlatformWatcher {
     }
 
     async fn is_watching(&self, path: &Path) -> bool {
+        let key = normalized_watch_key(path);
         self.watched_paths
             .lock()
             .unwrap_or_else(|error| error.into_inner())
-            .contains_key(path)
+            .contains_key(&key)
     }
 }
 
@@ -719,6 +760,7 @@ mod tests {
 
         // Check if watching
         assert!(watcher.is_watching(temp_dir.path()).await);
+        assert!(watcher.is_watching(&temp_dir.path().join(".")).await);
 
         // Stop watching
         let result = watcher.stop_watching().await;

@@ -93,6 +93,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         media_directories.push(MonitoredDirectoryConfig {
             path: media_dir.to_string_lossy().to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Warn,
@@ -111,6 +112,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         media_directories.push(MonitoredDirectoryConfig {
             path: additional_dir.to_string_lossy().to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Warn,

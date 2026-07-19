@@ -220,6 +220,7 @@ supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "jpg", "png"]
 [[media.directories]]
 path = "/home/user/Videos"
 recursive = true
+# case_sensitive = true # Optional override; omit for automatic root/volume detection
 extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
 exclude_patterns = ["*.tmp", ".*"]
 validation_mode = "Warn"  # Strict, Warn, or Skip
@@ -269,6 +270,7 @@ backup_enabled = false
 - `extensions` - Override extensions for this directory
 - `exclude_patterns` - Patterns to exclude (e.g., "*.tmp", ".*")
 - `validation_mode` - Path validation: "Strict" (fail if missing), "Warn" (log warning), "Skip" (no validation)
+- `case_sensitive` - Optional per-root override; omit it to detect the filesystem behavior automatically
 
 **Database:**
 - `path` - Database file location

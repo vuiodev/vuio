@@ -104,6 +104,7 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
     let monitored_directory = MonitoredDirectoryConfig {
         path: media_root.to_string_lossy().into_owned(),
         recursive: false,
+        case_sensitive: None,
         extensions: Some(vec!["mkv".to_string()]),
         exclude_patterns: None,
         validation_mode: ValidationMode::Warn,

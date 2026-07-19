@@ -1,3 +1,6 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![deny(clippy::undocumented_unsafe_blocks)]
+
 pub mod config;
 pub mod database;
 pub mod error;
@@ -176,6 +179,20 @@ pub mod state {
             // Last resort
             tracing::warn!("Could not auto-detect IP, falling back to 127.0.0.1");
             "127.0.0.1".to_string()
+        }
+
+        /// Absolute HTTP origin advertised to DLNA clients. Request `Host`
+        /// headers are deliberately excluded because they describe untrusted
+        /// inbound routing, not this server's public identity.
+        pub fn advertised_http_origin(&self) -> String {
+            let address = self.get_server_ip();
+            let host = address
+                .parse::<std::net::IpAddr>()
+                .map_or(address.clone(), |ip| match ip {
+                    std::net::IpAddr::V4(_) => ip.to_string(),
+                    std::net::IpAddr::V6(_) => format!("[{ip}]"),
+                });
+            format!("http://{}:{}", host, self.current_config().server.port)
         }
     }
 }

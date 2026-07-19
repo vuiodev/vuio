@@ -173,6 +173,8 @@ impl WindowsNetworkManager {
             | GAA_FLAG_SKIP_MULTICAST
             | GAA_FLAG_SKIP_DNS_SERVER;
 
+        // SAFETY: the writable byte buffer is large enough for `buffer_size`,
+        // remains alive for the call, and the API initializes only that buffer.
         let result = unsafe {
             GetAdaptersAddresses(
                 0, // AF_UNSPEC - get both IPv4 and IPv6
@@ -187,6 +189,8 @@ impl WindowsNetworkManager {
             ERROR_BUFFER_OVERFLOW => {
                 // Buffer too small, resize and try again
                 buffer.resize(buffer_size as usize, 0);
+                // SAFETY: the resized buffer has exactly the size requested by
+                // the first call and remains pinned for the duration of this call.
                 let result = unsafe {
                     GetAdaptersAddresses(
                         0,
@@ -214,10 +218,14 @@ impl WindowsNetworkManager {
         let mut current_adapter = buffer.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
 
         while !current_adapter.is_null() {
+            // SAFETY: `current_adapter` is either the first record in the API-
+            // initialized buffer or a `Next` pointer validated as non-null.
             let adapter = unsafe { &*current_adapter };
 
             // Get adapter name
             let adapter_name = if !adapter.FriendlyName.is_null() {
+                // SAFETY: Windows guarantees a NUL-terminated `FriendlyName`
+                // for a successful adapter record; the pointer is non-null here.
                 unsafe {
                     let name_slice = std::slice::from_raw_parts(
                         adapter.FriendlyName.0,
@@ -245,15 +253,21 @@ impl WindowsNetworkManager {
             // Parse IP addresses
             let mut unicast_addr = adapter.FirstUnicastAddress;
             while !unicast_addr.is_null() {
+                // SAFETY: the non-null address node belongs to the live adapter
+                // buffer and is advanced only through the API-provided list.
                 let addr_info = unsafe { &*unicast_addr };
                 let socket_addr = addr_info.Address.lpSockaddr;
 
                 if !socket_addr.is_null() {
+                    // SAFETY: `lpSockaddr` is non-null and points to at least a
+                    // SOCKADDR header owned by the adapter buffer.
                     let addr_family = unsafe { (*socket_addr).sa_family };
 
                     match addr_family {
                         AF_INET => {
                             let sockaddr_in = socket_addr as *const SOCKADDR_IN;
+                            // SAFETY: the address family was checked as AF_INET,
+                            // so the API-provided pointer has SOCKADDR_IN layout.
                             let ip_bytes =
                                 unsafe { (*sockaddr_in).sin_addr.S_un.S_addr.to_ne_bytes() };
                             let ip =
@@ -270,6 +284,8 @@ impl WindowsNetworkManager {
                         }
                         AF_INET6 => {
                             let sockaddr_in6 = socket_addr as *const SOCKADDR_IN6;
+                            // SAFETY: the address family was checked as AF_INET6,
+                            // so the API-provided pointer has SOCKADDR_IN6 layout.
                             let ip_bytes = unsafe { (*sockaddr_in6).sin6_addr.u.Byte };
                             let ip = Ipv6Addr::from(ip_bytes);
 

@@ -19,6 +19,7 @@ const BATCH_SIZE: usize = 1000;
 pub struct ScanPolicy {
     pub root: PathBuf,
     pub recursive: bool,
+    pub case_sensitive: bool,
     extensions: HashSet<String>,
     exclude_patterns: Vec<String>,
     pub scan_playlists: bool,
@@ -37,6 +38,21 @@ impl ScanPolicy {
         Self {
             root: PathBuf::from(&directory.path),
             recursive: directory.recursive,
+            case_sensitive: directory.case_sensitive.unwrap_or_else(|| {
+                detect_case_sensitivity(Path::new(&directory.path)).unwrap_or_else(|| {
+                    let fallback = !cfg!(target_os = "windows");
+                    warn!(
+                        "Could not detect case behavior for {}; using {} fallback",
+                        directory.path,
+                        if fallback {
+                            "case-sensitive"
+                        } else {
+                            "case-insensitive"
+                        }
+                    );
+                    fallback
+                })
+            }),
             extensions,
             exclude_patterns: directory.exclude_patterns.clone().unwrap_or_default(),
             scan_playlists: config.media.scan_playlists,
@@ -47,6 +63,7 @@ impl ScanPolicy {
         Self {
             root: root.to_path_buf(),
             recursive,
+            case_sensitive: detect_case_sensitivity(root).unwrap_or(!cfg!(target_os = "windows")),
             extensions: crate::platform::filesystem::get_supported_extensions()
                 .iter()
                 .map(|extension| extension.to_ascii_lowercase())
@@ -74,15 +91,18 @@ impl ScanPolicy {
     pub fn for_path<'a>(policies: &'a [Self], path: &Path) -> Option<&'a Self> {
         policies
             .iter()
-            .filter(|policy| path.starts_with(&policy.root))
+            .filter(|policy| policy.path_starts_with(path, &policy.root))
             .max_by_key(|policy| policy.root.components().count())
     }
 
     pub fn contains(&self, path: &Path) -> bool {
-        if !path.starts_with(&self.root) {
+        if !self.path_starts_with(path, &self.root) {
             return false;
         }
-        self.recursive || path.parent().is_some_and(|parent| parent == self.root)
+        self.recursive
+            || path
+                .parent()
+                .is_some_and(|parent| self.paths_equal(parent, &self.root))
     }
 
     pub fn allows_media(&self, path: &Path) -> bool {
@@ -111,7 +131,8 @@ impl ScanPolicy {
 
     pub fn allows_watched_path(&self, path: &Path) -> bool {
         if path.is_dir() {
-            return path == self.root || (self.recursive && path.starts_with(&self.root));
+            return self.paths_equal(path, &self.root)
+                || (self.recursive && self.path_starts_with(path, &self.root));
         }
         self.allows_media(path)
             || self.allows_playlist(path)
@@ -124,18 +145,35 @@ impl ScanPolicy {
     }
 
     fn is_excluded(&self, path: &Path) -> bool {
-        let relative = path.strip_prefix(&self.root).unwrap_or(path);
-        relative.components().any(|component| {
+        let skip = if self.path_starts_with(path, &self.root) {
+            self.root.components().count()
+        } else {
+            0
+        };
+        path.components().skip(skip).any(|component| {
             let value = component.as_os_str().to_string_lossy();
             self.exclude_patterns
                 .iter()
-                .any(|pattern| wildcard_match(pattern, &value))
+                .any(|pattern| wildcard_match(pattern, &value, self.case_sensitive))
+        })
+    }
+
+    fn paths_equal(&self, left: &Path, right: &Path) -> bool {
+        path_components_equal(left, right, self.case_sensitive)
+    }
+
+    fn path_starts_with(&self, path: &Path, root: &Path) -> bool {
+        let mut path_components = path.components();
+        root.components().all(|root_component| {
+            path_components.next().is_some_and(|path_component| {
+                component_equal(path_component, root_component, self.case_sensitive)
+            })
         })
     }
 }
 
-fn wildcard_match(pattern: &str, value: &str) -> bool {
-    let (pattern, value) = if cfg!(windows) {
+fn wildcard_match(pattern: &str, value: &str, case_sensitive: bool) -> bool {
+    let (pattern, value) = if !case_sensitive {
         (pattern.to_ascii_lowercase(), value.to_ascii_lowercase())
     } else {
         (pattern.to_owned(), value.to_owned())
@@ -163,6 +201,66 @@ fn wildcard_match(pattern: &str, value: &str) -> bool {
         p += 1;
     }
     p == pattern.len()
+}
+
+fn component_equal(
+    left: std::path::Component<'_>,
+    right: std::path::Component<'_>,
+    case_sensitive: bool,
+) -> bool {
+    if case_sensitive {
+        left == right
+    } else {
+        left.as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&right.as_os_str().to_string_lossy())
+    }
+}
+
+fn path_components_equal(left: &Path, right: &Path, case_sensitive: bool) -> bool {
+    let mut left = left.components();
+    let mut right = right.components();
+    loop {
+        match (left.next(), right.next()) {
+            (None, None) => return true,
+            (Some(a), Some(b)) if component_equal(a, b, case_sensitive) => {}
+            _ => return false,
+        }
+    }
+}
+
+/// Detect case behavior without writing to a monitored root. We change the
+/// ASCII case of one existing path component and ask the filesystem whether it
+/// resolves to the same canonical object.
+fn detect_case_sensitivity(root: &Path) -> Option<bool> {
+    let canonical = std::fs::canonicalize(root).ok()?;
+    for current in canonical.ancestors() {
+        let Some(name) = current.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(swapped) = swap_one_ascii_case(name) else {
+            continue;
+        };
+        let mut candidate = current.to_path_buf();
+        candidate.set_file_name(swapped);
+        match std::fs::canonicalize(candidate) {
+            Ok(other) => return Some(other != current),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Some(true),
+            Err(_) => continue,
+        }
+    }
+    None
+}
+
+fn swap_one_ascii_case(value: &str) -> Option<String> {
+    let mut bytes = value.as_bytes().to_vec();
+    let byte = bytes.iter_mut().find(|byte| byte.is_ascii_alphabetic())?;
+    *byte = if byte.is_ascii_lowercase() {
+        byte.to_ascii_uppercase()
+    } else {
+        byte.to_ascii_lowercase()
+    };
+    String::from_utf8(bytes).ok()
 }
 
 #[derive(Debug)]
@@ -1149,4 +1247,18 @@ mod tests {
         assert_eq!(result.new_files[0].filename, "visible-name.mp4");
         assert_eq!(result.new_files[0].path, target.canonicalize().unwrap());
     }
+}
+#[test]
+fn case_policy_compares_path_components_without_changing_boundaries() {
+    assert!(path_components_equal(
+        Path::new("/Media/Movies"),
+        Path::new("/media/movies"),
+        false
+    ));
+    assert!(!path_components_equal(
+        Path::new("/Media/Movies"),
+        Path::new("/media/movies"),
+        true
+    ));
+    assert_eq!(swap_one_ascii_case("Movies"), Some("movies".to_string()));
 }

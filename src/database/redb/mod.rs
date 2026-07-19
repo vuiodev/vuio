@@ -28,13 +28,13 @@ use super::{
     VisitSummary,
 };
 
+include!("schema.rs");
+
 mod health;
 mod media_repo;
 mod playlist_repo;
 mod root_repo;
 mod stats;
-
-include!("schema.rs");
 
 /// RedbDatabase - ACID-compliant embedded database
 pub struct RedbDatabase {
@@ -126,26 +126,15 @@ impl RedbDatabase {
         {
             let write_txn = db.begin_write()?;
             {
-                let _ = write_txn.open_table(FILES_TABLE)?;
-                let _ = write_txn.open_table(PATH_INDEX)?;
-                let _ = write_txn.open_table(DIRECTORY_PATH_INDEX)?;
-                let _ = write_txn.open_table(DIRECTORY_RECORDS)?;
-                let _ = write_txn.open_multimap_table(DIRECTORY_CHILDREN)?;
-                let _ = write_txn.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
-                let _ = write_txn.open_multimap_table(DIRECTORY_FILES)?;
-                let _ = write_txn.open_table(DIRECTORY_MIME_COUNTS)?;
-                let _ = write_txn.open_table(PLAYLISTS_TABLE)?;
-                let _ = write_txn.open_table(PLAYLIST_ENTRIES)?;
-                let _ = write_txn.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
-                let _ = write_txn.open_table(PLAYLIST_SOURCES)?;
-                let _ = write_txn.open_multimap_table(SOURCE_PLAYLISTS)?;
-                let _ = write_txn.open_table(METADATA_TABLE)?;
-                let _ = write_txn.open_table(ROOT_AVAILABILITY)?;
-                let _ = write_txn.open_multimap_table(ARTIST_INDEX)?;
-                let _ = write_txn.open_multimap_table(ALBUM_INDEX)?;
-                let _ = write_txn.open_multimap_table(GENRE_INDEX)?;
-                let _ = write_txn.open_multimap_table(YEAR_INDEX)?;
-                let _ = write_txn.open_multimap_table(ALBUM_ARTIST_INDEX)?;
+                macro_rules! open_schema_entry {
+                    (table, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+                        let _ = write_txn.open_table($constant)?;
+                    };
+                    (multimap, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+                        let _ = write_txn.open_multimap_table($constant)?;
+                    };
+                }
+                redb_schema!(open_schema_entry);
             }
             let existing_schema = {
                 let metadata = write_txn.open_table(METADATA_TABLE)?;
@@ -502,6 +491,106 @@ impl RedbDatabase {
             current_path = parent_path;
         }
         Ok(())
+    }
+
+    /// Remove every directory-index artifact in a canonical subtree. Normal
+    /// file removal already prunes empty ancestors; this defensive pass also
+    /// handles legacy/corrupt records that have no surviving file membership.
+    fn prune_directory_subtree(
+        transaction: &redb::WriteTransaction,
+        canonical_root: &str,
+    ) -> Result<usize> {
+        let directories = {
+            let paths = transaction.open_table(DIRECTORY_PATH_INDEX)?;
+            paths
+                .iter()?
+                .filter_map(|entry| match entry {
+                    Ok((path, id))
+                        if Path::new(path.value()).starts_with(Path::new(canonical_root)) =>
+                    {
+                        Some(Ok((path.value().to_owned(), id.value())))
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<std::result::Result<Vec<_>, redb::StorageError>>()?
+        };
+        if directories.is_empty() {
+            return Ok(0);
+        }
+
+        let directory_ids = directories
+            .iter()
+            .map(|(_, id)| *id)
+            .collect::<HashSet<_>>();
+
+        {
+            let mut children = transaction.open_multimap_table(DIRECTORY_CHILDREN)?;
+            let edges = children
+                .iter()?
+                .flat_map(|entry| match entry {
+                    Ok((parent, values)) => values
+                        .map(|child| child.map(|child| (parent.value(), child.value())))
+                        .collect::<Vec<_>>(),
+                    Err(error) => vec![Err(error)],
+                })
+                .collect::<std::result::Result<Vec<_>, redb::StorageError>>()?;
+            for (parent, child) in edges {
+                if directory_ids.contains(&parent) || directory_ids.contains(&child) {
+                    children.remove(parent, child)?;
+                }
+            }
+        }
+        {
+            let mut ordered = transaction.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
+            let keys = ordered
+                .iter()?
+                .filter_map(|entry| match entry {
+                    Ok((key, child)) if directory_ids.contains(&child.value()) => {
+                        Some(Ok(key.value().to_owned()))
+                    }
+                    Ok(_) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<std::result::Result<Vec<_>, redb::StorageError>>()?;
+            for key in keys {
+                ordered.remove(key.as_str())?;
+            }
+        }
+        {
+            let mut directory_files = transaction.open_multimap_table(DIRECTORY_FILES)?;
+            for id in &directory_ids {
+                let _ = directory_files.remove_all(*id)?;
+            }
+        }
+        {
+            let mut counts = transaction.open_table(DIRECTORY_MIME_COUNTS)?;
+            let keys = counts
+                .iter()?
+                .filter_map(|entry| match entry {
+                    Ok((key, _)) => key
+                        .value()
+                        .split_once(':')
+                        .and_then(|(id, _)| id.parse::<u64>().ok())
+                        .filter(|id| directory_ids.contains(id))
+                        .map(|_| Ok(key.value().to_owned())),
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<std::result::Result<Vec<_>, redb::StorageError>>()?;
+            for key in keys {
+                counts.remove(key.as_str())?;
+            }
+        }
+        {
+            let mut paths = transaction.open_table(DIRECTORY_PATH_INDEX)?;
+            let mut records = transaction.open_table(DIRECTORY_RECORDS)?;
+            for (path, id) in &directories {
+                paths.remove(path.as_str())?;
+                records.remove(*id)?;
+            }
+        }
+
+        Ok(directories.len())
     }
 
     fn remove_file_indexes<V: MediaFileView>(
@@ -1135,6 +1224,96 @@ mod tests {
             .await
             .unwrap();
         assert!(db.get_file_by_path(&b.path).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn targeted_removal_prunes_orphan_directory_artifacts() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("orphan-subtree.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+
+        {
+            let database = db.db.read().unwrap();
+            let transaction = database.begin_write().unwrap();
+            {
+                let mut paths = transaction.open_table(DIRECTORY_PATH_INDEX).unwrap();
+                let mut records = transaction.open_table(DIRECTORY_RECORDS).unwrap();
+                for (path, id) in [
+                    ("/media", 900),
+                    ("/media/orphan", 901),
+                    ("/media/orphan/child", 902),
+                    ("/media/orphans", 903),
+                ] {
+                    paths.insert(path, id).unwrap();
+                    records.insert(id, path).unwrap();
+                }
+                let mut children = transaction.open_multimap_table(DIRECTORY_CHILDREN).unwrap();
+                children.insert(900, 901).unwrap();
+                children.insert(901, 902).unwrap();
+                children.insert(900, 903).unwrap();
+                let mut ordered = transaction.open_table(DIRECTORY_CHILDREN_BY_NAME).unwrap();
+                ordered
+                    .insert(
+                        RedbDatabase::directory_order_key(900, "/media/orphan", 901).as_str(),
+                        901,
+                    )
+                    .unwrap();
+                ordered
+                    .insert(
+                        RedbDatabase::directory_order_key(901, "/media/orphan/child", 902).as_str(),
+                        902,
+                    )
+                    .unwrap();
+                ordered
+                    .insert(
+                        RedbDatabase::directory_order_key(900, "/media/orphans", 903).as_str(),
+                        903,
+                    )
+                    .unwrap();
+                transaction
+                    .open_table(DIRECTORY_MIME_COUNTS)
+                    .unwrap()
+                    .insert("901:*", 99)
+                    .unwrap();
+            }
+            transaction.commit().unwrap();
+        }
+
+        let summary = db
+            .remove_media_under_path(Path::new("/media/orphan"))
+            .await
+            .unwrap();
+        assert_eq!(summary.removed_files, 0);
+
+        let database = db.db.read().unwrap();
+        let transaction = database.begin_read().unwrap();
+        let paths = transaction.open_table(DIRECTORY_PATH_INDEX).unwrap();
+        assert!(paths.get("/media/orphan").unwrap().is_none());
+        assert!(paths.get("/media/orphan/child").unwrap().is_none());
+        assert_eq!(paths.get("/media/orphans").unwrap().unwrap().value(), 903);
+        let children = transaction.open_multimap_table(DIRECTORY_CHILDREN).unwrap();
+        let remaining = children
+            .get(900)
+            .unwrap()
+            .map(|value| value.unwrap().value())
+            .collect::<Vec<_>>();
+        assert_eq!(remaining, vec![903]);
+    }
+
+    #[test]
+    fn schema_registry_has_unique_names() {
+        let mut names = Vec::new();
+        macro_rules! collect_schema_name {
+            ($kind:ident, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+                names.push($name);
+            };
+        }
+        redb_schema!(collect_schema_name);
+        let unique = names.iter().copied().collect::<HashSet<_>>();
+        assert_eq!(names.len(), unique.len());
+        assert_eq!(names.len(), 20);
     }
 
     #[tokio::test]

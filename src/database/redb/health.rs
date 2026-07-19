@@ -91,26 +91,15 @@ impl RedbDatabase {
             }};
         }
 
-        copy_table!(FILES_TABLE);
-        copy_table!(PATH_INDEX);
-        copy_table!(DIRECTORY_PATH_INDEX);
-        copy_table!(DIRECTORY_RECORDS);
-        copy_multimap!(DIRECTORY_CHILDREN);
-        copy_table!(DIRECTORY_CHILDREN_BY_NAME);
-        copy_multimap!(DIRECTORY_FILES);
-        copy_table!(DIRECTORY_MIME_COUNTS);
-        copy_table!(PLAYLISTS_TABLE);
-        copy_table!(PLAYLIST_ENTRIES);
-        copy_multimap!(FILE_PLAYLIST_ENTRIES);
-        copy_table!(PLAYLIST_SOURCES);
-        copy_multimap!(SOURCE_PLAYLISTS);
-        copy_table!(METADATA_TABLE);
-        copy_table!(ROOT_AVAILABILITY);
-        copy_multimap!(ARTIST_INDEX);
-        copy_multimap!(ALBUM_INDEX);
-        copy_multimap!(GENRE_INDEX);
-        copy_multimap!(YEAR_INDEX);
-        copy_multimap!(ALBUM_ARTIST_INDEX);
+        macro_rules! copy_schema_entry {
+            (table, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+                copy_table!($constant);
+            };
+            (multimap, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+                copy_multimap!($constant);
+            };
+        }
+        redb_schema!(copy_schema_entry);
 
         target_transaction.commit()?;
         drop(source_transaction);
@@ -197,50 +186,40 @@ impl RedbDatabase {
                         files.remove(key)?;
                     }
                 }
-                macro_rules! clear_table_str {
-                    ($def:expr) => {{
-                        let mut table = txn.open_table($def)?;
+                macro_rules! clear_schema_entry {
+                    ($kind:ident, $constant:ident, $key:ty, $value:ty, $name:literal, primary) => {};
+                    (table, $constant:ident, &str, $value:ty, $name:literal, derived) => {{
+                        let mut table = txn.open_table($constant)?;
                         let keys = table
                             .iter()?
-                            .map(|entry| entry.map(|(key, _)| key.value().to_string()))
+                            .map(|entry| entry.map(|(key, _)| key.value().to_owned()))
                             .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             table.remove(key.as_str())?;
                         }
                     }};
-                }
-                clear_table_str!(PATH_INDEX);
-                clear_table_str!(DIRECTORY_PATH_INDEX);
-                clear_table_str!(DIRECTORY_MIME_COUNTS);
-                {
-                    let mut table = txn.open_table(DIRECTORY_RECORDS)?;
-                    let keys = table
-                        .iter()?
-                        .map(|entry| entry.map(|(key, _)| key.value()))
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    for key in keys {
-                        table.remove(key)?;
-                    }
-                }
-                macro_rules! clear_multimap_str {
-                    ($def:expr) => {{
-                        let mut table = txn.open_multimap_table($def)?;
+                    (table, $constant:ident, $key:ty, $value:ty, $name:literal, derived) => {{
+                        let mut table = txn.open_table($constant)?;
                         let keys = table
                             .iter()?
-                            .map(|entry| entry.map(|(key, _)| key.value().to_string()))
+                            .map(|entry| entry.map(|(key, _)| key.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        for key in keys {
+                            table.remove(key)?;
+                        }
+                    }};
+                    (multimap, $constant:ident, &str, $value:ty, $name:literal, derived) => {{
+                        let mut table = txn.open_multimap_table($constant)?;
+                        let keys = table
+                            .iter()?
+                            .map(|entry| entry.map(|(key, _)| key.value().to_owned()))
                             .collect::<std::result::Result<Vec<_>, _>>()?;
                         for key in keys {
                             let _ = table.remove_all(key.as_str())?;
                         }
                     }};
-                }
-                clear_multimap_str!(ARTIST_INDEX);
-                clear_multimap_str!(ALBUM_INDEX);
-                clear_multimap_str!(GENRE_INDEX);
-                clear_multimap_str!(ALBUM_ARTIST_INDEX);
-                macro_rules! clear_multimap_u64 {
-                    ($definition:expr) => {{
-                        let mut table = txn.open_multimap_table($definition)?;
+                    (multimap, $constant:ident, $key:ty, $value:ty, $name:literal, derived) => {{
+                        let mut table = txn.open_multimap_table($constant)?;
                         let keys = table
                             .iter()?
                             .map(|entry| entry.map(|(key, _)| key.value()))
@@ -250,19 +229,7 @@ impl RedbDatabase {
                         }
                     }};
                 }
-                clear_multimap_u64!(DIRECTORY_CHILDREN);
-                clear_multimap_u64!(DIRECTORY_FILES);
-                clear_table_str!(DIRECTORY_CHILDREN_BY_NAME);
-                {
-                    let mut table = txn.open_multimap_table(YEAR_INDEX)?;
-                    let keys = table
-                        .iter()?
-                        .map(|entry| entry.map(|(key, _)| key.value()))
-                        .collect::<std::result::Result<Vec<_>, _>>()?;
-                    for key in keys {
-                        let _ = table.remove_all(key)?;
-                    }
-                }
+                redb_schema!(clear_schema_entry);
                 let total_size = {
                     let files = txn.open_table(FILES_TABLE)?;
                     let mut paths = txn.open_table(PATH_INDEX)?;

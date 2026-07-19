@@ -46,6 +46,7 @@ impl LinuxNetworkManager {
         std::env::var("USER")
             .map(|user| user == "root")
             .unwrap_or(false)
+            // SAFETY: `geteuid` takes no pointers and has no preconditions.
             || unsafe { libc::geteuid() == 0 }
     }
 
@@ -92,63 +93,10 @@ impl LinuxNetworkManager {
         &self,
         socket: &UdpSocket,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        use std::os::unix::io::AsRawFd;
-
-        let fd = socket.as_raw_fd();
-
-        // Enable SO_REUSEADDR
-        let optval: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!(
-                "Failed to set SO_REUSEADDR: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-
-        // Set multicast TTL
-        let ttl: libc::c_int = 4; // Standard multicast TTL
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_MULTICAST_TTL,
-                &ttl as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&ttl) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!(
-                "Failed to set IP_MULTICAST_TTL: {}",
-                std::io::Error::last_os_error()
-            );
-        }
-
-        // Enable multicast loopback (important for Docker containers)
-        let loop_val: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::IPPROTO_IP,
-                libc::IP_MULTICAST_LOOP,
-                &loop_val as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&loop_val) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!(
-                "Failed to set IP_MULTICAST_LOOP: {}",
-                std::io::Error::last_os_error()
-            );
-        }
+        let socket = socket2::SockRef::from(socket);
+        socket.set_reuse_address(true)?;
+        socket.set_multicast_ttl_v4(4)?;
+        socket.set_multicast_loop_v4(true)?;
 
         debug!("Configured multicast socket options for optimal Docker compatibility");
         Ok(())
@@ -772,47 +720,16 @@ impl LinuxNetworkManager {
 
     /// Apply receive socket options
     fn apply_receive_socket_options(&self, socket: &UdpSocket) -> PlatformResult<()> {
-        use std::os::unix::io::AsRawFd;
-
-        let fd = socket.as_raw_fd();
-
-        // SO_REUSEADDR (critical for multiple binds)
-        let optval: libc::c_int = 1;
-        let ret = unsafe {
-            libc::setsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                libc::SO_REUSEADDR,
-                &optval as *const _ as *const libc::c_void,
-                std::mem::size_of_val(&optval) as libc::socklen_t,
-            )
-        };
-        if ret != 0 {
-            warn!(
-                "Failed to set SO_REUSEADDR: {}",
-                std::io::Error::last_os_error()
-            );
+        let socket = socket2::SockRef::from(socket);
+        if let Err(error) = socket.set_reuse_address(true) {
+            warn!("Failed to set SO_REUSEADDR: {error}");
         }
 
         // This is necessary to prevent the "Address in use" error when creating the announcement socket.
-        #[cfg(target_os = "linux")]
-        {
-            let ret_port = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::SOL_SOCKET,
-                    libc::SO_REUSEPORT,
-                    &optval as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&optval) as libc::socklen_t,
-                )
-            };
-            if ret_port != 0 {
-                // Log as a warning, as older kernels might not support this, but it's crucial for modern systems.
-                warn!(
-                    "Failed to set SO_REUSEPORT: {}. This might cause issues in some environments.",
-                    std::io::Error::last_os_error()
-                );
-            }
+        if let Err(error) = socket.set_reuse_port(true) {
+            warn!(
+                "Failed to set SO_REUSEPORT: {error}. This might cause issues in some environments."
+            );
         }
 
         debug!("Applied receive socket options");
@@ -825,41 +742,17 @@ impl LinuxNetworkManager {
         socket: &UdpSocket,
         interface: &NetworkInterface,
     ) -> PlatformResult<()> {
-        use std::os::unix::io::AsRawFd;
-
-        let fd = socket.as_raw_fd();
-
         // Use IP_ADD_MEMBERSHIP with specific interface address
         if let IpAddr::V4(interface_ip) = interface.ip_address {
             let multicast_addr = SSDP_MULTICAST_IPV4;
-
-            // Create ip_mreq structure
-            let mreq = libc::ip_mreq {
-                imr_multiaddr: libc::in_addr {
-                    s_addr: u32::from(multicast_addr).to_be(),
-                },
-                imr_interface: libc::in_addr {
-                    s_addr: u32::from(interface_ip).to_be(),
-                },
-            };
-
-            let ret = unsafe {
-                libc::setsockopt(
-                    fd,
-                    libc::IPPROTO_IP,
-                    libc::IP_ADD_MEMBERSHIP,
-                    &mreq as *const _ as *const libc::c_void,
-                    std::mem::size_of_val(&mreq) as libc::socklen_t,
-                )
-            };
-
-            if ret < 0 {
-                let error = std::io::Error::last_os_error();
-                return Err(PlatformError::NetworkConfig(format!(
-                    "Failed to join multicast group on interface {} ({}): {}",
-                    interface.name, interface_ip, error
-                )));
-            }
+            socket
+                .join_multicast_v4(multicast_addr, interface_ip)
+                .map_err(|error| {
+                    PlatformError::NetworkConfig(format!(
+                        "Failed to join multicast group on interface {} ({}): {}",
+                        interface.name, interface_ip, error
+                    ))
+                })?;
 
             info!(
                 "Successfully joined multicast 239.255.255.250 on interface {} ({})",

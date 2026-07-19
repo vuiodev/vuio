@@ -493,6 +493,7 @@ mod tests {
         test_config.media.directories = vec![super::MonitoredDirectoryConfig {
             path: temp_dir.path().to_string_lossy().to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Strict,
@@ -527,6 +528,7 @@ mod tests {
         config.media.directories = vec![super::MonitoredDirectoryConfig {
             path: temp_dir.path().to_string_lossy().to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Strict,
@@ -549,6 +551,7 @@ mod tests {
         config.media.directories = vec![super::MonitoredDirectoryConfig {
             path: "/tmp".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Warn,
@@ -565,6 +568,7 @@ mod tests {
         let valid_dir = super::MonitoredDirectoryConfig {
             path: temp_dir.path().to_string_lossy().to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: Some(vec!["mp4".to_string()]),
             exclude_patterns: Some(vec!["*.tmp".to_string()]),
             validation_mode: super::ValidationMode::Strict,
@@ -575,6 +579,7 @@ mod tests {
         let invalid_dir_strict = super::MonitoredDirectoryConfig {
             path: "/nonexistent/directory".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Strict,
@@ -585,6 +590,7 @@ mod tests {
         let invalid_dir_warn = super::MonitoredDirectoryConfig {
             path: "/nonexistent/directory".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Warn,
@@ -595,6 +601,7 @@ mod tests {
         let invalid_dir_skip = super::MonitoredDirectoryConfig {
             path: "/nonexistent/directory".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Skip,
@@ -605,6 +612,7 @@ mod tests {
         let empty_path_dir = super::MonitoredDirectoryConfig {
             path: "".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Warn,
@@ -618,6 +626,7 @@ mod tests {
         let missing_dir_warn = super::MonitoredDirectoryConfig {
             path: "/definitely/does/not/exist".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Warn,
@@ -630,6 +639,7 @@ mod tests {
         let missing_dir_skip = super::MonitoredDirectoryConfig {
             path: "/definitely/does/not/exist".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Skip,
@@ -642,6 +652,7 @@ mod tests {
         let missing_dir_strict = super::MonitoredDirectoryConfig {
             path: "/definitely/does/not/exist".to_string(),
             recursive: true,
+            case_sensitive: None,
             extensions: None,
             exclude_patterns: None,
             validation_mode: ValidationMode::Strict,
@@ -663,6 +674,7 @@ mod tests {
             super::MonitoredDirectoryConfig {
                 path: temp_dir.path().to_string_lossy().to_string(),
                 recursive: true,
+                case_sensitive: None,
                 extensions: None,
                 exclude_patterns: None,
                 validation_mode: ValidationMode::Strict, // This should pass
@@ -670,6 +682,7 @@ mod tests {
             super::MonitoredDirectoryConfig {
                 path: "/definitely/does/not/exist".to_string(),
                 recursive: true,
+                case_sensitive: None,
                 extensions: None,
                 exclude_patterns: None,
                 validation_mode: ValidationMode::Warn, // This should warn but not fail
@@ -677,6 +690,7 @@ mod tests {
             super::MonitoredDirectoryConfig {
                 path: "/another/missing/directory".to_string(),
                 recursive: true,
+                case_sensitive: None,
                 extensions: None,
                 exclude_patterns: None,
                 validation_mode: ValidationMode::Skip, // This should be skipped

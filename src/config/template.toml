@@ -46,6 +46,7 @@ supported_extensions = [
 [[media.directories]]
 path = "PLACEHOLDER_DEFAULT_MEDIA_PATH"
 recursive = true
+# case_sensitive = true # Optional override; omit to auto-detect this root/volume
 validation_mode = "Warn"
 
 # Database configuration

@@ -707,9 +707,12 @@ impl BaseFileSystemManager {
             });
         }
 
-        // Check for directory traversal attempts
-        let path_str = path.to_string_lossy();
-        if path_str.contains("..") {
+        // Reject only a real parent component. Double dots are legal inside a
+        // filename (for example `movie..mp4`).
+        if path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+        {
             return Err(FileSystemError::InvalidPath {
                 path: path.display().to_string(),
                 reason: "Path contains directory traversal".to_string(),
@@ -1164,6 +1167,9 @@ mod tests {
             .is_ok());
         assert!(manager
             .validate_path_common(Path::new("relative/path"))
+            .is_ok());
+        assert!(manager
+            .validate_path_common(Path::new("relative/movie..mp4"))
             .is_ok());
 
         // Invalid paths

@@ -7,6 +7,79 @@ use std::time::Duration;
 use tokio::net::UdpSocket;
 use tracing::{debug, warn};
 
+const MAX_RENDERER_ERROR_BYTES: usize = 64 * 1024;
+const MAX_RENDERER_SOAP_BYTES: usize = 256 * 1024;
+
+struct CappedBody {
+    text: String,
+    truncated: bool,
+}
+
+async fn read_response_body_capped(
+    response: reqwest::Response,
+    limit: usize,
+) -> Result<CappedBody> {
+    let mut bytes =
+        Vec::with_capacity(response.content_length().unwrap_or(0).min(limit as u64) as usize);
+    let mut truncated = response
+        .content_length()
+        .is_some_and(|length| length > limit as u64);
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.context("failed while reading renderer response body")?;
+        let remaining = limit.saturating_sub(bytes.len());
+        if chunk.len() > remaining {
+            bytes.extend_from_slice(&chunk[..remaining]);
+            truncated = true;
+            break;
+        }
+        bytes.extend_from_slice(&chunk);
+        if bytes.len() == limit {
+            if stream.next().await.transpose()?.is_some() {
+                truncated = true;
+            }
+            break;
+        }
+    }
+    Ok(CappedBody {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        truncated,
+    })
+}
+
+async fn renderer_error(operation: &str, response: reqwest::Response) -> anyhow::Error {
+    let status = response.status();
+    match read_response_body_capped(response, MAX_RENDERER_ERROR_BYTES).await {
+        Ok(body) => {
+            let suffix = if body.truncated { " [truncated]" } else { "" };
+            anyhow::anyhow!(
+                "{} failed (HTTP {}): {}{}",
+                operation,
+                status,
+                body.text,
+                suffix
+            )
+        }
+        Err(error) => anyhow::anyhow!(
+            "{} failed (HTTP {}); error body could not be read: {:#}",
+            operation,
+            status,
+            error
+        ),
+    }
+}
+
+async fn renderer_soap_body(response: reqwest::Response, operation: &str) -> Result<String> {
+    let body = read_response_body_capped(response, MAX_RENDERER_SOAP_BYTES).await?;
+    anyhow::ensure!(
+        !body.truncated,
+        "{} response exceeded {} bytes",
+        operation,
+        MAX_RENDERER_SOAP_BYTES
+    );
+    Ok(body.text)
+}
+
 /// A discovered UPnP MediaRenderer (TV/speaker/player) on the network
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct DiscoveredTv {
@@ -395,9 +468,7 @@ pub async fn cast_media(
         .await?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("SetAVTransportURI failed (HTTP {}): {}", status, body);
+        return Err(renderer_error("SetAVTransportURI", resp).await);
     }
 
     debug!("SetAVTransportURI succeeded on {}", control_url);
@@ -450,9 +521,7 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
         .await?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("{} command failed (HTTP {}): {}", action, status, err_body);
+        return Err(renderer_error(&format!("{action} command"), resp).await);
     }
 
     debug!("{} command succeeded on {}", action, control_url);
@@ -485,13 +554,7 @@ pub async fn set_next_media(
         .await?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
-        anyhow::bail!(
-            "SetNextAVTransportURI failed (HTTP {}): {}",
-            status,
-            err_body
-        );
+        return Err(renderer_error("SetNextAVTransportURI", resp).await);
     }
 
     debug!("SetNextAVTransportURI succeeded on {}", control_url);
@@ -528,12 +591,10 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
         .await?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("GetPositionInfo failed (HTTP {}): {}", status, err_body);
+        return Err(renderer_error("GetPositionInfo", resp).await);
     }
 
-    let text = resp.text().await?;
+    let text = renderer_soap_body(resp, "GetPositionInfo").await?;
 
     // Extract TrackURI
     if let Some(uri_part) = text.split("<TrackURI>").nth(1) {
@@ -575,12 +636,10 @@ pub async fn get_transport_state(control_url: &str) -> Result<String> {
         .await?;
 
     if !resp.status().is_success() {
-        let status = resp.status();
-        let err_body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("GetTransportInfo failed (HTTP {}): {}", status, err_body);
+        return Err(renderer_error("GetTransportInfo", resp).await);
     }
 
-    let text = resp.text().await?;
+    let text = renderer_soap_body(resp, "GetTransportInfo").await?;
     if let Some(state_part) = text.split("<CurrentTransportState>").nth(1) {
         if let Some(state) = state_part.split("</CurrentTransportState>").next() {
             return Ok(state.trim().to_string());
@@ -615,5 +674,17 @@ mod tests {
         .unwrap();
         assert!(xml.contains("A &amp;amp; &amp;lt;B&amp;gt;"));
         assert!(!xml.contains("<dc:title>A &"));
+    }
+
+    #[tokio::test]
+    async fn renderer_response_reader_caps_and_marks_truncation() {
+        let response: reqwest::Response = axum::http::Response::builder()
+            .header(axum::http::header::CONTENT_LENGTH, "10")
+            .body(b"0123456789".to_vec())
+            .unwrap()
+            .into();
+        let body = read_response_body_capped(response, 8).await.unwrap();
+        assert_eq!(body.text, "01234567");
+        assert!(body.truncated);
     }
 }

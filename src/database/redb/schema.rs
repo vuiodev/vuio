@@ -1,48 +1,45 @@
 // ReDB table schema and Rkyv archived record views.
 
-// Table definitions for redb
-// Primary table: stores MediaFile data keyed by ID
-const FILES_TABLE: TableDefinition<i64, &[u8]> = TableDefinition::new("files");
-// Index: path -> file ID (for lookups by path)
-const PATH_INDEX: TableDefinition<&str, i64> = TableDefinition::new("path_index");
-// Native one-to-many indexes. ReDB keeps each ID independently ordered, so
-// inserts/removals no longer parse and rewrite an entire comma-separated blob.
-const DIRECTORY_PATH_INDEX: TableDefinition<&str, u64> =
-    TableDefinition::new("directory_path_index");
-const DIRECTORY_RECORDS: TableDefinition<u64, &str> = TableDefinition::new("directory_records");
-const DIRECTORY_CHILDREN: MultimapTableDefinition<u64, u64> =
-    MultimapTableDefinition::new("directory_children");
-// Composite key `<parent id>\0<case-folded name>\0<child id>` keeps direct
-// children in stable display order and permits pagination before loading paths.
-const DIRECTORY_CHILDREN_BY_NAME: TableDefinition<&str, u64> =
-    TableDefinition::new("directory_children_by_name");
-const DIRECTORY_FILES: MultimapTableDefinition<u64, i64> =
-    MultimapTableDefinition::new("directory_files");
-// Composite key `<directory id>:<MIME family>`. Counts are recursive, so a
-// direct child can be filtered without opening or decoding any media record.
-const DIRECTORY_MIME_COUNTS: TableDefinition<&str, u64> =
-    TableDefinition::new("directory_mime_counts");
-// Playlists table
-const PLAYLISTS_TABLE: TableDefinition<i64, &[u8]> = TableDefinition::new("playlists");
-// Packed `(playlist_id, position)` key -> media file, plus a reverse mapping
-// used to remove dangling playlist entries without scanning every playlist.
-const PLAYLIST_ENTRIES: TableDefinition<u128, i64> = TableDefinition::new("playlist_entries");
-const FILE_PLAYLIST_ENTRIES: MultimapTableDefinition<i64, u128> =
-    MultimapTableDefinition::new("file_playlist_entries");
-const PLAYLIST_SOURCES: TableDefinition<i64, &str> = TableDefinition::new("playlist_sources");
-const SOURCE_PLAYLISTS: MultimapTableDefinition<&str, i64> =
-    MultimapTableDefinition::new("source_playlists");
-const METADATA_TABLE: TableDefinition<&str, u64> = TableDefinition::new("metadata");
-const ROOT_AVAILABILITY: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("root_availability");
+// This is the single registration point for every table. Callers provide a
+// small callback macro for initialization, snapshots, or schema auditing.
+// The final token documents whether health repair rebuilds the table from
+// primary records or treats it as primary state.
+macro_rules! redb_schema {
+    ($callback:ident) => {
+        $callback!(table, FILES_TABLE, i64, &[u8], "files", primary);
+        $callback!(table, PATH_INDEX, &str, i64, "path_index", derived);
+        $callback!(table, DIRECTORY_PATH_INDEX, &str, u64, "directory_path_index", derived);
+        $callback!(table, DIRECTORY_RECORDS, u64, &str, "directory_records", derived);
+        $callback!(multimap, DIRECTORY_CHILDREN, u64, u64, "directory_children", derived);
+        $callback!(table, DIRECTORY_CHILDREN_BY_NAME, &str, u64, "directory_children_by_name", derived);
+        $callback!(multimap, DIRECTORY_FILES, u64, i64, "directory_files", derived);
+        $callback!(table, DIRECTORY_MIME_COUNTS, &str, u64, "directory_mime_counts", derived);
+        $callback!(table, PLAYLISTS_TABLE, i64, &[u8], "playlists", primary);
+        $callback!(table, PLAYLIST_ENTRIES, u128, i64, "playlist_entries", primary);
+        $callback!(multimap, FILE_PLAYLIST_ENTRIES, i64, u128, "file_playlist_entries", derived);
+        $callback!(table, PLAYLIST_SOURCES, i64, &str, "playlist_sources", primary);
+        $callback!(multimap, SOURCE_PLAYLISTS, &str, i64, "source_playlists", derived);
+        $callback!(table, METADATA_TABLE, &str, u64, "metadata", primary);
+        $callback!(table, ROOT_AVAILABILITY, &str, &[u8], "root_availability", primary);
+        $callback!(multimap, ARTIST_INDEX, &str, i64, "artist_index", derived);
+        $callback!(multimap, ALBUM_INDEX, &str, i64, "album_index", derived);
+        $callback!(multimap, GENRE_INDEX, &str, i64, "genre_index", derived);
+        $callback!(multimap, YEAR_INDEX, u32, i64, "year_index", derived);
+        $callback!(multimap, ALBUM_ARTIST_INDEX, &str, i64, "album_artist_index", derived);
+    };
+}
 
-const ARTIST_INDEX: MultimapTableDefinition<&str, i64> =
-    MultimapTableDefinition::new("artist_index");
-const ALBUM_INDEX: MultimapTableDefinition<&str, i64> = MultimapTableDefinition::new("album_index");
-const GENRE_INDEX: MultimapTableDefinition<&str, i64> = MultimapTableDefinition::new("genre_index");
-const YEAR_INDEX: MultimapTableDefinition<u32, i64> = MultimapTableDefinition::new("year_index");
-const ALBUM_ARTIST_INDEX: MultimapTableDefinition<&str, i64> =
-    MultimapTableDefinition::new("album_artist_index");
+macro_rules! declare_schema_entry {
+    (table, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+        const $constant: TableDefinition<$key, $value> = TableDefinition::new($name);
+    };
+    (multimap, $constant:ident, $key:ty, $value:ty, $name:literal, $role:ident) => {
+        const $constant: MultimapTableDefinition<$key, $value> =
+            MultimapTableDefinition::new($name);
+    };
+}
+
+redb_schema!(declare_schema_entry);
 const SCHEMA_VERSION: u64 = 5;
 const CODEC_VERSION: u64 = 1;
 

@@ -949,6 +949,19 @@ impl RedbDatabase {
                 summary.affected_parents.dedup();
                 let (removed, removed_size) =
                     Self::remove_files_from_transaction(&transaction, &files)?;
+                let pruned_directories =
+                    Self::prune_directory_subtree(&transaction, prefix.as_str())?;
+                if pruned_directories > 0 {
+                    if let Some(parent) = Path::new(&prefix).parent() {
+                        summary.affected_parents.push(parent.to_path_buf());
+                        summary.affected_parents.sort();
+                        summary.affected_parents.dedup();
+                    }
+                    debug!(
+                        "Defensively pruned {} directory records under {}",
+                        pruned_directories, prefix
+                    );
+                }
                 transaction.commit()?;
                 Ok((summary, removed, removed_size))
             })
