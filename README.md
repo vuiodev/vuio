@@ -1,5 +1,9 @@
 # VuIO Media Server
 
+[![CI](https://github.com/vuiodev/vuio/actions/workflows/ci.yml/badge.svg)](https://github.com/vuiodev/vuio/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/vuio.svg)](https://crates.io/crates/vuio)
+[![License](https://img.shields.io/badge/License-MIT%20%2F%20Apache--2.0-blue.svg)](#license)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macos%20%7C%20windows%20%7C%20freebsd-lightgrey.svg)](#)
 [![SCANOSS](https://img.shields.io/badge/SCANOSS-0%20matches-brightgreen)](https://scanoss.com)
 [![cargo audit](https://img.shields.io/badge/security-cargo%20audit%20passing-brightgreen)](https://github.com/rustsec/rustsec)
 [![cargo deny](https://img.shields.io/badge/licensing-cargo%20deny%20passing-brightgreen)](https://github.com/embark-studios/cargo-deny)
