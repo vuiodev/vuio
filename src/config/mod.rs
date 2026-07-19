@@ -13,11 +13,12 @@ mod model;
 pub mod validation;
 
 use model::{
-    default_redb_cache_mb, default_session_ttl_hours, default_unavailable_root_grace_hours,
+    default_allowed_networks, default_redb_cache_mb, default_session_ttl_hours,
+    default_unavailable_root_grace_hours,
 };
 pub use model::{
     AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
-    NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
+    NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode, CastConfig,
 };
 
 use crate::platform::config::PlatformConfig;
@@ -160,19 +161,26 @@ impl AppConfig {
                 enabled: std::env::var("VUIO_MANAGEMENT_ENABLED")
                     .map(|value| value.eq_ignore_ascii_case("true"))
                     .unwrap_or(true),
+                auth_enabled: std::env::var("VUIO_AUTH_ENABLED")
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false),
                 token_file: std::env::var("VUIO_ADMIN_TOKEN_FILE").ok(),
                 session_ttl_hours: std::env::var("VUIO_ADMIN_SESSION_TTL_HOURS")
                     .ok()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_else(default_session_ttl_hours),
                 allowed_networks: std::env::var("VUIO_MANAGEMENT_ALLOWED_NETWORKS")
-                    .unwrap_or_default()
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
+                    .ok()
+                    .filter(|v| !v.trim().is_empty())
+                    .map(|v| {
+                        v.split(',')
+                            .map(|s| s.trim().to_string())
+                            .filter(|s| !s.is_empty())
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_else(default_allowed_networks),
             },
+            cast: CastConfig::default(),
         })
     }
 
@@ -335,6 +343,7 @@ impl AppConfig {
                 redb_cache_mb: default_redb_cache_mb(),
             },
             management: ManagementConfig::default(),
+            cast: CastConfig::default(),
         }
     }
 

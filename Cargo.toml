@@ -48,13 +48,18 @@ toml_edit = "0.25"
 serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
-ipnet = "2.11"
+ipnet = "2.12"
 reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
 audiotags = "0.5"
 quick-xml = "0.41"
 percent-encoding = "2.3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"] }
 socket2 = { version = "0.6", features = ["all"] }
+mdns-sd = "0.20"
+prost = "0.14"
+tokio-rustls = "0.26"
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std"] }
+webpki-roots = "1.0"
 
 redb = "4.1"
 jwalk = "0.8"

@@ -35,6 +35,7 @@ struct Session {
 
 pub struct AuthState {
     enabled: bool,
+    auth_enabled: bool,
     admin_token: String,
     sessions: Mutex<HashMap<String, Session>>,
     login_attempts: Mutex<HashMap<IpAddr, (Instant, u8)>>,
@@ -100,6 +101,7 @@ impl AuthState {
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             enabled: config.enabled,
+            auth_enabled: config.auth_enabled,
             admin_token,
             sessions: Mutex::new(HashMap::new()),
             login_attempts: Mutex::new(HashMap::new()),
@@ -113,6 +115,7 @@ impl AuthState {
     pub fn testing() -> Self {
         Self {
             enabled: true,
+            auth_enabled: true,
             admin_token: "test-management-token-which-is-long-enough".to_owned(),
             sessions: Mutex::new(HashMap::new()),
             login_attempts: Mutex::new(HashMap::new()),
@@ -125,6 +128,10 @@ impl AuthState {
 
     pub fn enabled(&self) -> bool {
         self.enabled
+    }
+
+    pub fn auth_enabled(&self) -> bool {
+        self.auth_enabled
     }
 
     fn network_allowed(&self, address: IpAddr) -> bool {
@@ -385,12 +392,18 @@ pub async fn require_management<D: DatabaseManager>(
     let Ok(_permit) = state.auth.concurrency.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    if !state.auth.auth_enabled() {
+        return next.run(request).await;
+    }
     let bearer = state.auth.bearer_valid(request.headers());
     let cookie = state
         .auth
         .session_from_headers(request.headers(), peer.ip())
         .is_some();
     if !bearer && !cookie {
+        if request.uri().path() == "/" && request.method() == Method::GET {
+            return axum::response::Redirect::to("/login").into_response();
+        }
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if cookie

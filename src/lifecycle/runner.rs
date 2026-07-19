@@ -128,10 +128,21 @@ where
     let resolved_log_file =
         log_file_path.unwrap_or_else(crate::config::AppConfig::get_platform_log_file_path);
     let lifecycle_stats = Arc::new(ApplicationStats::new());
+    let mut auth_config = config.management.clone();
+    if cli_args.auth {
+        auth_config.auth_enabled = true;
+    }
     let auth = Arc::new(crate::web::auth::AuthState::load(
-        &config.management,
+        &auth_config,
         config_manager.get_config_path(),
     )?);
+    let discovery_config = crate::discovery::DiscoveryConfig {
+        chromecast_enabled: config.cast.chromecast_enabled,
+        airplay_enabled: config.cast.airplay_enabled,
+        dial_enabled: config.cast.dial_enabled,
+        discovery_interval: std::time::Duration::from_secs(config.cast.discovery_interval_seconds),
+    };
+    let discovery_service = Arc::new(crate::discovery::DiscoveryService::new(discovery_config));
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
@@ -162,6 +173,7 @@ where
             crate::runtime_state::ActiveCastRegistry::new(),
         )),
         discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
+        discovery_service,
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: cancellation.clone(),
         background_tasks: background_tasks.clone(),
@@ -235,6 +247,13 @@ where
             "subscription cleanup",
             subscription_handle.await.map_err(anyhow::Error::from),
         )
+    });
+
+    let disc_service = app_state.discovery_service.clone();
+    let disc_cancel = cancellation.clone();
+    services.spawn(async move {
+        disc_service.run(disc_cancel).await;
+        ("discovery service", Ok(()))
     });
 
     // Start file system monitoring

@@ -8,6 +8,10 @@ pub(super) fn default_true() -> bool {
     true
 }
 
+pub(super) fn default_false() -> bool {
+    false
+}
+
 pub(super) fn default_session_ttl_hours() -> u64 {
     12
 }
@@ -36,26 +40,74 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub management: ManagementConfig,
+    #[serde(default)]
+    pub cast: CastConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CastConfig {
+    /// Enable Chromecast (Castv2) discovery and control.
+    #[serde(default = "default_true")]
+    pub chromecast_enabled: bool,
+    /// Enable Apple AirPlay discovery and control.
+    #[serde(default = "default_true")]
+    pub airplay_enabled: bool,
+    /// Enable DIAL (Discovery and Launch) for smart TVs.
+    #[serde(default = "default_true")]
+    pub dial_enabled: bool,
+    /// Interval between discovery scans in seconds.
+    #[serde(default = "default_discovery_interval")]
+    pub discovery_interval_seconds: u64,
+}
+
+pub(super) fn default_discovery_interval() -> u64 {
+    30
+}
+
+impl Default for CastConfig {
+    fn default() -> Self {
+        Self {
+            chromecast_enabled: true,
+            airplay_enabled: true,
+            dial_enabled: true,
+            discovery_interval_seconds: default_discovery_interval(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManagementConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default = "default_false")]
+    pub auth_enabled: bool,
     pub token_file: Option<String>,
     #[serde(default = "default_session_ttl_hours")]
     pub session_ttl_hours: u64,
-    #[serde(default)]
+    #[serde(default = "default_allowed_networks")]
     pub allowed_networks: Vec<String>,
+}
+
+pub(super) fn default_allowed_networks() -> Vec<String> {
+    vec![
+        "127.0.0.0/8".to_string(),
+        "10.0.0.0/8".to_string(),
+        "172.16.0.0/12".to_string(),
+        "192.168.0.0/16".to_string(),
+        "::1/128".to_string(),
+        "fd00::/8".to_string(),
+        "fe80::/10".to_string(),
+    ]
 }
 
 impl Default for ManagementConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            auth_enabled: false,
             token_file: None,
             session_ttl_hours: default_session_ttl_hours(),
-            allowed_networks: Vec::new(),
+            allowed_networks: default_allowed_networks(),
         }
     }
 }

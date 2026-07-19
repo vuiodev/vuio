@@ -98,6 +98,7 @@ async fn test_metrics_endpoints_data() {
             vuio::runtime_state::ActiveCastRegistry::new(),
         )),
         discovered_tvs: Arc::new(vuio::runtime_state::RendererCache::new()),
+        discovery_service: Arc::new(vuio::discovery::DiscoveryService::default()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),

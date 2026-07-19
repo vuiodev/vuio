@@ -74,6 +74,7 @@ Options:
   -n, --name <NAME>        DLNA server name
   -c, --config <CONFIG>    Path to config file
   -m, --media-dir <DIR>    Additional media directories
+      --auth               Enable token authentication for management dashboard
       --debug              Enable debug logging
       --log-file <PATH>    Path to custom log file
       --log-level <LEVEL>  Set log level (off, error, warn, info, debug, trace)
@@ -123,6 +124,7 @@ services:
       - VUIO_MEDIA_DIRS=/media
       - VUIO_SERVER_NAME=VuIO
       - VUIO_DB_PATH=/data/vuio.redb
+      - VUIO_AUTH_ENABLED=true     # Enable token authentication (default: false)
 ```
 
 ### Docker Volume Mounting
@@ -528,6 +530,32 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
      -H "Content-Type: application/json" \
      -d '{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"cast_media_to_renderer","arguments":{"file_id":42,"renderer_id":"uuid:renderer-id"}}}'
    ```
+
+---
+
+## Authentication & Security
+
+By default, token authentication is **disabled**. The management dashboard is fully functional and accessible without entering a token.
+
+If you want to secure the management interface, you can enable token-based authentication in one of three ways:
+
+1. **CLI Flag**: Run the server with the `--auth` argument:
+   ```bash
+   ./vuio --auth /path/to/media
+   ```
+
+2. **Environment Variable**: Set `VUIO_AUTH_ENABLED=true`:
+   ```bash
+   VUIO_AUTH_ENABLED=true ./vuio /path/to/media
+   ```
+
+3. **Configuration File**: In your `vuio.toml` / `config.toml`, add `auth_enabled = true` under the `[management]` section:
+   ```toml
+   [management]
+   auth_enabled = true
+   ```
+
+When authentication is enabled, the server generates a cryptographically secure token on startup (saved to `admin.token` in the config directory, or set via `VUIO_ADMIN_TOKEN` environment variable). Visiting the root page will automatically redirect you to `/login` to authenticate.
 
 ---
 

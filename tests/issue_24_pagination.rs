@@ -135,6 +135,7 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         discovered_tvs: Arc::new(RendererCache::new()),
+        discovery_service: Arc::new(vuio::discovery::DiscoveryService::default()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),

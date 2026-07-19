@@ -1366,6 +1366,81 @@
             });
         }
 
+        function playFileOnTv(file) {
+            showToast("Discovering TVs on local network...", "info");
+            
+            fetch('/api/renderers')
+                .then(res => res.json())
+                .then(renderers => {
+                    if (!Array.isArray(renderers) || renderers.length === 0) {
+                        showToast("No TVs found on your local network.", "error");
+                        return;
+                    }
+                    
+                    if (renderers.length === 1) {
+                        castFileToRenderer(renderers[0], file);
+                    } else {
+                        showFileRendererSelectionModal(renderers, file);
+                    }
+                })
+                .catch(err => {
+                    console.error("TV discovery failed", err);
+                    showToast("Failed to discover TVs: " + err, "error");
+                });
+        }
+
+        function showFileRendererSelectionModal(renderers, file) {
+            document.getElementById('tv-modal-folder-name').textContent = file.title || file.name;
+            const container = document.getElementById('tv-list-container');
+            container.replaceChildren();
+            
+            renderers.forEach(renderer => {
+                const btn = document.createElement('button');
+                btn.className = 'tv-select-btn';
+                btn.onclick = () => {
+                    closeTvModal();
+                    castFileToRenderer(renderer, file);
+                };
+                btn.innerHTML = `
+                    <div class="tv-icon-wrapper">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                        <span class="tv-friendly-name"></span>
+                    </div>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                `;
+                btn.querySelector('.tv-friendly-name').textContent = renderer.friendly_name || 'Unknown renderer';
+                container.appendChild(btn);
+            });
+            
+            document.getElementById('tv-modal').style.display = 'flex';
+        }
+
+        function castFileToRenderer(renderer, file) {
+            showToast("Casting " + (file.title || file.name) + " to " + renderer.friendly_name + "...", "info");
+            
+            fetch('/api/cast/playlist', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    renderer_id: renderer.id,
+                    folder_name: file.title || file.name,
+                    file_ids: [file.id]
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                if (data.error) {
+                    showToast("Cast error: " + data.error, "error");
+                } else {
+                    showToast("Successfully playing " + (file.title || file.name) + " on " + renderer.friendly_name + "!", "success");
+                }
+            })
+            .catch(err => {
+                console.error("Cast request failed", err);
+                showToast("Failed to cast to TV: " + err, "error");
+            });
+        }
+
         function showToast(message, type = 'info') {
             let container = document.getElementById('toast-container');
             if (!container) {
@@ -2100,9 +2175,23 @@
                 playButton.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>';
                 playButton.addEventListener('click', event => {
                     event.stopPropagation();
-                    playAudioFile(file.id);
+                    playAudioFile(file);
                 });
                 actionArea.prepend(playButton);
+            }
+
+            if (file.cat === 'audio' || file.cat === 'video' || file.cat === 'radio') {
+                const tvButton = document.createElement('button');
+                tvButton.className = 'btn-action';
+                tvButton.title = 'Play on TV / Cast';
+                tvButton.style.marginRight = '0.35rem';
+                tvButton.style.color = 'var(--accent-color)';
+                tvButton.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>';
+                tvButton.addEventListener('click', event => {
+                    event.stopPropagation();
+                    playFileOnTv(file);
+                });
+                actionArea.prepend(tvButton);
             }
 
             const download = card.querySelector('.media-download');

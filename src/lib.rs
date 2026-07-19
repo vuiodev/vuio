@@ -14,6 +14,11 @@ pub mod tv_control;
 pub mod watcher;
 pub mod web;
 
+pub mod airplay;
+pub mod chromecast;
+pub mod dial;
+pub mod discovery;
+
 pub type DefaultDatabase = crate::database::redb::RedbDatabase;
 pub type DefaultAppState = crate::state::AppState<DefaultDatabase>;
 
@@ -101,6 +106,7 @@ pub mod state {
         >,
         pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
         pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
+        pub discovery_service: Arc<crate::discovery::DiscoveryService>,
         pub upnp_subscriptions:
             Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
         pub cancellation: tokio_util::sync::CancellationToken,
@@ -129,6 +135,7 @@ pub mod state {
                 active_monitors: self.active_monitors.clone(),
                 active_casts: self.active_casts.clone(),
                 discovered_tvs: self.discovered_tvs.clone(),
+                discovery_service: self.discovery_service.clone(),
                 upnp_subscriptions: self.upnp_subscriptions.clone(),
                 cancellation: self.cancellation.clone(),
                 background_tasks: self.background_tasks.clone(),

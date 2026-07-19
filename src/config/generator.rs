@@ -406,7 +406,7 @@ mod tests {
     use super::*;
     use crate::config::{
         AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
-        NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
+        NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode, CastConfig,
     };
     use uuid::Uuid;
 
@@ -453,6 +453,7 @@ mod tests {
                 redb_cache_mb: 128,
             },
             management: ManagementConfig::default(),
+            cast: CastConfig::default(),
         };
 
         // Generate TOML
@@ -561,6 +562,7 @@ mod tests {
                 redb_cache_mb: 128,
             },
             management: ManagementConfig::default(),
+            cast: CastConfig::default(),
         };
 
         // Generate TOML

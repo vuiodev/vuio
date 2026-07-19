@@ -7,6 +7,7 @@ pub struct LaunchOptions {
     pub config_override: Option<AppConfig>,
     pub restore_backup: Option<String>,
     pub update: bool,
+    pub auth: bool,
 }
 
 /// Parse command line arguments once and return configuration overrides
@@ -55,6 +56,10 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         /// Update the binary to the latest version from GitHub
         #[arg(long = "update")]
         update: bool,
+
+        /// Enable management token authentication
+        #[arg(long = "auth")]
+        auth: bool,
     }
 
     let args = Args::parse();
@@ -69,6 +74,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
             config_override: None,
             restore_backup: args.restore_backup,
             update: args.update,
+            auth: args.auth,
         });
     }
 
@@ -135,6 +141,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         config_override: Some(config_override),
         restore_backup: args.restore_backup,
         update: args.update,
+        auth: args.auth,
     })
 }
 
