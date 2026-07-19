@@ -214,11 +214,21 @@ You can deploy VuIO to a Kubernetes cluster using the provided Helm chart.
 
 ### Quick Start
 
-Deploy the chart locally from the cloned repository:
+#### Remote Installation (OCI Registry)
+
+You can install the chart directly from GitHub Container Registry without cloning the repository:
+
+```bash
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.1.0
+```
+
+#### Local Installation
+
+If you have cloned the repository, you can install the chart locally:
 
 ```bash
 # From the repository root directory
-helm install my-vuio ./helm/vuio
+helm install vuio ./helm/vuio
 ```
 
 ### Networking & SSDP Discovery
@@ -232,7 +242,7 @@ hostNetwork: true
 *Note: On platforms like macOS, multicast routing restrictions in the hypervisor layer prevent SSDP from working. If you are deploying locally on macOS Kubernetes or do not require LAN discovery, you should disable host networking in your `values.yaml` or overrides:*
 
 ```bash
-helm install my-vuio ./helm/vuio --set hostNetwork=false
+helm install vuio ./helm/vuio --set hostNetwork=false
 ```
 
 ### Configuration and Persistence
