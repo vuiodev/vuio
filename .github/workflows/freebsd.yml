@@ -1,0 +1,98 @@
+name: Build FreeBSD Packages
+
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  BINARY_NAME: vuio
+
+jobs:
+  # ==========================================================================
+  # x86_64 FreeBSD - Native build inside a FreeBSD VM
+  # ==========================================================================
+  build-freebsd-x64:
+    name: FreeBSD x86_64 (native)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Build in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: '14.2'
+          usesh: true
+          copyback: true
+          prepare: |
+            pkg install -y rust cargo
+          run: |
+            set -e
+            echo "=== Rust version ==="
+            rustc --version
+            cargo --version
+
+            echo "=== Building vuio for x86_64-unknown-freebsd ==="
+            cargo build --release
+
+            echo "=== Binary info ==="
+            file target/release/vuio
+            ls -lh target/release/vuio
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Package FreeBSD x64 binary
+        run: |
+          mkdir -p builds
+          cp target/release/vuio builds/vuio-${{ steps.version.outputs.version }}-freebsd-amd64
+          chmod +x builds/vuio-${{ steps.version.outputs.version }}-freebsd-amd64
+
+      - name: Upload FreeBSD x64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuio-freebsd-amd64
+          path: builds/vuio-*-freebsd-amd64
+          retention-days: 90
+
+  # ==========================================================================
+  # aarch64 FreeBSD - Cross-compiled from Linux using cargo-cross
+  # ==========================================================================
+  build-freebsd-arm64:
+    name: FreeBSD aarch64 (cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Cross-compile for aarch64-unknown-freebsd
+        uses: zijiren233/cargo-cross@v1
+        with:
+          command: build
+          targets: aarch64-unknown-freebsd
+          profile: release
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Package FreeBSD arm64 binary
+        run: |
+          mkdir -p builds
+          cp target/aarch64-unknown-freebsd/release/vuio builds/vuio-${{ steps.version.outputs.version }}-freebsd-arm64
+          chmod +x builds/vuio-${{ steps.version.outputs.version }}-freebsd-arm64
+
+      - name: Upload FreeBSD arm64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: vuio-freebsd-arm64
+          path: builds/vuio-*-freebsd-arm64
+          retention-days: 90
