@@ -60,11 +60,16 @@ impl Default for ManagementConfig {
     }
 }
 
+fn default_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ServerConfig {
     pub port: u16,
     pub interface: String,
     pub name: String,
+    #[serde(default = "default_uuid")]
     pub uuid: String,
     pub ip: Option<String>,
 }

@@ -461,6 +461,13 @@ jobs:
           # Use python to safely update the checksum strings in Formula/vuio.rb
           python3 -c "
           import re
+          
+          mac_arm = '$MAC_ARM_SHA'
+          mac_intel = '$MAC_INTEL_SHA'
+          linux_arm64 = '$LINUX_ARM64_SHA'
+          linux_armv7 = '$LINUX_ARMV7_SHA'
+          linux_intel = '$LINUX_INTEL_SHA'
+          
           with open('$FORMULA_FILE', 'r') as f:
               content = f.read()
               
@@ -468,31 +475,31 @@ jobs:
           # 1. Mac ARM:
           content = re.sub(
               r'(vuio-macos-arm64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>'$MAC_ARM_SHA'\g<2>',
+              r'\g<1>' + mac_arm + r'\g<2>',
               content
           )
           # 2. Mac Intel (x86_64):
           content = re.sub(
               r'(vuio-macos-x86_64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>'$MAC_INTEL_SHA'\g<2>',
+              r'\g<1>' + mac_intel + r'\g<2>',
               content
           )
           # 3. Linux ARM64:
           content = re.sub(
               r'(vuio-linux-arm64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>'$LINUX_ARM64_SHA'\g<2>',
+              r'\g<1>' + linux_arm64 + r'\g<2>',
               content
           )
           # 4. Linux ARMv7:
           content = re.sub(
               r'(vuio-linux-armv7.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>'$LINUX_ARMV7_SHA'\g<2>',
+              r'\g<1>' + linux_armv7 + r'\g<2>',
               content
           )
           # 5. Linux Intel (x86_64):
           content = re.sub(
               r'(vuio-linux-x86_64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>'$LINUX_INTEL_SHA'\g<2>',
+              r'\g<1>' + linux_intel + r'\g<2>',
               content
           )
           
