@@ -14,6 +14,7 @@ use tracing::{debug, error, info, warn};
 /// Helper function to calculate the length of a wide string
 unsafe fn wcslen(mut s: *const u16) -> usize {
     let mut len = 0;
+    // SAFETY: The caller must ensure that `s` is a valid, NUL-terminated wide string pointer.
     unsafe {
         while *s != 0 {
             len += 1;
