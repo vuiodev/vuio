@@ -233,9 +233,9 @@ impl PlatformInfo {
 
         #[cfg(target_os = "freebsd")]
         {
-            use crate::platform::network::linux::LinuxNetworkManager; // BSD uses Linux implementation
+            use crate::platform::network::bsd::BsdNetworkManager;
             use crate::platform::network::NetworkManager;
-            let manager = LinuxNetworkManager::new();
+            let manager = BsdNetworkManager::new();
             manager
                 .get_local_interfaces()
                 .await

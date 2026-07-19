@@ -1,4 +1,5 @@
-#[cfg(target_os = "freebsd")]
+#![cfg(target_os = "freebsd")]
+
 use super::{InterfaceType, NetworkInterface, PlatformResult};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -95,9 +96,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_bsd_interface_detection() {
-        use crate::platform::network::linux::LinuxNetworkManager;
+        use crate::platform::network::bsd::BsdNetworkManager;
         use crate::platform::network::NetworkManager;
-        let manager = LinuxNetworkManager::new();
+        let manager = BsdNetworkManager::new();
         let interfaces = manager.get_local_interfaces().await;
         assert!(interfaces.is_ok());
         let ifaces = interfaces.unwrap();

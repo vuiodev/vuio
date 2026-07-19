@@ -64,30 +64,33 @@ cp "$BINARY_PATH" "$PKG_ROOT/usr/local/bin/vuio"
 chmod 755 "$PKG_ROOT/usr/local/bin/vuio"
 
 # Create default configuration file
-cat > "$PKG_ROOT/usr/local/etc/vuio/config.toml" << 'EOF'
-# VuIO Configuration File
-# This is the default configuration for VuIO DLNA Media Server
+cat > "$PKG_ROOT/usr/local/etc/vuio/vuio.toml" << 'EOF'
+# VuIO Server Configuration
+# This is the default configuration file for VuIO
 
 [server]
-name = "VuIO Media Server"
 port = 8080
-host = "0.0.0.0"
-
-[media]
-library_paths = ["/usr/home/media", "/mnt/media"]
-scan_interval = 3600
-watch_for_changes = true
+interface = "0.0.0.0"
+name = "Vuio"
 
 [network]
-interface = "auto"
-multicast_address = "239.255.255.250"
+ssdp_port = 1900
+interface_selection = "auto"
+multicast_ttl = 4
+announce_interval_seconds = 30
+
+[media]
+scan_on_startup = true
+watch_for_changes = true
+supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "jpg", "png", "gif"]
+
+[[media.directories]]
+path = "/usr/home/media"
+recursive = true
 
 [database]
-path = "/var/db/vuio/media.db"
-
-[logging]
-level = "info"
-file = "/var/log/vuio/vuio.log"
+vacuum_on_startup = false
+backup_enabled = true
 EOF
 
 # Create rc.d service script
@@ -104,7 +107,7 @@ name="vuio"
 rcvar="vuio_enable"
 
 command="/usr/local/bin/vuio"
-command_args="--config /usr/local/etc/vuio/config.toml"
+command_args="--config /usr/local/etc/vuio/vuio.toml"
 pidfile="/var/run/vuio.pid"
 
 vuio_user="vuio"
@@ -128,8 +131,8 @@ vuio_prestart()
     install -d -o "$vuio_user" -g "$vuio_group" /var/log/vuio
     
     # Set permissions on config file
-    chown "$vuio_user:$vuio_group" /usr/local/etc/vuio/config.toml
-    chmod 640 /usr/local/etc/vuio/config.toml
+    chown "$vuio_user:$vuio_group" /usr/local/etc/vuio/vuio.toml
+    chmod 640 /usr/local/etc/vuio/vuio.toml
 }
 
 load_rc_config $name
@@ -209,12 +212,12 @@ if [ -f "$PACKAGE_FILE" ]; then
     echo "1. Copy package to FreeBSD system"
     echo "2. Install: sudo pkg add $PACKAGE_FILE"
     echo "3. Enable service: sudo sysrc vuio_enable=YES"
-    echo "4. Configure: edit /usr/local/etc/vuio/config.toml"
+    echo "4. Configure: edit /usr/local/etc/vuio/vuio.toml"
     echo "5. Start service: sudo service vuio start"
     echo ""
     echo -e "${CYAN}Package contents:${NC}"
     echo "- Binary: /usr/local/bin/vuio"
-    echo "- Config: /usr/local/etc/vuio/config.toml"
+    echo "- Config: /usr/local/etc/vuio/vuio.toml"
     echo "- Service: /usr/local/etc/rc.d/vuio"
     echo "- Database: /var/db/vuio/ (created on first run)"
     echo "- Logs: /var/log/vuio/ (created on first run)"

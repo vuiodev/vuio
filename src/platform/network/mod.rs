@@ -41,7 +41,10 @@ pub type PlatformNetworkManager = MacOSNetworkManager;
 pub type PlatformNetworkManager = LinuxNetworkManager;
 
 #[cfg(target_os = "freebsd")]
-pub type PlatformNetworkManager = BaseNetworkManager;
+pub mod bsd;
+
+#[cfg(target_os = "freebsd")]
+pub type PlatformNetworkManager = bsd::BsdNetworkManager;
 
 /// Configuration for SSDP networking
 #[derive(Debug, Clone)]
