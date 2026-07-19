@@ -17,8 +17,8 @@ use model::{
     default_unavailable_root_grace_hours,
 };
 pub use model::{
-    AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
-    NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode, CastConfig,
+    AppConfig, CastConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
+    NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
 };
 
 use crate::platform::config::PlatformConfig;

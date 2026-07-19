@@ -24,15 +24,35 @@ pub async fn api_list_renderers<D: DatabaseManager>(
         .into_iter()
         .map(|target| {
             let (friendly_name, model_name) = match target.kind {
-                TargetKind::Dlna => (target.friendly_name.clone(), target.model.clone().unwrap_or_else(|| "DLNA".to_string())),
-                TargetKind::Chromecast => (format!("{} (Chromecast)", target.friendly_name), target.model.clone().unwrap_or_else(|| "Chromecast".to_string())),
-                TargetKind::AirPlay => (format!("{} (AirPlay)", target.friendly_name), target.model.clone().unwrap_or_else(|| "AirPlay".to_string())),
-                TargetKind::Dial => (format!("{} (DIAL)", target.friendly_name), target.model.clone().unwrap_or_else(|| "DIAL".to_string())),
+                TargetKind::Dlna => (
+                    target.friendly_name.clone(),
+                    target.model.clone().unwrap_or_else(|| "DLNA".to_string()),
+                ),
+                TargetKind::Chromecast => (
+                    format!("{} (Chromecast)", target.friendly_name),
+                    target
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "Chromecast".to_string()),
+                ),
+                TargetKind::AirPlay => (
+                    format!("{} (AirPlay)", target.friendly_name),
+                    target
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| "AirPlay".to_string()),
+                ),
+                TargetKind::Dial => (
+                    format!("{} (DIAL)", target.friendly_name),
+                    target.model.clone().unwrap_or_else(|| "DIAL".to_string()),
+                ),
             };
             DiscoveredTv {
                 id: target.id,
                 friendly_name,
-                control_url: target.control_url.unwrap_or_else(|| target.address.to_string()),
+                control_url: target
+                    .control_url
+                    .unwrap_or_else(|| target.address.to_string()),
                 location_url: match target.kind {
                     TargetKind::Dlna => format!("http://{}", target.address),
                     TargetKind::Chromecast => format!("chromecast://{}", target.address),
@@ -157,22 +177,39 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
             };
 
             let origin = state.advertised_http_origin();
-            let media_url = format!("{}/media/{}", origin, media_file.id.unwrap_or(first_file_id));
+            let media_url = format!(
+                "{}/media/{}",
+                origin,
+                media_file.id.unwrap_or(first_file_id)
+            );
 
             match target.kind {
                 TargetKind::Chromecast => {
-                    match crate::chromecast::client::ChromecastClient::connect(target.address).await {
+                    match crate::chromecast::client::ChromecastClient::connect(target.address).await
+                    {
                         Ok(client) => {
                             if let Err(e) = client.launch_media_receiver().await {
                                 return (
                                     StatusCode::INTERNAL_SERVER_ERROR,
-                                    axum::Json(serde_json::json!({ "error": format!("Chromecast launch error: {}", e) })),
+                                    axum::Json(
+                                        serde_json::json!({ "error": format!("Chromecast launch error: {}", e) }),
+                                    ),
                                 );
                             }
-                            match client.load(&media_url, &media_file.mime_type, media_file.title.as_deref().unwrap_or(&media_file.filename)).await {
+                            match client
+                                .load(
+                                    &media_url,
+                                    &media_file.mime_type,
+                                    media_file.title.as_deref().unwrap_or(&media_file.filename),
+                                )
+                                .await
+                            {
                                 Ok(()) => {
                                     let mut casts = state.active_casts.lock().await;
-                                    casts.insert(target.friendly_name.clone(), media_file.filename.clone());
+                                    casts.insert(
+                                        target.friendly_name.clone(),
+                                        media_file.filename.clone(),
+                                    );
                                     (
                                         StatusCode::OK,
                                         axum::Json(serde_json::json!({ "status": "playing" })),
@@ -180,13 +217,17 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
                                 }
                                 Err(e) => (
                                     StatusCode::BAD_REQUEST,
-                                    axum::Json(serde_json::json!({ "error": format!("Chromecast load error: {}", e) })),
+                                    axum::Json(
+                                        serde_json::json!({ "error": format!("Chromecast load error: {}", e) }),
+                                    ),
                                 ),
                             }
                         }
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(serde_json::json!({ "error": format!("Chromecast connection error: {}", e) })),
+                            axum::Json(
+                                serde_json::json!({ "error": format!("Chromecast connection error: {}", e) }),
+                            ),
                         ),
                     }
                 }
@@ -203,7 +244,9 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
                         }
                         Err(e) => (
                             StatusCode::BAD_REQUEST,
-                            axum::Json(serde_json::json!({ "error": format!("AirPlay error: {}", e) })),
+                            axum::Json(
+                                serde_json::json!({ "error": format!("AirPlay error: {}", e) }),
+                            ),
                         ),
                     }
                 }
@@ -217,13 +260,17 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
                             ),
                             Err(e) => (
                                 StatusCode::BAD_REQUEST,
-                                axum::Json(serde_json::json!({ "error": format!("DIAL launch error: {}", e) })),
+                                axum::Json(
+                                    serde_json::json!({ "error": format!("DIAL launch error: {}", e) }),
+                                ),
                             ),
                         }
                     } else {
                         (
                             StatusCode::BAD_REQUEST,
-                            axum::Json(serde_json::json!({ "error": "DIAL target has no application URL" })),
+                            axum::Json(
+                                serde_json::json!({ "error": "DIAL target has no application URL" }),
+                            ),
                         )
                     }
                 }
@@ -231,7 +278,14 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
             }
         } else {
             // DLNA Target
-            match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0).await {
+            match crate::web::mcp::cast_playlist_helper(
+                &state,
+                playlist_id,
+                &payload.renderer_id,
+                0,
+            )
+            .await
+            {
                 Ok(result) => (StatusCode::OK, axum::Json(result)),
                 Err(e) => (
                     StatusCode::BAD_REQUEST,
@@ -241,7 +295,9 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
         }
     } else {
         // Fallback to DLNA if target not found in discovery list (could be legacy refresh status)
-        match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0).await {
+        match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0)
+            .await
+        {
             Ok(result) => (StatusCode::OK, axum::Json(result)),
             Err(e) => (
                 StatusCode::BAD_REQUEST,
@@ -326,7 +382,11 @@ pub async fn api_cast_to_target<D: DatabaseManager + 'static>(
 
     // Build the streaming URL
     let origin = state.advertised_http_origin();
-    let media_url = format!("{}/media/{}", origin, media_file.id.unwrap_or(payload.media_id));
+    let media_url = format!(
+        "{}/media/{}",
+        origin,
+        media_file.id.unwrap_or(payload.media_id)
+    );
 
     // Cast based on target type
     match target.kind {

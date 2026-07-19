@@ -405,8 +405,9 @@ impl ConfigGenerator {
 mod tests {
     use super::*;
     use crate::config::{
-        AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
-        NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode, CastConfig,
+        AppConfig, CastConfig, DatabaseConfig, ManagementConfig, MediaConfig,
+        MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
+        ValidationMode,
     };
     use uuid::Uuid;
 
