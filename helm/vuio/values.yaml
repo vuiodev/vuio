@@ -1,0 +1,110 @@
+# Default values for vuio.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/vuiodev/vuio
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# SSDP/UPnP requires multicast. Host networking is recommended for LAN discovery.
+hostNetwork: true
+
+# Security capabilities for UDP/multicast support if running with hostNetwork: false
+# or for permission adjustment in container entrypoint (changing ownership, etc.)
+securityContext:
+  privileged: false
+  capabilities:
+    add:
+      - NET_ADMIN
+      - NET_RAW
+
+podSecurityContext: {}
+  # fsGroup: 1000
+
+# User/Group IDs inside the container (corresponds to local files owner)
+env:
+  PUID: 1000
+  PGID: 1000
+  VUIO_PORT: 8080
+  VUIO_BIND_INTERFACE: 0.0.0.0
+  VUIO_SSDP_INTERFACE: Auto
+  VUIO_SERVER_NAME: VuIO
+  VUIO_DB_PATH: /config/media.db
+  # Set VUIO_IP if hostNetwork is true, or use auto-detect
+  VUIO_IP: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+  ssdpPort: 1900
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: vuio.local
+      paths:
+        - path: /
+          pathType: ImplementationSpecific
+  tls: []
+  #  - secretName: vuio-tls
+  #    hosts:
+  #      - vuio.local
+
+resources: {}
+  # We usually recommend at least 128Mi of memory for small libraries,
+  # but larger libraries will require more memory for ReDB caches and scanning.
+  # limits:
+  #   cpu: 1000m
+  #   memory: 1Gi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 11
+  targetCPUUtilizationPercentage: 80
+  # targetMemoryUtilizationPercentage: 80
+
+# Persistence configuration for application database and config.toml
+persistence:
+  config:
+    enabled: true
+    storageClass: ""
+    accessMode: ReadWriteOnce
+    size: 2Gi
+    # existingClaim: ""
+    # hostPath: ""
+
+# Media library configuration. Supports mounting host directories or PVCs.
+media:
+  # You can either mount a single media folder or configure multiple.
+  # If dynamic config of directories is needed, set VUIO_MEDIA_DIRS env accordingly.
+  volumeMounts:
+    - name: media
+      mountPath: /media
+      readOnly: true
+  volumes:
+    - name: media
+      hostPath:
+        path: /mnt/media
+        type: Directory
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}

@@ -192,6 +192,53 @@ uuidgen  # Linux/macOS
 [System.Guid]::NewGuid()  # Windows PowerShell
 ```
 
+## Kubernetes (Helm 3)
+
+You can deploy VuIO to a Kubernetes cluster using the provided Helm chart. 
+
+### Quick Start
+
+Deploy the chart locally from the cloned repository:
+
+```bash
+# From the repository root directory
+helm install my-vuio ./helm/vuio
+```
+
+### Networking & SSDP Discovery
+
+For SSDP/UPnP multicast auto-discovery to work natively on your local area network (LAN), the container needs to bind directly to the host's networking. The Helm chart is configured to use host networking by default:
+
+```yaml
+hostNetwork: true
+```
+
+*Note: On platforms like macOS, multicast routing restrictions in the hypervisor layer prevent SSDP from working. If you are deploying locally on macOS Kubernetes or do not require LAN discovery, you should disable host networking in your `values.yaml` or overrides:*
+
+```bash
+helm install my-vuio ./helm/vuio --set hostNetwork=false
+```
+
+### Configuration and Persistence
+
+The Helm chart supports configuring a Persistent Volume Claim (PVC) to retain the database and generated configuration across restarts. Additionally, you can configure your media volume mounts directly under `media` values:
+
+```yaml
+# Mount your local media library directory into the container
+media:
+  volumeMounts:
+    - name: media
+      mountPath: /media
+      readOnly: true
+  volumes:
+    - name: media
+      hostPath:
+        path: /Users/alex/test-media  # Path to media on your host machine
+        type: Directory
+```
+
+Refer to the default [values.yaml](helm/vuio/values.yaml) file for a complete list of parameters, including resource constraints, service configurations, and Ingress routing rules.
+
 ## Configuration
 
 ### Native (TOML Config)

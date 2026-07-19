@@ -1,0 +1,6 @@
+apiVersion: v2
+name: vuio
+description: A Helm chart for VuIO - A cross-platform DLNA/UPnP media server
+type: application
+version: 0.1.0
+appVersion: "0.0.33"

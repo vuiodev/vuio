@@ -1,0 +1,99 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "vuio.fullname" . }}
+  labels:
+    {{- include "vuio.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "vuio.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "vuio.selectorLabels" . | nindent 8 }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      hostNetwork: {{ .Values.hostNetwork }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.env.VUIO_PORT | default 8080 }}
+              protocol: TCP
+            - name: ssdp
+              containerPort: 1900
+              protocol: UDP
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          env:
+            - name: PUID
+              value: {{ .Values.env.PUID | quote }}
+            - name: PGID
+              value: {{ .Values.env.PGID | quote }}
+            - name: VUIO_PORT
+              value: {{ .Values.env.VUIO_PORT | quote }}
+            - name: VUIO_BIND_INTERFACE
+              value: {{ .Values.env.VUIO_BIND_INTERFACE | quote }}
+            - name: VUIO_SSDP_INTERFACE
+              value: {{ .Values.env.VUIO_SSDP_INTERFACE | quote }}
+            - name: VUIO_SERVER_NAME
+              value: {{ .Values.env.VUIO_SERVER_NAME | quote }}
+            - name: VUIO_DB_PATH
+              value: {{ .Values.env.VUIO_DB_PATH | quote }}
+            {{- if .Values.env.VUIO_IP }}
+            - name: VUIO_IP
+              value: {{ .Values.env.VUIO_IP | quote }}
+            {{- end }}
+          volumeMounts:
+            {{- if .Values.persistence.config.enabled }}
+            - name: config
+              mountPath: /config
+            {{- end }}
+            {{- if .Values.media.volumeMounts }}
+            {{- toYaml .Values.media.volumeMounts | nindent 12 }}
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        {{- if .Values.persistence.config.enabled }}
+        - name: config
+          {{- if .Values.persistence.config.hostPath }}
+          hostPath:
+            path: {{ .Values.persistence.config.hostPath }}
+            type: DirectoryOrCreate
+          {{- else if .Values.persistence.config.existingClaim }}
+          persistentVolumeClaim:
+            claimName: {{ .Values.persistence.config.existingClaim }}
+          {{- else }}
+          persistentVolumeClaim:
+            claimName: {{ include "vuio.fullname" . }}-config
+          {{- end }}
+        {{- end }}
+        {{- if .Values.media.volumes }}
+        {{- toYaml .Values.media.volumes | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

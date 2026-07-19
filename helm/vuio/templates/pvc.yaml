@@ -1,0 +1,17 @@
+{{- if and .Values.persistence.config.enabled (not .Values.persistence.config.existingClaim) (not .Values.persistence.config.hostPath) }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "vuio.fullname" . }}-config
+  labels:
+    {{- include "vuio.labels" . | nindent 4 }}
+spec:
+  accessModes:
+    - {{ .Values.persistence.config.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.persistence.config.size | default "2Gi" }}
+  {{- if .Values.persistence.config.storageClass }}
+  storageClassName: {{ .Values.persistence.config.storageClass | quote }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,24 @@
+1. Get the application URL by running these commands:
+{{- if .Values.ingress.enabled }}
+  http://{{ (index .Values.ingress.hosts 0).host }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "vuio.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.service.type }}
+     NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+           You can watch the status of the service by running 'kubectl get svc -w {{ include "vuio.fullname" . }}'
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "vuio.fullname" . }} -o jsonpath='{.status.loadBalancer.ingress[0].ip}')
+  echo http://$SERVICE_IP:{{ .Values.service.port }}
+{{- else if contains "ClusterIP" .Values.service.type }}
+  export POD_NAME=$(kubectl get pods --namespace {{ .Release.Namespace }} -l "app.kubernetes.io/name={{ include "vuio.name" . }},app.kubernetes.io/instance={{ .Release.Name }}" -o jsonpath="{.items[0].metadata.name}")
+  kubectl --namespace {{ .Release.Namespace }} port-forward $POD_NAME 8080:{{ .Values.service.port }}
+  echo "Visit http://127.0.0.1:8080 to access your VuIO UI"
+{{- end }}
+
+2. UPnP / SSDP Discovery Notes:
+{{- if .Values.hostNetwork }}
+  Host networking is enabled (`hostNetwork: true`). This allows UPnP and SSDP discovery to work directly on the host's LAN (port 1900 UDP). If you're experiencing issues, ensure your host firewall doesn't block UDP multicast traffic on 239.255.255.250:1900.
+{{- else }}
+  Host networking is disabled (`hostNetwork: false`). Note that link-local SSDP/UPnP discovery on UDP port 1900 typically does not cross the Kubernetes pod network namespace. While you can access the HTTP dashboard at the URL above, auto-discovery by smart TVs and wireless speakers on your physical LAN might not function out-of-the-box. If discovery is required, consider changing `hostNetwork` to `true` in your values.yaml.
+{{- end }}
