@@ -82,7 +82,7 @@ mkdir -p "$RPM_ROOT"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
 # Create source tarball
 SOURCE_DIR="$TEMP_DIR/${PACKAGE_NAME}-${VERSION}"
-mkdir -p "$SOURCE_DIR"/{bin,etc/vuio,lib/systemd/system}
+mkdir -p "$SOURCE_DIR"/{bin,etc/vuio,etc/init.d,lib/systemd/system}
 
 # Copy binary
 cp "$BINARY_PATH" "$SOURCE_DIR/bin/vuio"
@@ -96,8 +96,7 @@ cat > "$SOURCE_DIR/etc/vuio/vuio.toml" << 'EOF'
 [server]
 port = 8080
 interface = "0.0.0.0"
-name = "VuIO Server"
-uuid = "12345678-1234-1234-1234-123456789012"
+name = "Vuio"
 
 [network]
 ssdp_port = 1900
@@ -166,6 +165,123 @@ IPAddressAllow=multicast
 WantedBy=multi-user.target
 EOF
 
+# Create SysV init script
+cat > "$SOURCE_DIR/etc/init.d/vuio" << 'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          vuio
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: VuIO DLNA Media Server
+# Description:       VuIO is a cross-platform DLNA media server
+### END INIT INFO
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+DESC="VuIO DLNA Media Server"
+NAME=vuio
+DAEMON=/usr/bin/vuio
+DAEMON_ARGS="--config /etc/vuio/vuio.toml --log-file /var/log/vuio/vuio.log"
+PIDFILE=/var/run/$NAME.pid
+SCRIPTNAME=/etc/init.d/$NAME
+USER=vuio
+GROUP=vuio
+
+# Exit if the package is not installed
+[ -x "$DAEMON" ] || exit 0
+
+# Load the LSB library functions
+if [ -f /lib/lsb/init-functions ]; then
+    . /lib/lsb/init-functions
+fi
+
+do_start()
+{
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            return 1 # already running
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    # Create directories if needed
+    mkdir -p /var/log/vuio /var/lib/vuio
+    chown -R $USER:$GROUP /var/log/vuio /var/lib/vuio
+
+    if command -v start-stop-daemon >/dev/null; then
+        start-stop-daemon --start --quiet --pidfile "$PIDFILE" --chuid $USER:$GROUP --make-pidfile --background --exec "$DAEMON" -- $DAEMON_ARGS || return 2
+    elif [ -f /etc/rc.d/init.d/functions ]; then
+        # Use RHEL daemon function
+        . /etc/rc.d/init.d/functions
+        daemon --user=$USER --pidfile=$PIDFILE "$DAEMON $DAEMON_ARGS >/dev/null 2>&1 &"
+    else
+        # Fallback for systems without start-stop-daemon
+        su -s /bin/sh -c "nohup $DAEMON $DAEMON_ARGS >/dev/null 2>&1 & echo \$!" $USER > "$PIDFILE" || return 2
+    fi
+    return 0
+}
+
+do_stop()
+{
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -15 "$PID" || kill -9 "$PID"
+            rm -f "$PIDFILE"
+            return 0
+        fi
+        rm -f "$PIDFILE"
+        return 1
+    fi
+    if command -v start-stop-daemon >/dev/null; then
+        start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 --exec "$DAEMON"
+        return "$?"
+    elif [ -f /etc/rc.d/init.d/functions ]; then
+        . /etc/rc.d/init.d/functions
+        killproc -p "$PIDFILE" "$DAEMON"
+        return "$?"
+    fi
+    return 1
+}
+
+case "$1" in
+  start)
+    echo "Starting $DESC..."
+    do_start
+    ;;
+  stop)
+    echo "Stopping $DESC..."
+    do_stop
+    ;;
+  status)
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "$NAME is running (pid $PID)"
+            exit 0
+        fi
+        echo "$NAME is not running but pid file exists"
+        exit 1
+    fi
+    echo "$NAME is not running"
+    exit 3
+    ;;
+  restart|force-reload)
+    echo "Restarting $DESC..."
+    do_stop
+    sleep 1
+    do_start
+    ;;
+  *)
+    echo "Usage: $SCRIPTNAME {start|stop|status|restart|force-reload}" >&2
+    exit 3
+    ;;
+esac
+EOF
+chmod +x "$SOURCE_DIR/etc/init.d/vuio"
+
 # Create source tarball
 cd "$TEMP_DIR"
 tar -czf "$RPM_ROOT/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz" "${PACKAGE_NAME}-${VERSION}"
@@ -182,11 +298,8 @@ URL:            https://github.com/vuio/vuio
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      $ARCHITECTURE
 
-Requires:       systemd
 Requires(pre):  shadow-utils
-Requires(post): systemd
-Requires(preun): systemd
-Requires(postun): systemd
+%{?systemd_requires}
 
 %description
 $DESCRIPTION
@@ -196,7 +309,7 @@ Features:
 - Automatic media discovery and indexing
 - Real-time file system monitoring
 - Configurable via TOML configuration files
-- Systemd integration for service management
+- Systemd and SysVinit integration for service management
 
 %prep
 %setup -q
@@ -210,6 +323,7 @@ rm -rf %{buildroot}
 # Create directory structure
 mkdir -p %{buildroot}%{_bindir}
 mkdir -p %{buildroot}%{_sysconfdir}/vuio
+mkdir -p %{buildroot}%{_initddir}
 mkdir -p %{buildroot}%{_unitdir}
 mkdir -p %{buildroot}%{_localstatedir}/lib/vuio
 mkdir -p %{buildroot}%{_localstatedir}/log/vuio
@@ -217,6 +331,7 @@ mkdir -p %{buildroot}%{_localstatedir}/log/vuio
 # Install files
 install -m 755 bin/vuio %{buildroot}%{_bindir}/vuio
 install -m 640 etc/vuio/vuio.toml %{buildroot}%{_sysconfdir}/vuio/vuio.toml
+install -m 755 etc/init.d/vuio %{buildroot}%{_initddir}/vuio
 install -m 644 lib/systemd/system/vuio.service %{buildroot}%{_unitdir}/vuio.service
 
 %pre
@@ -238,29 +353,42 @@ chmod 755 %{_localstatedir}/log/vuio
 chown root:vuio %{_sysconfdir}/vuio/vuio.toml
 chmod 640 %{_sysconfdir}/vuio/vuio.toml
 
-# Systemd integration
-%systemd_post vuio.service
+# Set SysV init script permissions
+if [ -f %{_initddir}/vuio ]; then
+    chown root:root %{_initddir}/vuio
+    chmod 755 %{_initddir}/vuio
+fi
 
-echo "VuIO Server has been installed successfully!"
-echo ""
-echo "To start the service:"
-echo "  sudo systemctl start vuio"
-echo ""
-echo "To enable automatic startup:"
-echo "  sudo systemctl enable vuio"
-echo ""
-echo "To check service status:"
-echo "  sudo systemctl status vuio"
-echo ""
-echo "Configuration file: %{_sysconfdir}/vuio/vuio.toml"
-echo "Log files: %{_localstatedir}/log/vuio/ or 'journalctl -u vuio'"
-echo ""
+# Service integration
+if [ -d /run/systemd/system ]; then
+    %systemd_post vuio.service
+    echo "VuIO Server has been installed successfully via systemd!"
+else
+    if [ -x /sbin/chkconfig ]; then
+        /sbin/chkconfig --add vuio || :
+    fi
+    echo "VuIO Server has been installed successfully via SysV init!"
+fi
 
 %preun
-%systemd_preun vuio.service
+if [ -d /run/systemd/system ]; then
+    %systemd_preun vuio.service
+else
+    if [ \$1 -eq 0 ]; then
+        # Package is being uninstalled
+        if [ -x %{_initddir}/vuio ]; then
+            %{_initddir}/vuio stop >/dev/null 2>&1 || :
+        fi
+        if [ -x /sbin/chkconfig ]; then
+            /sbin/chkconfig --del vuio || :
+        fi
+    fi
+fi
 
 %postun
-%systemd_postun_with_restart vuio.service
+if [ -d /run/systemd/system ]; then
+    %systemd_postun_with_restart vuio.service
+fi
 
 # Remove user and group on package removal
 if [ \$1 -eq 0 ]; then
@@ -271,12 +399,14 @@ if [ \$1 -eq 0 ]; then
     # Remove data directories
     rm -rf %{_localstatedir}/lib/vuio
     rm -rf %{_localstatedir}/log/vuio
+    rm -f %{_initddir}/vuio
 fi
 
 %files
 %{_bindir}/vuio
 %config(noreplace) %{_sysconfdir}/vuio/vuio.toml
 %{_unitdir}/vuio.service
+%{_initddir}/vuio
 %attr(755,vuio,vuio) %dir %{_localstatedir}/lib/vuio
 %attr(755,vuio,vuio) %dir %{_localstatedir}/log/vuio
 
@@ -284,7 +414,7 @@ fi
 * $(date '+%a %b %d %Y') VuIO Project <vuio@example.com> - $VERSION-$RELEASE
 - Initial release of VuIO Server
 - Cross-platform DLNA media server
-- Systemd integration
+- Systemd and SysVinit integration
 - Real-time file system monitoring
 EOF
 

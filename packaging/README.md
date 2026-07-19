@@ -23,12 +23,14 @@ This directory contains scripts and configurations for building platform-specifi
   - Signed package support
 
 ### Linux
-- **DEB Package**: Debian/Ubuntu package with systemd integration
-- **RPM Package**: RedHat/SUSE package with systemd integration
-- **Requirements**: dpkg-deb (for DEB), rpmbuild (for RPM)
+- **DEB Package**: Debian/Ubuntu package with systemd and SysVinit service integration
+- **RPM Package**: RedHat/SUSE/Fedora package with systemd and SysVinit service integration
+- **Arch Package**: Arch Linux package (`.pkg.tar.zst`) with systemd service integration
+- **Nix Expressions**: Nix derivation (`vuio.nix`) and NixOS service module (`vuio-service.nix`)
+- **Requirements**: dpkg-deb (for DEB), rpmbuild (for RPM), makepkg (for Arch)
 - **Features**:
-  - Systemd service integration
-  - User and group creation
+  - Systemd & SysVinit service integration for maximum init system compatibility
+  - System user and group creation with secure shell (`/usr/sbin/nologin`)
   - SELinux/AppArmor compatibility
   - Proper file permissions
 
@@ -79,6 +81,10 @@ cd linux
 # Linux RPM
 cd linux
 ./build-rpm.sh
+
+# Linux Arch
+cd linux
+./build-arch.sh
 ```
 
 ## Prerequisites
@@ -126,6 +132,12 @@ cd linux
    sudo zypper install rpm-build
    ```
 
+3. **For Arch packages**:
+   ```bash
+   # Arch Linux
+   sudo pacman -S pacman-contrib base-devel
+   ```
+
 ## Directory Structure
 
 ```
@@ -158,12 +170,12 @@ packaging/
 - **Configuration**: Default configuration in `/usr/local/etc/vuio/`
 - **Logs**: Centralized logging in `/usr/local/var/log/vuio/`
 
-### Linux DEB/RPM Features
-- **Systemd Integration**: Native systemd service
+### Linux DEB/RPM/Arch Features
+- **Systemd & SysVinit Integration**: Native systemd service with fallback SysVinit script
 - **User Management**: Creates `vuio` system user
-- **Security**: Hardened systemd service configuration
+- **Security**: Hardened systemd service configuration (PrivateTmp, ProtectSystem, strict path rules)
 - **Configuration**: System configuration in `/etc/vuio/`
-- **Logs**: Journal integration with fallback to `/var/log/vuio/`
+- **Logs**: Journal integration with fallback to `/var/log/vuio/vuio.log`
 
 ## Configuration Files
 
@@ -283,3 +295,36 @@ When adding new packaging features:
 3. Update this README
 4. Ensure security best practices
 5. Test installation and removal procedures
+
+## NixOS Support
+
+To package and run VuIO on NixOS, we provide Nix expressions in `packaging/linux/nix/`.
+
+### 1. Nix Derivation (vuio.nix)
+Build VuIO directly via Nix:
+```bash
+nix-build -E 'with import <nixpkgs> {}; callPackage ./packaging/linux/nix/vuio.nix {}'
+```
+
+### 2. NixOS Service Module (vuio-service.nix)
+Add the following to your `/etc/nixos/configuration.nix` to register and configure VuIO:
+
+```nix
+{ config, pkgs, ... }:
+
+{
+  imports = [
+    ./packaging/linux/nix/vuio-service.nix
+  ];
+
+  services.vuio = {
+    enable = true;
+    port = 8080;
+    mediaDirectories = [
+      "/var/lib/vuio/media/Videos"
+      "/var/lib/vuio/media/Music"
+    ];
+  };
+}
+```
+This module automatically handles user creation, generates `/etc/vuio/vuio.toml` safely, and sets up a hardened systemd service.

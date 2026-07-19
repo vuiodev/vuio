@@ -166,6 +166,17 @@ function build_linux_packages() {
         ./build-rpm.sh "$musl_binary" "$OUTPUT_DIR" "$VERSION" "1" "x86_64"
     fi
     
+    # Build Arch packages
+    if [[ -f "$x64_binary" ]]; then
+        echo "Building Arch package (x86_64)..."
+        ./build-arch.sh "$x64_binary" "$OUTPUT_DIR" "$VERSION" "x86_64"
+    fi
+    
+    if [[ -f "$arm64_binary" ]]; then
+        echo "Building Arch package (ARM64)..."
+        ./build-arch.sh "$arm64_binary" "$OUTPUT_DIR" "$VERSION" "aarch64"
+    fi
+    
     cd ..
     
     if [[ ! -f "$x64_binary" && ! -f "$arm64_binary" && ! -f "$musl_binary" ]]; then
@@ -296,7 +307,7 @@ echo ""
 echo -e "${GREEN}--- Packaging Complete ---${NC}"
 echo "Generated packages:"
 if [[ -d "$OUTPUT_DIR" ]]; then
-    ls -la "$OUTPUT_DIR"/*.{msi,pkg,deb,rpm,txz} 2>/dev/null || echo "No packages found in output directory"
+    ls -la "$OUTPUT_DIR"/*.{msi,pkg,deb,rpm,txz} "$OUTPUT_DIR"/*.pkg.tar.zst 2>/dev/null || echo "No packages found in output directory"
 else
     echo "Output directory not found: $OUTPUT_DIR"
 fi
@@ -305,6 +316,7 @@ echo ""
 echo -e "${CYAN}Package installation commands:${NC}"
 echo "Windows MSI: msiexec /i package.msi"
 echo "macOS PKG:   sudo installer -pkg package.pkg -target /"
-echo "DEB package: sudo dpkg -i package.deb"
-echo "RPM package: sudo rpm -ivh package.rpm"
-echo "BSD package: sudo pkg add package.txz"
+echo "DEB package:  sudo dpkg -i package.deb"
+echo "RPM package:  sudo rpm -ivh package.rpm"
+echo "Arch package: sudo pacman -U package.pkg.tar.zst"
+echo "BSD package:  sudo pkg add package.txz"

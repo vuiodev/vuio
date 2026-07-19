@@ -74,7 +74,7 @@ if [[ -d "$TEMP_DIR" ]]; then
     rm -rf "$TEMP_DIR"
 fi
 
-mkdir -p "$PKG_DIR"/{DEBIAN,usr/bin,etc/vuio,var/log/vuio,lib/systemd/system,usr/share/doc/vuio}
+mkdir -p "$PKG_DIR"/{DEBIAN,usr/bin,etc/vuio,etc/init.d,var/log/vuio,lib/systemd/system,usr/share/doc/vuio}
 
 # Copy binary
 cp "$BINARY_PATH" "$PKG_DIR/usr/bin/vuio"
@@ -88,8 +88,7 @@ cat > "$PKG_DIR/etc/vuio/vuio.toml" << 'EOF'
 [server]
 port = 8080
 interface = "0.0.0.0"
-name = "VuIO Server"
-uuid = "12345678-1234-1234-1234-123456789012"
+name = "Vuio"
 
 [network]
 ssdp_port = 1900
@@ -158,6 +157,115 @@ IPAddressAllow=multicast
 WantedBy=multi-user.target
 EOF
 
+# Create SysV init script
+cat > "$PKG_DIR/etc/init.d/vuio" << 'EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          vuio
+# Required-Start:    $network $local_fs $remote_fs
+# Required-Stop:     $network $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: VuIO DLNA Media Server
+# Description:       VuIO is a cross-platform DLNA media server
+### END INIT INFO
+
+PATH=/sbin:/usr/sbin:/bin:/usr/bin
+DESC="VuIO DLNA Media Server"
+NAME=vuio
+DAEMON=/usr/bin/vuio
+DAEMON_ARGS="--config /etc/vuio/vuio.toml --log-file /var/log/vuio/vuio.log"
+PIDFILE=/var/run/$NAME.pid
+SCRIPTNAME=/etc/init.d/$NAME
+USER=vuio
+GROUP=vuio
+
+# Exit if the package is not installed
+[ -x "$DAEMON" ] || exit 0
+
+# Load the LSB library functions
+if [ -f /lib/lsb/init-functions ]; then
+    . /lib/lsb/init-functions
+fi
+
+do_start()
+{
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            return 1 # already running
+        fi
+        rm -f "$PIDFILE"
+    fi
+
+    # Create directories if needed
+    mkdir -p /var/log/vuio /var/lib/vuio
+    chown -R $USER:$GROUP /var/log/vuio /var/lib/vuio
+
+    if command -v start-stop-daemon >/dev/null; then
+        start-stop-daemon --start --quiet --pidfile "$PIDFILE" --chuid $USER:$GROUP --make-pidfile --background --exec "$DAEMON" -- $DAEMON_ARGS || return 2
+    else
+        # Fallback for systems without start-stop-daemon
+        su -s /bin/sh -c "nohup $DAEMON $DAEMON_ARGS >/dev/null 2>&1 & echo \$!" $USER > "$PIDFILE" || return 2
+    fi
+    return 0
+}
+
+do_stop()
+{
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            kill -15 "$PID" || kill -9 "$PID"
+            rm -f "$PIDFILE"
+            return 0
+        fi
+        rm -f "$PIDFILE"
+        return 1
+    fi
+    if command -v start-stop-daemon >/dev/null; then
+        start-stop-daemon --stop --quiet --retry=TERM/30/KILL/5 --exec "$DAEMON"
+        return "$?"
+    fi
+    return 1
+}
+
+case "$1" in
+  start)
+    echo "Starting $DESC..."
+    do_start
+    ;;
+  stop)
+    echo "Stopping $DESC..."
+    do_stop
+    ;;
+  status)
+    if [ -f "$PIDFILE" ]; then
+        PID=$(cat "$PIDFILE")
+        if kill -0 "$PID" 2>/dev/null; then
+            echo "$NAME is running (pid $PID)"
+            exit 0
+        fi
+        echo "$NAME is not running but pid file exists"
+        exit 1
+    fi
+    echo "$NAME is not running"
+    exit 3
+    ;;
+  restart|force-reload)
+    echo "Restarting $DESC..."
+    do_stop
+    sleep 1
+    do_start
+    ;;
+  *)
+    echo "Usage: $SCRIPTNAME {start|stop|status|restart|force-reload}" >&2
+    exit 3
+    ;;
+esac
+EOF
+chmod +x "$PKG_DIR/etc/init.d/vuio"
+
 # Create control file
 cat > "$PKG_DIR/DEBIAN/control" << EOF
 Package: $PACKAGE_NAME
@@ -165,7 +273,7 @@ Version: $VERSION
 Section: net
 Priority: optional
 Architecture: $ARCHITECTURE
-Depends: libc6 (>= 2.17), systemd
+Depends: libc6 (>= 2.17)
 Maintainer: $MAINTAINER
 Description: $DESCRIPTION
  VuIO is a cross-platform DLNA media server that allows you to share
@@ -176,7 +284,7 @@ Description: $DESCRIPTION
   - Automatic media discovery and indexing
   - Real-time file system monitoring
   - Configurable via TOML configuration files
-  - Systemd integration for service management
+  - Systemd and SysVinit integration for service management
 Homepage: https://github.com/vuio/vuio
 EOF
 
@@ -186,9 +294,14 @@ cat > "$PKG_DIR/DEBIAN/preinst" << 'EOF'
 set -e
 
 # Stop service if it's running
-if systemctl is-active --quiet vuio 2>/dev/null; then
-    echo "Stopping VuIO service..."
-    systemctl stop vuio || true
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    if systemctl is-active --quiet vuio 2>/dev/null; then
+        echo "Stopping VuIO systemd service..."
+        systemctl stop vuio || true
+    fi
+elif [ -x /etc/init.d/vuio ]; then
+    echo "Stopping VuIO init.d service..."
+    /etc/init.d/vuio stop || true
 fi
 
 exit 0
@@ -224,23 +337,31 @@ chmod 755 /var/log/vuio
 chown root:vuio /etc/vuio/vuio.toml
 chmod 640 /etc/vuio/vuio.toml
 
-# Reload systemd and enable service
-systemctl daemon-reload
+# Set init script permissions if it exists
+if [ -f /etc/init.d/vuio ]; then
+    chown root:root /etc/init.d/vuio
+    chmod 755 /etc/init.d/vuio
+fi
 
-echo "VuIO Server has been installed successfully!"
-echo ""
-echo "To start the service:"
-echo "  sudo systemctl start vuio"
-echo ""
-echo "To enable automatic startup:"
-echo "  sudo systemctl enable vuio"
-echo ""
-echo "To check service status:"
-echo "  sudo systemctl status vuio"
-echo ""
-echo "Configuration file: /etc/vuio/vuio.toml"
-echo "Log files: /var/log/vuio/ or 'journalctl -u vuio'"
-echo ""
+# Reload systemd and enable service, or fallback to SysV init
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    echo "Configuring systemd service..."
+    systemctl daemon-reload || true
+    systemctl enable vuio || true
+    systemctl start vuio || true
+    echo "VuIO Server has been installed and started via systemd!"
+elif command -v update-rc.d >/dev/null; then
+    echo "Configuring SysV init service..."
+    update-rc.d vuio defaults || true
+    if [ -x /etc/init.d/vuio ]; then
+        /etc/init.d/vuio start || true
+    fi
+    echo "VuIO Server has been installed and started via SysV init!"
+else
+    echo "VuIO Server installed successfully, but no supported init system was detected."
+    echo "You can start the server manually by running:"
+    echo "  sudo -u vuio /usr/bin/vuio --config /etc/vuio/vuio.toml"
+fi
 
 exit 0
 EOF
@@ -251,14 +372,16 @@ cat > "$PKG_DIR/DEBIAN/prerm" << 'EOF'
 set -e
 
 # Stop and disable service
-if systemctl is-enabled --quiet vuio 2>/dev/null; then
-    echo "Disabling VuIO service..."
+if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+    echo "Stopping and disabling VuIO systemd service..."
     systemctl disable vuio || true
-fi
-
-if systemctl is-active --quiet vuio 2>/dev/null; then
-    echo "Stopping VuIO service..."
     systemctl stop vuio || true
+elif [ -x /etc/init.d/vuio ]; then
+    echo "Stopping and disabling VuIO init.d service..."
+    /etc/init.d/vuio stop || true
+    if command -v update-rc.d >/dev/null; then
+        update-rc.d -f vuio remove || true
+    fi
 fi
 
 exit 0
@@ -288,10 +411,13 @@ case "$1" in
         
         # Remove configuration
         rm -rf /etc/vuio
+        rm -f /etc/init.d/vuio
         ;;
     remove)
-        # Reload systemd
-        systemctl daemon-reload || true
+        # Reload systemd if present
+        if [ -d /run/systemd/system ] && command -v systemctl >/dev/null; then
+            systemctl daemon-reload || true
+        fi
         ;;
 esac
 
