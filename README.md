@@ -57,8 +57,8 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 # Custom port and name
 ./vuio -p 9090 -n "My Media Server" /path/to/media
 
-# Multiple directories
-./vuio /movies --media-dir /music --media-dir /photos
+# Multiple directories (using -m or --media-dir)
+./vuio /movies -m /music -m /photos
 ```
 
 ### Command Line Options
@@ -73,7 +73,7 @@ Options:
   -p, --port <PORT>        Port to listen on [default: 8080]
   -n, --name <NAME>        DLNA server name
   -c, --config <CONFIG>    Path to config file
-      --media-dir <DIR>    Additional media directories
+  -m, --media-dir <DIR>    Additional media directories
       --debug              Enable debug logging
       --log-file <PATH>    Path to custom log file
       --log-level <LEVEL>  Set log level (off, error, warn, info, debug, trace)

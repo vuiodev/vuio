@@ -21,7 +21,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         media_dir: Option<String>,
 
         /// Additional media directories to serve (can be used multiple times)
-        #[arg(long = "media-dir", action = clap::ArgAction::Append)]
+        #[arg(short = 'm', long = "media-dir", action = clap::ArgAction::Append)]
         additional_media_dirs: Vec<String>,
 
         /// The network port to listen on
