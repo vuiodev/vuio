@@ -32,6 +32,7 @@ include!("network.rs");
 include!("maintenance.rs");
 include!("shutdown.rs");
 include!("runner.rs");
+include!("update.rs");
 
 #[cfg(test)]
 mod tests {
@@ -106,5 +107,21 @@ mod tests {
         let name = quarantine.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("media.failed-"));
         assert!(name.ends_with(".redb"));
+    }
+
+    #[test]
+    fn test_is_newer_version() {
+        assert!(is_newer_version("0.0.33", "0.0.34"));
+        assert!(is_newer_version("0.0.33", "0.1.0"));
+        assert!(is_newer_version("0.0.33", "1.0.0"));
+        assert!(is_newer_version("v0.0.33", "v0.0.34"));
+        assert!(is_newer_version("0.0.33", "v0.0.34"));
+        assert!(is_newer_version("v0.0.33", "0.0.34"));
+
+        assert!(!is_newer_version("0.0.33", "0.0.33"));
+        assert!(!is_newer_version("0.0.33", "0.0.32"));
+        assert!(!is_newer_version("0.1.0", "0.0.33"));
+        assert!(!is_newer_version("1.0.0", "0.9.9"));
+        assert!(!is_newer_version("v0.0.33", "v0.0.33"));
     }
 }

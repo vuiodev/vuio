@@ -492,6 +492,9 @@ pub struct ApplicationRunner;
 
 impl ApplicationRunner {
     pub async fn run(options: LaunchOptions) -> anyhow::Result<()> {
+        if options.update {
+            return update_binary().await;
+        }
         run_application(options).await
     }
 }

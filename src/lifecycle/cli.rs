@@ -6,6 +6,7 @@ pub struct LaunchOptions {
     pub log_level: Option<String>,
     pub config_override: Option<AppConfig>,
     pub restore_backup: Option<String>,
+    pub update: bool,
 }
 
 /// Parse command line arguments once and return configuration overrides
@@ -50,6 +51,10 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         /// Restore a validated Redb backup before opening the database
         #[arg(long = "restore-backup")]
         restore_backup: Option<String>,
+
+        /// Update the binary to the latest version from GitHub
+        #[arg(long = "update")]
+        update: bool,
     }
 
     let args = Args::parse();
@@ -63,6 +68,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
             log_level: args.log_level,
             config_override: None,
             restore_backup: args.restore_backup,
+            update: args.update,
         });
     }
 
@@ -128,6 +134,7 @@ fn parse_args_once() -> anyhow::Result<LaunchOptions> {
         log_level: args.log_level,
         config_override: Some(config_override),
         restore_backup: args.restore_backup,
+        update: args.update,
     })
 }
 
