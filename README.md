@@ -70,8 +70,31 @@ Options:
       --debug              Enable debug logging
       --log-file <PATH>    Path to custom log file
       --log-level <LEVEL>  Set log level (off, error, warn, info, debug, trace)
+      --update             Update binary to the latest version from GitHub
   -h, --help               Print help
   -V, --version            Print version
+```
+
+## Homebrew (macOS & Linux)
+
+You can install VuIO using our official Homebrew Tap:
+
+```bash
+brew tap vuiodev/vuio
+brew install vuio
+```
+
+Once installed, start the server using:
+```bash
+vuio /path/to/media
+```
+
+### Self-Updater
+
+You can automatically update your installed binary to the latest release on GitHub at any time:
+
+```bash
+vuio --update
 ```
 
 ## Docker

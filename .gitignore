@@ -3,6 +3,7 @@
 /builds/
 **/*.rs.bk
 ideas.txt
+ideas2.txt
 /vuio-config/
 /demo/
 Cargo.lock
