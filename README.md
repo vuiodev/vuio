@@ -259,7 +259,7 @@ media:
   volumes:
     - name: media
       hostPath:
-        path: /Users/alex/test-media  # Path to media on your host machine
+        path: /Users/random/test-media  # Path to media on your host machine
         type: Directory
 ```
 
@@ -270,51 +270,6 @@ Refer to the default [values.yaml](helm/vuio/values.yaml) file for a complete li
 ### Native (TOML Config)
 
 VuIO uses TOML configuration files on native platforms. Config location: `./config/config.toml`
-
-```toml
-[server]
-port = 8080
-interface = "0.0.0.0"
-name = "VuIO Server"
-uuid = "auto-generated"
-
-[network]
-interface_selection = "Auto"
-multicast_ttl = 4
-announce_interval_seconds = 30
-
-[media]
-scan_on_startup = true
-watch_for_changes = true
-cleanup_deleted_files = true
-scan_playlists = true
-supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "jpg", "png"]
-
-[[media.directories]]
-path = "/home/user/Videos"
-recursive = true
-# case_sensitive = true # Optional override; omit for automatic root/volume detection
-extensions = ["mp4", "mkv", "avi", "mov", "wmv", "webm"]
-exclude_patterns = ["*.tmp", ".*"]
-validation_mode = "Warn"  # Strict, Warn, or Skip
-
-[[media.directories]]
-path = "/home/user/Music"
-recursive = true
-extensions = ["mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus"]
-exclude_patterns = ["*.tmp", ".*"]
-
-[[media.directories]]
-path = "/home/user/Pictures"
-recursive = true
-extensions = ["jpg", "jpeg", "png", "gif", "bmp", "webp"]
-exclude_patterns = ["*.tmp", ".*"]
-
-[database]
-path = "~/.local/share/vuio/media.redb"
-vacuum_on_startup = false
-backup_enabled = false
-```
 
 ### Configuration Options
 
@@ -401,43 +356,6 @@ VuIO uses Redb, an embedded ACID-compliant database.
 | **Linux** | `~/.local/share/vuio/media.redb` |
 | **macOS** | `~/Library/Application Support/vuio/media.redb` |
 | **Docker** | `/data/vuio.redb` (or `VUIO_DB_PATH`) |
-
-When running from source on Windows:
-```
-C:\Users\Welcome\Downloads\code\rust\vuio\target\release\config\database\media.redb
-```
-
-### Reset Database
-
-```bash
-# Windows (PowerShell)
-Remove-Item -Force .\target\release\config\database\media.redb
-
-# Linux
-rm -f ~/.local/share/vuio/media.redb
-
-# macOS
-rm -f ~/Library/Application\ Support/vuio/media.redb
-
-# Docker
-docker exec vuio-server rm -f /data/vuio.redb
-```
-
-VuIO will create a new database and rescan media on next startup.
-
-## Platform Notes
-
-### Windows
-- Supports UNC paths (`\\server\share`)
-- Auto-excludes `Thumbs.db`, `desktop.ini`
-
-### macOS
-- Supports network volumes under `/Volumes`
-- Auto-excludes `.DS_Store`, `.AppleDouble`
-
-### Linux
-- Supports mounts under `/media`, `/mnt`
-- Auto-excludes `lost+found`, `.Trash-*`
 
 ## Architecture
 
@@ -612,12 +530,6 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
    ```
 
 ---
-
-## Testing
-
-```bash
-cargo test
-```
 
 ## Contributing
 

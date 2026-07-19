@@ -11,7 +11,7 @@ OUTPUT_DIR="${2:-../../builds}"
 VERSION="${3:-0.1.0}"
 ARCHITECTURE="${4:-amd64}"
 PACKAGE_NAME="vuio"
-MAINTAINER="VuIO Project <vuio@example.com>"
+MAINTAINER="VuIO <vuio@vuio.dev>"
 DESCRIPTION="Cross-platform DLNA media server"
 
 # Colors for output
@@ -302,11 +302,11 @@ EOF
 cat > "$PKG_DIR/usr/share/doc/vuio/copyright" << 'EOF'
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: vuio
-Upstream-Contact: VuIO Project <vuio@example.com>
+Upstream-Contact: VuIO <vuio@vuio.dev>
 Source: https://github.com/vuio/vuio
 
 Files: *
-Copyright: 2024 VuIO Project
+Copyright: 2025 VuIO Contributors
 License: MIT
 
 License: MIT
@@ -333,7 +333,7 @@ EOF
 cat > "$PKG_DIR/usr/share/doc/vuio/changelog.Debian" << EOF
 $PACKAGE_NAME ($VERSION-1) unstable; urgency=low
 
-  * Initial release of VuIO Server
+  * VuIO Server
   * Cross-platform DLNA media server
   * Systemd integration
   * Real-time file system monitoring
