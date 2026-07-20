@@ -1443,17 +1443,17 @@ mod tests {
             path: "/media/show".to_string(),
             mime_family: None,
         };
-        let filenames = db.read(move |session| {
-            let mut filenames = Vec::new();
-            session
-                .visit_files(&query, 0, 10, |file| {
+        let filenames = db
+            .read(move |session| {
+                let mut filenames = Vec::new();
+                session.visit_files(&query, 0, 10, |file| {
                     filenames.push(file.filename().to_string());
                     Ok(())
                 })?;
-            Ok(filenames)
-        })
-        .await
-        .unwrap();
+                Ok(filenames)
+            })
+            .await
+            .unwrap();
 
         // Expected sorted order: s01e02.mkv, s01e08.mkv, s01e10.mkv
         assert_eq!(
