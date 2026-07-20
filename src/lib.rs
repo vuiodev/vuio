@@ -13,6 +13,7 @@ pub mod ssdp;
 pub mod tv_control;
 pub mod watcher;
 pub mod web;
+pub mod natural_sort;
 
 pub mod airplay;
 pub mod chromecast;

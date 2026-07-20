@@ -314,7 +314,7 @@ impl RedbDatabase {
     fn directory_order_key(parent_id: u64, path: &str, child_id: u64) -> String {
         format!(
             "{parent_id:016x}\0{}\0{child_id:016x}",
-            Self::directory_name(path).to_lowercase()
+            crate::natural_sort::natural_sort_key(&Self::directory_name(path).to_lowercase())
         )
     }
 
@@ -322,6 +322,20 @@ impl RedbDatabase {
         (
             format!("{parent_id:016x}\0"),
             format!("{parent_id:016x}\u{1}"),
+        )
+    }
+
+    fn directory_file_order_key(directory_id: u64, filename: &str, file_id: i64) -> String {
+        format!(
+            "{directory_id:016x}\0{}\0{file_id:016x}",
+            crate::natural_sort::natural_sort_key(&filename.to_lowercase())
+        )
+    }
+
+    fn directory_file_order_range(directory_id: u64) -> (String, String) {
+        (
+            format!("{directory_id:016x}\0"),
+            format!("{directory_id:016x}\u{1}"),
         )
     }
 
@@ -411,6 +425,7 @@ impl RedbDatabase {
         children: &mut redb::MultimapTable<u64, u64>,
         ordered_children: &mut redb::Table<&str, u64>,
         directory_files: &mut redb::MultimapTable<u64, i64>,
+        ordered_files: &mut redb::Table<&str, i64>,
         counts: &mut redb::Table<&str, u64>,
         next_directory_id: &AtomicU64,
         file: &V,
@@ -428,6 +443,8 @@ impl RedbDatabase {
             &directory_path,
         )?;
         directory_files.insert(directory_id, file_id)?;
+        let file_order_key = Self::directory_file_order_key(directory_id, file.filename(), file_id);
+        ordered_files.insert(file_order_key.as_str(), file_id)?;
         Self::change_recursive_mime_count(
             paths,
             counts,
@@ -445,6 +462,7 @@ impl RedbDatabase {
         children: &mut redb::MultimapTable<u64, u64>,
         ordered_children: &mut redb::Table<&str, u64>,
         directory_files: &mut redb::MultimapTable<u64, i64>,
+        ordered_files: &mut redb::Table<&str, i64>,
         counts: &mut redb::Table<&str, u64>,
         file_id: i64,
         file: &V,
@@ -457,6 +475,8 @@ impl RedbDatabase {
             return Ok(());
         };
         directory_files.remove(directory_id, file_id)?;
+        let file_order_key = Self::directory_file_order_key(directory_id, file.filename(), file_id);
+        ordered_files.remove(file_order_key.as_str())?;
         Self::change_recursive_mime_count(
             paths,
             counts,
@@ -582,6 +602,29 @@ impl RedbDatabase {
             }
         }
         {
+            let mut ordered_files = transaction.open_table(DIRECTORY_FILES_BY_NAME)?;
+            let keys = ordered_files
+                .iter()?
+                .filter_map(|entry| match entry {
+                    Ok((key, _)) => {
+                        let key_str = key.value();
+                        if key_str.len() >= 16 {
+                            if let Ok(dir_id) = u64::from_str_radix(&key_str[..16], 16) {
+                                if directory_ids.contains(&dir_id) {
+                                    return Some(Ok(key_str.to_owned()));
+                                }
+                            }
+                        }
+                        None
+                    }
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<std::result::Result<Vec<_>, redb::StorageError>>()?;
+            for key in keys {
+                ordered_files.remove(key.as_str())?;
+            }
+        }
+        {
             let mut paths = transaction.open_table(DIRECTORY_PATH_INDEX)?;
             let mut records = transaction.open_table(DIRECTORY_RECORDS)?;
             for (path, id) in &directories {
@@ -658,6 +701,7 @@ impl RedbDatabase {
         let mut directory_children = transaction.open_multimap_table(DIRECTORY_CHILDREN)?;
         let mut ordered_children = transaction.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
         let mut directory_files = transaction.open_multimap_table(DIRECTORY_FILES)?;
+        let mut ordered_files = transaction.open_table(DIRECTORY_FILES_BY_NAME)?;
         let mut directory_mime_counts = transaction.open_table(DIRECTORY_MIME_COUNTS)?;
         let mut artist_index = transaction.open_multimap_table(ARTIST_INDEX)?;
         let mut album_index = transaction.open_multimap_table(ALBUM_INDEX)?;
@@ -678,6 +722,7 @@ impl RedbDatabase {
                 &mut directory_children,
                 &mut ordered_children,
                 &mut directory_files,
+                &mut ordered_files,
                 &mut directory_mime_counts,
                 *id,
                 file,
@@ -1313,7 +1358,7 @@ mod tests {
         redb_schema!(collect_schema_name);
         let unique = names.iter().copied().collect::<HashSet<_>>();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 20);
+        assert_eq!(names.len(), 21);
     }
 
     #[tokio::test]
@@ -1359,6 +1404,65 @@ mod tests {
                 .0
                 .len(),
             1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_natural_sort_directory_files() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("natural-sort-test.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+
+        // Let's store files with unsorted names
+        let f1 = MediaFile::new(
+            PathBuf::from("/media/show/s01e10.mkv"),
+            1,
+            "video/x-matroska".to_string(),
+        );
+        let f2 = MediaFile::new(
+            PathBuf::from("/media/show/s01e02.mkv"),
+            1,
+            "video/x-matroska".to_string(),
+        );
+        let f3 = MediaFile::new(
+            PathBuf::from("/media/show/s01e08.mkv"),
+            1,
+            "video/x-matroska".to_string(),
+        );
+
+        // Bulk store them in unsorted order
+        db.bulk_store_media_files(&[f1.clone(), f2.clone(), f3.clone()])
+            .await
+            .unwrap();
+
+        use crate::database::MediaRepository;
+        let db = std::sync::Arc::new(db);
+        let query = MediaFileQuery::Directory {
+            path: "/media/show".to_string(),
+            mime_family: None,
+        };
+        let filenames = db.read(move |session| {
+            let mut filenames = Vec::new();
+            session
+                .visit_files(&query, 0, 10, |file| {
+                    filenames.push(file.filename().to_string());
+                    Ok(())
+                })?;
+            Ok(filenames)
+        })
+        .await
+        .unwrap();
+
+        // Expected sorted order: s01e02.mkv, s01e08.mkv, s01e10.mkv
+        assert_eq!(
+            filenames,
+            vec![
+                "s01e02.mkv".to_string(),
+                "s01e08.mkv".to_string(),
+                "s01e10.mkv".to_string()
+            ]
         );
     }
 

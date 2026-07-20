@@ -238,6 +238,7 @@ impl RedbDatabase {
                     let mut directory_children = txn.open_multimap_table(DIRECTORY_CHILDREN)?;
                     let mut ordered_children = txn.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
                     let mut directory_files = txn.open_multimap_table(DIRECTORY_FILES)?;
+                    let mut ordered_files = txn.open_table(DIRECTORY_FILES_BY_NAME)?;
                     let mut directory_mime_counts = txn.open_table(DIRECTORY_MIME_COUNTS)?;
                     let mut artists = txn.open_multimap_table(ARTIST_INDEX)?;
                     let mut albums = txn.open_multimap_table(ALBUM_INDEX)?;
@@ -255,6 +256,7 @@ impl RedbDatabase {
                             &mut directory_children,
                             &mut ordered_children,
                             &mut directory_files,
+                            &mut ordered_files,
                             &mut directory_mime_counts,
                             &next_directory_id,
                             &view,

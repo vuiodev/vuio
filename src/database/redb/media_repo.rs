@@ -259,14 +259,18 @@ impl RedbDatabase {
                 }
             }
 
-            // Sort subdirectories case-insensitively
-            directories.sort_by_cached_key(|directory| directory.name.to_lowercase());
-
-            // Sort files by track number if available, then case-insensitively by filename
-            files.sort_by(|a, b| match (a.track_number, b.track_number) {
-                (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
-                _ => a.filename.to_lowercase().cmp(&b.filename.to_lowercase()),
-            });
+             // Sort subdirectories case-insensitively using natural sort
+             directories.sort_by_cached_key(|directory| crate::natural_sort::natural_sort_key(&directory.name.to_lowercase()));
+ 
+             // Sort files by track number if available, then case-insensitively by filename using natural sort
+             files.sort_by(|a, b| match (a.track_number, b.track_number) {
+                 (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
+                 _ => {
+                     let a_key = crate::natural_sort::natural_sort_key(&a.filename.to_lowercase());
+                     let b_key = crate::natural_sort::natural_sort_key(&b.filename.to_lowercase());
+                     a_key.cmp(&b_key)
+                 }
+             });
 
             Ok((directories, files))
         })
@@ -694,6 +698,7 @@ impl RedbDatabase {
                         write_txn.open_multimap_table(DIRECTORY_CHILDREN)?;
                     let mut ordered_children = write_txn.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
                     let mut directory_files = write_txn.open_multimap_table(DIRECTORY_FILES)?;
+                    let mut ordered_files = write_txn.open_table(DIRECTORY_FILES_BY_NAME)?;
                     let mut directory_mime_counts = write_txn.open_table(DIRECTORY_MIME_COUNTS)?;
 
                     let mut artist_index = write_txn.open_multimap_table(ARTIST_INDEX)?;
@@ -720,16 +725,17 @@ impl RedbDatabase {
                         file_with_id.id = Some(file_id);
                         let had_old = if let Some(old_bytes) = files_table.get(file_id)? {
                             let old = RedbReadSession::view(old_bytes.value())?;
-                            Self::remove_directory_membership(
-                                &mut directory_paths,
-                                &mut directory_records,
-                                &mut directory_children,
-                                &mut ordered_children,
-                                &mut directory_files,
-                                &mut directory_mime_counts,
-                                file_id,
-                                &old,
-                            )?;
+                             Self::remove_directory_membership(
+                                 &mut directory_paths,
+                                 &mut directory_records,
+                                 &mut directory_children,
+                                 &mut ordered_children,
+                                 &mut directory_files,
+                                 &mut ordered_files,
+                                 &mut directory_mime_counts,
+                                 file_id,
+                                 &old,
+                             )?;
                             Self::remove_file_indexes(
                                 &mut artist_index,
                                 &mut album_index,
@@ -767,6 +773,7 @@ impl RedbDatabase {
                             &mut directory_children,
                             &mut ordered_children,
                             &mut directory_files,
+                            &mut ordered_files,
                             &mut directory_mime_counts,
                             &next_directory_id,
                             &file_with_id,

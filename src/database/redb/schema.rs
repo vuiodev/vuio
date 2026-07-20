@@ -14,6 +14,7 @@ macro_rules! redb_schema {
         $callback!(table, DIRECTORY_CHILDREN_BY_NAME, &str, u64, "directory_children_by_name", derived);
         $callback!(multimap, DIRECTORY_FILES, u64, i64, "directory_files", derived);
         $callback!(table, DIRECTORY_MIME_COUNTS, &str, u64, "directory_mime_counts", derived);
+        $callback!(table, DIRECTORY_FILES_BY_NAME, &str, i64, "directory_files_by_name", derived);
         $callback!(table, PLAYLISTS_TABLE, i64, &[u8], "playlists", primary);
         $callback!(table, PLAYLIST_ENTRIES, u128, i64, "playlist_entries", primary);
         $callback!(multimap, FILE_PLAYLIST_ENTRIES, i64, u128, "file_playlist_entries", derived);
@@ -40,7 +41,7 @@ macro_rules! declare_schema_entry {
 }
 
 redb_schema!(declare_schema_entry);
-const SCHEMA_VERSION: u64 = 5;
+const SCHEMA_VERSION: u64 = 6;
 const CODEC_VERSION: u64 = 1;
 
 // Stable storage records. Keep these independent from application structs so
@@ -377,9 +378,12 @@ impl DatabaseReadSession for RedbReadSession {
             MediaFileQuery::Directory { path, mime_family } => {
                 let paths = self.transaction.open_table(DIRECTORY_PATH_INDEX)?;
                 if let Some(directory_id) = paths.get(path.as_str())? {
-                    let index = self.transaction.open_multimap_table(DIRECTORY_FILES)?;
-                    for id in index.get(directory_id.value())? {
-                        let id = id?.value();
+                    let directory_id = directory_id.value();
+                    let index = self.transaction.open_table(DIRECTORY_FILES_BY_NAME)?;
+                    let (range_start, range_end) = RedbDatabase::directory_file_order_range(directory_id);
+                    for entry in index.range(range_start.as_str()..range_end.as_str())? {
+                        let (_, id) = entry?;
+                        let id = id.value();
                         if let Some(family) = mime_family {
                             if let Some(bytes) = files.get(id)? {
                                 if !Self::view(bytes.value())?.mime_type().starts_with(family) {
