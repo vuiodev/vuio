@@ -591,6 +591,8 @@ pub const SUPPORTED_MEDIA_TYPES: &[(&str, &str)] = &[
     ("3gp", "video/3gpp"),
     ("mpg", "video/mpeg"),
     ("mpeg", "video/mpeg"),
+    ("ts", "video/mp2t"),
+    ("m2ts", "video/mp2t"),
     // Audio formats
     ("mp3", "audio/mpeg"),
     ("flac", "audio/flac"),
@@ -1142,6 +1144,8 @@ mod tests {
         assert_eq!(get_mime_type_for_extension("mp4"), "video/mp4");
         assert_eq!(get_mime_type_for_extension("MP4"), "video/mp4");
         assert_eq!(get_mime_type_for_extension("mp3"), "audio/mpeg");
+        assert_eq!(get_mime_type_for_extension("ts"), "video/mp2t");
+        assert_eq!(get_mime_type_for_extension("m2ts"), "video/mp2t");
         assert_eq!(
             get_mime_type_for_extension("unknown"),
             "application/octet-stream"
@@ -1153,6 +1157,8 @@ mod tests {
         assert!(is_supported_media_extension("mp4"));
         assert!(is_supported_media_extension("MP4"));
         assert!(is_supported_media_extension("mp3"));
+        assert!(is_supported_media_extension("ts"));
+        assert!(is_supported_media_extension("m2ts"));
         assert!(!is_supported_media_extension("txt"));
         assert!(!is_supported_media_extension("unknown"));
     }

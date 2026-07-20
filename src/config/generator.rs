@@ -210,6 +210,7 @@ impl ConfigGenerator {
         }
 
         database_table["vacuum_on_startup"] = value(config.database.vacuum_on_startup);
+        database_table["compact_on_shutdown"] = value(config.database.compact_on_shutdown);
         database_table["backup_enabled"] = value(config.database.backup_enabled);
 
         Ok(())
@@ -450,6 +451,7 @@ mod tests {
             database: DatabaseConfig {
                 path: Some("/test/vuio.redb".to_string()),
                 vacuum_on_startup: true,
+                compact_on_shutdown: true,
                 backup_enabled: false,
                 redb_cache_mb: 128,
             },
@@ -480,6 +482,7 @@ mod tests {
         assert!(toml_content.contains("validation_mode = \"Strict\""));
         assert!(toml_content.contains("path = \"/test/vuio.redb\""));
         assert!(toml_content.contains("vacuum_on_startup = true"));
+        assert!(toml_content.contains("compact_on_shutdown = true"));
         assert!(toml_content.contains("backup_enabled = false"));
 
         // Verify comments are preserved
@@ -517,6 +520,7 @@ mod tests {
             Some("/test/vuio.redb".to_string())
         );
         assert!(parsed_config.database.vacuum_on_startup);
+        assert!(parsed_config.database.compact_on_shutdown);
         assert!(!parsed_config.database.backup_enabled);
     }
 
@@ -559,6 +563,7 @@ mod tests {
             database: DatabaseConfig {
                 path: None, // Test None case
                 vacuum_on_startup: false,
+                compact_on_shutdown: false,
                 backup_enabled: true,
                 redb_cache_mb: 128,
             },

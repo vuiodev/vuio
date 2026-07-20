@@ -52,6 +52,7 @@ async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
 async fn perform_graceful_shutdown<D: DatabaseManager>(
     database: &Arc<D>,
     stats: &ApplicationStats,
+    config: &crate::config::AppConfig,
 ) -> anyhow::Result<()> {
     info!("Performing graceful shutdown with atomic state persistence...");
 
@@ -85,11 +86,15 @@ async fn perform_graceful_shutdown<D: DatabaseManager>(
         }
     }
 
-    // Perform database vacuum if needed (this will also ensure all data is persisted)
-    info!("Performing final database maintenance...");
-    match database.vacuum().await {
-        Ok(compacted) => info!(compacted, "Final database compaction completed"),
-        Err(e) => warn!("Could not compact database during shutdown: {}", e),
+    // Perform database vacuum if enabled
+    if config.database.compact_on_shutdown {
+        info!("Performing final database maintenance...");
+        match database.vacuum().await {
+            Ok(compacted) => info!(compacted, "Final database compaction completed"),
+            Err(e) => warn!("Could not compact database during shutdown: {}", e),
+        }
+    } else {
+        info!("Skipping database compaction on shutdown (compact_on_shutdown = false)");
     }
 
     info!("Graceful shutdown with atomic state persistence completed");
@@ -124,8 +129,9 @@ impl ShutdownCoordinator {
     pub async fn finalize<D: DatabaseManager>(
         database: &Arc<D>,
         stats: &ApplicationStats,
+        config: &crate::config::AppConfig,
     ) -> anyhow::Result<()> {
-        perform_graceful_shutdown(database, stats).await
+        perform_graceful_shutdown(database, stats, config).await
     }
 }
 

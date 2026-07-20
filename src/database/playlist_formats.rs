@@ -49,7 +49,7 @@ impl PlaylistFileManager {
             )
         })?;
 
-        let file_content = fs::read_to_string(file_path)?;
+        let file_content = tokio::fs::read_to_string(file_path).await?;
         let playlist_name = playlist_name.unwrap_or_else(|| {
             file_path
                 .file_stem()
@@ -138,11 +138,11 @@ impl PlaylistFileManager {
                 i += 1;
                 if i < lines.len() {
                     let file_path_str = lines[i].trim();
-                    track_paths.push(resolve_playlist_entry(base_dir, file_path_str));
+                    track_paths.push(resolve_playlist_entry(base_dir, file_path_str).await);
                 }
             } else if !line.starts_with('#') {
                 // Simple M3U format - just file paths
-                track_paths.push(resolve_playlist_entry(base_dir, line));
+                track_paths.push(resolve_playlist_entry(base_dir, line).await);
             }
 
             i += 1;
@@ -192,7 +192,7 @@ impl PlaylistFileManager {
 
                     // Extract the number from "File1", "File2", etc.
                     if let Ok(track_num) = key[4..].parse::<u32>() {
-                        tracks.push((track_num, resolve_playlist_entry(base_dir, value.trim())));
+                        tracks.push((track_num, resolve_playlist_entry(base_dir, value.trim()).await));
                     }
                 }
             }
@@ -236,10 +236,11 @@ impl PlaylistFileManager {
             output_path.display()
         );
 
-        let mut file = fs::File::create(output_path)?;
+        use std::fmt::Write;
+        let mut content = String::new();
 
         // Write M3U header
-        writeln!(file, "#EXTM3U")?;
+        writeln!(content, "#EXTM3U").unwrap();
 
         for track in tracks {
             // Write extended info if available
@@ -260,9 +261,11 @@ impl PlaylistFileManager {
 
             let artist = track.artist.as_deref().unwrap_or("Unknown Artist");
 
-            writeln!(file, "#EXTINF:{},{} - {}", duration, artist, title)?;
-            writeln!(file, "{}", track.path.display())?;
+            writeln!(content, "#EXTINF{},{} - {}", duration, artist, title).unwrap();
+            writeln!(content, "{}", track.path.display()).unwrap();
         }
+
+        tokio::fs::write(output_path, content).await?;
 
         debug!("Successfully exported {} tracks to M3U", tracks.len());
         Ok(())
@@ -280,35 +283,38 @@ impl PlaylistFileManager {
             output_path.display()
         );
 
-        let mut file = fs::File::create(output_path)?;
+        use std::fmt::Write;
+        let mut content = String::new();
 
         // Write PLS header
-        writeln!(file, "[playlist]")?;
-        writeln!(file, "NumberOfEntries={}", tracks.len())?;
-        writeln!(file)?;
+        writeln!(content, "[playlist]").unwrap();
+        writeln!(content, "NumberOfEntries={}", tracks.len()).unwrap();
+        writeln!(content).unwrap();
 
         for (i, track) in tracks.iter().enumerate() {
             let track_num = i + 1;
 
-            writeln!(file, "File{}={}", track_num, track.path.display())?;
+            writeln!(content, "File{}={}", track_num, track.path.display()).unwrap();
 
             if let Some(ref title) = track.title {
                 let artist = track.artist.as_deref().unwrap_or("Unknown Artist");
-                writeln!(file, "Title{}={} - {}", track_num, artist, title)?;
+                writeln!(content, "Title{}={} - {}", track_num, artist, title).unwrap();
             } else {
-                writeln!(file, "Title{}={}", track_num, track.filename)?;
+                writeln!(content, "Title{}={}", track_num, track.filename).unwrap();
             }
 
             if let Some(duration) = track.duration {
-                writeln!(file, "Length{}={}", track_num, duration.as_secs())?;
+                writeln!(content, "Length{}={}", track_num, duration.as_secs()).unwrap();
             } else {
-                writeln!(file, "Length{}=-1", track_num)?;
+                writeln!(content, "Length{}=-1", track_num).unwrap();
             }
 
-            writeln!(file)?;
+            writeln!(content).unwrap();
         }
 
-        writeln!(file, "Version=2")?;
+        writeln!(content, "Version=2").unwrap();
+
+        tokio::fs::write(output_path, content).await?;
 
         debug!("Successfully exported {} tracks to PLS", tracks.len());
         Ok(())
@@ -392,10 +398,9 @@ impl PlaylistFileManager {
             return Err(anyhow!("Path is not a directory: {}", directory.display()));
         }
 
-        let entries = fs::read_dir(directory)?;
+        let mut entries = tokio::fs::read_dir(directory).await?;
 
-        for entry in entries {
-            let entry = entry?;
+        while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
 
             if path.is_file() {
@@ -506,7 +511,7 @@ impl PlaylistFileManager {
             )
         })?;
 
-        let file_content = fs::read_to_string(file_path)?;
+        let file_content = tokio::fs::read_to_string(file_path).await?;
         let playlist_path_str = crate::platform::filesystem::create_platform_path_normalizer()
             .to_canonical(file_path)
             .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
@@ -657,19 +662,19 @@ fn is_radio_playlist_path(path: &Path) -> bool {
     })
 }
 
-fn resolve_playlist_entry(base_dir: &Path, entry: &str) -> String {
+async fn resolve_playlist_entry(base_dir: &Path, entry: &str) -> String {
     let entry = entry.trim();
     if is_http_stream(entry) {
         entry.to_string()
     } else {
-        resolve_playlist_path(base_dir, entry)
+        resolve_playlist_path(base_dir, entry).await
             .to_string_lossy()
             .into_owned()
     }
 }
 
 /// Resolve a relative playlist path to absolute
-fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf {
+async fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf {
     let raw_path = PathBuf::from(track_path_str.replace('\\', "/"));
     let absolute_path = if raw_path.is_absolute() {
         raw_path
@@ -677,7 +682,7 @@ fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf {
         base_dir.join(raw_path)
     };
 
-    if let Ok(canonical) = std::fs::canonicalize(&absolute_path) {
+    if let Ok(canonical) = tokio::fs::canonicalize(&absolute_path).await {
         canonical
     } else {
         let mut components = Vec::new();
@@ -742,33 +747,34 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_resolve_playlist_path() {
-        let base_dir = Path::new("/media/music");
+    #[tokio::test]
+    async fn test_resolve_playlist_path() {
+        let base_dir = Path::new("/var/media/playlists");
 
-        // Absolute path
-        let resolved = resolve_playlist_path(base_dir, "/other/track.mp3");
+        let resolved = resolve_playlist_path(base_dir, "/other/track.mp3").await;
         assert_eq!(resolved, PathBuf::from("/other/track.mp3"));
 
-        // Relative path
-        let resolved = resolve_playlist_path(base_dir, "album/track.mp3");
-        assert_eq!(resolved, PathBuf::from("/media/music/album/track.mp3"));
+        let resolved = resolve_playlist_path(base_dir, "album/track.mp3").await;
+        assert_eq!(resolved, PathBuf::from("/var/media/playlists/album/track.mp3"));
 
-        // Relative path with parent directory (..)
-        let resolved = resolve_playlist_path(base_dir, "../other/track.mp3");
-        assert_eq!(resolved, PathBuf::from("/media/other/track.mp3"));
+        let resolved = resolve_playlist_path(base_dir, "../other/track.mp3").await;
+        assert_eq!(resolved, PathBuf::from("/var/media/other/track.mp3"));
 
-        // Windows-style backslashes replaced with forward slashes
-        let resolved = resolve_playlist_path(base_dir, r"album\track.mp3");
-        assert_eq!(resolved, PathBuf::from("/media/music/album/track.mp3"));
+        // Test Windows style paths
+        let resolved = resolve_playlist_path(base_dir, r"album\track.mp3").await;
+        assert_eq!(resolved, PathBuf::from("/var/media/playlists/album/track.mp3"));
+
+        // Test HTTP stream
+        let url = "http://radio.example.com/stream";
+        assert_eq!(resolve_playlist_entry(base_dir, url).await, url);
     }
 
-    #[test]
-    fn test_stream_entries_are_not_resolved_as_filesystem_paths() {
+    #[tokio::test]
+    async fn test_stream_entries_are_not_resolved_as_filesystem_paths() {
         let base_dir = Path::new("/Users/alex/Downloads/radio");
         let url = "https://cast1.asurahosting.com/proxy/julien/stream";
 
-        assert_eq!(resolve_playlist_entry(base_dir, url), url);
+        assert_eq!(resolve_playlist_entry(base_dir, url).await, url);
         assert!(is_radio_playlist_path(Path::new(
             "/Users/alex/Downloads/radio/stations.m3u"
         )));

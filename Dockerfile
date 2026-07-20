@@ -63,8 +63,8 @@ ENV PGID=1000
 
 # Set default environment variables for configuration
 ENV VUIO_PORT=8080
-ENV VUIO_MEDIA_DIR=/media
-ENV VUIO_BIND_INTERFACE=0.0.0.0
+ENV VUIO_MEDIA_DIRS=/media
+ENV VUIO_INTERFACE=0.0.0.0
 # Can be "Auto", "All", or a specific interface name e.g., "eth0"
 ENV VUIO_SSDP_INTERFACE=Auto
 ENV VUIO_SERVER_NAME=VuIO

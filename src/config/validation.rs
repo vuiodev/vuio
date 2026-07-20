@@ -752,6 +752,7 @@ validation_mode = "Skip"
 
 [database]
 vacuum_on_startup = false
+compact_on_shutdown = false
 backup_enabled = true
 "#,
             temp_path

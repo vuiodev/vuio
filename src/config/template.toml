@@ -36,7 +36,7 @@ watch_for_changes = true
 cleanup_deleted_files = true
 autoplay_enabled = true
 supported_extensions = [
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp",
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "ts", "m2ts",
     "mp3", "flac", "wav", "aac", "ogg", "wma",
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "heif", "heic", "avif"
 ]
@@ -54,6 +54,7 @@ validation_mode = "Warn"
 [database]
 path = "PLACEHOLDER_DATABASE_PATH"
 vacuum_on_startup = false
+compact_on_shutdown = false
 backup_enabled = false
 
 # Platform-specific notes:

@@ -349,7 +349,7 @@ pub async fn serve_subtitle<D: DatabaseManager>(
         })?;
 
     let srt_path = PathBuf::from(&file_info.path).with_extension("srt");
-    if !srt_path.exists() {
+    if !tokio::fs::try_exists(&srt_path).await.unwrap_or(false) {
         return Err(AppError::NotFound);
     }
 
@@ -414,14 +414,20 @@ pub async fn serve_cover<D: DatabaseManager>(
         for name in &cover_filenames {
             for ext in &extensions {
                 let img_path = parent.join(format!("{}.{}", name, ext));
-                if img_path.exists() && img_path.is_file() {
-                    if let Ok(data) = tokio::fs::read(&img_path).await {
-                        let content_type =
-                            crate::platform::filesystem::get_mime_type_for_extension(ext);
-                        return Response::builder()
-                            .header(header::CONTENT_TYPE, content_type)
-                            .body(Body::from(data))
-                            .map_err(|_| AppError::NotFound);
+                if let Ok(metadata) = tokio::fs::metadata(&img_path).await {
+                    if metadata.is_file() {
+                        let size = metadata.len();
+                        if size <= 10 * 1024 * 1024 { // Cap cover size to 10MB
+                            if let Ok(file) = tokio::fs::File::open(&img_path).await {
+                                let content_type =
+                                    crate::platform::filesystem::get_mime_type_for_extension(ext);
+                                let stream = tokio_util::io::ReaderStream::new(file);
+                                return Response::builder()
+                                    .header(header::CONTENT_TYPE, content_type)
+                                    .body(Body::from_stream(stream))
+                                    .map_err(|_| AppError::NotFound);
+                            }
+                        }
                     }
                 }
             }

@@ -20,6 +20,8 @@ error_exit() {
 
 # Validate environment variables
 validate_env() {
+
+
     if [ -z "$VUIO_PORT" ]; then
         error_exit "VUIO_PORT environment variable is required"
     fi
@@ -72,21 +74,13 @@ setup_directories() {
     # Set ownership for directories we can control
     chown -R vuio:vuio /config /app /data
     
-    # Try to set ownership on media directory, but don't fail if it's read-only
+    # Check if we can read the media directory
     if [ -d "/media" ]; then
-        if chown -R vuio:vuio /media 2>/dev/null; then
-            log "Successfully set ownership on /media directory"
+        if [ -r "/media" ]; then
+            log "Media directory is readable, continuing..."
         else
-            log "Warning: Could not change ownership of /media directory (likely read-only)"
-            log "This is normal for read-only media mounts and should not affect functionality"
-            
-            # Check if we can at least read the media directory
-            if [ -r "/media" ]; then
-                log "Media directory is readable, continuing..."
-            else
-                log "Error: Media directory is not readable by current user"
-                log "Please ensure the media volume is mounted with appropriate read permissions"
-            fi
+            log "Error: Media directory is not readable by current user"
+            log "Please ensure the media volume is mounted with appropriate read permissions"
         fi
     fi
     
@@ -147,8 +141,8 @@ should_update_config() {
     
     [ "${VUIO_PORT:-8080}" != "$current_port" ] || 
     [ "${VUIO_SERVER_NAME:-VuIO}" != "$current_name" ] || 
-    [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$current_interface" ] ||
-    [ "${VUIO_SERVER_IP:-}" != "$current_ip" ]
+    [ "${VUIO_INTERFACE:-0.0.0.0}" != "$current_interface" ] ||
+    [ "${VUIO_IP:-}" != "$current_ip" ]
 }
 
 # Update existing configuration with environment variables
@@ -172,21 +166,21 @@ update_existing_config() {
     fi
     
     # Update interface if different
-    if [ "${VUIO_BIND_INTERFACE:-0.0.0.0}" != "$(grep '^interface' "$config_file" | sed 's/interface = "\(.*\)"/\1/')" ]; then
-        sed "s/^interface = .*/interface = \"${VUIO_BIND_INTERFACE:-0.0.0.0}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
-        log "Updated bind interface to ${VUIO_BIND_INTERFACE:-0.0.0.0}"
+    if [ "${VUIO_INTERFACE:-0.0.0.0}" != "$(grep '^interface' "$config_file" | sed 's/interface = "\(.*\)"/\1/')" ]; then
+        sed "s/^interface = .*/interface = \"${VUIO_INTERFACE:-0.0.0.0}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+        log "Updated bind interface to ${VUIO_INTERFACE:-0.0.0.0}"
     fi
     
     # Update server IP if specified
-    if [ -n "${VUIO_SERVER_IP:-}" ]; then
+    if [ -n "${VUIO_IP:-}" ]; then
         if ! grep -q '^ip = ' "$config_file"; then
             # Add IP field if it doesn't exist
-            sed "/^uuid = /a ip = \"${VUIO_SERVER_IP}\"" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
-            log "Added server IP: ${VUIO_SERVER_IP}"
-        elif [ "${VUIO_SERVER_IP}" != "$(grep '^ip' "$config_file" | sed 's/ip = "\(.*\)"/\1/')" ]; then
+            sed "/^uuid = /a ip = \"${VUIO_IP}\"" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+            log "Added server IP: ${VUIO_IP}"
+        elif [ "${VUIO_IP}" != "$(grep '^ip' "$config_file" | sed 's/ip = "\(.*\)"/\1/')" ]; then
             # Update existing IP field
-            sed "s/^ip = .*/ip = \"${VUIO_SERVER_IP}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
-            log "Updated server IP to ${VUIO_SERVER_IP}"
+            sed "s/^ip = .*/ip = \"${VUIO_IP}\"/" "$config_file" > "$temp_file" && mv "$temp_file" "$config_file"
+            log "Updated server IP to ${VUIO_IP}"
         fi
     fi
     
@@ -255,14 +249,14 @@ generate_config() {
 
 [server]
 port = ${VUIO_PORT:-8080}
-interface = "${VUIO_BIND_INTERFACE:-0.0.0.0}"
+interface = "${VUIO_INTERFACE:-0.0.0.0}"
 name = "${VUIO_SERVER_NAME:-VuIO}"
 uuid = "$uuid"
 EOF
 
     # Add server IP if specified
-    if [ -n "${VUIO_SERVER_IP:-}" ]; then
-        echo "ip = \"${VUIO_SERVER_IP}\"" >> "$config_file"
+    if [ -n "${VUIO_IP:-}" ]; then
+        echo "ip = \"${VUIO_IP}\"" >> "$config_file"
     fi
     
     cat >> "$config_file" <<EOF
@@ -289,13 +283,13 @@ scan_on_startup = true
 watch_for_changes = true
 cleanup_deleted_files = true
 supported_extensions = [
-    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ogv",
+    "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ts", "m2ts", "ogv",
     "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "ape",
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "svg"
 ]
 
 [[media.directories]]
-path = "${VUIO_MEDIA_DIR:-/media}"
+path = "${VUIO_MEDIA_DIRS:-/media}"
 recursive = true
 
 [database]
@@ -314,10 +308,10 @@ EOF
     log "Configuration summary:"
     log "  Server port: ${VUIO_PORT:-8080}"
     log "  Server name: ${VUIO_SERVER_NAME:-VuIO}"
-    log "  Bind interface: ${VUIO_BIND_INTERFACE:-0.0.0.0}"
-    log "  Server IP: ${VUIO_SERVER_IP:-auto-detect}"
+    log "  Bind interface: ${VUIO_INTERFACE:-0.0.0.0}"
+    log "  Server IP: ${VUIO_IP:-auto-detect}"
     log "  SSDP interface: ${VUIO_SSDP_INTERFACE:-Auto}"
-    log "  Media directory: ${VUIO_MEDIA_DIR:-/media}"
+    log "  Media directory: ${VUIO_MEDIA_DIRS:-/media}"
 }
 
 # Validate generated configuration
@@ -340,11 +334,6 @@ show_system_info() {
     log "  Architecture: $(uname -m)"
     log "  Kernel: $(uname -r)"
     log "  Available interfaces: $(ls /sys/class/net/ | tr '\n' ' ')"
-    
-    if [ -d "/media" ]; then
-        local media_count=$(find /media -type f 2>/dev/null | wc -l || echo "0")
-        log "  Media files found: $media_count"
-    fi
 }
 
 # Main execution

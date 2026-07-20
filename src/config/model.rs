@@ -186,6 +186,8 @@ pub struct MonitoredDirectoryConfig {
 pub struct DatabaseConfig {
     pub path: Option<String>,
     pub vacuum_on_startup: bool,
+    #[serde(default)]
+    pub compact_on_shutdown: bool,
     pub backup_enabled: bool,
     #[serde(default = "default_redb_cache_mb")]
     pub redb_cache_mb: usize,

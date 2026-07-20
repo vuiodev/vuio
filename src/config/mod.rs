@@ -118,6 +118,8 @@ impl AppConfig {
                 "webm".to_string(),
                 "m4v".to_string(),
                 "3gp".to_string(),
+                "ts".to_string(),
+                "m2ts".to_string(),
                 "mp3".to_string(),
                 "flac".to_string(),
                 "wav".to_string(),
@@ -143,6 +145,7 @@ impl AppConfig {
             vacuum_on_startup: std::env::var("VUIO_DB_VACUUM")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(false),
+            compact_on_shutdown: false,
             backup_enabled: std::env::var("VUIO_DB_BACKUP")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(false),
@@ -264,8 +267,32 @@ impl AppConfig {
             .generate_config(self)
             .context("Failed to generate configuration TOML")?;
 
-        std::fs::write(config_path, content)
-            .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
+        use std::io::Write;
+        
+        let mut temp_path = config_path.to_path_buf();
+        temp_path.set_extension("toml.tmp");
+        
+        // Write to temp file and sync
+        {
+            let mut temp_file = std::fs::File::create(&temp_path)
+                .with_context(|| format!("Failed to create temp config file: {}", temp_path.display()))?;
+            temp_file.write_all(content.as_bytes())
+                .with_context(|| format!("Failed to write to temp config file: {}", temp_path.display()))?;
+            temp_file.sync_all()
+                .with_context(|| format!("Failed to sync temp config file: {}", temp_path.display()))?;
+        }
+        
+        // Atomic rename
+        std::fs::rename(&temp_path, config_path)
+            .with_context(|| format!("Failed to atomically rename config file to {}", config_path.display()))?;
+            
+        // Fsync parent directory (Unix only)
+        #[cfg(unix)]
+        if let Some(parent) = config_path.parent() {
+            if let Ok(dir) = std::fs::File::open(parent) {
+                let _ = dir.sync_all();
+            }
+        }
 
         Ok(())
     }
@@ -339,6 +366,7 @@ impl AppConfig {
                         .to_string(),
                 ),
                 vacuum_on_startup: false,
+                compact_on_shutdown: false,
                 backup_enabled: false,
                 redb_cache_mb: default_redb_cache_mb(),
             },

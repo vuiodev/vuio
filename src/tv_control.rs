@@ -190,6 +190,14 @@ async fn fetch_tv_info(
         "renderer descriptor returned {}",
         response.status()
     );
+    if let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) {
+        let ct_str = content_type.to_str().unwrap_or("");
+        anyhow::ensure!(
+            ct_str.starts_with("text/xml") || ct_str.starts_with("application/xml"),
+            "renderer descriptor has invalid Content-Type: {}",
+            ct_str
+        );
+    }
     if let Some(length) = response.content_length() {
         anyhow::ensure!(
             length <= MAX_DESCRIPTOR_BYTES as u64,

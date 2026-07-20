@@ -446,7 +446,7 @@ impl LinuxNetworkManager {
     fn get_interfaces_alternative_method(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
 
-        // Priority 1: If we have VUIO_SERVER_IP configured and we're in Docker, use it directly
+        // Priority 1: If we have VUIO_IP configured and we're in Docker, use it directly
         if self.is_running_in_docker() {
             if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
                 if let Ok(server_ip) = server_ip_str.parse::<IpAddr>() {

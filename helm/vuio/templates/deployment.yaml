@@ -45,8 +45,8 @@ spec:
               value: {{ .Values.env.PGID | quote }}
             - name: VUIO_PORT
               value: {{ .Values.env.VUIO_PORT | quote }}
-            - name: VUIO_BIND_INTERFACE
-              value: {{ .Values.env.VUIO_BIND_INTERFACE | quote }}
+            - name: VUIO_INTERFACE
+              value: {{ .Values.env.VUIO_INTERFACE | quote }}
             - name: VUIO_SSDP_INTERFACE
               value: {{ .Values.env.VUIO_SSDP_INTERFACE | quote }}
             - name: VUIO_SERVER_NAME

@@ -541,10 +541,12 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                     if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
                         error!("Failed to refresh unavailable-root visibility: {}", error);
                     }
-                    match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
-                        Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
-                        Ok(_) => {}
-                        Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
+                    if app_state_clone.current_config().media.cleanup_deleted_files {
+                        match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
+                            Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
+                            Ok(_) => {}
+                            Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
+                        }
                     }
                 }
             }

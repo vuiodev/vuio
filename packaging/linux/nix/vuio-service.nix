@@ -64,7 +64,7 @@ in {
         [media]
         scan_on_startup = true
         watch_for_changes = true
-        supported_extensions = ["mp4", "mkv", "avi", "mp3", "flac", "wav", "jpg", "png", "gif"]
+        supported_extensions = ["mp4", "mkv", "avi", "ts", "m2ts", "mp3", "flac", "wav", "jpg", "png", "gif"]
 
         ${concatMapStrings (dir: ''
           [[media.directories]]
