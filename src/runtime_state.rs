@@ -374,6 +374,7 @@ mod tests {
             object_id: "audio".to_string(),
             starting_index: 0,
             requested_count: 25,
+            is_metadata: false,
             client_profile: crate::web::client::DlnaClientProfile::Standard,
             content_update_id: 1,
             browse_epoch: epoch,

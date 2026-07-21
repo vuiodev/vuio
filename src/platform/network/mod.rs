@@ -61,6 +61,8 @@ pub struct SsdpConfig {
     pub max_retries: u32,
     /// Specific interfaces to use (empty means use all suitable interfaces)
     pub interfaces: Vec<NetworkInterface>,
+    /// Multicast TTL for SSDP packets
+    pub multicast_ttl: u32,
 }
 
 impl Default for SsdpConfig {
@@ -72,6 +74,7 @@ impl Default for SsdpConfig {
             announce_interval: Duration::from_secs(300), // 5 minutes
             max_retries: 3,
             interfaces: Vec::new(),
+            multicast_ttl: 4,
         }
     }
 }

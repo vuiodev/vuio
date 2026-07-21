@@ -28,6 +28,8 @@ use crate::{
     state::{AppState, McpClient},
 };
 
+const MAX_MCP_PAGE_SIZE: usize = 1000;
+
 const MCP_MAX_CLIENTS: usize = 64;
 const MCP_MAX_CLIENTS_PER_PEER: usize = 4;
 const MCP_CLIENT_TTL: Duration = Duration::from_secs(30 * 60);
@@ -614,7 +616,7 @@ async fn tool_browse_folder<D: DatabaseManager + 'static>(
                 &canonical_path,
                 media_type_filter.as_deref(),
                 0,
-                usize::MAX,
+                MAX_MCP_PAGE_SIZE,
                 |directory| {
                     directories.push(serde_json::json!({
                         "name": directory.name(),
@@ -624,7 +626,7 @@ async fn tool_browse_folder<D: DatabaseManager + 'static>(
                 },
             )?;
             let mut files = Vec::new();
-            session.visit_files(&query, 0, usize::MAX, |file| {
+            session.visit_files(&query, 0, MAX_MCP_PAGE_SIZE, |file| {
                 files.push(media_file_view_to_json(&file));
                 Ok(())
             })?;
@@ -1024,7 +1026,7 @@ async fn tool_get_playlist_tracks<D: DatabaseManager + 'static>(
             session.visit_files(
                 &MediaFileQuery::Playlist(playlist_id),
                 0,
-                usize::MAX,
+                MAX_MCP_PAGE_SIZE,
                 |file| {
                     tracks.push(media_file_view_to_json(&file));
                     Ok(())
@@ -1064,7 +1066,7 @@ async fn playlist_file_locations<D: DatabaseManager + 'static>(
             session.visit_files(
                 &MediaFileQuery::Playlist(playlist_id),
                 0,
-                usize::MAX,
+                MAX_MCP_PAGE_SIZE,
                 |file| {
                     if let Some(location) = file.to_file_location() {
                         tracks.push(location);

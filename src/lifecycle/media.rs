@@ -492,20 +492,26 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                         }
                     }
 
-                    let dirty_roots = watcher_clone.take_dirty_roots();
-                    if !dirty_roots.is_empty() {
+                    let dirty_roots = coalesce_roots(watcher_clone.take_dirty_roots());
+                    let roots_to_scan = if !dirty_roots.is_empty() {
                         warn!(
-                            "Reconciling after dropped watcher events in {} root(s)",
+                            "Reconciling after dropped watcher events in {} dirty path(s)",
                             dirty_roots.len()
                         );
-                    }
+                        configured_roots
+                            .iter()
+                            .filter(|root| {
+                                let path = Path::new(&root.path);
+                                dirty_roots.iter().any(|dp| dp.starts_with(path) || path.starts_with(dp))
+                            })
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    } else {
+                        configured_roots.clone()
+                    };
 
-                    // Watchers are advisory: some network filesystems and backend
-                    // overflows can lose every event for a download. Sweep every
-                    // configured root so any supported file is eventually found
-                    // even when no Create/Rename/Modify event reaches the app.
                     let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                    for root in &configured_roots {
+                    for root in &roots_to_scan {
                         let path = PathBuf::from(&root.path);
                         let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
                         if !path.is_dir() {
@@ -532,7 +538,7 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                                 }
                             }
                             Err(error) => error!(
-                                "Periodic media discovery failed for {}: {}",
+                                "Media discovery failed for {}: {}",
                                 path.display(),
                                 error
                             ),
@@ -560,6 +566,18 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
         directories.len()
     );
     Ok(Some(handle))
+}
+
+/// Coalesce dirty root paths so overlapping subtrees are merged
+fn coalesce_roots(mut roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    roots.sort_by_key(|p| p.components().count());
+    let mut coalesced = Vec::new();
+    for root in roots {
+        if !coalesced.iter().any(|parent: &PathBuf| root.starts_with(parent)) {
+            coalesced.push(root);
+        }
+    }
+    coalesced
 }
 
 /// Increment the content update ID to notify DLNA clients of changes

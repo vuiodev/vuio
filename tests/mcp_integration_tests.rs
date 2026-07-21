@@ -108,6 +108,7 @@ async fn content_publication_and_cache_only_invalidation_have_distinct_revisions
         object_id: "audio".to_string(),
         starting_index: 0,
         requested_count: 10,
+        is_metadata: false,
         client_profile: DlnaClientProfile::Standard,
         content_update_id: 1,
         browse_epoch: epoch,

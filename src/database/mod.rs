@@ -109,6 +109,7 @@ pub struct FileFingerprint {
     pub size: u64,
     pub modified: SystemTime,
     pub created_at: SystemTime,
+    pub subtitle_available: bool,
 }
 
 /// Minimal owned state needed after a database session to serve one resource.
@@ -332,6 +333,7 @@ pub trait MediaFileView {
             size: self.size(),
             modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.created_at_secs()),
+            subtitle_available: self.subtitle_available(),
         })
     }
 
@@ -566,6 +568,9 @@ pub trait MediaRepository: Send + Sync {
 
     /// Load compact scanner comparison records instead of complete media metadata.
     async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>>;
+
+    /// Load compact scanner comparison records scoped to a specific root directory.
+    async fn load_file_fingerprints_under_root(&self, root: &Path) -> Result<Vec<FileFingerprint>>;
 
     async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>>;
 

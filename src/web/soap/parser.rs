@@ -4,11 +4,18 @@ use axum::{
 };
 use tracing::{debug, warn};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum BrowseFlag {
+    BrowseMetadata,
+    BrowseDirectChildren,
+}
+
 #[derive(Debug, Clone)]
 pub(super) struct BrowseParams {
     pub(super) object_id: String,
     pub(super) starting_index: u32,
     pub(super) requested_count: u32,
+    pub(super) browse_flag: BrowseFlag,
 }
 
 const MAX_BROWSE_ITEMS_PER_RESPONSE: usize = 2_000;
@@ -148,6 +155,7 @@ pub(super) fn parse_browse_params(body: &str) -> BrowseParams {
     let mut object_id = "0".to_string();
     let mut starting_index = 0_u32;
     let mut requested_count = 0_u32;
+    let mut browse_flag = BrowseFlag::BrowseDirectChildren;
     let mut buffer = Vec::new();
     let mut current_element = String::new();
 
@@ -163,6 +171,11 @@ pub(super) fn parse_browse_params(body: &str) -> BrowseParams {
                         object_id = text.trim().to_string();
                         if object_id.is_empty() {
                             object_id = "0".to_string();
+                        }
+                    }
+                    "BrowseFlag" => {
+                        if text.trim().eq_ignore_ascii_case("BrowseMetadata") {
+                            browse_flag = BrowseFlag::BrowseMetadata;
                         }
                     }
                     "StartingIndex" => {
@@ -191,12 +204,13 @@ pub(super) fn parse_browse_params(body: &str) -> BrowseParams {
     }
 
     debug!(
-        "Parsed browse params - ObjectID: '{}', StartingIndex: {}, RequestedCount: {}",
-        object_id, starting_index, requested_count
+        "Parsed BrowseParams: object_id={}, flag={:?}, start={}, count={}",
+        object_id, browse_flag, starting_index, requested_count
     );
     BrowseParams {
         object_id,
         starting_index,
         requested_count,
+        browse_flag,
     }
 }

@@ -247,22 +247,53 @@ impl UnifiedSsdpService {
         request: &str,
         addr: SocketAddr,
     ) {
+        let mut st_header = None;
+        let mut mx_seconds = 1u64;
+
+        for line in request.lines() {
+            let line = line.trim();
+            if let Some((key, val)) = line.split_once(':') {
+                let key = key.trim();
+                let val = val.trim();
+                if key.eq_ignore_ascii_case("ST") {
+                    st_header = Some(val);
+                } else if key.eq_ignore_ascii_case("MX") {
+                    if let Ok(mx) = val.parse::<u64>() {
+                        mx_seconds = mx.min(5).max(1);
+                    }
+                }
+            }
+        }
+
+        let st = st_header.unwrap_or("");
         let mut response_types = Vec::new();
 
-        if request.contains("ssdp:all") {
+        if st == "ssdp:all" || request.contains("ssdp:all") {
             response_types.extend_from_slice(&[
                 "upnp:rootdevice",
                 "urn:schemas-upnp-org:device:MediaServer:1",
                 "urn:schemas-upnp-org:service:ContentDirectory:1",
             ]);
-        } else if request.contains("upnp:rootdevice") {
+        } else if st == "upnp:rootdevice" || request.contains("upnp:rootdevice") {
             response_types.push("upnp:rootdevice");
-        } else if request.contains("urn:schemas-upnp-org:device:MediaServer") {
+        } else if st.starts_with("urn:schemas-upnp-org:device:MediaServer")
+            || request.contains("urn:schemas-upnp-org:device:MediaServer")
+        {
             response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
-        } else if request.contains("urn:schemas-upnp-org:service:ContentDirectory") {
+        } else if st.starts_with("urn:schemas-upnp-org:service:ContentDirectory")
+            || request.contains("urn:schemas-upnp-org:service:ContentDirectory")
+        {
             response_types.push("urn:schemas-upnp-org:service:ContentDirectory:1");
         } else if request.contains("ssdp:discover") {
             response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
+        }
+
+        if !response_types.is_empty() {
+            // Apply a small bounded random delay (within MX window) to prevent response bursts
+            let delay_ms = (addr.port() as u64 % (mx_seconds * 200 + 1)).min(1000);
+            if delay_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            }
         }
 
         let response_count = response_types.len();
@@ -572,6 +603,7 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
             announce_interval: Duration::from_secs(config.network.announce_interval_seconds),
             max_retries: 3,
             interfaces: Vec::new(),
+            multicast_ttl: u32::from(config.network.multicast_ttl),
         }
     }
 }

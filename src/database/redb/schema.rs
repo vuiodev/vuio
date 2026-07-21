@@ -447,6 +447,7 @@ impl DatabaseReadSession for RedbReadSession {
                 text,
             } => {
                 let first_id = after_id.unwrap_or(i64::MIN).saturating_add(1);
+                let needle_lower = text.as_deref().map(|n| n.to_lowercase());
                 for entry in files.range(first_id..)? {
                     let (_, bytes) = entry?;
                     let view = Self::view(bytes.value())?;
@@ -456,24 +457,24 @@ impl DatabaseReadSession for RedbReadSession {
                     {
                         continue;
                     }
-                    if text.as_deref().is_some_and(|needle| {
-                        !contains_ignore_ascii_case(view.filename(), needle)
-                            && !view
-                                .title()
-                                .is_some_and(|value| contains_ignore_ascii_case(value, needle))
-                            && !view
-                                .artist()
-                                .is_some_and(|value| contains_ignore_ascii_case(value, needle))
-                            && !view
-                                .album()
-                                .is_some_and(|value| contains_ignore_ascii_case(value, needle))
-                    }) {
-                        continue;
+                    if let Some(needle) = needle_lower.as_deref() {
+                        let matches_text = contains_ignore_ascii_case(view.filename(), needle)
+                            || view.title().is_some_and(|v| contains_ignore_ascii_case(v, needle))
+                            || view.artist().is_some_and(|v| contains_ignore_ascii_case(v, needle))
+                            || view.album().is_some_and(|v| contains_ignore_ascii_case(v, needle));
+                        if !matches_text {
+                            continue;
+                        }
                     }
                     summary.matched += 1;
-                    if summary.matched > offset && summary.visited < limit {
-                        visitor(view)?;
-                        summary.visited += 1;
+                    if summary.matched > offset {
+                        if summary.visited < limit {
+                            visitor(view)?;
+                            summary.visited += 1;
+                        }
+                        if summary.visited >= limit {
+                            break;
+                        }
                     }
                 }
             }

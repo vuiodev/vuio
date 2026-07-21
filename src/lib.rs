@@ -55,6 +55,7 @@ pub mod state {
         pub object_id: String,
         pub starting_index: u32,
         pub requested_count: u32,
+        pub is_metadata: bool,
         pub client_profile: crate::web::client::DlnaClientProfile,
         pub content_update_id: u32,
         pub browse_epoch: u64,

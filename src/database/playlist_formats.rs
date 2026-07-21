@@ -1,6 +1,5 @@
 use anyhow::{anyhow, Result};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
@@ -261,7 +260,7 @@ impl PlaylistFileManager {
 
             let artist = track.artist.as_deref().unwrap_or("Unknown Artist");
 
-            writeln!(content, "#EXTINF{},{} - {}", duration, artist, title).unwrap();
+            writeln!(content, "#EXTINF:{},{} - {}", duration, artist, title).unwrap();
             writeln!(content, "{}", track.path.display()).unwrap();
         }
 
@@ -575,18 +574,14 @@ impl PlaylistFileManager {
             }
         }
 
-        // Discover old derived records, propagating storage corruption rather
-        // than silently committing a partial replacement.
+        // Discover old derived records via album index lookup instead of full-table scan.
         let mut old_paths = Vec::new();
-        let mut stream = database.stream_all_media_files();
-        while let Some(res) = stream.next().await {
-            let file = res?;
-            if file.mime_type == "audio/radio" && file.album.as_deref() == Some(&playlist_path_str)
-            {
+        let old_files = database.get_music_by_album(&playlist_path_str, None).await?;
+        for file in old_files {
+            if file.mime_type == "audio/radio" {
                 old_paths.push(file.path.clone());
             }
         }
-        drop(stream);
 
         // Materialize the complete new set first and commit it in one database
         // transaction. Stale records are removed only after that succeeds.

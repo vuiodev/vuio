@@ -285,6 +285,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             size: file.size,
             modified: file.modified,
             created_at: file.created_at,
+            subtitle_available: file.subtitle_available,
         }
     }
 
@@ -538,28 +539,28 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
     /// Check if a file needs to be updated in the database
     fn file_needs_update(&self, existing: &MediaFile, current: &MediaFile) -> bool {
-        // Compare file sizes first (most reliable)
         if existing.size != current.size {
             return true;
         }
 
-        // Compare MIME type and filename
         if existing.mime_type != current.mime_type || existing.filename != current.filename {
             return true;
         }
 
-        // Compare modification times with tolerance for Windows timestamp precision issues
-        // Windows can have different precision depending on filesystem and access method
+        if existing.subtitle_available != current.subtitle_available {
+            return true;
+        }
+
+        // Compare modification times with 500ms tolerance for filesystem precision differences
         let time_diff = if existing.modified > current.modified {
             existing.modified.duration_since(current.modified)
         } else {
             current.modified.duration_since(existing.modified)
         };
 
-        // Allow up to 10 seconds difference to account for timestamp precision issues
         match time_diff {
-            Ok(diff) => diff.as_secs() > 10,
-            Err(_) => true, // If we can't calculate the difference, assume it needs updating
+            Ok(diff) => diff.as_millis() > 500,
+            Err(_) => true,
         }
     }
 
@@ -567,12 +568,15 @@ impl<D: DatabaseManager> MediaScanner<D> {
         if existing.size != current.size {
             return true;
         }
+        if existing.subtitle_available != current.subtitle_available {
+            return true;
+        }
         let time_diff = if existing.modified > current.modified {
             existing.modified.duration_since(current.modified)
         } else {
             current.modified.duration_since(existing.modified)
         };
-        time_diff.map_or(true, |difference| difference.as_secs() > 10)
+        time_diff.map_or(true, |difference| difference.as_millis() > 500)
     }
 
     /// Scan multiple directories and return combined results
@@ -632,11 +636,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
             canonical_root.display()
         );
 
-        // Load all existing files from database once at the start (for incremental updates)
-        debug!("Loading existing files from database...");
+        // Load existing files for this root from database (for incremental updates)
+        debug!("Loading existing files under root from database...");
         let existing_files_map: HashMap<PathBuf, FileFingerprint> = self
             .database_manager
-            .load_file_fingerprints()
+            .load_file_fingerprints_under_root(&canonical_root)
             .await?
             .into_iter()
             .map(|fingerprint| (fingerprint.path.clone(), fingerprint))

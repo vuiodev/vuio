@@ -815,6 +815,10 @@ impl MediaRepository for RedbDatabase {
         RedbDatabase::load_file_fingerprints_impl(self).await
     }
 
+    async fn load_file_fingerprints_under_root(&self, root: &Path) -> Result<Vec<FileFingerprint>> {
+        RedbDatabase::load_file_fingerprints_under_root_impl(self, root).await
+    }
+
     async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>> {
         RedbDatabase::get_root_availability_impl(self, path).await
     }

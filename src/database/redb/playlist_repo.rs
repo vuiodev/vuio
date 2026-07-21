@@ -262,8 +262,6 @@ impl RedbDatabase {
             .to_string_lossy()
             .to_string();
         let child_prefix = format!("{}/", source.trim_end_matches('/'));
-        let matches_source =
-            |candidate: &str| candidate == source || candidate.starts_with(&child_prefix);
         let source_for_query = source.clone();
         let child_for_query = child_prefix.clone();
         let ids = self
@@ -290,17 +288,33 @@ impl RedbDatabase {
         for id in ids {
             removed += usize::from(self.delete_playlist_impl(id).await?);
         }
-        let mut radio_paths = Vec::new();
-        use futures_util::StreamExt;
-        let mut stream = self.stream_all_media_files_impl();
-        while let Some(file) = stream.next().await {
-            let file = file?;
-            if file.mime_type == "audio/radio" && file.album.as_deref().is_some_and(matches_source)
-            {
-                radio_paths.push(file.path);
-            }
-        }
-        drop(stream);
+        let source_for_album = source.clone();
+        let child_for_album = child_prefix.clone();
+        let radio_paths = self
+            .execute_read(move |database| {
+                let txn = database.begin_read()?;
+                let table = txn.open_multimap_table(ALBUM_INDEX)?;
+                let files_table = txn.open_table(FILES_TABLE)?;
+                let mut radio_paths = Vec::new();
+                for entry in table.range(source_for_album.as_str()..)? {
+                    let (key, values) = entry?;
+                    let k = key.value();
+                    if k != source_for_album && !k.starts_with(&child_for_album) {
+                        break;
+                    }
+                    for value in values {
+                        let fid = value?.value();
+                        if let Some(bytes) = files_table.get(fid)? {
+                            let view = RedbReadSession::view(bytes.value())?;
+                            if view.mime_type() == "audio/radio" {
+                                radio_paths.push(PathBuf::from(view.path()));
+                            }
+                        }
+                    }
+                }
+                Ok(radio_paths)
+            })
+            .await?;
         removed += self.bulk_remove_media_files_impl(&radio_paths).await?;
         Ok(removed)
     }
