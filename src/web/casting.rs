@@ -11,7 +11,7 @@ pub struct ApiCastPlaylistRequest {
     pub file_ids: Vec<i64>,
 }
 
-/// Discover UPnP/DLNA TVs, Chromecasts, AirPlay, and DIAL devices, and return them as DiscoveredTv equivalents in JSON format
+/// Discover UPnP/DLNA TVs, Chromecasts, and AirPlay devices, and return them as DiscoveredTv equivalents in JSON format
 pub async fn api_list_renderers<D: DatabaseManager>(
     State(state): State<AppState<D>>,
 ) -> impl IntoResponse {
@@ -42,10 +42,6 @@ pub async fn api_list_renderers<D: DatabaseManager>(
                         .clone()
                         .unwrap_or_else(|| "AirPlay".to_string()),
                 ),
-                TargetKind::Dial => (
-                    format!("{} (DIAL)", target.friendly_name),
-                    target.model.clone().unwrap_or_else(|| "DIAL".to_string()),
-                ),
             };
             DiscoveredTv {
                 id: target.id,
@@ -57,7 +53,6 @@ pub async fn api_list_renderers<D: DatabaseManager>(
                     TargetKind::Dlna => format!("http://{}", target.address),
                     TargetKind::Chromecast => format!("chromecast://{}", target.address),
                     TargetKind::AirPlay => format!("airplay://{}", target.address),
-                    TargetKind::Dial => format!("dial://{}", target.address),
                 },
                 model_name,
             }
@@ -144,7 +139,7 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
     // clients on the old browse generation.
     crate::web::eventing::publish_content_change(&state).await;
 
-    // Check if the target is non-DLNA (Chromecast, AirPlay, or DIAL)
+    // Check if the target is non-DLNA (Chromecast or AirPlay)
     let targets = state.discovery_service.targets().await;
 
     if let Some(target) = targets.into_iter().find(|t| t.id == payload.renderer_id) {
@@ -250,30 +245,6 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
                         ),
                     }
                 }
-                TargetKind::Dial => {
-                    if let Some(app_url) = &target.control_url {
-                        let dial_client = crate::dial::client::DialClient::new(app_url);
-                        match dial_client.launch_app("YouTube", Some(&media_url)).await {
-                            Ok(()) => (
-                                StatusCode::OK,
-                                axum::Json(serde_json::json!({ "status": "playing" })),
-                            ),
-                            Err(e) => (
-                                StatusCode::BAD_REQUEST,
-                                axum::Json(
-                                    serde_json::json!({ "error": format!("DIAL launch error: {}", e) }),
-                                ),
-                            ),
-                        }
-                    } else {
-                        (
-                            StatusCode::BAD_REQUEST,
-                            axum::Json(
-                                serde_json::json!({ "error": "DIAL target has no application URL" }),
-                            ),
-                        )
-                    }
-                }
                 _ => unreachable!(),
             }
         } else {
@@ -311,7 +282,7 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
 // Unified target discovery and casting API
 // ---------------------------------------------------------------------------
 
-/// List all discovered playback targets (DLNA + Chromecast + AirPlay + DIAL).
+/// List all discovered playback targets (DLNA + Chromecast + AirPlay).
 pub async fn api_list_targets<D: DatabaseManager>(
     State(state): State<AppState<D>>,
 ) -> impl IntoResponse {
@@ -497,35 +468,6 @@ pub async fn api_cast_to_target<D: DatabaseManager + 'static>(
                     StatusCode::BAD_REQUEST,
                     axum::Json(serde_json::json!({ "error": format!("AirPlay error: {}", e) })),
                 ),
-            }
-        }
-        TargetKind::Dial => {
-            // DIAL launches an app; we pass the media URL as launch data
-            if let Some(app_url) = &target.control_url {
-                let dial_client = crate::dial::client::DialClient::new(app_url);
-                match dial_client.launch_app("YouTube", Some(&media_url)).await {
-                    Ok(()) => (
-                        StatusCode::OK,
-                        axum::Json(serde_json::json!({
-                            "status": "launched",
-                            "target": target.friendly_name,
-                            "protocol": "dial",
-                        })),
-                    ),
-                    Err(e) => (
-                        StatusCode::BAD_REQUEST,
-                        axum::Json(
-                            serde_json::json!({ "error": format!("DIAL launch error: {}", e) }),
-                        ),
-                    ),
-                }
-            } else {
-                (
-                    StatusCode::BAD_REQUEST,
-                    axum::Json(
-                        serde_json::json!({ "error": "DIAL target has no application URL" }),
-                    ),
-                )
             }
         }
     }

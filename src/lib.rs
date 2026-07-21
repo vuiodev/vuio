@@ -17,7 +17,6 @@ pub mod web;
 
 pub mod airplay;
 pub mod chromecast;
-pub mod dial;
 pub mod discovery;
 
 pub type DefaultDatabase = crate::database::redb::RedbDatabase;

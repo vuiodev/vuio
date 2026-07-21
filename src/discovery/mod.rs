@@ -1,7 +1,6 @@
-//! Unified device discovery combining SSDP (UPnP/DLNA), mDNS (Chromecast/AirPlay), and DIAL.
+//! Unified device discovery combining SSDP (UPnP/DLNA) and mDNS (Chromecast/AirPlay).
 
 pub mod compat;
-pub mod dial;
 pub mod mdns;
 
 use serde::{Deserialize, Serialize};
@@ -22,8 +21,6 @@ pub enum TargetKind {
     Chromecast,
     /// Apple AirPlay (HTTP video control)
     AirPlay,
-    /// DIAL (Discovery and Launch)
-    Dial,
 }
 
 impl std::fmt::Display for TargetKind {
@@ -32,7 +29,6 @@ impl std::fmt::Display for TargetKind {
             TargetKind::Dlna => write!(f, "DLNA"),
             TargetKind::Chromecast => write!(f, "Chromecast"),
             TargetKind::AirPlay => write!(f, "AirPlay"),
-            TargetKind::Dial => write!(f, "DIAL"),
         }
     }
 }
@@ -106,16 +102,6 @@ impl TargetCapabilities {
             ],
         }
     }
-
-    pub fn dial() -> Self {
-        // DIAL launches apps, so capabilities depend on the app itself.
-        // We report a broad set since the app handles decoding.
-        Self {
-            video_codecs: vec!["h264".into(), "vp9".into(), "av1".into()],
-            audio_codecs: vec!["aac".into(), "mp3".into(), "opus".into()],
-            containers: vec!["mp4".into(), "webm".into()],
-        }
-    }
 }
 
 /// A discovered playback target on the local network.
@@ -142,7 +128,6 @@ pub struct PlaybackTarget {
 pub struct DiscoveryConfig {
     pub chromecast_enabled: bool,
     pub airplay_enabled: bool,
-    pub dial_enabled: bool,
     pub discovery_interval: Duration,
 }
 
@@ -151,7 +136,6 @@ impl Default for DiscoveryConfig {
         Self {
             chromecast_enabled: true,
             airplay_enabled: true,
-            dial_enabled: true,
             discovery_interval: Duration::from_secs(30),
         }
     }
@@ -176,7 +160,7 @@ impl DiscoveryService {
         self.targets.read().await.clone()
     }
 
-    /// Run a single discovery cycle: SSDP (DLNA) + mDNS (Cast/AirPlay) + DIAL.
+    /// Run a single discovery cycle: SSDP (DLNA) + mDNS (Cast/AirPlay).
     pub async fn refresh(&self) -> Vec<PlaybackTarget> {
         let mut all_targets = Vec::new();
 
@@ -221,25 +205,12 @@ impl DiscoveryService {
             }
         }
 
-        // 3. Discover DIAL devices
-        if self.config.dial_enabled {
-            match dial::discover_dial_devices().await {
-                Ok(dial_targets) => {
-                    debug!("DIAL discovery found {} target(s)", dial_targets.len());
-                    all_targets.extend(dial_targets);
-                }
-                Err(e) => {
-                    warn!(error = %e, "DIAL discovery failed");
-                }
-            }
-        }
-
         // Deduplicate by ID
         let mut seen = HashMap::new();
         all_targets.retain(|target| seen.insert(target.id.clone(), ()).is_none());
 
         info!(
-            "Discovery cycle complete: {} target(s) ({} DLNA, {} Cast, {} AirPlay, {} DIAL)",
+            "Discovery cycle complete: {} target(s) ({} DLNA, {} Cast, {} AirPlay)",
             all_targets.len(),
             all_targets
                 .iter()
@@ -252,10 +223,6 @@ impl DiscoveryService {
             all_targets
                 .iter()
                 .filter(|t| t.kind == TargetKind::AirPlay)
-                .count(),
-            all_targets
-                .iter()
-                .filter(|t| t.kind == TargetKind::Dial)
                 .count(),
         );
 
@@ -316,7 +283,6 @@ mod tests {
         assert_eq!(TargetKind::Dlna.to_string(), "DLNA");
         assert_eq!(TargetKind::Chromecast.to_string(), "Chromecast");
         assert_eq!(TargetKind::AirPlay.to_string(), "AirPlay");
-        assert_eq!(TargetKind::Dial.to_string(), "DIAL");
     }
 
     #[test]

@@ -139,7 +139,6 @@ where
     let discovery_config = crate::discovery::DiscoveryConfig {
         chromecast_enabled: config.cast.chromecast_enabled,
         airplay_enabled: config.cast.airplay_enabled,
-        dial_enabled: config.cast.dial_enabled,
         discovery_interval: std::time::Duration::from_secs(config.cast.discovery_interval_seconds),
     };
     let discovery_service = Arc::new(crate::discovery::DiscoveryService::new(discovery_config));

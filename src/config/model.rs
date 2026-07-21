@@ -52,9 +52,6 @@ pub struct CastConfig {
     /// Enable Apple AirPlay discovery and control.
     #[serde(default = "default_true")]
     pub airplay_enabled: bool,
-    /// Enable DIAL (Discovery and Launch) for smart TVs.
-    #[serde(default = "default_true")]
-    pub dial_enabled: bool,
     /// Interval between discovery scans in seconds.
     #[serde(default = "default_discovery_interval")]
     pub discovery_interval_seconds: u64,
@@ -69,7 +66,6 @@ impl Default for CastConfig {
         Self {
             chromecast_enabled: true,
             airplay_enabled: true,
-            dial_enabled: true,
             discovery_interval_seconds: default_discovery_interval(),
         }
     }

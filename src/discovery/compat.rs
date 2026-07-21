@@ -173,7 +173,6 @@ mod tests {
                 TargetKind::Chromecast => TargetCapabilities::chromecast(),
                 TargetKind::AirPlay => TargetCapabilities::airplay(),
                 TargetKind::Dlna => TargetCapabilities::dlna(),
-                TargetKind::Dial => TargetCapabilities::dial(),
             },
         }
     }
