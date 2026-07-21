@@ -5,8 +5,90 @@ use axum::body::Bytes;
 use std::{
     collections::HashMap,
     hash::Hash,
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+#[derive(Clone)]
+pub enum CastTransport {
+    Dlna { control_url: String },
+    Chromecast(Arc<crate::chromecast::client::ChromecastClient>),
+    AirPlay { address: std::net::SocketAddr },
+}
+
+#[derive(Clone)]
+pub struct CastSession {
+    pub transport: CastTransport,
+    pub operation: Arc<tokio::sync::Mutex<()>>,
+    pub device: String,
+    pub filename: String,
+    last_activity: Instant,
+}
+
+impl CastSession {
+    pub fn new(transport: CastTransport, device: String, filename: String) -> Self {
+        Self {
+            transport,
+            operation: Arc::new(tokio::sync::Mutex::new(())),
+            device,
+            filename,
+            last_activity: Instant::now(),
+        }
+    }
+}
+
+pub struct CastSessionRegistry {
+    entries: HashMap<String, CastSession>,
+}
+
+impl CastSessionRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+        }
+    }
+
+    pub fn insert(&mut self, target_id: String, session: CastSession) -> Option<CastSession> {
+        self.prune();
+        if self.entries.len() >= ACTIVE_CAST_MAX_ENTRIES && !self.entries.contains_key(&target_id) {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, session)| session.last_activity)
+                .map(|(id, _)| id.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(target_id, session)
+    }
+
+    pub fn get(&mut self, target_id: &str) -> Option<CastSession> {
+        self.prune();
+        let session = self.entries.get_mut(target_id)?;
+        session.last_activity = Instant::now();
+        Some(session.clone())
+    }
+
+    pub fn remove(&mut self, target_id: &str) -> Option<CastSession> {
+        self.entries.remove(target_id)
+    }
+
+    pub fn prune(&mut self) {
+        self.entries
+            .retain(|_, session| session.last_activity.elapsed() < ACTIVE_CAST_TTL);
+    }
+
+    pub fn drain(&mut self) -> Vec<CastSession> {
+        self.entries.drain().map(|(_, session)| session).collect()
+    }
+}
+
+impl Default for CastSessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub const BROWSE_CACHE_MAX_ENTRIES: usize = 256;
 pub const BROWSE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;

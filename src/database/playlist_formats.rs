@@ -1,9 +1,8 @@
 use anyhow::{anyhow, Result};
-use std::fs;
 use std::path::{Path, PathBuf};
 use tracing::{debug, warn};
 
-use crate::database::{DatabaseManager, MediaFile, Playlist};
+use crate::database::{DatabaseManager, MediaFile, Playlist, SourceMediaEntry};
 
 /// Supported playlist file formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,12 +154,11 @@ impl PlaylistFileManager {
             .collect();
 
         // Add all tracks to playlist in batch operation
-        let media_entries =
-            Self::resolve_playlist_tracks(database, &file_paths_with_positions, Some(source_path))
-                .await?;
+        let media_entries = Self::source_entries(&file_paths_with_positions);
         let playlist_id = database
-            .replace_playlist_from_source(Path::new(source_path), playlist_name, &media_entries)
-            .await?;
+            .replace_source_content(Path::new(source_path), Some(playlist_name), &media_entries)
+            .await?
+            .ok_or_else(|| anyhow!("playlist import did not create a playlist"))?;
 
         debug!(
             "Imported {} tracks to playlist '{}'",
@@ -191,7 +189,10 @@ impl PlaylistFileManager {
 
                     // Extract the number from "File1", "File2", etc.
                     if let Ok(track_num) = key[4..].parse::<u32>() {
-                        tracks.push((track_num, resolve_playlist_entry(base_dir, value.trim()).await));
+                        tracks.push((
+                            track_num,
+                            resolve_playlist_entry(base_dir, value.trim()).await,
+                        ));
                     }
                 }
             }
@@ -208,12 +209,11 @@ impl PlaylistFileManager {
             .collect();
 
         // Add all tracks to playlist in batch operation
-        let media_entries =
-            Self::resolve_playlist_tracks(database, &file_paths_with_positions, Some(source_path))
-                .await?;
+        let media_entries = Self::source_entries(&file_paths_with_positions);
         let playlist_id = database
-            .replace_playlist_from_source(Path::new(source_path), playlist_name, &media_entries)
-            .await?;
+            .replace_source_content(Path::new(source_path), Some(playlist_name), &media_entries)
+            .await?
+            .ok_or_else(|| anyhow!("playlist import did not create a playlist"))?;
 
         debug!(
             "Imported {} tracks to playlist '{}'",
@@ -320,65 +320,15 @@ impl PlaylistFileManager {
     }
 
     /// Add tracks to playlist by file paths using batch operations
-    async fn resolve_playlist_tracks<D: DatabaseManager + ?Sized>(
-        database: &D,
-        file_paths_with_positions: &[(String, u32)],
-        source_path: Option<&str>,
-    ) -> Result<Vec<(i64, u32)>> {
-        if file_paths_with_positions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Extract paths for batch query
-        let paths: Vec<PathBuf> = file_paths_with_positions
+    fn source_entries(file_paths_with_positions: &[(String, u32)]) -> Vec<SourceMediaEntry> {
+        file_paths_with_positions
             .iter()
-            .map(|(path_str, _)| PathBuf::from(path_str))
-            .collect();
-
-        // Get all media files in a single query
-        let media_files = database.get_files_by_paths(&paths).await?;
-
-        // Create a map from path to media file for quick lookup
-        let mut path_to_file = std::collections::HashMap::new();
-        for media_file in media_files {
-            if let Some(file_id) = media_file.id {
-                path_to_file.insert(media_file.path.clone(), file_id);
-            }
-        }
-
-        // Streams are valid playlist entries even though they are not present on
-        // the local filesystem. Materialize missing HTTP(S) entries as virtual
-        // radio files before building the playlist entry batch.
-        for (location, _) in file_paths_with_positions {
-            if !is_http_stream(location) {
-                continue;
-            }
-            let path = PathBuf::from(location);
-            if path_to_file.contains_key(&path) {
-                continue;
-            }
-
-            let mut stream = MediaFile::new(path.clone(), 0, "audio/radio".to_string());
-            stream.title = Some(location.clone());
-            stream.album = source_path.map(str::to_owned);
-            let file_id = database.store_media_file(&stream).await?;
-            path_to_file.insert(path, file_id);
-        }
-
-        // Build list of (media_file_id, position) pairs for files that exist in database
-        let mut media_file_entries = Vec::new();
-
-        for (file_path_str, position) in file_paths_with_positions {
-            let file_path = PathBuf::from(file_path_str);
-
-            if let Some(&file_id) = path_to_file.get(&file_path) {
-                media_file_entries.push((file_id, *position));
-            } else {
-                warn!("File not found in media database: {}", file_path.display());
-            }
-        }
-
-        Ok(media_file_entries)
+            .map(|(location, position)| SourceMediaEntry {
+                location: PathBuf::from(location),
+                position: *position,
+                stream_title: is_http_stream(location).then(|| location.clone()),
+            })
+            .collect()
     }
 
     /// Scan a directory for playlist files and import them
@@ -501,8 +451,6 @@ impl PlaylistFileManager {
         database: &D,
         file_path: &Path,
     ) -> Result<()> {
-        use futures_util::StreamExt;
-
         let format = PlaylistFormat::from_extension(file_path).ok_or_else(|| {
             anyhow!(
                 "Unsupported playlist format for file: {}",
@@ -574,44 +522,18 @@ impl PlaylistFileManager {
             }
         }
 
-        // Discover old derived records via album index lookup instead of full-table scan.
-        let mut old_paths = Vec::new();
-        let old_files = database.get_music_by_album(&playlist_path_str, None).await?;
-        for file in old_files {
-            if file.mime_type == "audio/radio" {
-                old_paths.push(file.path.clone());
-            }
-        }
-
-        // Materialize the complete new set first and commit it in one database
-        // transaction. Stale records are removed only after that succeeds.
-        let mut new_files = Vec::with_capacity(stations.len());
-        let mut new_paths = std::collections::HashSet::with_capacity(stations.len());
-        for (name, url) in stations {
-            let path = PathBuf::from(&url);
-            new_paths.insert(path.clone());
-            if let Some(existing_file) = database.get_file_by_path(&path).await? {
-                let mut file = existing_file;
-                file.filename = name.clone();
-                file.title = Some(name);
-                file.album = Some(playlist_path_str.clone());
-                new_files.push(file);
-            } else {
-                let mut file = MediaFile::new(path, 0, "audio/radio".to_string());
-                file.filename = name.clone();
-                file.title = Some(name);
-                file.album = Some(playlist_path_str.clone());
-                new_files.push(file);
-            }
-        }
-        database.bulk_store_media_files(&new_files).await?;
-        let stale_paths = old_paths
+        let entries = stations
             .into_iter()
-            .filter(|path| !new_paths.contains(path))
+            .enumerate()
+            .map(|(position, (name, url))| SourceMediaEntry {
+                location: PathBuf::from(url),
+                position: u32::try_from(position).unwrap_or(u32::MAX),
+                stream_title: Some(name),
+            })
             .collect::<Vec<_>>();
-        if !stale_paths.is_empty() {
-            database.bulk_remove_media_files(&stale_paths).await?;
-        }
+        database
+            .replace_source_content(Path::new(&playlist_path_str), None, &entries)
+            .await?;
 
         Ok(())
     }
@@ -662,7 +584,8 @@ async fn resolve_playlist_entry(base_dir: &Path, entry: &str) -> String {
     if is_http_stream(entry) {
         entry.to_string()
     } else {
-        resolve_playlist_path(base_dir, entry).await
+        resolve_playlist_path(base_dir, entry)
+            .await
             .to_string_lossy()
             .into_owned()
     }
@@ -698,6 +621,7 @@ async fn resolve_playlist_path(base_dir: &Path, track_path_str: &str) -> PathBuf
 mod tests {
     use super::*;
     use crate::database::{MediaRepository, PlaylistRepository};
+    use std::fs;
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -750,14 +674,20 @@ mod tests {
         assert_eq!(resolved, PathBuf::from("/other/track.mp3"));
 
         let resolved = resolve_playlist_path(base_dir, "album/track.mp3").await;
-        assert_eq!(resolved, PathBuf::from("/var/media/playlists/album/track.mp3"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/var/media/playlists/album/track.mp3")
+        );
 
         let resolved = resolve_playlist_path(base_dir, "../other/track.mp3").await;
         assert_eq!(resolved, PathBuf::from("/var/media/other/track.mp3"));
 
         // Test Windows style paths
         let resolved = resolve_playlist_path(base_dir, r"album\track.mp3").await;
-        assert_eq!(resolved, PathBuf::from("/var/media/playlists/album/track.mp3"));
+        assert_eq!(
+            resolved,
+            PathBuf::from("/var/media/playlists/album/track.mp3")
+        );
 
         // Test HTTP stream
         let url = "http://radio.example.com/stream";

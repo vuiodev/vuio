@@ -27,6 +27,13 @@ pub struct RemovalSummary {
     pub mime_families: HashSet<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SourceMediaEntry {
+    pub location: PathBuf,
+    pub position: u32,
+    pub stream_title: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RootAvailability {
     pub path: PathBuf,
@@ -170,6 +177,9 @@ impl MediaFileView for IndexSnapshot {
     fn modified_secs(&self) -> u64 {
         0
     }
+    fn modified_nanos(&self) -> u32 {
+        0
+    }
     fn mime_type(&self) -> &str {
         &self.mime_type
     }
@@ -259,6 +269,12 @@ impl MediaFileView for MediaFile {
             .unwrap_or_default()
             .as_secs()
     }
+    fn modified_nanos(&self) -> u32 {
+        self.modified
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos()
+    }
     fn mime_type(&self) -> &str {
         &self.mime_type
     }
@@ -313,6 +329,7 @@ pub trait MediaFileView {
     fn filename(&self) -> &str;
     fn size(&self) -> u64;
     fn modified_secs(&self) -> u64;
+    fn modified_nanos(&self) -> u32;
     fn mime_type(&self) -> &str;
     fn duration_secs(&self) -> Option<f64>;
     fn title(&self) -> Option<&str>;
@@ -331,7 +348,8 @@ pub trait MediaFileView {
             id: self.id()?,
             path: PathBuf::from(self.path()),
             size: self.size(),
-            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
+            modified: SystemTime::UNIX_EPOCH
+                + Duration::new(self.modified_secs(), self.modified_nanos().min(999_999_999)),
             created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.created_at_secs()),
             subtitle_available: self.subtitle_available(),
         })
@@ -355,7 +373,8 @@ pub trait MediaFileView {
             path: PathBuf::from(self.path()),
             filename: self.filename().to_owned(),
             size: self.size(),
-            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
+            modified: SystemTime::UNIX_EPOCH
+                + Duration::new(self.modified_secs(), self.modified_nanos().min(999_999_999)),
             mime_type: self.mime_type().to_owned(),
             duration: self.duration_secs().map(Duration::from_secs_f64),
             title: self.title().map(str::to_owned),
@@ -698,6 +717,15 @@ pub trait PlaylistRepository: Send + Sync {
         name: &str,
         media_file_ids: &[(i64, u32)],
     ) -> Result<i64>;
+
+    /// Atomically replace all content derived from a playlist source. When
+    /// `playlist_name` is `None`, only source-owned radio streams are replaced.
+    async fn replace_source_content(
+        &self,
+        source_path: &Path,
+        playlist_name: Option<&str>,
+        entries: &[SourceMediaEntry],
+    ) -> Result<Option<i64>>;
 
     /// Delete playlists/radio records derived from an on-disk source file.
     async fn remove_derived_content_by_source(&self, source_path: &Path) -> Result<usize>;

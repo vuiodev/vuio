@@ -132,10 +132,9 @@ where
     if cli_args.auth {
         auth_config.auth_enabled = true;
     }
-    let auth = Arc::new(crate::web::auth::AuthState::load(
-        &auth_config,
-        config_manager.get_config_path(),
-    )?);
+    let auth = Arc::new(crate::web::auth::ReloadableAuthState::new(Arc::new(
+        crate::web::auth::AuthState::load(&auth_config, config_manager.get_config_path())?,
+    )));
     let discovery_config = crate::discovery::DiscoveryConfig {
         chromecast_enabled: config.cast.chromecast_enabled,
         airplay_enabled: config.cast.airplay_enabled,
@@ -145,13 +144,20 @@ where
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
+        desired_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
+        config_reload_errors: Arc::new(std::sync::RwLock::new(Vec::new())),
+        pending_restart_fields: Arc::new(std::sync::RwLock::new(Vec::new())),
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         database: database.clone(),
         auth,
+        auth_forced: cli_args.auth,
         platform_info: platform_info.clone(),
         filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        content_change_notify: Arc::new(tokio::sync::Notify::new()),
+        http_rebind_notify: Arc::new(tokio::sync::Notify::new()),
+        ssdp_reload_notify: Arc::new(tokio::sync::Notify::new()),
         web_metrics: Arc::new(crate::web::diagnostics::WebHandlerMetrics::new()),
         runtime_diagnostics: Arc::new(
             crate::platform::diagnostics::SystemDiagnosticsSampler::new(),
@@ -170,6 +176,9 @@ where
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::ActiveCastRegistry::new(),
+        )),
+        cast_sessions: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::CastSessionRegistry::new(),
         )),
         discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
         discovery_service,
@@ -196,33 +205,32 @@ where
 
     let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
 
-    if config.database.backup_enabled {
-        let backup_database = database.clone();
-        let backup_state = app_state.clone();
-        let backup_cancellation = cancellation.clone();
-        services.spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-            interval.tick().await;
-            loop {
-                tokio::select! {
-                    _ = backup_cancellation.cancelled() => break,
-                    _ = interval.tick() => {
-                        let current = backup_state.current_config();
-                        if current.database.backup_enabled {
-                            if let Err(error) = create_lifecycle_backup(&backup_database, &current).await {
-                                warn!("Periodic database backup failed: {}", error);
-                            }
+    let backup_database = database.clone();
+    let backup_state = app_state.clone();
+    let backup_cancellation = cancellation.clone();
+    services.spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+        interval.tick().await;
+        loop {
+            tokio::select! {
+                _ = backup_cancellation.cancelled() => break,
+                _ = interval.tick() => {
+                    let current = backup_state.current_config();
+                    if current.database.backup_enabled {
+                        if let Err(error) = create_lifecycle_backup(&backup_database, &current).await {
+                            warn!("Periodic database backup failed: {}", error);
                         }
                     }
                 }
             }
-            ("database backup", Ok(()))
-        });
-    }
+        }
+        ("database backup", Ok(()))
+    });
 
     let subscription_handle = {
         let subscriptions = app_state.upnp_subscriptions.clone();
         let active_casts = app_state.active_casts.clone();
+        let cast_sessions = app_state.cast_sessions.clone();
         let cancellation = cancellation.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -236,6 +244,7 @@ where
                             .await
                             .retain(|_, subscription| subscription.expires_at > now);
                         active_casts.lock().await.prune();
+                        cast_sessions.lock().await.prune();
                     }
                 }
             }
@@ -246,6 +255,13 @@ where
             "subscription cleanup",
             subscription_handle.await.map_err(anyhow::Error::from),
         )
+    });
+
+    let event_state = app_state.clone();
+    let event_cancellation = cancellation.clone();
+    services.spawn(async move {
+        crate::web::eventing::run_content_change_publisher(event_state, event_cancellation).await;
+        ("UPnP event publisher", Ok(()))
     });
 
     let disc_service = app_state.discovery_service.clone();
@@ -449,6 +465,12 @@ where
 
     info!("Shutting down gracefully...");
     shutdown.cancel();
+    let cast_sessions = app_state.cast_sessions.lock().await.drain();
+    for session in cast_sessions {
+        if let crate::runtime_state::CastTransport::Chromecast(client) = session.transport {
+            let _ = client.disconnect().await;
+        }
+    }
     background_tasks.close();
     if let Err(error) = file_watcher.stop_watching().await {
         warn!("Failed to stop file watcher cleanly: {}", error);

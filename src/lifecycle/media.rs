@@ -366,16 +366,12 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
     app_state: AppState<D>,
     cancellation: CancellationToken,
 ) -> anyhow::Result<Option<tokio::task::JoinHandle<()>>> {
-    if !app_state.current_config().media.watch_for_changes {
-        info!("File system monitoring disabled");
-        return Ok(None);
-    }
-
-    info!("Starting file system monitoring...");
+    let watching_enabled = app_state.current_config().media.watch_for_changes;
+    info!("Starting file system monitoring controller...");
 
     // Get directories to monitor
     let all_directories: Vec<std::path::PathBuf> = app_state
-        .config
+        .current_config()
         .media
         .directories
         .iter()
@@ -397,12 +393,15 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
     }
 
     // Start watching directories
-    watcher
-        .start_watching(&directories)
-        .await
-        .context("Failed to start watching directories")?;
-
-    info!("File system watcher successfully started for all directories");
+    if watching_enabled {
+        watcher
+            .start_watching(&directories)
+            .await
+            .context("Failed to start watching directories")?;
+        info!("File system watcher successfully started for all directories");
+    } else {
+        info!("File system watching is disabled; controller remains ready for reload");
+    }
 
     // Get event receiver
     let mut event_receiver = watcher
@@ -693,14 +692,12 @@ async fn index_media_file_path<D: DatabaseManager + ?Sized>(
     database: &D,
     path: &Path,
 ) -> anyhow::Result<i64> {
-    let metadata = tokio::fs::metadata(path).await?;
-    let extension = path
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .unwrap_or("");
-    let mime_type = crate::platform::filesystem::get_mime_type_for_extension(extension);
-    let mut media_file = database::MediaFile::new(path.to_path_buf(), metadata.len(), mime_type);
-    media_file.modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+    let filesystem_manager = create_platform_filesystem_manager();
+    let mut media_file = media::build_media_file_from_path(path, filesystem_manager.as_ref()).await?;
+    if let Some(existing) = database.get_file_by_path(&media_file.path).await? {
+        media_file.id = existing.id;
+        media_file.created_at = existing.created_at;
+    }
 
     database
         .bulk_store_media_files(&[media_file])
@@ -839,15 +836,17 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
             // A downloader or platform backend may report only Modify/CloseWrite,
             // without a preceding Create. Upsert missing paths so those event
             // shapes cannot leave a completed download absent from the database.
-            if let Some(mut existing_file) = database.get_file_by_path(&path).await? {
-                let metadata = tokio::fs::metadata(&path).await?;
-                existing_file.size = metadata.len();
-                existing_file.modified =
-                    metadata.modified().unwrap_or(std::time::SystemTime::now());
-                existing_file.updated_at = std::time::SystemTime::now();
+            if let Some(existing_file) = database.get_file_by_path(&path).await? {
+                let mut refreshed = media::build_media_file_from_path(
+                    &path,
+                    app_state.filesystem_manager.as_ref(),
+                )
+                .await?;
+                refreshed.id = existing_file.id;
+                refreshed.created_at = existing_file.created_at;
 
                 // Use ReDB bulk update operation (single-item batch for atomic consistency)
-                database.bulk_update_media_files(&[existing_file]).await?;
+                database.bulk_update_media_files(&[refreshed]).await?;
 
                 // Record atomic statistics
                 stats.record_files_processed(1);
@@ -912,61 +911,72 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
             }
             info!("Path renamed: {} -> {}", from.display(), to.display());
 
-            // Check if the destination is a directory or file
-            if to.is_dir() {
-                let Some(policy) = media::ScanPolicy::for_path(&policies, &to).cloned() else {
-                    return Ok(());
-                };
-                if !policy.recursive || to == policy.root {
-                    return Ok(());
-                }
-                // Handle directory rename using ReDB bulk operations
+            let path_normalizer = create_platform_path_normalizer();
+            let canonical_from_prefix = path_normalizer.to_canonical(&from)?;
+            let files_in_old_path = database
+                .get_files_with_path_prefix(&canonical_from_prefix)
+                .await?;
+            let looks_like_directory = to.is_dir()
+                || files_in_old_path
+                    .iter()
+                    .any(|file| file.path.as_path() != from.as_path());
+            if looks_like_directory {
                 info!("Directory renamed: {} -> {}", from.display(), to.display());
-
-                // Use efficient path prefix query to find files in the old directory path
-                let path_normalizer = create_platform_path_normalizer();
-                let canonical_from_prefix = path_normalizer.to_canonical(&from)?;
-                let files_in_old_path = database
-                    .get_files_with_path_prefix(&canonical_from_prefix)
-                    .await?;
-
-                if !files_in_old_path.is_empty() {
-                    info!(
-                        "Updating {} media files for renamed directory using ReDB bulk operations",
-                        files_in_old_path.len()
-                    );
-
-                    // Collect paths for bulk removal
-                    let old_paths: Vec<PathBuf> =
-                        files_in_old_path.iter().map(|f| f.path.clone()).collect();
-
-                    // Remove old files from database using ReDB bulk operation
-                    let removed_count = database.bulk_remove_media_files(&old_paths).await?;
-                    info!(
-                        "ReDB bulk removal: {} files removed for renamed directory",
-                        removed_count
-                    );
-
-                    // Scan the new directory location using ReDB bulk operations
-                    let scanner = media::MediaScanner::with_database(database.clone());
-                    match scanner
-                        .scan_directory_recursive_with_policy(&policy.for_subtree(&to))
-                        .await
-                    {
-                        Ok(scan_result) => {
-                            info!(
-                                "Rescanned renamed directory {}: {}",
-                                to.display(),
-                                scan_result.summary()
-                            );
-
-                            // Files are already stored in database by the scanner using ReDB bulk operations
-
-                            // Increment update ID to notify DLNA clients
+                let from_policy = media::ScanPolicy::for_path(&policies, &from)
+                    .filter(|policy| from == policy.root || policy.recursive)
+                    .cloned();
+                let to_policy = media::ScanPolicy::for_path(&policies, &to)
+                    .filter(|policy| to == policy.root || policy.recursive)
+                    .cloned();
+                match (from_policy, to_policy) {
+                    (None, None) => {}
+                    (Some(_), None) => {
+                        let removed = database.remove_media_under_path(&from).await?;
+                        let derived = database.remove_derived_content_by_source(&from).await?;
+                        if removed.removed_files > 0 || derived > 0 {
                             increment_content_update_id(app_state).await;
                         }
-                        Err(e) => {
-                            error!("Failed to rescan renamed directory {}: {}", to.display(), e);
+                    }
+                    (from_policy, Some(policy)) => {
+                        // Stage the complete destination before touching old records.
+                        let scanner = media::MediaScanner::with_database(database.clone());
+                        let mut staged = scanner
+                            .stage_directory_with_policy(&policy.for_subtree(&to))
+                            .await?;
+                        let old_by_relative = files_in_old_path
+                            .iter()
+                            .filter_map(|file| {
+                                file.path
+                                    .strip_prefix(&from)
+                                    .ok()
+                                    .map(|relative| (relative.to_path_buf(), file))
+                            })
+                            .collect::<HashMap<_, _>>();
+                        for file in &mut staged {
+                            if let Ok(relative) = file.path.strip_prefix(&to) {
+                                if let Some(previous) = old_by_relative.get(relative) {
+                                    file.id = previous.id;
+                                    file.created_at = previous.created_at;
+                                }
+                            }
+                        }
+                        // Reusing IDs makes each matched old->new remap part of
+                        // the same ReDB transaction as the staged upsert.
+                        database.bulk_store_canonical_media_files(&staged).await?;
+                        let staged_ids = staged.iter().filter_map(|file| file.id).collect::<HashSet<_>>();
+                        let stale_old = files_in_old_path
+                            .iter()
+                            .filter(|file| file.id.is_none_or(|id| !staged_ids.contains(&id)))
+                            .map(|file| file.path.clone())
+                            .collect::<Vec<_>>();
+                        if !stale_old.is_empty() {
+                            database.bulk_remove_media_files(&stale_old).await?;
+                        }
+                        if from_policy.is_some() {
+                            database.remove_derived_content_by_source(&from).await?;
+                        }
+                        if !staged.is_empty() || !files_in_old_path.is_empty() {
+                            increment_content_update_id(app_state).await;
                         }
                     }
                 }

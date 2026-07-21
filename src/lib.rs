@@ -81,15 +81,22 @@ pub mod state {
     pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
         pub config: Arc<AppConfig>,
         pub live_config: Arc<LiveConfig>,
+        pub desired_config: Arc<LiveConfig>,
+        pub config_reload_errors: Arc<std::sync::RwLock<Vec<String>>>,
+        pub pending_restart_fields: Arc<std::sync::RwLock<Vec<String>>>,
         pub media_directories:
             Arc<tokio::sync::RwLock<Vec<crate::config::MonitoredDirectoryConfig>>>,
         pub unavailable_roots:
             Arc<tokio::sync::RwLock<std::collections::HashSet<std::path::PathBuf>>>,
         pub database: Arc<D>,
-        pub auth: Arc<crate::web::auth::AuthState>,
+        pub auth: Arc<crate::web::auth::ReloadableAuthState>,
+        pub auth_forced: bool,
         pub platform_info: Arc<PlatformInfo>,
         pub filesystem_manager: Arc<dyn FileSystemManager>,
         pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
+        pub content_change_notify: Arc<tokio::sync::Notify>,
+        pub http_rebind_notify: Arc<tokio::sync::Notify>,
+        pub ssdp_reload_notify: Arc<tokio::sync::Notify>,
         pub web_metrics: Arc<crate::web::diagnostics::WebHandlerMetrics>,
         pub runtime_diagnostics: Arc<crate::platform::diagnostics::SystemDiagnosticsSampler>,
         pub lifecycle_stats: Arc<crate::lifecycle::ApplicationStats>,
@@ -106,6 +113,7 @@ pub mod state {
             >,
         >,
         pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
+        pub cast_sessions: Arc<tokio::sync::Mutex<crate::runtime_state::CastSessionRegistry>>,
         pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
         pub discovery_service: Arc<crate::discovery::DiscoveryService>,
         pub upnp_subscriptions:
@@ -119,13 +127,20 @@ pub mod state {
             Self {
                 config: self.config.clone(),
                 live_config: self.live_config.clone(),
+                desired_config: self.desired_config.clone(),
+                config_reload_errors: self.config_reload_errors.clone(),
+                pending_restart_fields: self.pending_restart_fields.clone(),
                 media_directories: self.media_directories.clone(),
                 unavailable_roots: self.unavailable_roots.clone(),
                 database: self.database.clone(),
                 auth: self.auth.clone(),
+                auth_forced: self.auth_forced,
                 platform_info: self.platform_info.clone(),
                 filesystem_manager: self.filesystem_manager.clone(),
                 content_update_id: self.content_update_id.clone(),
+                content_change_notify: self.content_change_notify.clone(),
+                http_rebind_notify: self.http_rebind_notify.clone(),
+                ssdp_reload_notify: self.ssdp_reload_notify.clone(),
                 web_metrics: self.web_metrics.clone(),
                 runtime_diagnostics: self.runtime_diagnostics.clone(),
                 lifecycle_stats: self.lifecycle_stats.clone(),
@@ -135,6 +150,7 @@ pub mod state {
                 mcp_clients: self.mcp_clients.clone(),
                 active_monitors: self.active_monitors.clone(),
                 active_casts: self.active_casts.clone(),
+                cast_sessions: self.cast_sessions.clone(),
                 discovered_tvs: self.discovered_tvs.clone(),
                 discovery_service: self.discovery_service.clone(),
                 upnp_subscriptions: self.upnp_subscriptions.clone(),
@@ -150,24 +166,23 @@ pub mod state {
         }
         /// Get the server's IP address using unified logic from platform_info
         pub fn get_server_ip(&self) -> String {
+            let config = self.current_config();
             // Check if server IP is explicitly configured (important for Docker)
-            if let Some(server_ip) = &self.config.server.ip {
+            if let Some(server_ip) = &config.server.ip {
                 if !server_ip.is_empty() && server_ip != "0.0.0.0" {
                     return server_ip.clone();
                 }
             }
 
             // Use the SSDP interface from config if it's a specific IP address
-            match &self.config.network.interface_selection {
+            match &config.network.interface_selection {
                 crate::config::NetworkInterfaceConfig::Specific(ip) => {
                     return ip.clone();
                 }
                 _ => {
                     // For Auto or All, fallback to server interface if it's not 0.0.0.0
-                    if self.config.server.interface != "0.0.0.0"
-                        && !self.config.server.interface.is_empty()
-                    {
-                        return self.config.server.interface.clone();
+                    if config.server.interface != "0.0.0.0" && !config.server.interface.is_empty() {
+                        return config.server.interface.clone();
                     }
                 }
             }

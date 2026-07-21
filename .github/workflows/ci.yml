@@ -73,7 +73,31 @@ jobs:
             target/
           key: clippy-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D clippy::all -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+
+  full_test:
+    name: Locked all-target/all-feature tests
+    if: |
+      github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: full-test-${{ hashFiles('**/Cargo.lock') }}
+      - name: Run locked all-target/all-feature tests
+        run: cargo test --locked --all-targets --all-features
 
   # ===================================================================
   # Run Tests and Checks (Push, Pull Requests, or Manual 'test' run)
@@ -513,5 +537,4 @@ jobs:
           git add Formula/vuio.rb
           git commit -m "Update vuio formula to version ${VERSION}"
           git push origin main
-
 

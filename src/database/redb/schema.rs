@@ -20,6 +20,8 @@ macro_rules! redb_schema {
         $callback!(multimap, FILE_PLAYLIST_ENTRIES, i64, u128, "file_playlist_entries", derived);
         $callback!(table, PLAYLIST_SOURCES, i64, &str, "playlist_sources", primary);
         $callback!(multimap, SOURCE_PLAYLISTS, &str, i64, "source_playlists", derived);
+        $callback!(multimap, SOURCE_STREAMS, &str, i64, "source_streams", primary);
+        $callback!(multimap, STREAM_SOURCES, i64, &str, "stream_sources", derived);
         $callback!(table, METADATA_TABLE, &str, u64, "metadata", primary);
         $callback!(table, ROOT_AVAILABILITY, &str, &[u8], "root_availability", primary);
         $callback!(multimap, ARTIST_INDEX, &str, i64, "artist_index", derived);
@@ -41,8 +43,8 @@ macro_rules! declare_schema_entry {
 }
 
 redb_schema!(declare_schema_entry);
-const SCHEMA_VERSION: u64 = 6;
-const CODEC_VERSION: u64 = 1;
+const SCHEMA_VERSION: u64 = 7;
+const CODEC_VERSION: u64 = 2;
 
 // Stable storage records. Keep these independent from application structs so
 // schema changes are explicit and versioned.
@@ -53,6 +55,7 @@ struct MediaFileSerializable {
     filename: String,
     size: u64,
     modified_secs: u64,
+    modified_nanos: u32,
     mime_type: String,
     duration_secs: Option<f64>,
     title: Option<String>,
@@ -79,6 +82,11 @@ impl From<&MediaFile> for MediaFileSerializable {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs(),
+            modified_nanos: file
+                .modified
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos(),
             mime_type: file.mime_type.clone(),
             duration_secs: file.duration.map(|d| d.as_secs_f64()),
             title: file.title.clone(),
@@ -110,7 +118,8 @@ impl From<MediaFileSerializable> for MediaFile {
             path: PathBuf::from(s.path),
             filename: s.filename,
             size: s.size,
-            modified: UNIX_EPOCH + Duration::from_secs(s.modified_secs),
+            modified: UNIX_EPOCH
+                + Duration::new(s.modified_secs, s.modified_nanos.min(999_999_999)),
             mime_type: s.mime_type,
             duration: s.duration_secs.map(Duration::from_secs_f64),
             title: s.title,
@@ -266,6 +275,9 @@ impl MediaFileView for RkyvMediaFileView<'_> {
     }
     fn modified_secs(&self) -> u64 {
         self.archived.modified_secs.to_native()
+    }
+    fn modified_nanos(&self) -> u32 {
+        self.archived.modified_nanos.to_native()
     }
     fn mime_type(&self) -> &str {
         self.archived.mime_type.as_str()

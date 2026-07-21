@@ -45,6 +45,25 @@ pub struct AuthState {
     allowed_networks: Vec<IpNet>,
 }
 
+pub struct ReloadableAuthState(std::sync::RwLock<Arc<AuthState>>);
+
+impl ReloadableAuthState {
+    pub fn new(auth: Arc<AuthState>) -> Self {
+        Self(std::sync::RwLock::new(auth))
+    }
+
+    pub fn load(&self) -> Arc<AuthState> {
+        self.0
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn store(&self, auth: Arc<AuthState>) {
+        *self.0.write().unwrap_or_else(|error| error.into_inner()) = auth;
+    }
+}
+
 impl std::fmt::Debug for AuthState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -112,8 +131,8 @@ impl AuthState {
         })
     }
 
-    pub fn testing() -> Self {
-        Self {
+    pub fn testing() -> ReloadableAuthState {
+        ReloadableAuthState::new(Arc::new(Self {
             enabled: true,
             auth_enabled: true,
             admin_token: "test-management-token-which-is-long-enough".to_owned(),
@@ -123,7 +142,7 @@ impl AuthState {
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_MANAGEMENT_CONCURRENCY)),
             session_ttl: Duration::from_secs(3600),
             allowed_networks: Vec::new(),
-        }
+        }))
     }
 
     pub fn enabled(&self) -> bool {
@@ -334,16 +353,17 @@ pub async fn login<D: DatabaseManager>(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(request): Json<LoginRequest>,
 ) -> Response {
-    if !state.auth.enabled() || !state.auth.network_allowed(peer.ip()) {
+    let auth = state.auth.load();
+    if !auth.enabled() || !auth.network_allowed(peer.ip()) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if !state.auth.rate_limit_login(peer.ip()) {
+    if !auth.rate_limit_login(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    if !constant_time_eq(request.token.as_bytes(), state.auth.admin_token.as_bytes()) {
+    if !constant_time_eq(request.token.as_bytes(), auth.admin_token.as_bytes()) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Some(session) = state.auth.create_session(peer.ip()) else {
+    let Some(session) = auth.create_session(peer.ip()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     (
@@ -352,7 +372,7 @@ pub async fn login<D: DatabaseManager>(
             header::SET_COOKIE,
             format!(
                 "vuio_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-                state.auth.session_ttl.as_secs()
+                auth.session_ttl.as_secs()
             ),
         )],
     )
@@ -363,7 +383,7 @@ pub async fn logout<D: DatabaseManager>(
     State(state): State<AppState<D>>,
     headers: HeaderMap,
 ) -> Response {
-    state.auth.remove_session(&headers);
+    state.auth.load().remove_session(&headers);
     (
         StatusCode::NO_CONTENT,
         [(
@@ -380,24 +400,24 @@ pub async fn require_management<D: DatabaseManager>(
     request: Request<Body>,
     next: Next,
 ) -> Response {
-    if !state.auth.enabled() {
+    let auth = state.auth.load();
+    if !auth.enabled() {
         return StatusCode::NOT_FOUND.into_response();
     }
-    if !state.auth.network_allowed(peer.ip()) {
+    if !auth.network_allowed(peer.ip()) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if !state.auth.rate_limit_management(peer.ip()) {
+    if !auth.rate_limit_management(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    let Ok(_permit) = state.auth.concurrency.clone().try_acquire_owned() else {
+    let Ok(_permit) = auth.concurrency.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    if !state.auth.auth_enabled() {
+    if !auth.auth_enabled() {
         return next.run(request).await;
     }
-    let bearer = state.auth.bearer_valid(request.headers());
-    let cookie = state
-        .auth
+    let bearer = auth.bearer_valid(request.headers());
+    let cookie = auth
         .session_from_headers(request.headers(), peer.ip())
         .is_some();
     if !bearer && !cookie {

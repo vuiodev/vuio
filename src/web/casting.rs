@@ -4,6 +4,34 @@ use crate::{database::DatabaseManager, state::AppState};
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
 use tracing::error;
 
+async fn register_cast_session<D: DatabaseManager>(
+    state: &AppState<D>,
+    target_id: &str,
+    device: &str,
+    filename: &str,
+    transport: crate::runtime_state::CastTransport,
+) {
+    let session =
+        crate::runtime_state::CastSession::new(transport, device.to_owned(), filename.to_owned());
+    let replaced = state
+        .cast_sessions
+        .lock()
+        .await
+        .insert(target_id.to_owned(), session);
+    state.active_casts.lock().await.insert_labeled(
+        target_id.to_owned(),
+        device.to_owned(),
+        filename.to_owned(),
+    );
+    if let Some(crate::runtime_state::CastSession {
+        transport: crate::runtime_state::CastTransport::Chromecast(client),
+        ..
+    }) = replaced
+    {
+        let _ = client.disconnect().await;
+    }
+}
+
 #[derive(serde::Deserialize)]
 pub struct ApiCastPlaylistRequest {
     pub renderer_id: String,
@@ -200,11 +228,16 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
                                 .await
                             {
                                 Ok(()) => {
-                                    let mut casts = state.active_casts.lock().await;
-                                    casts.insert(
-                                        target.friendly_name.clone(),
-                                        media_file.filename.clone(),
-                                    );
+                                    register_cast_session(
+                                        &state,
+                                        &target.id,
+                                        &target.friendly_name,
+                                        &media_file.filename,
+                                        crate::runtime_state::CastTransport::Chromecast(
+                                            std::sync::Arc::new(client),
+                                        ),
+                                    )
+                                    .await;
                                     (
                                         StatusCode::OK,
                                         axum::Json(serde_json::json!({ "status": "playing" })),
@@ -230,8 +263,16 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
                     let client = crate::airplay::client::AirPlayClient::new(target.address);
                     match client.play(&media_url, 0.0).await {
                         Ok(()) => {
-                            let mut casts = state.active_casts.lock().await;
-                            casts.insert(target.friendly_name.clone(), media_file.filename.clone());
+                            register_cast_session(
+                                &state,
+                                &target.id,
+                                &target.friendly_name,
+                                &media_file.filename,
+                                crate::runtime_state::CastTransport::AirPlay {
+                                    address: target.address,
+                                },
+                            )
+                            .await;
                             (
                                 StatusCode::OK,
                                 axum::Json(serde_json::json!({ "status": "playing" })),
@@ -257,7 +298,21 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
             )
             .await
             {
-                Ok(result) => (StatusCode::OK, axum::Json(result)),
+                Ok(result) => {
+                    if let Some(control_url) = &target.control_url {
+                        register_cast_session(
+                            &state,
+                            &target.id,
+                            &target.friendly_name,
+                            &payload.folder_name,
+                            crate::runtime_state::CastTransport::Dlna {
+                                control_url: control_url.clone(),
+                            },
+                        )
+                        .await;
+                    }
+                    (StatusCode::OK, axum::Json(result))
+                }
                 Err(e) => (
                     StatusCode::BAD_REQUEST,
                     axum::Json(serde_json::json!({ "error": format!("Cast error: {}", e) })),
@@ -372,8 +427,16 @@ pub async fn api_cast_to_target<D: DatabaseManager + 'static>(
                 .await
                 {
                     Ok(()) => {
-                        let mut casts = state.active_casts.lock().await;
-                        casts.insert(target.friendly_name.clone(), media_file.filename.clone());
+                        register_cast_session(
+                            &state,
+                            &target.id,
+                            &target.friendly_name,
+                            &media_file.filename,
+                            crate::runtime_state::CastTransport::Dlna {
+                                control_url: control_url.clone(),
+                            },
+                        )
+                        .await;
                         (
                             StatusCode::OK,
                             axum::Json(serde_json::json!({
@@ -418,8 +481,16 @@ pub async fn api_cast_to_target<D: DatabaseManager + 'static>(
                         .await
                     {
                         Ok(()) => {
-                            let mut casts = state.active_casts.lock().await;
-                            casts.insert(target.friendly_name.clone(), media_file.filename.clone());
+                            register_cast_session(
+                                &state,
+                                &target.id,
+                                &target.friendly_name,
+                                &media_file.filename,
+                                crate::runtime_state::CastTransport::Chromecast(
+                                    std::sync::Arc::new(client),
+                                ),
+                            )
+                            .await;
                             (
                                 StatusCode::OK,
                                 axum::Json(serde_json::json!({
@@ -451,8 +522,16 @@ pub async fn api_cast_to_target<D: DatabaseManager + 'static>(
             let client = crate::airplay::client::AirPlayClient::new(target.address);
             match client.play(&media_url, 0.0).await {
                 Ok(()) => {
-                    let mut casts = state.active_casts.lock().await;
-                    casts.insert(target.friendly_name.clone(), media_file.filename.clone());
+                    register_cast_session(
+                        &state,
+                        &target.id,
+                        &target.friendly_name,
+                        &media_file.filename,
+                        crate::runtime_state::CastTransport::AirPlay {
+                            address: target.address,
+                        },
+                    )
+                    .await;
                     (
                         StatusCode::OK,
                         axum::Json(serde_json::json!({
@@ -483,26 +562,82 @@ pub struct ApiCastControlRequest {
 
 /// Control playback on a cast target (pause, resume, stop).
 pub async fn api_cast_control<D: DatabaseManager>(
-    State(_state): State<AppState<D>>,
+    State(state): State<AppState<D>>,
     axum::Json(payload): axum::Json<ApiCastControlRequest>,
 ) -> impl IntoResponse {
-    // For now, return which action was requested. Full session tracking
-    // (maintaining persistent connections to Chromecast/AirPlay devices)
-    // is planned for Phase 2.
-    match payload.action.as_str() {
-        "pause" | "resume" | "stop" => (
-            StatusCode::OK,
-            axum::Json(serde_json::json!({
-                "status": "ok",
-                "action": payload.action,
-                "target_id": payload.target_id,
-            })),
-        ),
-        _ => (
+    if !matches!(payload.action.as_str(), "pause" | "resume" | "stop") {
+        return (
             StatusCode::BAD_REQUEST,
-            axum::Json(serde_json::json!({
-                "error": format!("Unknown action: {}", payload.action),
-            })),
+            axum::Json(
+                serde_json::json!({ "error": format!("Unknown action: {}", payload.action) }),
+            ),
+        );
+    }
+    let Some(session) = state.cast_sessions.lock().await.get(&payload.target_id) else {
+        return (
+            StatusCode::NOT_FOUND,
+            axum::Json(serde_json::json!({ "error": "No active cast session for target" })),
+        );
+    };
+    let _operation = session.operation.lock().await;
+    let action = payload.action.clone();
+    let operation = async {
+        match &session.transport {
+            crate::runtime_state::CastTransport::Dlna { control_url } => {
+                let soap_action = match action.as_str() {
+                    "pause" => "Pause",
+                    "resume" => "Play",
+                    "stop" => "Stop",
+                    _ => unreachable!(),
+                };
+                crate::tv_control::control_playback(control_url, soap_action).await
+            }
+            crate::runtime_state::CastTransport::Chromecast(client) => match action.as_str() {
+                "pause" => client.pause().await,
+                "resume" => client.play().await,
+                "stop" => client.stop().await,
+                _ => unreachable!(),
+            },
+            crate::runtime_state::CastTransport::AirPlay { address } => {
+                let client = crate::airplay::client::AirPlayClient::new(*address);
+                match action.as_str() {
+                    "pause" => client.pause().await,
+                    "resume" => client.resume().await,
+                    "stop" => client.stop().await,
+                    _ => unreachable!(),
+                }
+            }
+        }
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), operation).await {
+        Ok(Ok(())) => {
+            if action == "stop" {
+                let removed = state.cast_sessions.lock().await.remove(&payload.target_id);
+                state.active_casts.lock().await.remove(&payload.target_id);
+                if let Some(crate::runtime_state::CastSession {
+                    transport: crate::runtime_state::CastTransport::Chromecast(client),
+                    ..
+                }) = removed
+                {
+                    let _ = client.disconnect().await;
+                }
+            }
+            (
+                StatusCode::OK,
+                axum::Json(serde_json::json!({
+                    "status": "ok",
+                    "action": action,
+                    "target_id": payload.target_id,
+                })),
+            )
+        }
+        Ok(Err(error)) => (
+            StatusCode::BAD_GATEWAY,
+            axum::Json(serde_json::json!({ "error": format!("Cast control failed: {error}") })),
+        ),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            axum::Json(serde_json::json!({ "error": "Cast control timed out" })),
         ),
     }
 }

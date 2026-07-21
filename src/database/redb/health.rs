@@ -388,6 +388,42 @@ impl RedbDatabase {
                         reverse.insert(source.value(), playlist_id.value())?;
                     }
                 }
+                {
+                    let live = winners.values().map(|(id, _)| *id).collect::<HashSet<_>>();
+                    let mut source_streams = txn.open_multimap_table(SOURCE_STREAMS)?;
+                    let snapshot = source_streams
+                        .iter()?
+                        .map(|entry| {
+                            let (source, values) = entry?;
+                            let source = source.value().to_owned();
+                            let ids = values
+                                .map(|id| id.map(|id| id.value()))
+                                .collect::<std::result::Result<Vec<_>, _>>()?;
+                            Ok((source, ids))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let keys = snapshot.iter().map(|(source, _)| source.clone()).collect::<Vec<_>>();
+                    for source in keys {
+                        source_streams.remove_all(source.as_str())?;
+                    }
+                    let mut reverse = txn.open_multimap_table(STREAM_SOURCES)?;
+                    let reverse_keys = reverse
+                        .iter()?
+                        .map(|entry| entry.map(|(id, _)| id.value()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    for id in reverse_keys {
+                        reverse.remove_all(id)?;
+                    }
+                    for (source, ids) in snapshot {
+                        for old_id in ids {
+                            let id = remap.get(&old_id).copied().unwrap_or(old_id);
+                            if live.contains(&id) {
+                                source_streams.insert(source.as_str(), id)?;
+                                reverse.insert(id, source.as_str())?;
+                            }
+                        }
+                    }
+                }
                 txn.commit()?;
                 let total_files = winners.len() as u64;
                 let health = DatabaseHealth {

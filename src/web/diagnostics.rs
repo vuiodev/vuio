@@ -203,6 +203,27 @@ pub async fn get_web_metrics<D: DatabaseManager>(
             "architecture": std::env::consts::ARCH,
             "unavailable_or_incomplete_roots": unavailable_roots,
         },
+        "configuration": {
+            "desired": {
+                "server_port": state.desired_config.load().server.port,
+                "server_interface": state.desired_config.load().server.interface,
+                "watch_for_changes": state.desired_config.load().media.watch_for_changes,
+                "backup_enabled": state.desired_config.load().database.backup_enabled,
+                "chromecast_enabled": state.desired_config.load().cast.chromecast_enabled,
+                "airplay_enabled": state.desired_config.load().cast.airplay_enabled,
+            },
+            "effective": {
+                "server_port": state.current_config().server.port,
+                "server_interface": state.current_config().server.interface,
+                "watch_for_changes": state.current_config().media.watch_for_changes,
+                "backup_enabled": state.current_config().database.backup_enabled,
+                "chromecast_enabled": state.current_config().cast.chromecast_enabled,
+                "airplay_enabled": state.current_config().cast.airplay_enabled,
+            },
+            "restart_required": !state.pending_restart_fields.read().unwrap_or_else(|e| e.into_inner()).is_empty(),
+            "pending_restart_fields": state.pending_restart_fields.read().unwrap_or_else(|e| e.into_inner()).clone(),
+            "reload_errors": state.config_reload_errors.read().unwrap_or_else(|e| e.into_inner()).clone(),
+        },
         "active_casts": active_casts
     });
 

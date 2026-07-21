@@ -3,6 +3,287 @@
 use super::*;
 
 impl RedbDatabase {
+    pub(super) async fn replace_source_content_impl(
+        &self,
+        source_path: &Path,
+        playlist_name: Option<&str>,
+        entries: &[SourceMediaEntry],
+    ) -> Result<Option<i64>> {
+        let source = Self::canonical_path(source_path)?
+            .to_string_lossy()
+            .into_owned();
+        let entries = entries
+            .iter()
+            .map(|entry| {
+                Ok(SourceMediaEntry {
+                    location: Self::canonical_path(&entry.location)?,
+                    position: entry.position,
+                    stream_title: entry.stream_title.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let playlist_name = playlist_name.map(str::to_owned);
+        let candidate_playlist_id = self.next_playlist_id.fetch_add(1, Ordering::SeqCst);
+        let candidate_file_ids = entries
+            .iter()
+            .map(|_| self.next_file_id.fetch_add(1, Ordering::SeqCst))
+            .collect::<Vec<_>>();
+        let next_directory_id = Arc::clone(&self.next_directory_id);
+
+        let (playlist_id, added_files, removed_files, added_size, removed_size) = self
+            .execute_write(move |database| {
+                let transaction = database.begin_write()?;
+                let mut resolved = Vec::with_capacity(entries.len());
+                let mut stream_ids = HashSet::new();
+                let mut added_files = 0_u64;
+                let mut added_size = 0_u64;
+
+                {
+                    let mut files = transaction.open_table(FILES_TABLE)?;
+                    let mut paths = transaction.open_table(PATH_INDEX)?;
+                    let mut directory_paths = transaction.open_table(DIRECTORY_PATH_INDEX)?;
+                    let mut directory_records = transaction.open_table(DIRECTORY_RECORDS)?;
+                    let mut directory_children =
+                        transaction.open_multimap_table(DIRECTORY_CHILDREN)?;
+                    let mut ordered_children =
+                        transaction.open_table(DIRECTORY_CHILDREN_BY_NAME)?;
+                    let mut directory_files = transaction.open_multimap_table(DIRECTORY_FILES)?;
+                    let mut ordered_files = transaction.open_table(DIRECTORY_FILES_BY_NAME)?;
+                    let mut directory_mime_counts =
+                        transaction.open_table(DIRECTORY_MIME_COUNTS)?;
+                    let mut artist = transaction.open_multimap_table(ARTIST_INDEX)?;
+                    let mut album = transaction.open_multimap_table(ALBUM_INDEX)?;
+                    let mut genre = transaction.open_multimap_table(GENRE_INDEX)?;
+                    let mut year = transaction.open_multimap_table(YEAR_INDEX)?;
+                    let mut album_artist = transaction.open_multimap_table(ALBUM_ARTIST_INDEX)?;
+
+                    for (entry, candidate_id) in entries.iter().zip(candidate_file_ids) {
+                        let path = entry.location.to_string_lossy().into_owned();
+                        let is_stream = path
+                            .get(..7)
+                            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+                            || path
+                                .get(..8)
+                                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"));
+                        let existing_id = {
+                            let value = paths.get(path.as_str())?.map(|id| id.value());
+                            value
+                        };
+                        let file_id = if let Some(id) = existing_id {
+                            id
+                        } else if is_stream {
+                            let mut stream =
+                                MediaFile::new(entry.location.clone(), 0, "audio/radio".to_owned());
+                            let title = entry.stream_title.clone().unwrap_or_else(|| path.clone());
+                            stream.filename = title.clone();
+                            stream.title = Some(title);
+                            stream.id = Some(candidate_id);
+                            let serialized = rkyv::to_bytes::<rkyv::rancor::Error>(
+                                &MediaFileSerializable::from(&stream),
+                            )
+                            .map_err(|error| anyhow!("Failed to archive stream: {error}"))?;
+                            files.insert(candidate_id, serialized.as_slice())?;
+                            paths.insert(path.as_str(), candidate_id)?;
+                            Self::add_directory_membership(
+                                &mut directory_paths,
+                                &mut directory_records,
+                                &mut directory_children,
+                                &mut ordered_children,
+                                &mut directory_files,
+                                &mut ordered_files,
+                                &mut directory_mime_counts,
+                                &next_directory_id,
+                                &stream,
+                            )?;
+                            Self::add_file_indexes(
+                                &mut artist,
+                                &mut album,
+                                &mut genre,
+                                &mut year,
+                                &mut album_artist,
+                                candidate_id,
+                                &stream,
+                            )?;
+                            added_files += 1;
+                            added_size = added_size.saturating_add(stream.size);
+                            candidate_id
+                        } else {
+                            continue;
+                        };
+                        if is_stream {
+                            stream_ids.insert(file_id);
+                        }
+                        resolved.push((file_id, entry.position));
+                    }
+                }
+
+                let playlist_id = if let Some(name) = playlist_name {
+                    let existing = {
+                        let reverse = transaction.open_multimap_table(SOURCE_PLAYLISTS)?;
+                        let ids = reverse
+                            .get(source.as_str())?
+                            .map(|id| id.map(|id| id.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        ids
+                    };
+                    let playlist_id = existing
+                        .iter()
+                        .copied()
+                        .min()
+                        .unwrap_or(candidate_playlist_id);
+                    let now = SystemTime::now();
+                    let playlist = Playlist {
+                        id: Some(playlist_id),
+                        name,
+                        description: None,
+                        created_at: now,
+                        updated_at: now,
+                    };
+                    let serialized = Self::serialize_playlist(&playlist)?;
+                    {
+                        let mut playlists = transaction.open_table(PLAYLISTS_TABLE)?;
+                        let mut playlist_entries = transaction.open_table(PLAYLIST_ENTRIES)?;
+                        let mut reverse_entries =
+                            transaction.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
+                        let mut sources = transaction.open_table(PLAYLIST_SOURCES)?;
+                        let mut source_playlists =
+                            transaction.open_multimap_table(SOURCE_PLAYLISTS)?;
+                        for duplicate_id in existing {
+                            let old_entries = playlist_entries
+                                .range(Self::playlist_entry_range(duplicate_id))?
+                                .map(|entry| entry.map(|(key, file)| (key.value(), file.value())))
+                                .collect::<std::result::Result<Vec<_>, _>>()?;
+                            for (key, file_id) in old_entries {
+                                playlist_entries.remove(key)?;
+                                reverse_entries.remove(file_id, key)?;
+                            }
+                            if duplicate_id != playlist_id {
+                                playlists.remove(duplicate_id)?;
+                                sources.remove(duplicate_id)?;
+                            }
+                        }
+                        source_playlists.remove_all(source.as_str())?;
+                        playlists.insert(playlist_id, serialized.as_slice())?;
+                        sources.insert(playlist_id, source.as_str())?;
+                        source_playlists.insert(source.as_str(), playlist_id)?;
+                        for (file_id, position) in &resolved {
+                            let key = Self::playlist_entry_key(playlist_id, *position);
+                            playlist_entries.insert(key, *file_id)?;
+                            reverse_entries.insert(*file_id, key)?;
+                        }
+                    }
+                    Some(playlist_id)
+                } else {
+                    let existing = {
+                        let reverse = transaction.open_multimap_table(SOURCE_PLAYLISTS)?;
+                        let ids = reverse
+                            .get(source.as_str())?
+                            .map(|id| id.map(|id| id.value()))
+                            .collect::<std::result::Result<Vec<_>, _>>()?;
+                        ids
+                    };
+                    {
+                        let mut playlists = transaction.open_table(PLAYLISTS_TABLE)?;
+                        let mut playlist_entries = transaction.open_table(PLAYLIST_ENTRIES)?;
+                        let mut reverse_entries =
+                            transaction.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
+                        let mut sources = transaction.open_table(PLAYLIST_SOURCES)?;
+                        let mut source_playlists =
+                            transaction.open_multimap_table(SOURCE_PLAYLISTS)?;
+                        for playlist_id in existing {
+                            let old_entries = playlist_entries
+                                .range(Self::playlist_entry_range(playlist_id))?
+                                .map(|entry| entry.map(|(key, file)| (key.value(), file.value())))
+                                .collect::<std::result::Result<Vec<_>, _>>()?;
+                            for (key, file_id) in old_entries {
+                                playlist_entries.remove(key)?;
+                                reverse_entries.remove(file_id, key)?;
+                            }
+                            playlists.remove(playlist_id)?;
+                            sources.remove(playlist_id)?;
+                        }
+                        source_playlists.remove_all(source.as_str())?;
+                    }
+                    None
+                };
+
+                let old_stream_ids = {
+                    let source_streams = transaction.open_multimap_table(SOURCE_STREAMS)?;
+                    let ids = source_streams
+                        .get(source.as_str())?
+                        .map(|id| id.map(|id| id.value()))
+                        .collect::<std::result::Result<Vec<_>, _>>()?;
+                    ids
+                };
+                {
+                    let mut source_streams = transaction.open_multimap_table(SOURCE_STREAMS)?;
+                    let mut stream_sources = transaction.open_multimap_table(STREAM_SOURCES)?;
+                    source_streams.remove_all(source.as_str())?;
+                    for file_id in &old_stream_ids {
+                        stream_sources.remove(*file_id, source.as_str())?;
+                    }
+                    for file_id in &stream_ids {
+                        source_streams.insert(source.as_str(), *file_id)?;
+                        stream_sources.insert(*file_id, source.as_str())?;
+                    }
+                }
+
+                let orphaned = {
+                    let stream_sources = transaction.open_multimap_table(STREAM_SOURCES)?;
+                    let playlist_refs = transaction.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
+                    let files = transaction.open_table(FILES_TABLE)?;
+                    let mut orphaned = Vec::new();
+                    for file_id in old_stream_ids {
+                        let has_owner = stream_sources.get(file_id)?.next().transpose()?.is_some();
+                        let has_playlist =
+                            playlist_refs.get(file_id)?.next().transpose()?.is_some();
+                        if !has_owner && !has_playlist {
+                            if let Some(bytes) = files.get(file_id)? {
+                                let view = RedbReadSession::view(bytes.value())?;
+                                if view.mime_type() == "audio/radio" {
+                                    orphaned.push((
+                                        view.path().to_owned(),
+                                        file_id,
+                                        IndexSnapshot::from_view(&view).ok_or_else(|| {
+                                            anyhow!("stream record {file_id} has no ID")
+                                        })?,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    orphaned
+                };
+                let (removed_files, removed_size) =
+                    Self::remove_files_from_transaction(&transaction, &orphaned)?;
+                transaction.commit()?;
+                Ok((
+                    playlist_id,
+                    added_files,
+                    removed_files as u64,
+                    added_size,
+                    removed_size,
+                ))
+            })
+            .await?;
+
+        if added_files >= removed_files {
+            self.total_files
+                .fetch_add(added_files - removed_files, Ordering::SeqCst);
+        } else {
+            self.total_files
+                .fetch_sub(removed_files - added_files, Ordering::SeqCst);
+        }
+        if added_size >= removed_size {
+            self.total_size
+                .fetch_add(added_size - removed_size, Ordering::SeqCst);
+        } else {
+            self.total_size
+                .fetch_sub(removed_size - added_size, Ordering::SeqCst);
+        }
+        Ok(playlist_id)
+    }
+
     pub(super) async fn create_playlist_impl(
         &self,
         name: &str,
@@ -264,58 +545,48 @@ impl RedbDatabase {
         let child_prefix = format!("{}/", source.trim_end_matches('/'));
         let source_for_query = source.clone();
         let child_for_query = child_prefix.clone();
-        let ids = self
+        let sources = self
             .execute_read(move |database| {
                 let txn = database.begin_read()?;
-                let table = txn.open_multimap_table(SOURCE_PLAYLISTS)?;
-                let mut ids = Vec::new();
-                for entry in table.range(source_for_query.as_str()..)? {
-                    let (key, values) = entry?;
-                    if key.value() != source_for_query && !key.value().starts_with(&child_for_query)
-                    {
-                        break;
-                    }
-                    for value in values {
-                        ids.push(value?.value());
-                    }
-                }
-                ids.sort_unstable();
-                ids.dedup();
-                Ok(ids)
-            })
-            .await?;
-        let mut removed = 0;
-        for id in ids {
-            removed += usize::from(self.delete_playlist_impl(id).await?);
-        }
-        let source_for_album = source.clone();
-        let child_for_album = child_prefix.clone();
-        let radio_paths = self
-            .execute_read(move |database| {
-                let txn = database.begin_read()?;
-                let table = txn.open_multimap_table(ALBUM_INDEX)?;
-                let files_table = txn.open_table(FILES_TABLE)?;
-                let mut radio_paths = Vec::new();
-                for entry in table.range(source_for_album.as_str()..)? {
-                    let (key, values) = entry?;
-                    let k = key.value();
-                    if k != source_for_album && !k.starts_with(&child_for_album) {
-                        break;
-                    }
-                    for value in values {
-                        let fid = value?.value();
-                        if let Some(bytes) = files_table.get(fid)? {
-                            let view = RedbReadSession::view(bytes.value())?;
-                            if view.mime_type() == "audio/radio" {
-                                radio_paths.push(PathBuf::from(view.path()));
+                let mut sources = Vec::new();
+                for is_playlist in [true, false] {
+                    if is_playlist {
+                        let table = txn.open_multimap_table(SOURCE_PLAYLISTS)?;
+                        for entry in table.range(source_for_query.as_str()..)? {
+                            let (key, _) = entry?;
+                            if key.value() != source_for_query
+                                && !key.value().starts_with(&child_for_query)
+                            {
+                                break;
                             }
+                            sources.push(key.value().to_owned());
+                        }
+                    } else {
+                        let table = txn.open_multimap_table(SOURCE_STREAMS)?;
+                        for entry in table.range(source_for_query.as_str()..)? {
+                            let (key, _) = entry?;
+                            if key.value() != source_for_query
+                                && !key.value().starts_with(&child_for_query)
+                            {
+                                break;
+                            }
+                            sources.push(key.value().to_owned());
                         }
                     }
                 }
-                Ok(radio_paths)
+                sources.sort();
+                sources.dedup();
+                Ok(sources)
             })
             .await?;
-        removed += self.bulk_remove_media_files_impl(&radio_paths).await?;
+        let mut removed = 0;
+        for derived_source in sources {
+            let before = self.total_files.load(Ordering::SeqCst);
+            self.replace_source_content_impl(Path::new(&derived_source), None, &[])
+                .await?;
+            removed += before.saturating_sub(self.total_files.load(Ordering::SeqCst)) as usize;
+            removed += 1;
+        }
         Ok(removed)
     }
 

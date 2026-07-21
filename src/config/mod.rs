@@ -268,24 +268,34 @@ impl AppConfig {
             .context("Failed to generate configuration TOML")?;
 
         use std::io::Write;
-        
+
         let mut temp_path = config_path.to_path_buf();
         temp_path.set_extension("toml.tmp");
-        
+
         // Write to temp file and sync
         {
-            let mut temp_file = std::fs::File::create(&temp_path)
-                .with_context(|| format!("Failed to create temp config file: {}", temp_path.display()))?;
-            temp_file.write_all(content.as_bytes())
-                .with_context(|| format!("Failed to write to temp config file: {}", temp_path.display()))?;
-            temp_file.sync_all()
-                .with_context(|| format!("Failed to sync temp config file: {}", temp_path.display()))?;
+            let mut temp_file = std::fs::File::create(&temp_path).with_context(|| {
+                format!("Failed to create temp config file: {}", temp_path.display())
+            })?;
+            temp_file.write_all(content.as_bytes()).with_context(|| {
+                format!(
+                    "Failed to write to temp config file: {}",
+                    temp_path.display()
+                )
+            })?;
+            temp_file.sync_all().with_context(|| {
+                format!("Failed to sync temp config file: {}", temp_path.display())
+            })?;
         }
-        
+
         // Atomic rename
-        std::fs::rename(&temp_path, config_path)
-            .with_context(|| format!("Failed to atomically rename config file to {}", config_path.display()))?;
-            
+        std::fs::rename(&temp_path, config_path).with_context(|| {
+            format!(
+                "Failed to atomically rename config file to {}",
+                config_path.display()
+            )
+        })?;
+
         // Fsync parent directory (Unix only)
         #[cfg(unix)]
         if let Some(parent) = config_path.parent() {

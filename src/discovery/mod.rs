@@ -144,15 +144,22 @@ impl Default for DiscoveryConfig {
 /// Shared snapshot of discovered targets.
 pub struct DiscoveryService {
     targets: Arc<RwLock<Vec<PlaybackTarget>>>,
-    config: DiscoveryConfig,
+    config: RwLock<DiscoveryConfig>,
+    config_changed: tokio::sync::Notify,
 }
 
 impl DiscoveryService {
     pub fn new(config: DiscoveryConfig) -> Self {
         Self {
             targets: Arc::new(RwLock::new(Vec::new())),
-            config,
+            config: RwLock::new(config),
+            config_changed: tokio::sync::Notify::new(),
         }
+    }
+
+    pub async fn reconfigure(&self, config: DiscoveryConfig) {
+        *self.config.write().await = config;
+        self.config_changed.notify_one();
     }
 
     /// Get the current snapshot of all discovered targets.
@@ -162,6 +169,7 @@ impl DiscoveryService {
 
     /// Run a single discovery cycle: SSDP (DLNA) + mDNS (Cast/AirPlay).
     pub async fn refresh(&self) -> Vec<PlaybackTarget> {
+        let config = self.config.read().await.clone();
         let mut all_targets = Vec::new();
 
         // 1. Discover DLNA renderers (reuse existing discover_tvs)
@@ -188,12 +196,9 @@ impl DiscoveryService {
         }
 
         // 2. Discover Chromecast and AirPlay via mDNS
-        if self.config.chromecast_enabled || self.config.airplay_enabled {
-            match mdns::discover_mdns_targets(
-                self.config.chromecast_enabled,
-                self.config.airplay_enabled,
-            )
-            .await
+        if config.chromecast_enabled || config.airplay_enabled {
+            match mdns::discover_mdns_targets(config.chromecast_enabled, config.airplay_enabled)
+                .await
             {
                 Ok(mdns_targets) => {
                     debug!("mDNS discovery found {} target(s)", mdns_targets.len());
@@ -232,26 +237,26 @@ impl DiscoveryService {
 
     /// Run the discovery loop as a background task until the cancellation token is triggered.
     pub async fn run(self: Arc<Self>, cancel: tokio_util::sync::CancellationToken) {
+        let initial_interval = self.config.read().await.discovery_interval;
         info!(
             "Starting unified discovery service (interval: {}s)",
-            self.config.discovery_interval.as_secs()
+            initial_interval.as_secs()
         );
 
         // Initial discovery
         self.refresh().await;
 
-        let mut interval = tokio::time::interval(self.config.discovery_interval);
-        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        // The first tick fires immediately, consume it since we just ran refresh.
-        interval.tick().await;
-
         loop {
+            let interval = self.config.read().await.discovery_interval;
             tokio::select! {
                 _ = cancel.cancelled() => {
                     info!("Discovery service shutting down");
                     break;
                 }
-                _ = interval.tick() => {
+                _ = tokio::time::sleep(interval) => {
+                    self.refresh().await;
+                }
+                _ = self.config_changed.notified() => {
                     self.refresh().await;
                 }
             }

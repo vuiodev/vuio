@@ -23,23 +23,104 @@ async fn start_platform_adaptation<D: DatabaseManager + 'static>(
                                 ConfigChangeEvent::Reloaded(new_config) => {
                                     let new_config = *new_config;
                                     let old_config = app_state.current_config();
-                                    if old_config.server.port != new_config.server.port
-                                        || old_config.server.interface != new_config.server.interface
-                                        || old_config.server.ip != new_config.server.ip
-                                        || old_config.server.uuid != new_config.server.uuid
-                                        || old_config.network != new_config.network
-                                        || old_config.database != new_config.database
-                                        || old_config.management != new_config.management
+                                    app_state.desired_config.store(Arc::new(new_config.clone()));
+                                    let mut effective = (*old_config).clone();
+                                    let mut errors = Vec::new();
+                                    let mut pending = Vec::new();
+                                    let mut rebind_http = false;
+
+                                    // Listener rebinding is intentionally conservative: identity
+                                    // fields hot-reload, while a bind-address change remains pending
+                                    // until a replacement listener can be introduced safely.
+                                    if old_config.server.port == new_config.server.port
+                                        && old_config.server.interface == new_config.server.interface
                                     {
-                                        warn!(
-                                            "Configuration reloaded; server identity/bind, network, database, or management changes require restart"
-                                        );
+                                        effective.server = new_config.server.clone();
+                                    } else {
+                                        pending.extend(["server.port".to_owned(), "server.interface".to_owned()]);
+                                        rebind_http = true;
                                     }
-                                    *app_state.media_directories.write().await =
-                                        new_config.media.directories.clone();
-                                    watcher
-                                        .set_policies(media::ScanPolicy::policies(&new_config));
-                                    app_state.live_config.store(Arc::new(new_config));
+                                    effective.network = new_config.network.clone();
+
+                                    let mut management = new_config.management.clone();
+                                    if app_state.auth_forced {
+                                        management.auth_enabled = true;
+                                    }
+                                    match crate::web::auth::AuthState::load(
+                                        &management,
+                                        config_manager_clone.get_config_path(),
+                                    ) {
+                                        Ok(auth) => {
+                                            app_state.auth.store(Arc::new(auth));
+                                            effective.management = management;
+                                        }
+                                        Err(error) => errors.push(format!("management: {error}")),
+                                    }
+
+                                    let discovery_config = crate::discovery::DiscoveryConfig {
+                                        chromecast_enabled: new_config.cast.chromecast_enabled,
+                                        airplay_enabled: new_config.cast.airplay_enabled,
+                                        discovery_interval: std::time::Duration::from_secs(
+                                            new_config.cast.discovery_interval_seconds.max(1),
+                                        ),
+                                    };
+                                    app_state.discovery_service.reconfigure(discovery_config).await;
+                                    effective.cast = new_config.cast.clone();
+
+                                    let active_directories = new_config
+                                        .media
+                                        .directories
+                                        .iter()
+                                        .map(|directory| PathBuf::from(&directory.path))
+                                        .filter(|path| path.is_dir())
+                                        .collect::<Vec<_>>();
+                                    let watcher_result = match (
+                                        old_config.media.watch_for_changes,
+                                        new_config.media.watch_for_changes,
+                                    ) {
+                                        (true, false) => watcher.stop_watching().await,
+                                        (false, true) => watcher.start_watching(&active_directories).await,
+                                        _ => Ok(()),
+                                    };
+                                    if let Err(error) = watcher_result {
+                                        errors.push(format!("media watcher: {error}"));
+                                    } else {
+                                        watcher.set_policies(media::ScanPolicy::policies(&new_config));
+                                        *app_state.media_directories.write().await =
+                                            new_config.media.directories.clone();
+                                        effective.media = new_config.media.clone();
+                                    }
+
+                                    if !old_config.database.backup_enabled
+                                        && new_config.database.backup_enabled
+                                    {
+                                        if let Err(error) = create_lifecycle_backup(&app_state.database, &new_config).await {
+                                            errors.push(format!("database backup: {error}"));
+                                        } else {
+                                            effective.database.backup_enabled = true;
+                                        }
+                                    } else {
+                                        effective.database.backup_enabled = new_config.database.backup_enabled;
+                                    }
+                                    effective.database.compact_on_shutdown =
+                                        new_config.database.compact_on_shutdown;
+                                    if old_config.database.path != new_config.database.path {
+                                        pending.push("database.path".to_owned());
+                                    }
+                                    if old_config.database.redb_cache_mb != new_config.database.redb_cache_mb {
+                                        pending.push("database.redb_cache_mb".to_owned());
+                                    }
+                                    if old_config.database.vacuum_on_startup != new_config.database.vacuum_on_startup {
+                                        pending.push("database.vacuum_on_startup".to_owned());
+                                    }
+
+                                    app_state.live_config.store(Arc::new(effective));
+                                    *app_state.config_reload_errors.write().unwrap_or_else(|e| e.into_inner()) = errors;
+                                    *app_state.pending_restart_fields.write().unwrap_or_else(|e| e.into_inner()) = pending;
+                                    app_state.ssdp_reload_notify.notify_one();
+                                    if rebind_http {
+                                        app_state.http_rebind_notify.notify_one();
+                                    }
                                     increment_content_update_id(&app_state).await;
                                 }
                                 ConfigChangeEvent::DirectoriesChanged { added, removed, modified } => {
@@ -391,6 +472,16 @@ fn preserve_failed_database(db_path: &std::path::Path) -> anyhow::Result<Option<
     Ok(Some(backup_path))
 }
 
+fn discard_incompatible_database(db_path: &std::path::Path) -> anyhow::Result<()> {
+    if db_path.exists() {
+        std::fs::remove_file(db_path).with_context(|| {
+            format!("Failed to remove incompatible database {}", db_path.display())
+        })?;
+        warn!("Removed incompatible alpha database {}", db_path.display());
+    }
+    Ok(())
+}
+
 /// Initialize database manager with health checks and recovery
 async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::redb::RedbDatabase> {
     info!("Initializing Redb database...");
@@ -407,7 +498,11 @@ async fn initialize_database(config: &AppConfig) -> anyhow::Result<database::red
             Ok(database) => database,
             Err(error) => {
                 error!("Failed to open ReDB database: {}", error);
-                preserve_failed_database(&db_path)?;
+                if database::redb::is_incompatible_database(&error) {
+                    discard_incompatible_database(&db_path)?;
+                } else {
+                    preserve_failed_database(&db_path)?;
+                }
                 database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
                     .await
                     .context("Failed to create replacement ReDB database")?

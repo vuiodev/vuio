@@ -26,15 +26,32 @@ pub async fn publish_content_change<D: DatabaseManager + 'static>(state: &AppSta
     invalidate_browse_responses(state).await;
     info!(old_id, new_id, "ContentDirectory revision published");
 
-    let state = state.clone();
-    let cancellation = state.cancellation.clone();
-    let tracker = state.background_tasks.clone();
-    tracker.spawn(async move {
+    state.content_change_notify.notify_one();
+}
+
+/// One coalescing publisher owns all mutation notifications. Every burst is
+/// reduced to its latest revision and still receives a trailing notification.
+pub async fn run_content_change_publisher<D: DatabaseManager + 'static>(
+    state: AppState<D>,
+    cancellation: tokio_util::sync::CancellationToken,
+) {
+    loop {
         tokio::select! {
-            _ = cancellation.cancelled() => {}
-            _ = notify_content_change(&state, new_id) => {}
+            _ = cancellation.cancelled() => break,
+            _ = state.content_change_notify.notified() => {}
         }
-    });
+        loop {
+            let quiet = tokio::time::sleep(MIN_NOTIFICATION_INTERVAL);
+            tokio::pin!(quiet);
+            tokio::select! {
+                _ = cancellation.cancelled() => return,
+                _ = state.content_change_notify.notified() => continue,
+                _ = &mut quiet => break,
+            }
+        }
+        let latest = state.content_update_id.load(Ordering::SeqCst);
+        notify_content_change(&state, latest).await;
+    }
 }
 
 /// Clear cached SOAP browse responses without announcing a content mutation.
@@ -131,21 +148,13 @@ pub async fn content_directory_subscribe<D: DatabaseManager>(
             peer: peer_ip,
             generation: uuid::Uuid::new_v4(),
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds),
-            next_sequence: 1,
+            next_sequence: 0,
             consecutive_failures: 0,
-            last_notification_at: now,
+            last_notification_at: now - MIN_NOTIFICATION_INTERVAL,
         },
     );
     drop(subscriptions);
-    let update_id = state.content_update_id.load(Ordering::SeqCst);
-    let initial_sid = sid.clone();
-    let cancellation = state.cancellation.clone();
-    state.background_tasks.spawn(async move {
-        tokio::select! {
-            _ = cancellation.cancelled() => {}
-            _ = send_event_notification(&callback_url, &initial_sid, 0, update_id) => {}
-        }
-    });
+    state.content_change_notify.notify_one();
     (
         StatusCode::OK,
         [

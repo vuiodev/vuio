@@ -551,17 +551,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             return true;
         }
 
-        // Compare modification times with 500ms tolerance for filesystem precision differences
-        let time_diff = if existing.modified > current.modified {
-            existing.modified.duration_since(current.modified)
-        } else {
-            current.modified.duration_since(existing.modified)
-        };
-
-        match time_diff {
-            Ok(diff) => diff.as_millis() > 500,
-            Err(_) => true,
-        }
+        existing.modified != current.modified
     }
 
     fn fingerprint_needs_update(&self, existing: &FileFingerprint, current: &MediaFile) -> bool {
@@ -571,12 +561,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         if existing.subtitle_available != current.subtitle_available {
             return true;
         }
-        let time_diff = if existing.modified > current.modified {
-            existing.modified.duration_since(current.modified)
-        } else {
-            current.modified.duration_since(existing.modified)
-        };
-        time_diff.map_or(true, |difference| difference.as_millis() > 500)
+        existing.modified != current.modified
     }
 
     /// Scan multiple directories and return combined results
@@ -866,55 +851,98 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
     /// Create a MediaFile from a path by reading file metadata
     async fn create_media_file_from_path(&self, path: &Path) -> Result<MediaFile> {
-        let metadata = tokio::fs::metadata(path).await?;
-        let filename = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
-        let size = metadata.len();
-        let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
-        let storage_path = self
-            .filesystem_manager
-            .get_canonical_path(path)
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| path.to_path_buf());
+        build_media_file_from_path(path, self.filesystem_manager.as_ref()).await
+    }
 
-        let mut media_file = MediaFile {
-            id: None,
-            path: storage_path,
-            filename,
-            size,
-            modified,
-            mime_type,
-            duration: None,
-            title: None,
-            artist: None,
-            album: None,
-            genre: None,
-            track_number: None,
-            year: None,
-            album_artist: None,
-            subtitle_available: tokio::fs::try_exists(path.with_extension("srt"))
-                .await
-                .unwrap_or(false),
-            created_at: SystemTime::now(),
-            updated_at: SystemTime::now(),
-        };
-
-        if media_file.mime_type.starts_with("audio/") {
-            let _ = crate::platform::filesystem::extract_audio_metadata(&mut media_file).await;
+    /// Traverse and materialize a subtree without changing the database. Any
+    /// traversal or metadata error fails the complete staging operation.
+    pub async fn stage_directory_with_policy(&self, policy: &ScanPolicy) -> Result<Vec<MediaFile>> {
+        let canonical_root = PathBuf::from(
+            self.filesystem_manager
+                .get_canonical_path(&policy.root)
+                .map_err(|error| {
+                    anyhow::anyhow!("failed to canonicalize rename destination: {error}")
+                })?,
+        );
+        let mut traversal_policy = policy.clone();
+        traversal_policy.root = canonical_root.clone();
+        let recursive = traversal_policy.recursive;
+        let paths = tokio::task::spawn_blocking(move || -> Result<Vec<PathBuf>> {
+            let mut paths = Vec::new();
+            for entry in jwalk::WalkDir::new(&canonical_root).skip_hidden(false) {
+                let entry = entry.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                if entry.file_type().is_file() {
+                    let path = entry.path();
+                    if (!recursive && path.parent() != Some(canonical_root.as_path()))
+                        || !traversal_policy.allows_media(&path)
+                    {
+                        continue;
+                    }
+                    paths.push(path);
+                }
+            }
+            Ok(paths)
+        })
+        .await??;
+        let mut files = Vec::with_capacity(paths.len());
+        for path in paths {
+            files.push(self.create_media_file_from_path(&path).await?);
         }
-
-        Ok(media_file)
+        Ok(files)
     }
 
     /// Get the file system manager (for testing or advanced usage)
     pub fn filesystem_manager(&self) -> &dyn FileSystemManager {
         self.filesystem_manager.as_ref()
     }
+}
+
+pub(crate) async fn build_media_file_from_path(
+    path: &Path,
+    filesystem_manager: &dyn FileSystemManager,
+) -> Result<MediaFile> {
+    let metadata = tokio::fs::metadata(path).await?;
+    let filename = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
+    let size = metadata.len();
+    let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
+    let storage_path = filesystem_manager
+        .get_canonical_path(path)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| path.to_path_buf());
+
+    let mut media_file = MediaFile {
+        id: None,
+        path: storage_path,
+        filename,
+        size,
+        modified,
+        mime_type,
+        duration: None,
+        title: None,
+        artist: None,
+        album: None,
+        genre: None,
+        track_number: None,
+        year: None,
+        album_artist: None,
+        subtitle_available: tokio::fs::try_exists(path.with_extension("srt"))
+            .await
+            .unwrap_or(false),
+        created_at: SystemTime::now(),
+        updated_at: SystemTime::now(),
+    };
+
+    if media_file.mime_type.starts_with("audio/") {
+        let _ = crate::platform::filesystem::extract_audio_metadata(&mut media_file).await;
+    }
+
+    Ok(media_file)
 }
 
 /// Result of a media scanning operation

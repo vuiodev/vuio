@@ -417,7 +417,8 @@ pub async fn serve_cover<D: DatabaseManager>(
                 if let Ok(metadata) = tokio::fs::metadata(&img_path).await {
                     if metadata.is_file() {
                         let size = metadata.len();
-                        if size <= 10 * 1024 * 1024 { // Cap cover size to 10MB
+                        if size <= 10 * 1024 * 1024 {
+                            // Cap cover size to 10MB
                             if let Ok(file) = tokio::fs::File::open(&img_path).await {
                                 let content_type =
                                     crate::platform::filesystem::get_mime_type_for_extension(ext);

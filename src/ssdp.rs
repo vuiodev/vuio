@@ -259,7 +259,7 @@ impl UnifiedSsdpService {
                     st_header = Some(val);
                 } else if key.eq_ignore_ascii_case("MX") {
                     if let Ok(mx) = val.parse::<u64>() {
-                        mx_seconds = mx.min(5).max(1);
+                        mx_seconds = mx.clamp(1, 5);
                     }
                 }
             }

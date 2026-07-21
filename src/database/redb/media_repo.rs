@@ -61,7 +61,11 @@ impl RedbDatabase {
                     id: id.value(),
                     path: PathBuf::from(view.path()),
                     size: view.size(),
-                    modified: UNIX_EPOCH + Duration::from_secs(view.modified_secs()),
+                    modified: UNIX_EPOCH
+                        + Duration::new(
+                            view.modified_secs(),
+                            view.modified_nanos().min(999_999_999),
+                        ),
                     created_at: UNIX_EPOCH + Duration::from_secs(view.created_at_secs()),
                     subtitle_available: view.subtitle_available(),
                 });
@@ -89,7 +93,11 @@ impl RedbDatabase {
                         id: id.value(),
                         path: PathBuf::from(path),
                         size: view.size(),
-                        modified: UNIX_EPOCH + Duration::from_secs(view.modified_secs()),
+                        modified: UNIX_EPOCH
+                            + Duration::new(
+                                view.modified_secs(),
+                                view.modified_nanos().min(999_999_999),
+                            ),
                         created_at: UNIX_EPOCH + Duration::from_secs(view.created_at_secs()),
                         subtitle_available: view.subtitle_available(),
                     });

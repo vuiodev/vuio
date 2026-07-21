@@ -24,8 +24,8 @@ use super::{
     DatabaseBackend, DatabaseHealth, DatabaseManager, DatabaseReadSession, DatabaseStats,
     DirectoryView, FileFingerprint, FileLocation, HealthRepository, IndexSnapshot, MediaDirectory,
     MediaFile, MediaFileQuery, MediaFileView, MediaRepository, MusicCategory, MusicCategoryType,
-    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, RootAvailability, StatsRepository,
-    VisitSummary,
+    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, RootAvailability, SourceMediaEntry,
+    StatsRepository, VisitSummary,
 };
 
 include!("schema.rs");
@@ -35,6 +35,30 @@ mod media_repo;
 mod playlist_repo;
 mod root_repo;
 mod stats;
+
+#[derive(Debug)]
+pub struct IncompatibleDatabaseVersion {
+    pub schema: Option<u64>,
+    pub codec: Option<u64>,
+}
+
+impl std::fmt::Display for IncompatibleDatabaseVersion {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "incompatible database schema {:?}/codec {:?}; expected {SCHEMA_VERSION}/{CODEC_VERSION}",
+            self.schema, self.codec
+        )
+    }
+}
+
+impl std::error::Error for IncompatibleDatabaseVersion {}
+
+pub fn is_incompatible_database(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<IncompatibleDatabaseVersion>()
+        .is_some()
+}
 
 /// RedbDatabase - ACID-compliant embedded database
 pub struct RedbDatabase {
@@ -141,17 +165,28 @@ impl RedbDatabase {
                 let version = metadata.get("schema_version")?.map(|value| value.value());
                 version
             };
-            let has_files = {
-                let files = write_txn.open_table(FILES_TABLE)?;
-                let present = files.iter()?.next().transpose()?.is_some();
-                present
+            let existing_codec = {
+                let metadata = write_txn.open_table(METADATA_TABLE)?;
+                let version = metadata.get("codec_version")?.map(|value| value.value());
+                version
             };
-            if has_files && existing_schema != Some(SCHEMA_VERSION) {
-                return Err(anyhow!(
-                    "Incompatible database schema {:?}; expected Rkyv schema {}",
-                    existing_schema,
-                    SCHEMA_VERSION
-                ));
+            let has_records = {
+                let files = write_txn.open_table(FILES_TABLE)?;
+                let has_files = files.iter()?.next().transpose()?.is_some();
+                drop(files);
+                let playlists = write_txn.open_table(PLAYLISTS_TABLE)?;
+                let has_playlists = playlists.iter()?.next().transpose()?.is_some();
+                has_files || has_playlists
+            };
+            if has_records
+                && (existing_schema != Some(SCHEMA_VERSION)
+                    || existing_codec != Some(CODEC_VERSION))
+            {
+                return Err(IncompatibleDatabaseVersion {
+                    schema: existing_schema,
+                    codec: existing_codec,
+                }
+                .into());
             }
             {
                 let mut metadata = write_txn.open_table(METADATA_TABLE)?;
@@ -711,6 +746,8 @@ impl RedbDatabase {
         let mut playlist_entries = transaction.open_table(PLAYLIST_ENTRIES)?;
         let mut reverse_playlist_entries =
             transaction.open_multimap_table(FILE_PLAYLIST_ENTRIES)?;
+        let mut source_streams = transaction.open_multimap_table(SOURCE_STREAMS)?;
+        let mut stream_sources = transaction.open_multimap_table(STREAM_SOURCES)?;
 
         let mut removed_size = 0_u64;
         for (path, id, file) in files {
@@ -744,6 +781,14 @@ impl RedbDatabase {
             for key in dangling {
                 playlist_entries.remove(key)?;
                 reverse_playlist_entries.remove(*id, key)?;
+            }
+            let owners = stream_sources
+                .get(*id)?
+                .map(|owner| owner.map(|owner| owner.value().to_owned()))
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for owner in owners {
+                source_streams.remove(owner.as_str(), *id)?;
+                stream_sources.remove(*id, owner.as_str())?;
             }
             removed_size = removed_size.saturating_add(file.size);
         }
@@ -977,6 +1022,15 @@ impl PlaylistRepository for RedbDatabase {
     ) -> Result<i64> {
         RedbDatabase::replace_playlist_from_source_impl(self, source_path, name, media_file_ids)
             .await
+    }
+
+    async fn replace_source_content(
+        &self,
+        source_path: &Path,
+        playlist_name: Option<&str>,
+        entries: &[SourceMediaEntry],
+    ) -> Result<Option<i64>> {
+        RedbDatabase::replace_source_content_impl(self, source_path, playlist_name, entries).await
     }
 
     async fn remove_derived_content_by_source(&self, source_path: &Path) -> Result<usize> {
@@ -1362,7 +1416,7 @@ mod tests {
         redb_schema!(collect_schema_name);
         let unique = names.iter().copied().collect::<HashSet<_>>();
         assert_eq!(names.len(), unique.len());
-        assert_eq!(names.len(), 21);
+        assert_eq!(names.len(), 23);
     }
 
     #[tokio::test]
@@ -1545,20 +1599,26 @@ mod tests {
         db.rebuild_derived_indexes().await.unwrap();
 
         let source = PathBuf::from("/music/playlists/stations.m3u");
-        let playlist = db.create_playlist("Stations", None).await.unwrap();
-        db.set_playlist_source(playlist, &source).await.unwrap();
-        let mut radio = MediaFile::new(
-            PathBuf::from("https://radio.example/stream"),
-            0,
-            "audio/radio".to_string(),
-        );
-        radio.album = Some(
-            RedbDatabase::canonical_path(&source)
-                .unwrap()
-                .to_string_lossy()
-                .to_string(),
-        );
-        let radio_id = db.store_media_file(&radio).await.unwrap();
+        let playlist = db
+            .replace_source_content(
+                &source,
+                Some("Stations"),
+                &[SourceMediaEntry {
+                    location: PathBuf::from("https://radio.example/stream"),
+                    position: 0,
+                    stream_title: Some("Station".to_owned()),
+                }],
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let radio_id = db
+            .get_file_by_path(Path::new("https://radio.example/stream"))
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+            .unwrap();
 
         assert_eq!(
             db.remove_derived_content_by_source(Path::new("/music/playlists"))
@@ -1662,5 +1722,65 @@ mod tests {
         assert_eq!(summary.matched, 2);
         assert_eq!(summary.visited, 1);
         assert_eq!(names, ["alpha"]);
+    }
+
+    #[tokio::test]
+    async fn modification_timestamp_keeps_nanoseconds_across_reopen() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("precise-time.redb");
+        let expected = UNIX_EPOCH + Duration::new(1_700_000_000, 987_654_321);
+        let db = RedbDatabase::new(path.clone()).await.unwrap();
+        db.initialize().await.unwrap();
+        let mut file = MediaFile::new(
+            PathBuf::from("/media/precise.mp4"),
+            1,
+            "video/mp4".to_owned(),
+        );
+        file.modified = expected;
+        db.store_media_file(&file).await.unwrap();
+        drop(db);
+
+        let reopened = RedbDatabase::new(path).await.unwrap();
+        let stored = reopened
+            .get_file_by_path(Path::new("/media/precise.mp4"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.modified, expected);
+    }
+
+    #[tokio::test]
+    async fn shared_stream_is_deleted_only_after_its_last_source() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("shared-stream.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        let stream = SourceMediaEntry {
+            location: PathBuf::from("https://radio.example/shared"),
+            position: 0,
+            stream_title: Some("Shared".to_owned()),
+        };
+        let source_a = Path::new("/playlists/a.m3u");
+        let source_b = Path::new("/playlists/b.m3u");
+        db.replace_source_content(source_a, Some("A"), std::slice::from_ref(&stream))
+            .await
+            .unwrap();
+        db.replace_source_content(source_b, Some("B"), std::slice::from_ref(&stream))
+            .await
+            .unwrap();
+
+        db.remove_derived_content_by_source(source_a).await.unwrap();
+        assert!(db
+            .get_file_by_path(&stream.location)
+            .await
+            .unwrap()
+            .is_some());
+        db.remove_derived_content_by_source(source_b).await.unwrap();
+        assert!(db
+            .get_file_by_path(&stream.location)
+            .await
+            .unwrap()
+            .is_none());
     }
 }
