@@ -355,6 +355,7 @@ struct RendererSnapshot {
 pub struct RendererCache {
     snapshot: tokio::sync::RwLock<RendererSnapshot>,
     refresh: tokio::sync::Mutex<()>,
+    discovery: Option<Arc<crate::discovery::DiscoveryService>>,
 }
 
 impl RendererCache {
@@ -362,14 +363,29 @@ impl RendererCache {
         Self {
             snapshot: tokio::sync::RwLock::new(RendererSnapshot::default()),
             refresh: tokio::sync::Mutex::new(()),
+            discovery: None,
+        }
+    }
+
+    pub fn from_discovery(discovery: Arc<crate::discovery::DiscoveryService>) -> Self {
+        Self {
+            snapshot: tokio::sync::RwLock::new(RendererSnapshot::default()),
+            refresh: tokio::sync::Mutex::new(()),
+            discovery: Some(discovery),
         }
     }
 
     pub async fn snapshot(&self) -> Vec<DiscoveredTv> {
+        if let Some(discovery) = &self.discovery {
+            return discovery_renderers(discovery.targets().await);
+        }
         self.snapshot.read().await.renderers.clone()
     }
 
     pub async fn name_for_ip(&self, ip: &str) -> Option<String> {
+        if let Some(discovery) = &self.discovery {
+            return discovery.name_for_ip(ip).await;
+        }
         self.snapshot
             .read()
             .await
@@ -390,6 +406,11 @@ impl RendererCache {
     }
 
     pub async fn get_or_refresh(&self) -> anyhow::Result<Vec<DiscoveredTv>> {
+        if let Some(discovery) = &self.discovery {
+            return Ok(discovery_renderers(
+                discovery.targets_or_refresh(RENDERER_CACHE_FRESH_TTL).await,
+            ));
+        }
         if let Some(renderers) = self.usable_snapshot(RENDERER_CACHE_FRESH_TTL).await {
             return Ok(renderers);
         }
@@ -416,6 +437,9 @@ impl RendererCache {
     }
 
     pub async fn refresh(&self) -> anyhow::Result<Vec<DiscoveredTv>> {
+        if let Some(discovery) = &self.discovery {
+            return Ok(discovery_renderers(discovery.refresh().await));
+        }
         let _refresh_guard = self.refresh.lock().await;
         let renderers = crate::tv_control::discover_tvs().await?;
         self.replace(renderers).await;
@@ -431,6 +455,23 @@ impl RendererCache {
             None
         }
     }
+}
+
+fn discovery_renderers(targets: Vec<crate::discovery::PlaybackTarget>) -> Vec<DiscoveredTv> {
+    targets
+        .into_iter()
+        .filter(|target| target.kind == crate::discovery::TargetKind::Dlna)
+        .filter_map(|target| {
+            let control_url = target.control_url?;
+            Some(DiscoveredTv {
+                id: target.id,
+                friendly_name: target.friendly_name,
+                control_url,
+                location_url: format!("http://{}", target.address),
+                model_name: target.model.unwrap_or_default(),
+            })
+        })
+        .collect()
 }
 
 impl Default for RendererCache {

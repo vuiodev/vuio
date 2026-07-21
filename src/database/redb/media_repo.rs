@@ -79,29 +79,41 @@ impl RedbDatabase {
         &self,
         root: &Path,
     ) -> Result<Vec<FileFingerprint>> {
-        let root_str = root.to_string_lossy().to_string();
+        let root_str = root
+            .to_string_lossy()
+            .trim_end_matches(['/', '\\'])
+            .to_string();
+        let child_prefix = format!("{}{sep}", root_str, sep = std::path::MAIN_SEPARATOR);
         self.execute_read(move |database| {
             let transaction = database.begin_read()?;
             let files = transaction.open_table(FILES_TABLE)?;
+            let paths = transaction.open_table(PATH_INDEX)?;
             let mut fingerprints = Vec::new();
-            for entry in files.iter()? {
-                let (id, bytes) = entry?;
-                let view = RedbReadSession::view(bytes.value())?;
-                let path = view.path();
-                if path.starts_with(&root_str) {
-                    fingerprints.push(FileFingerprint {
-                        id: id.value(),
-                        path: PathBuf::from(path),
-                        size: view.size(),
-                        modified: UNIX_EPOCH
-                            + Duration::new(
-                                view.modified_secs(),
-                                view.modified_nanos().min(999_999_999),
-                            ),
-                        created_at: UNIX_EPOCH + Duration::from_secs(view.created_at_secs()),
-                        subtitle_available: view.subtitle_available(),
-                    });
+            for entry in paths.range(root_str.as_str()..)? {
+                let (path, id) = entry?;
+                let path = path.value();
+                if path != root_str && !path.starts_with(&child_prefix) {
+                    if !path.starts_with(&root_str) {
+                        break;
+                    }
+                    continue;
                 }
+                let Some(bytes) = files.get(id.value())? else {
+                    continue;
+                };
+                let view = RedbReadSession::view(bytes.value())?;
+                fingerprints.push(FileFingerprint {
+                    id: id.value(),
+                    path: PathBuf::from(view.path()),
+                    size: view.size(),
+                    modified: UNIX_EPOCH
+                        + Duration::new(
+                            view.modified_secs(),
+                            view.modified_nanos().min(999_999_999),
+                        ),
+                    created_at: UNIX_EPOCH + Duration::from_secs(view.created_at_secs()),
+                    subtitle_available: view.subtitle_available(),
+                });
             }
             Ok(fingerprints)
         })

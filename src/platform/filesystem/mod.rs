@@ -966,12 +966,20 @@ pub(crate) async fn extract_audio_metadata(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use std::time::Duration;
 
+    static METADATA_JOBS: std::sync::OnceLock<tokio::sync::Semaphore> = std::sync::OnceLock::new();
+    let permit = METADATA_JOBS
+        .get_or_init(|| tokio::sync::Semaphore::new(4))
+        .acquire()
+        .await
+        .map_err(|error| std::io::Error::other(format!("metadata worker pool closed: {error}")))?;
+
     // Clone the path for the blocking operation
     let path = media_file.path.clone();
 
     // Wrap the synchronous I/O operation in spawn_blocking to prevent blocking the async runtime
     let metadata_result =
         tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
+    drop(permit);
 
     // Handle the result from spawn_blocking
     match metadata_result {

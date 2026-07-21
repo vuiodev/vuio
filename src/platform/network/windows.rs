@@ -7,7 +7,6 @@ use crate::platform::{
 };
 use async_trait::async_trait;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
-use std::process::Command;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
 
@@ -109,9 +108,7 @@ impl WindowsNetworkManager {
         let mut suggestions = Vec::new();
 
         // Check if Windows Defender Firewall is running
-        match Command::new("netsh")
-            .args(["advfirewall", "show", "allprofiles", "state"])
-            .output()
+        match super::command_output("netsh", &["advfirewall", "show", "allprofiles", "state"]).await
         {
             Ok(output) if output.status.success() => {
                 let output_str = String::from_utf8_lossy(&output.stdout);
@@ -360,7 +357,7 @@ impl WindowsNetworkManager {
         });
 
         // Try to detect other interfaces using system commands
-        if let Ok(output) = Command::new("ipconfig").arg("/all").output() {
+        if let Ok(output) = super::command_output("ipconfig", &["/all"]).await {
             let output_str = String::from_utf8_lossy(&output.stdout);
             let mut current_adapter_name = String::new();
 

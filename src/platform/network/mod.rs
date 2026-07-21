@@ -4,6 +4,22 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 use tokio::net::UdpSocket;
 
+pub(crate) async fn command_output(
+    program: &str,
+    args: &[&str],
+) -> std::io::Result<std::process::Output> {
+    let mut command = tokio::process::Command::new(program);
+    command.args(args).kill_on_drop(true);
+    tokio::time::timeout(Duration::from_secs(3), command.output())
+        .await
+        .map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!("{program} exceeded the 3 second deadline"),
+            )
+        })?
+}
+
 pub const SSDP_MULTICAST_IPV4: Ipv4Addr = Ipv4Addr::new(239, 255, 255, 250);
 pub const SSDP_MULTICAST_IP: IpAddr = IpAddr::V4(SSDP_MULTICAST_IPV4);
 pub const UNSPECIFIED_IPV4: IpAddr = IpAddr::V4(Ipv4Addr::UNSPECIFIED);

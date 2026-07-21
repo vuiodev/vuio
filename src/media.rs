@@ -653,16 +653,6 @@ impl<D: DatabaseManager> MediaScanner<D> {
         existing.modified != current.modified
     }
 
-    fn fingerprint_needs_update(&self, existing: &FileFingerprint, current: &MediaFile) -> bool {
-        if existing.size != current.size {
-            return true;
-        }
-        if existing.subtitle_available != current.subtitle_available {
-            return true;
-        }
-        existing.modified != current.modified
-    }
-
     /// Scan multiple directories and return combined results
     pub async fn scan_directories(&self, directories: &[PathBuf]) -> Result<ScanResult> {
         let mut combined_result = ScanResult::new();
@@ -818,6 +808,34 @@ impl<D: DatabaseManager> MediaScanner<D> {
             };
             current_paths.insert(path.clone());
 
+            // Compare the cheap filesystem fingerprint before parsing audio
+            // tags. Periodic scans should not perform blocking metadata work
+            // for files whose indexed identity has not changed.
+            let metadata = match tokio::fs::metadata(&path).await {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    result.errors.push(ScanError {
+                        path: path.clone(),
+                        error: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let subtitle_available = tokio::fs::symlink_metadata(path.with_extension("srt"))
+                .await
+                .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink());
+            if let Some(existing) = existing_files_map.get(&path) {
+                if existing.size == metadata.len()
+                    && existing.modified == modified
+                    && existing.subtitle_available == subtitle_available
+                {
+                    result.unchanged_files.push(existing.clone());
+                    processed += 1;
+                    continue;
+                }
+            }
+
             // Create MediaFile from path
             let current_file = match self.create_media_file_from_path(&path).await {
                 Ok(f) => f,
@@ -833,15 +851,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
             // Check if file exists in database
             if let Some(existing) = existing_files_map.get(&path) {
-                if self.fingerprint_needs_update(existing, &current_file) {
-                    let mut updated = current_file;
-                    updated.id = Some(existing.id);
-                    updated.created_at = existing.created_at;
-                    updated.updated_at = SystemTime::now();
-                    files_to_update.push(updated);
-                } else {
-                    result.unchanged_files.push(existing.clone());
-                }
+                let mut updated = current_file;
+                updated.id = Some(existing.id);
+                updated.created_at = existing.created_at;
+                updated.updated_at = SystemTime::now();
+                files_to_update.push(updated);
             } else {
                 files_to_insert.push(current_file);
             }

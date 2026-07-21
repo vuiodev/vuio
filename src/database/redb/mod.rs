@@ -1754,6 +1754,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn root_fingerprint_lookup_uses_component_boundaries() {
+        let temp = tempdir().unwrap();
+        let db = RedbDatabase::new(temp.path().join("root-range.redb"))
+            .await
+            .unwrap();
+        db.initialize().await.unwrap();
+        db.bulk_store_media_files(&[
+            MediaFile::new(
+                PathBuf::from("/media/foo/a.mp3"),
+                1,
+                "audio/mpeg".to_owned(),
+            ),
+            MediaFile::new(
+                PathBuf::from("/media/foo2/b.mp3"),
+                1,
+                "audio/mpeg".to_owned(),
+            ),
+        ])
+        .await
+        .unwrap();
+
+        let fingerprints = db
+            .load_file_fingerprints_under_root(Path::new("/media/foo"))
+            .await
+            .unwrap();
+        assert_eq!(fingerprints.len(), 1);
+        assert_eq!(fingerprints[0].path, PathBuf::from("/media/foo/a.mp3"));
+    }
+
+    #[tokio::test]
     async fn shared_stream_is_deleted_only_after_its_last_source() {
         let temp = tempdir().unwrap();
         let db = RedbDatabase::new(temp.path().join("shared-stream.redb"))

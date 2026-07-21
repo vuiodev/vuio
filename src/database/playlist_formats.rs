@@ -1,8 +1,44 @@
 use anyhow::{anyhow, Result};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 use tracing::{debug, warn};
 
 use crate::database::{DatabaseManager, MediaFile, Playlist, SourceMediaEntry};
+
+const MAX_PLAYLIST_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_PLAYLIST_LINE_BYTES: usize = 64 * 1024;
+const MAX_PLAYLIST_ENTRIES: usize = 100_000;
+
+async fn read_playlist_text(path: &Path) -> Result<String> {
+    let metadata = tokio::fs::metadata(path).await?;
+    if metadata.len() > MAX_PLAYLIST_BYTES {
+        return Err(anyhow!(
+            "playlist exceeds the {} byte limit",
+            MAX_PLAYLIST_BYTES
+        ));
+    }
+    let file = tokio::fs::File::open(path).await?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take(MAX_PLAYLIST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await?;
+    if bytes.len() as u64 > MAX_PLAYLIST_BYTES {
+        return Err(anyhow!(
+            "playlist exceeds the {} byte limit",
+            MAX_PLAYLIST_BYTES
+        ));
+    }
+    if bytes
+        .split_inclusive(|byte| *byte == b'\n')
+        .any(|line| line.len() > MAX_PLAYLIST_LINE_BYTES)
+    {
+        return Err(anyhow!(
+            "playlist line exceeds the {} byte limit",
+            MAX_PLAYLIST_LINE_BYTES
+        ));
+    }
+    String::from_utf8(bytes).map_err(Into::into)
+}
 
 /// Supported playlist file formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,7 +83,7 @@ impl PlaylistFileManager {
             )
         })?;
 
-        let file_content = tokio::fs::read_to_string(file_path).await?;
+        let file_content = read_playlist_text(file_path).await?;
         let playlist_name = playlist_name.unwrap_or_else(|| {
             file_path
                 .file_stem()
@@ -147,11 +183,17 @@ impl PlaylistFileManager {
         }
 
         // Create list of (path, position) pairs
+        if track_paths.len() > MAX_PLAYLIST_ENTRIES {
+            return Err(anyhow!(
+                "playlist exceeds the {} entry limit",
+                MAX_PLAYLIST_ENTRIES
+            ));
+        }
         let file_paths_with_positions: Vec<(String, u32)> = track_paths
             .into_iter()
             .enumerate()
-            .map(|(index, path)| (path, index as u32))
-            .collect();
+            .map(|(index, path)| Ok((path, u32::try_from(index)?)))
+            .collect::<Result<_>>()?;
 
         // Add all tracks to playlist in batch operation
         let media_entries = Self::source_entries(&file_paths_with_positions);
@@ -201,12 +243,19 @@ impl PlaylistFileManager {
         // Sort tracks by number to maintain order
         tracks.sort_by_key(|(num, _)| *num);
 
+        if tracks.len() > MAX_PLAYLIST_ENTRIES {
+            return Err(anyhow!(
+                "playlist exceeds the {} entry limit",
+                MAX_PLAYLIST_ENTRIES
+            ));
+        }
+
         // Create list of (path, position) pairs for batch operation
         let file_paths_with_positions: Vec<(String, u32)> = tracks
             .into_iter()
             .enumerate()
-            .map(|(index, (_, file_path))| (file_path, index as u32))
-            .collect();
+            .map(|(index, (_, file_path))| Ok((file_path, u32::try_from(index)?)))
+            .collect::<Result<_>>()?;
 
         // Add all tracks to playlist in batch operation
         let media_entries = Self::source_entries(&file_paths_with_positions);
@@ -243,7 +292,12 @@ impl PlaylistFileManager {
 
         for track in tracks {
             // Write extended info if available
-            let duration = track.duration.map(|d| d.as_secs() as i32).unwrap_or(-1);
+            let duration = track
+                .duration
+                .map(|duration| i32::try_from(duration.as_secs()))
+                .transpose()
+                .map_err(|_| anyhow!("track duration exceeds M3U's signed 32-bit range"))?
+                .unwrap_or(-1);
 
             let title = track
                 .title
@@ -356,19 +410,9 @@ impl PlaylistFileManager {
 
         let mut entries = tokio::fs::read_dir(directory).await?;
 
-        while let Ok(Some(entry)) = entries.next_entry().await {
+        while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            let file_type = match entry.file_type().await {
-                Ok(file_type) => file_type,
-                Err(error) => {
-                    warn!(
-                        "Failed to inspect playlist path {}: {}",
-                        path.display(),
-                        error
-                    );
-                    continue;
-                }
-            };
+            let file_type = entry.file_type().await?;
 
             if file_type.is_symlink() {
                 warn!("Skipping symbolic link: {}", path.display());
@@ -431,19 +475,9 @@ impl PlaylistFileManager {
                 }
             };
 
-            while let Ok(Some(entry)) = entries.next_entry().await {
+            while let Some(entry) = entries.next_entry().await? {
                 let path = entry.path();
-                let file_type = match entry.file_type().await {
-                    Ok(file_type) => file_type,
-                    Err(error) => {
-                        warn!(
-                            "Failed to inspect playlist path {}: {}",
-                            path.display(),
-                            error
-                        );
-                        continue;
-                    }
-                };
+                let file_type = entry.file_type().await?;
 
                 if file_type.is_symlink() {
                     warn!("Skipping symbolic link: {}", path.display());
@@ -494,7 +528,7 @@ impl PlaylistFileManager {
             )
         })?;
 
-        let file_content = tokio::fs::read_to_string(file_path).await?;
+        let file_content = read_playlist_text(file_path).await?;
         let playlist_path_str = crate::platform::filesystem::create_platform_path_normalizer()
             .to_canonical(file_path)
             .unwrap_or_else(|_| file_path.to_string_lossy().to_string());
@@ -558,15 +592,23 @@ impl PlaylistFileManager {
             }
         }
 
+        if stations.len() > MAX_PLAYLIST_ENTRIES {
+            return Err(anyhow!(
+                "playlist exceeds the {} entry limit",
+                MAX_PLAYLIST_ENTRIES
+            ));
+        }
         let entries = stations
             .into_iter()
             .enumerate()
-            .map(|(position, (name, url))| SourceMediaEntry {
-                location: PathBuf::from(url),
-                position: u32::try_from(position).unwrap_or(u32::MAX),
-                stream_title: Some(name),
+            .map(|(position, (name, url))| {
+                Ok(SourceMediaEntry {
+                    location: PathBuf::from(url),
+                    position: u32::try_from(position)?,
+                    stream_title: Some(name),
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>>>()?;
         database
             .replace_source_content(Path::new(&playlist_path_str), None, &entries)
             .await?;
@@ -700,6 +742,19 @@ mod tests {
             PlaylistFileManager::get_output_filename("Test<>Playlist", PlaylistFormat::M3U),
             "Test__Playlist.m3u"
         );
+    }
+
+    #[tokio::test]
+    async fn playlist_reader_rejects_oversized_files_and_lines() {
+        let temp = tempfile::tempdir().unwrap();
+        let oversized = temp.path().join("oversized.m3u");
+        let file = std::fs::File::create(&oversized).unwrap();
+        file.set_len(MAX_PLAYLIST_BYTES + 1).unwrap();
+        assert!(read_playlist_text(&oversized).await.is_err());
+
+        let long_line = temp.path().join("long-line.m3u");
+        std::fs::write(&long_line, vec![b'a'; MAX_PLAYLIST_LINE_BYTES + 1]).unwrap();
+        assert!(read_playlist_text(&long_line).await.is_err());
     }
 
     #[tokio::test]

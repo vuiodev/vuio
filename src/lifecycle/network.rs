@@ -63,23 +63,6 @@ async fn start_http_server_task<D: DatabaseManager + 'static>(
 
     info!("HTTP server started successfully");
 
-    // Spawn background SSDP TV discovery cache refresher every 60s
-    let state_clone = app_state.clone();
-    let discovery_cancellation = cancellation.clone();
-    let tv_discovery = tokio::spawn(async move {
-        loop {
-            tokio::select! {
-                _ = discovery_cancellation.cancelled() => break,
-                _ = async {
-                    if let Err(error) = state_clone.discovered_tvs.refresh().await {
-                        tracing::warn!(%error, "Background renderer discovery failed");
-                    }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                } => {}
-            }
-        }
-    });
-
     // A supervisor owns the active listener so bind/port changes can be
     // pre-bound and swapped without publishing an endpoint that is not live.
     let http = tokio::spawn(async move {
@@ -154,7 +137,7 @@ async fn start_http_server_task<D: DatabaseManager + 'static>(
         }
     });
 
-    Ok(NetworkTaskHandles { http, tv_discovery })
+    Ok(NetworkTaskHandles { http })
 }
 
 fn server_address(config: &crate::config::ServerConfig) -> anyhow::Result<SocketAddr> {
@@ -199,7 +182,6 @@ pub struct NetworkLifecycleService;
 
 pub struct NetworkTaskHandles {
     pub http: tokio::task::JoinHandle<anyhow::Result<()>>,
-    pub tv_discovery: tokio::task::JoinHandle<()>,
 }
 
 impl NetworkLifecycleService {

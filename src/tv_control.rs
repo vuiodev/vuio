@@ -148,14 +148,22 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
         locations.len()
     );
 
-    let mut tvs = Vec::new();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::http_clients::local()?;
+    let probes =
+        futures_util::stream::iter(locations.into_iter().map(|(location, usn, responder)| {
+            let client = client.clone();
+            async move {
+                let result = fetch_tv_info(&client, &location, &usn, responder).await;
+                (location, result)
+            }
+        }))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
 
-    for (location, usn, responder) in locations {
-        match fetch_tv_info(&client, &location, &usn, responder).await {
+    let mut tvs = Vec::new();
+    for (location, result) in probes {
+        match result {
             Ok(Some(tv)) => {
                 debug!("Discovered TV: {} at {}", tv.friendly_name, tv.control_url);
                 tvs.push(tv);
@@ -458,10 +466,7 @@ pub async fn cast_media(
     mime_type: &str,
 ) -> Result<()> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::http_clients::local()?;
     let set_uri_body = build_transport_uri_soap("SetAVTransportURI", media_url, title, mime_type)?;
 
     let resp = client
@@ -494,10 +499,7 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
         matches!(action, "Play" | "Pause" | "Stop"),
         "unsupported playback action"
     );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::http_clients::local()?;
 
     let soap_action = format!("urn:schemas-upnp-org:service:AVTransport:1#{}", action);
 
@@ -544,10 +546,7 @@ pub async fn set_next_media(
     mime_type: &str,
 ) -> Result<()> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::http_clients::local()?;
     let body = build_transport_uri_soap("SetNextAVTransportURI", media_url, title, mime_type)?;
 
     let resp = client
@@ -572,10 +571,7 @@ pub async fn set_next_media(
 /// Query what media URI is currently active/playing on the TV
 pub async fn get_position_info(control_url: &str) -> Result<String> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::http_clients::local()?;
 
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
@@ -617,10 +613,7 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
 /// Query the current transport state (PLAYING, STOPPED, PAUSED_PLAYBACK) of the TV
 pub async fn get_transport_state(control_url: &str) -> Result<String> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = crate::http_clients::local()?;
 
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"

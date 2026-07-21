@@ -6,7 +6,6 @@
 
 use anyhow::{Context, Result};
 use std::net::SocketAddr;
-use std::time::Duration;
 use tracing::debug;
 
 /// AirPlay video playback controller.
@@ -30,11 +29,8 @@ impl AirPlayClient {
     /// Create a new AirPlay client for a device at the given address.
     /// The address should point to the AirPlay receiver (usually port 7000).
     pub fn new(address: SocketAddr) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .expect("failed to build HTTP client");
+        let client = crate::http_clients::local()
+            .expect("shared local HTTP client configuration must be valid");
 
         Self { address, client }
     }

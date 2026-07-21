@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 
 /// The kind of playback target protocol.
@@ -146,6 +146,8 @@ pub struct DiscoveryService {
     targets: Arc<RwLock<Vec<PlaybackTarget>>>,
     config: RwLock<DiscoveryConfig>,
     config_changed: tokio::sync::Notify,
+    refreshed_at: RwLock<Option<tokio::time::Instant>>,
+    refresh_lock: Mutex<()>,
 }
 
 impl DiscoveryService {
@@ -154,6 +156,8 @@ impl DiscoveryService {
             targets: Arc::new(RwLock::new(Vec::new())),
             config: RwLock::new(config),
             config_changed: tokio::sync::Notify::new(),
+            refreshed_at: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
         }
     }
 
@@ -167,14 +171,71 @@ impl DiscoveryService {
         self.targets.read().await.clone()
     }
 
+    /// Return a fresh snapshot while ensuring concurrent callers share one
+    /// network discovery cycle.
+    pub async fn targets_or_refresh(&self, max_age: Duration) -> Vec<PlaybackTarget> {
+        if self
+            .refreshed_at
+            .read()
+            .await
+            .is_some_and(|instant| instant.elapsed() <= max_age)
+        {
+            return self.targets().await;
+        }
+        let _refresh_guard = self.refresh_lock.lock().await;
+        if self
+            .refreshed_at
+            .read()
+            .await
+            .is_some_and(|instant| instant.elapsed() <= max_age)
+        {
+            return self.targets().await;
+        }
+        self.refresh_cycle().await
+    }
+
+    pub async fn name_for_ip(&self, ip: &str) -> Option<String> {
+        self.targets
+            .read()
+            .await
+            .iter()
+            .find(|target| target.address.ip().to_string() == ip)
+            .map(|target| target.friendly_name.clone())
+    }
+
     /// Run a single discovery cycle: SSDP (DLNA) + mDNS (Cast/AirPlay).
     pub async fn refresh(&self) -> Vec<PlaybackTarget> {
-        let config = self.config.read().await.clone();
-        let mut all_targets = Vec::new();
+        let _refresh_guard = self.refresh_lock.lock().await;
+        self.refresh_cycle().await
+    }
 
-        // 1. Discover DLNA renderers (reuse existing discover_tvs)
-        match crate::tv_control::discover_tvs().await {
+    async fn refresh_cycle(&self) -> Vec<PlaybackTarget> {
+        let config = self.config.read().await.clone();
+        let cycle = async {
+            let dlna = crate::tv_control::discover_tvs();
+            let mdns = async {
+                if config.chromecast_enabled || config.airplay_enabled {
+                    mdns::discover_mdns_targets(config.chromecast_enabled, config.airplay_enabled)
+                        .await
+                } else {
+                    Ok(Vec::new())
+                }
+            };
+            tokio::join!(dlna, mdns)
+        };
+        let Ok((dlna_result, mdns_result)) =
+            tokio::time::timeout(Duration::from_secs(10), cycle).await
+        else {
+            warn!("Device discovery exceeded its 10 second cycle deadline; retaining snapshot");
+            return self.targets().await;
+        };
+
+        let previous_targets = self.targets().await;
+        let mut all_targets = Vec::new();
+        let mut any_protocol_succeeded = false;
+        match dlna_result {
             Ok(tvs) => {
+                any_protocol_succeeded = true;
                 for tv in tvs {
                     let addr = extract_socket_addr(&tv.location_url)
                         .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
@@ -192,22 +253,33 @@ impl DiscoveryService {
             }
             Err(e) => {
                 warn!(error = %e, "DLNA renderer discovery failed");
+                all_targets.extend(
+                    previous_targets
+                        .iter()
+                        .filter(|target| target.kind == TargetKind::Dlna)
+                        .cloned(),
+                );
             }
         }
 
-        // 2. Discover Chromecast and AirPlay via mDNS
-        if config.chromecast_enabled || config.airplay_enabled {
-            match mdns::discover_mdns_targets(config.chromecast_enabled, config.airplay_enabled)
-                .await
-            {
-                Ok(mdns_targets) => {
-                    debug!("mDNS discovery found {} target(s)", mdns_targets.len());
-                    all_targets.extend(mdns_targets);
-                }
-                Err(e) => {
-                    warn!(error = %e, "mDNS discovery failed");
-                }
+        match mdns_result {
+            Ok(mdns_targets) => {
+                any_protocol_succeeded = true;
+                debug!("mDNS discovery found {} target(s)", mdns_targets.len());
+                all_targets.extend(mdns_targets);
             }
+            Err(e) => {
+                warn!(error = %e, "mDNS discovery failed");
+                all_targets.extend(
+                    previous_targets
+                        .iter()
+                        .filter(|target| target.kind != TargetKind::Dlna)
+                        .cloned(),
+                );
+            }
+        }
+        if !any_protocol_succeeded {
+            return self.targets().await;
         }
 
         // Deduplicate by ID
@@ -232,6 +304,7 @@ impl DiscoveryService {
         );
 
         *self.targets.write().await = all_targets.clone();
+        *self.refreshed_at.write().await = Some(tokio::time::Instant::now());
         all_targets
     }
 

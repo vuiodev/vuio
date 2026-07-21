@@ -1,12 +1,12 @@
 use crate::platform::{
     network::{
-        FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager, SsdpConfig, SsdpSocket,
+        command_output, FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager,
+        SsdpConfig, SsdpSocket,
     },
     InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
-use std::process::Command;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
 
@@ -83,7 +83,7 @@ impl BsdNetworkManager {
     async fn get_bsd_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
 
-        match Command::new("ifconfig").output() {
+        match command_output("ifconfig", &[]).await {
             Ok(output) if output.status.success() => {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 interfaces = self.parse_ifconfig_output(&output_str)?;

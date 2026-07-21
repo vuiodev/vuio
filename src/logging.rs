@@ -1,10 +1,105 @@
 use crate::platform::PlatformError;
+use std::io::Write;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024;
 const LOG_RETENTION: usize = 3;
+const LOG_QUEUE_CAPACITY: usize = 8_192;
+static DROPPED_FILE_LOGS: AtomicU64 = AtomicU64::new(0);
+
+enum LogCommand {
+    Write(Vec<u8>),
+    Flush,
+    Shutdown,
+}
+
+#[derive(Clone)]
+struct NonBlockingFileWriter {
+    sender: std::sync::mpsc::SyncSender<LogCommand>,
+}
+
+impl Write for NonBlockingFileWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        match self.sender.try_send(LogCommand::Write(buffer.to_vec())) {
+            Ok(()) => Ok(buffer.len()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                DROPPED_FILE_LOGS.fetch_add(1, Ordering::Relaxed);
+                Ok(buffer.len())
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "log writer stopped",
+            )),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = self.sender.try_send(LogCommand::Flush);
+        Ok(())
+    }
+}
+
+pub struct LoggingGuard {
+    sender: Option<std::sync::mpsc::SyncSender<LogCommand>>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl LoggingGuard {
+    pub fn dropped_records(&self) -> u64 {
+        DROPPED_FILE_LOGS.load(Ordering::Relaxed)
+    }
+}
+
+impl Drop for LoggingGuard {
+    fn drop(&mut self) {
+        if let Some(sender) = self.sender.take() {
+            let _ = sender.send(LogCommand::Shutdown);
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+pub fn dropped_file_logs() -> u64 {
+    DROPPED_FILE_LOGS.load(Ordering::Relaxed)
+}
+
+fn non_blocking_file(file: RotatingFile) -> (NonBlockingFileWriter, LoggingGuard) {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(LOG_QUEUE_CAPACITY);
+    let worker = std::thread::Builder::new()
+        .name("vuio-log-writer".to_owned())
+        .spawn(move || {
+            let mut file = file;
+            while let Ok(command) = receiver.recv() {
+                match command {
+                    LogCommand::Write(bytes) => {
+                        let _ = file.write_all(&bytes);
+                    }
+                    LogCommand::Flush => {
+                        let _ = file.flush();
+                    }
+                    LogCommand::Shutdown => {
+                        let _ = file.flush();
+                        break;
+                    }
+                }
+            }
+        })
+        .expect("failed to start logging worker");
+    (
+        NonBlockingFileWriter {
+            sender: sender.clone(),
+        },
+        LoggingGuard {
+            sender: Some(sender),
+            worker: Some(worker),
+        },
+    )
+}
 
 struct RotatingFile {
     path: PathBuf,
@@ -78,12 +173,12 @@ impl std::io::Write for RotatingFile {
 }
 
 /// Initialize logging with platform-specific configuration.
-pub fn init_logging() -> Result<(), PlatformError> {
+pub fn init_logging() -> Result<LoggingGuard, PlatformError> {
     init_logging_with_options(None, None, false)
 }
 
 /// Initialize logging with debug output enabled.
-pub fn init_logging_with_debug(debug: bool) -> Result<(), PlatformError> {
+pub fn init_logging_with_debug(debug: bool) -> Result<LoggingGuard, PlatformError> {
     let log_level = if debug { "debug" } else { "info" };
     init_logging_with_options(Some(log_level), None, debug)
 }
@@ -93,7 +188,7 @@ pub fn init_logging_with_options(
     log_level: Option<&str>,
     log_file: Option<PathBuf>,
     debug: bool,
-) -> Result<(), PlatformError> {
+) -> Result<LoggingGuard, PlatformError> {
     let is_rust_log_set = std::env::var("RUST_LOG").is_ok();
     let in_docker = crate::config::AppConfig::is_running_in_docker();
     let console_should_be_verbose = debug || is_rust_log_set || log_level.is_some() || in_docker;
@@ -141,21 +236,25 @@ pub fn init_logging_with_options(
         let _ = std::fs::create_dir_all(parent);
     }
 
-    let file_layer = match RotatingFile::open(resolved_log_file.clone()) {
+    let (file_layer, guard) = match RotatingFile::open(resolved_log_file.clone()) {
         Ok(file) => {
+            let (writer, guard) = non_blocking_file(file);
             let file_level = if debug { "debug" } else { "info" };
             let file_filter =
                 EnvFilter::try_new(file_level).unwrap_or_else(|_| EnvFilter::new("info"));
-            Some(
-                fmt::layer()
-                    .with_target(true)
-                    .with_thread_ids(true)
-                    .with_file(true)
-                    .with_line_number(true)
-                    .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
-                    .with_ansi(false)
-                    .with_writer(std::sync::Mutex::new(file))
-                    .with_filter(file_filter),
+            (
+                Some(
+                    fmt::layer()
+                        .with_target(true)
+                        .with_thread_ids(true)
+                        .with_file(true)
+                        .with_line_number(true)
+                        .with_timer(tracing_subscriber::fmt::time::LocalTime::rfc_3339())
+                        .with_ansi(false)
+                        .with_writer(move || writer.clone())
+                        .with_filter(file_filter),
+                ),
+                guard,
             )
         }
         Err(error) => {
@@ -164,7 +263,13 @@ pub fn init_logging_with_options(
                 resolved_log_file.display(),
                 error
             );
-            None
+            (
+                None,
+                LoggingGuard {
+                    sender: None,
+                    worker: None,
+                },
+            )
         }
     };
 
@@ -178,7 +283,7 @@ pub fn init_logging_with_options(
         console_level,
         resolved_log_file.display()
     );
-    Ok(())
+    Ok(guard)
 }
 
 #[cfg(test)]

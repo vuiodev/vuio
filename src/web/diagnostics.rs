@@ -178,6 +178,7 @@ pub async fn get_web_metrics<D: DatabaseManager>(
             "cache_misses": stats.cache_misses,
             "cache_hit_rate_percent": stats.cache_hit_rate,
             "directory_listings": stats.directory_listings,
+            "dropped_file_log_records": crate::logging::dropped_file_logs(),
             "file_serves": stats.file_serves,
             "errors": stats.errors,
             "average_response_time_ms": stats.average_response_time_ms,

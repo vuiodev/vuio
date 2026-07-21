@@ -1,13 +1,12 @@
 use crate::platform::{
     network::{
-        FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager, SsdpConfig,
-        SsdpSocket, SSDP_MULTICAST_IPV4, UNSPECIFIED_IPV4,
+        command_output, FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager,
+        SsdpConfig, SsdpSocket, SSDP_MULTICAST_IPV4, UNSPECIFIED_IPV4,
     },
     InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
-use std::process::Command;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
 
@@ -88,9 +87,11 @@ impl MacOSNetworkManager {
         let mut suggestions = Vec::new();
 
         // Check if the application firewall is enabled
-        match Command::new("defaults")
-            .args(["read", "/Library/Preferences/com.apple.alf", "globalstate"])
-            .output()
+        match command_output(
+            "defaults",
+            &["read", "/Library/Preferences/com.apple.alf", "globalstate"],
+        )
+        .await
         {
             Ok(output) if output.status.success() => {
                 let output_str = String::from_utf8_lossy(&output.stdout);
@@ -144,7 +145,7 @@ impl MacOSNetworkManager {
         let mut interfaces = Vec::new();
 
         // Use ifconfig to get interface information
-        match Command::new("ifconfig").output() {
+        match command_output("ifconfig", &[]).await {
             Ok(output) if output.status.success() => {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 interfaces = self.parse_ifconfig_output(&output_str)?;
@@ -163,7 +164,7 @@ impl MacOSNetworkManager {
             warn!("No interfaces found via ifconfig, attempting fallback detection");
 
             // Try to get the default route interface
-            if let Ok(route_output) = Command::new("route").args(["get", "default"]).output() {
+            if let Ok(route_output) = command_output("route", &["get", "default"]).await {
                 let route_str = String::from_utf8_lossy(&route_output.stdout);
                 if let Some(interface_line) = route_str
                     .lines()
@@ -173,7 +174,7 @@ impl MacOSNetworkManager {
                         let iface_name = iface_name.trim();
 
                         // Try to get IP for this interface
-                        if let Ok(ip_output) = Command::new("ifconfig").arg(iface_name).output() {
+                        if let Ok(ip_output) = command_output("ifconfig", &[iface_name]).await {
                             let ip_str = String::from_utf8_lossy(&ip_output.stdout);
                             if let Some(inet_line) = ip_str.lines().find(|line| {
                                 line.trim().starts_with("inet ") && !line.contains("inet6")

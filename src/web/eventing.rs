@@ -250,11 +250,7 @@ async fn send_event_notification(
         update_id
     );
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
+    let client = match crate::http_clients::event() {
         Ok(client) => client,
         Err(_) => return false,
     };

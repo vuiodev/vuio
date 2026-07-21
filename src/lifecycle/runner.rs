@@ -46,7 +46,7 @@ where
 {
     // Initialize logging with options
     let log_file_path = cli_args.log_file.as_ref().map(PathBuf::from);
-    logging::init_logging_with_options(
+    let logging_guard = logging::init_logging_with_options(
         cli_args.log_level.as_deref(),
         log_file_path.clone(),
         cli_args.debug,
@@ -54,6 +54,7 @@ where
     .context("Failed to initialize logging")?;
 
     info!("Starting VuIO Server...");
+    let _logging_guard = logging_guard;
 
     let shutdown = ShutdownCoordinator::new();
     let cancellation = shutdown.token();
@@ -180,7 +181,9 @@ where
         cast_sessions: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::CastSessionRegistry::new(),
         )),
-        discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
+        discovered_tvs: Arc::new(crate::runtime_state::RendererCache::from_discovery(
+            discovery_service.clone(),
+        )),
         discovery_service,
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: cancellation.clone(),
@@ -366,16 +369,6 @@ where
             .and_then(|result| result);
         ("HTTP", result)
     });
-    services.spawn(async move {
-        (
-            "TV discovery",
-            network_handles
-                .tv_discovery
-                .await
-                .map_err(anyhow::Error::from),
-        )
-    });
-
     // Determine if console logging is verbose
     let is_rust_log_set = std::env::var("RUST_LOG").is_ok();
     let in_docker = AppConfig::is_running_in_docker();

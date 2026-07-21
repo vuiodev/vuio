@@ -8,7 +8,7 @@ use super::proto::{self, CastMessage};
 use anyhow::{Context, Result};
 use prost::Message;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,16 +24,36 @@ pub struct ChromecastClient {
     transport_id: Arc<Mutex<Option<String>>>,
     media_session_id: Arc<Mutex<Option<i32>>>,
     request_counter: AtomicI32,
-    _heartbeat_cancel: tokio_util::sync::CancellationToken,
+    heartbeat_cancel: tokio_util::sync::CancellationToken,
+    heartbeat_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    closed: AtomicBool,
 }
 
 impl ChromecastClient {
+    /// Connect, launch the receiver, and load media under one operation-level deadline.
+    pub async fn connect_and_load(
+        address: SocketAddr,
+        media_url: &str,
+        mime_type: &str,
+        title: &str,
+    ) -> Result<Self> {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let client = Self::connect(address).await?;
+            client.launch_media_receiver().await?;
+            client.load(media_url, mime_type, title).await?;
+            Ok(client)
+        })
+        .await
+        .context("Chromecast cast operation exceeded its 20 second deadline")?
+    }
+
     /// Connect to a Chromecast device at the given address.
     pub async fn connect(address: SocketAddr) -> Result<Self> {
         debug!(%address, "Connecting to Chromecast");
 
-        let tcp_stream = TcpStream::connect(address)
+        let tcp_stream = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(address))
             .await
+            .context("timed out connecting to Chromecast TCP")?
             .context("failed to connect to Chromecast TCP")?;
 
         // Chromecast uses a self-signed certificate, so we must disable verification.
@@ -46,10 +66,13 @@ impl ChromecastClient {
         let domain =
             rustls::pki_types::ServerName::try_from("chromecast").expect("valid server name");
 
-        let tls_stream = connector
-            .connect(domain, tcp_stream)
-            .await
-            .context("TLS handshake with Chromecast failed")?;
+        let tls_stream = tokio::time::timeout(
+            Duration::from_secs(5),
+            connector.connect(domain, tcp_stream),
+        )
+        .await
+        .context("Chromecast TLS handshake timed out")?
+        .context("TLS handshake with Chromecast failed")?;
 
         let stream = Arc::new(Mutex::new(TlsStream::Client(tls_stream)));
 
@@ -62,7 +85,7 @@ impl ChromecastClient {
         let heartbeat_cancel = tokio_util::sync::CancellationToken::new();
         let hb_stream = stream.clone();
         let hb_cancel = heartbeat_cancel.clone();
-        tokio::spawn(async move {
+        let heartbeat_task = tokio::spawn(async move {
             heartbeat_loop(hb_stream, hb_cancel).await;
         });
 
@@ -72,7 +95,9 @@ impl ChromecastClient {
             transport_id: Arc::new(Mutex::new(None)),
             media_session_id: Arc::new(Mutex::new(None)),
             request_counter: AtomicI32::new(10),
-            _heartbeat_cancel: heartbeat_cancel,
+            heartbeat_cancel,
+            heartbeat_task: std::sync::Mutex::new(Some(heartbeat_task)),
+            closed: AtomicBool::new(false),
         })
     }
 
@@ -168,13 +193,29 @@ impl ChromecastClient {
 
     /// Disconnect from the Chromecast.
     pub async fn disconnect(&self) -> Result<()> {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return Ok(());
+        }
+        self.heartbeat_cancel.cancel();
         if let Some(transport_id) = self.transport_id.lock().await.as_ref() {
             let close_msg = CastMessage::close(transport_id);
             let _ = send_message(&self.stream, &close_msg).await;
         }
         let close_receiver = CastMessage::close(proto::DEFAULT_RECEIVER_ID);
         let _ = send_message(&self.stream, &close_receiver).await;
-        self._heartbeat_cancel.cancel();
+        let task = self
+            .heartbeat_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take();
+        if let Some(mut task) = task {
+            if tokio::time::timeout(Duration::from_secs(2), &mut task)
+                .await
+                .is_err()
+            {
+                task.abort();
+            }
+        }
         debug!(%self.address, "Disconnected from Chromecast");
         Ok(())
     }
@@ -276,6 +317,20 @@ impl ChromecastClient {
     }
 }
 
+impl Drop for ChromecastClient {
+    fn drop(&mut self) {
+        self.heartbeat_cancel.cancel();
+        if let Some(task) = self
+            .heartbeat_task
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+        {
+            task.abort();
+        }
+    }
+}
+
 /// Send a `CastMessage` over the TLS stream with length-prefix framing.
 async fn send_message(
     stream: &Arc<Mutex<TlsStream<TcpStream>>>,
@@ -288,15 +343,22 @@ async fn send_message(
 
     let len = buf.len() as u32;
     let mut stream = stream.lock().await;
-    stream
-        .write_all(&len.to_be_bytes())
-        .await
-        .context("failed to write message length")?;
-    stream
-        .write_all(&buf)
-        .await
-        .context("failed to write message body")?;
-    stream.flush().await?;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        stream
+            .write_all(&len.to_be_bytes())
+            .await
+            .context("failed to write message length")?;
+        stream
+            .write_all(&buf)
+            .await
+            .context("failed to write message body")?;
+        stream
+            .flush()
+            .await
+            .context("failed to flush Castv2 message")
+    })
+    .await
+    .context("Castv2 write timed out")??;
     trace!(len, "Sent Castv2 message ({} bytes)", len);
     Ok(())
 }
@@ -307,9 +369,9 @@ async fn read_message(stream: &Arc<Mutex<TlsStream<TcpStream>>>) -> Result<CastM
 
     // Read the 4-byte big-endian length prefix.
     let mut len_buf = [0u8; 4];
-    stream
-        .read_exact(&mut len_buf)
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut len_buf))
         .await
+        .context("Castv2 message-length read timed out")?
         .context("failed to read message length")?;
     let len = u32::from_be_bytes(len_buf) as usize;
 
@@ -320,9 +382,9 @@ async fn read_message(stream: &Arc<Mutex<TlsStream<TcpStream>>>) -> Result<CastM
     );
 
     let mut msg_buf = vec![0u8; len];
-    stream
-        .read_exact(&mut msg_buf)
+    tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut msg_buf))
         .await
+        .context("Castv2 message-body read timed out")?
         .context("failed to read message body")?;
 
     CastMessage::decode(&msg_buf[..]).context("failed to decode CastMessage")

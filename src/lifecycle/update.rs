@@ -89,11 +89,7 @@ pub async fn update_binary() -> Result<()> {
     let current_exe = env::current_exe().context("Failed to get current executable path")?;
     println!("Current executable path: {}", current_exe.display());
 
-    // Create reqwest client with User-Agent header (required by GitHub API)
-    let client = reqwest::Client::builder()
-        .user_agent(format!("vuio-updater/{}", current_version))
-        .build()
-        .context("Failed to build HTTP client")?;
+    let client = crate::http_clients::updater()?;
 
     println!("Checking for latest release on GitHub...");
     let response = client

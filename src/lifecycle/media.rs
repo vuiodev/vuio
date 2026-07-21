@@ -7,11 +7,11 @@ async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
     database: Arc<D>,
     monitored_roots: &[PathBuf],
 ) -> anyhow::Result<usize> {
+    use futures_util::{stream, StreamExt};
+
     info!("Validating cached media files...");
 
     // Phase 1: Collect paths to delete (holds read lock)
-    let mut paths_to_delete = Vec::new();
-    let mut total_checked = 0;
     let unavailable_roots = database
         .list_root_availability()
         .await?
@@ -20,32 +20,50 @@ async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
         .map(|root| root.path)
         .collect::<Vec<_>>();
 
-    {
-        for media_file in database.load_file_fingerprints().await? {
-            total_checked += 1;
-
-            let unavailable_root = monitored_roots
-                .iter()
-                .any(|root| media_file.path.starts_with(root) && !root.is_dir())
-                || unavailable_roots
+    let unavailable_configured_roots = stream::iter(monitored_roots.iter().cloned())
+        .map(|root| async move {
+            let unavailable = match tokio::fs::metadata(&root).await {
+                Ok(metadata) => !metadata.is_dir(),
+                Err(_) => true,
+            };
+            (root, unavailable)
+        })
+        .buffer_unordered(32)
+        .filter_map(|(root, unavailable)| async move { unavailable.then_some(root) })
+        .collect::<Vec<_>>()
+        .await;
+    let fingerprints = database.load_file_fingerprints().await?;
+    let total_checked = fingerprints.len();
+    let paths_to_delete: Vec<PathBuf> = stream::iter(fingerprints)
+        .map(|media_file| {
+            let unavailable_roots = &unavailable_roots;
+            let unavailable_configured_roots = &unavailable_configured_roots;
+            async move {
+                let unavailable = unavailable_configured_roots
                     .iter()
+                    .chain(unavailable_roots.iter())
                     .any(|root| media_file.path.starts_with(root));
-            if !unavailable_root && !media_file.path.exists() {
-                paths_to_delete.push(media_file.path.clone());
+                if unavailable {
+                    return None;
+                }
+                tokio::fs::symlink_metadata(&media_file.path)
+                    .await
+                    .is_err()
+                    .then_some(media_file.path)
             }
-
-            // Log progress every 1000 files
-            if total_checked % 1000 == 0 {
-                info!("Validated {} files so far...", total_checked);
-            }
-        }
-    } // Stream dropped here, read lock released
+        })
+        .buffer_unordered(32)
+        .filter_map(std::future::ready)
+        .collect()
+        .await;
 
     // Phase 2: Bulk delete (acquires write lock)
     let removed_count = paths_to_delete.len();
     if !paths_to_delete.is_empty() {
         info!("Removing {} deleted files from database", removed_count);
-        database.bulk_remove_media_files(&paths_to_delete).await?;
+        database
+            .bulk_remove_canonical_media_files(&paths_to_delete)
+            .await?;
     }
 
     if removed_count > 0 {
@@ -170,6 +188,36 @@ async fn record_root_scan<D: DatabaseManager>(
     database.set_root_availability(&state).await
 }
 
+async fn reconcile_media_roots<D: DatabaseManager + 'static>(
+    app_state: &AppState<D>,
+    roots: &[crate::config::MonitoredDirectoryConfig],
+) {
+    let scanner = media::MediaScanner::with_database(app_state.database.clone());
+    for root in roots {
+        let path = PathBuf::from(&root.path);
+        if !matches!(tokio::fs::metadata(&path).await, Ok(metadata) if metadata.is_dir()) {
+            continue;
+        }
+        let policy = media::ScanPolicy::from_config(&app_state.current_config(), root);
+        let scan = if root.recursive {
+            scanner.scan_directory_recursive_with_policy(&policy).await
+        } else {
+            scanner.scan_directory_with_policy(&policy).await
+        };
+        match scan {
+            Ok(result) => {
+                if let Err(error) = record_root_scan(&app_state.database, &path, &result).await {
+                    error!("Failed to persist root scan state for {}: {}", path.display(), error);
+                }
+                if result.total_changes() > 0 {
+                    increment_content_update_id(app_state).await;
+                }
+            }
+            Err(error) => error!("Media discovery failed for {}: {}", path.display(), error),
+        }
+    }
+}
+
 pub(crate) async fn refresh_unavailable_roots<D: DatabaseManager>(
     app_state: &AppState<D>,
 ) -> anyhow::Result<()> {
@@ -267,17 +315,6 @@ async fn perform_initial_media_scan<D: DatabaseManager + 'static>(
             "Initial media scan completed - total files scanned: {}, total changes: {}",
             total_files_scanned, total_changes
         );
-
-        // Validate files to catch any that were deleted while app was offline
-        if config.media.cleanup_deleted_files {
-            let roots: Vec<_> = config
-                .media
-                .directories
-                .iter()
-                .map(|d| PathBuf::from(&d.path))
-                .collect();
-            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
-        }
 
         Ok(())
     } else {
@@ -416,8 +453,12 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
     let handle = tokio::spawn(async move {
         info!("File system event handler started");
 
-        let mut reconciliation = tokio::time::interval(std::time::Duration::from_secs(300));
-        reconciliation.tick().await;
+        let mut dirty_reconciliation =
+            tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut full_reconciliation =
+            tokio::time::interval(std::time::Duration::from_secs(300));
+        dirty_reconciliation.tick().await;
+        full_reconciliation.tick().await;
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
@@ -433,24 +474,28 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                             .read()
                             .await
                             .clone();
-                        for root in &configured_roots {
-                            let path = PathBuf::from(&root.path);
-                            if path.is_dir() {
-                                let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                                let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
-                                let scan = if root.recursive {
-                                    scanner.scan_directory_recursive_with_policy(&policy).await
-                                } else {
-                                    scanner.scan_directory_with_policy(&policy).await
-                                };
-                                if scan.is_ok() {
-                                    increment_content_update_id(&app_state_clone).await;
-                                }
-                            }
-                        }
+                        reconcile_media_roots(&app_state_clone, &configured_roots).await;
                     }
                 }
-                _ = reconciliation.tick() => {
+                _ = dirty_reconciliation.tick() => {
+                    let dirty_roots = coalesce_roots(watcher_clone.take_dirty_roots());
+                    if dirty_roots.is_empty() {
+                        continue;
+                    }
+                    warn!("Reconciling after dropped watcher events in {} dirty path(s)", dirty_roots.len());
+                    let configured_roots = app_state_clone.media_directories.read().await.clone();
+                    let roots_to_scan = configured_roots
+                        .into_iter()
+                        .filter(|root| {
+                            let path = Path::new(&root.path);
+                            dirty_roots
+                                .iter()
+                                .any(|dirty| dirty.starts_with(path) || path.starts_with(dirty))
+                        })
+                        .collect::<Vec<_>>();
+                    reconcile_media_roots(&app_state_clone, &roots_to_scan).await;
+                }
+                _ = full_reconciliation.tick() => {
                     let configured_roots = app_state_clone
                         .media_directories
                         .read()
@@ -491,67 +536,11 @@ async fn start_file_monitoring<D: DatabaseManager + 'static>(
                         }
                     }
 
-                    let dirty_roots = coalesce_roots(watcher_clone.take_dirty_roots());
-                    let roots_to_scan = if !dirty_roots.is_empty() {
-                        warn!(
-                            "Reconciling after dropped watcher events in {} dirty path(s)",
-                            dirty_roots.len()
-                        );
-                        configured_roots
-                            .iter()
-                            .filter(|root| {
-                                let path = Path::new(&root.path);
-                                dirty_roots.iter().any(|dp| dp.starts_with(path) || path.starts_with(dp))
-                            })
-                            .cloned()
-                            .collect::<Vec<_>>()
-                    } else {
-                        configured_roots.clone()
-                    };
-
-                    let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                    for root in &roots_to_scan {
-                        let path = PathBuf::from(&root.path);
-                        let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
-                        if !path.is_dir() {
-                            continue;
-                        }
-                        let result = if root.recursive {
-                            scanner.scan_directory_recursive_with_policy(&policy).await
-                        } else {
-                            scanner.scan_directory_with_policy(&policy).await
-                        };
-                        match result {
-                            Ok(result) => {
-                                if let Err(error) = record_root_scan(
-                                    &app_state_clone.database,
-                                    &path,
-                                    &result,
-                                )
-                                .await
-                                {
-                                    error!("Failed to persist root scan state for {}: {}", path.display(), error);
-                                }
-                                if result.total_changes() > 0 {
-                                    increment_content_update_id(&app_state_clone).await;
-                                }
-                            }
-                            Err(error) => error!(
-                                "Media discovery failed for {}: {}",
-                                path.display(),
-                                error
-                            ),
-                        }
-                    }
+                    // This mandatory sweep is independent of the dirty-root queue, so a noisy
+                    // root cannot starve reconciliation of the rest of the library.
+                    reconcile_media_roots(&app_state_clone, &configured_roots).await;
                     if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
                         error!("Failed to refresh unavailable-root visibility: {}", error);
-                    }
-                    if app_state_clone.current_config().media.cleanup_deleted_files {
-                        match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
-                            Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
-                            Ok(_) => {}
-                            Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
-                        }
                     }
                 }
             }

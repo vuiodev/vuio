@@ -1,12 +1,13 @@
 use crate::platform::{
     network::{
-        FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager, SsdpConfig,
-        SsdpSocket, LOOPBACK_IPV4, SSDP_MULTICAST_IPV4,
+        command_output, FirewallStatus, InterfaceStatus, NetworkDiagnostics, NetworkManager,
+        SsdpConfig, SsdpSocket, LOOPBACK_IPV4, SSDP_MULTICAST_IPV4,
     },
     InterfaceType, NetworkInterface, PlatformError, PlatformResult,
 };
 use async_trait::async_trait;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(test)]
 use std::process::Command;
 use tokio::net::UdpSocket;
 use tracing::{debug, error, info, warn};
@@ -109,27 +110,24 @@ impl LinuxNetworkManager {
         let mut suggestions = Vec::new();
 
         // Check for common firewall tools
-        let has_iptables = Command::new("which")
-            .arg("iptables")
-            .output()
+        let has_iptables = command_output("which", &["iptables"])
+            .await
             .map(|output| output.status.success())
             .unwrap_or(false);
 
-        let has_ufw = Command::new("which")
-            .arg("ufw")
-            .output()
+        let has_ufw = command_output("which", &["ufw"])
+            .await
             .map(|output| output.status.success())
             .unwrap_or(false);
 
-        let has_firewalld = Command::new("which")
-            .arg("firewall-cmd")
-            .output()
+        let has_firewalld = command_output("which", &["firewall-cmd"])
+            .await
             .map(|output| output.status.success())
             .unwrap_or(false);
 
         if has_ufw {
             // Check UFW status
-            match Command::new("ufw").arg("status").output() {
+            match command_output("ufw", &["status"]).await {
                 Ok(output) if output.status.success() => {
                     let output_str = String::from_utf8_lossy(&output.stdout);
                     detected = output_str.contains("Status: active");
@@ -148,7 +146,7 @@ impl LinuxNetworkManager {
             }
         } else if has_firewalld {
             // Check firewalld status
-            match Command::new("firewall-cmd").arg("--state").output() {
+            match command_output("firewall-cmd", &["--state"]).await {
                 Ok(output) if output.status.success() => {
                     let output_str = String::from_utf8_lossy(&output.stdout);
                     detected = output_str.trim() == "running";
@@ -171,7 +169,7 @@ impl LinuxNetworkManager {
             }
         } else if has_iptables {
             // Check iptables rules
-            match Command::new("iptables").args(["-L", "-n"]).output() {
+            match command_output("iptables", &["-L", "-n"]).await {
                 Ok(output) if output.status.success() => {
                     let output_str = String::from_utf8_lossy(&output.stdout);
                     detected = !output_str.is_empty() && output_str.lines().count() > 3; // More than just headers
@@ -245,12 +243,9 @@ impl LinuxNetworkManager {
 
     /// Parse output from 'ip addr show' command
     async fn parse_ip_command_output(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        let output = Command::new("ip")
-            .args(["addr", "show"])
-            .output()
-            .map_err(|e| {
-                PlatformError::NetworkConfig(format!("Failed to run 'ip addr show': {}", e))
-            })?;
+        let output = command_output("ip", &["addr", "show"]).await.map_err(|e| {
+            PlatformError::NetworkConfig(format!("Failed to run 'ip addr show': {}", e))
+        })?;
 
         if !output.status.success() {
             return Err(PlatformError::NetworkConfig(
@@ -357,16 +352,6 @@ impl LinuxNetworkManager {
             }
         }
 
-        // If we still don't have any good interfaces, try a different approach
-        if interfaces.is_empty() || interfaces.iter().all(|i| i.ip_address.is_loopback()) {
-            debug!("Standard interface detection failed, trying alternative methods");
-            if let Ok(alt_interfaces) = self.get_interfaces_alternative_method() {
-                if !alt_interfaces.is_empty() {
-                    return Ok(alt_interfaces);
-                }
-            }
-        }
-
         // Special handling for Docker containers - prioritize configured server IP
         if self.is_running_in_docker() && interfaces.iter().all(|i| i.ip_address.is_loopback()) {
             if let Ok(server_ip_str) = std::env::var("VUIO_IP") {
@@ -390,9 +375,11 @@ impl LinuxNetworkManager {
 
     /// Parse /proc/net/dev as fallback
     async fn parse_proc_net_dev(&self) -> PlatformResult<Vec<NetworkInterface>> {
-        let contents = std::fs::read_to_string("/proc/net/dev").map_err(|e| {
-            PlatformError::NetworkConfig(format!("Failed to read /proc/net/dev: {}", e))
-        })?;
+        let contents = tokio::fs::read_to_string("/proc/net/dev")
+            .await
+            .map_err(|e| {
+                PlatformError::NetworkConfig(format!("Failed to read /proc/net/dev: {}", e))
+            })?;
 
         let mut interfaces = Vec::new();
 
@@ -407,15 +394,16 @@ impl LinuxNetworkManager {
                 }
 
                 // Check if interface is up by reading from /sys/class/net
-                let is_up =
-                    std::fs::read_to_string(format!("/sys/class/net/{}/operstate", interface_name))
-                        .map(|state| state.trim() == "up")
-                        .unwrap_or(false);
+                let is_up = tokio::fs::read_to_string(format!(
+                    "/sys/class/net/{}/operstate",
+                    interface_name
+                ))
+                .await
+                .map(|state| state.trim() == "up")
+                .unwrap_or(false);
 
                 // Get IP address using ip command for this specific interface
-                let ip_address = self
-                    .get_interface_ip(&interface_name)
-                    .unwrap_or(LOOPBACK_IPV4);
+                let ip_address = interface_ip(&interface_name).await.unwrap_or(LOOPBACK_IPV4);
 
                 let interface_type = self.determine_linux_interface_type(&interface_name);
 
@@ -435,14 +423,13 @@ impl LinuxNetworkManager {
 
     /// Check if we're running in a Docker container
     fn is_running_in_docker(&self) -> bool {
-        // Check for Docker-specific files
-        std::path::Path::new("/.dockerenv").exists()
-            || std::fs::read_to_string("/proc/1/cgroup")
-                .map(|content| content.contains("docker") || content.contains("containerd"))
-                .unwrap_or(false)
+        std::env::var_os("container").is_some()
+            || std::env::var_os("VUIO_IP").is_some()
+            || std::env::var_os("KUBERNETES_SERVICE_HOST").is_some()
     }
 
     /// Alternative method to get network interfaces when standard detection fails
+    #[cfg(test)]
     fn get_interfaces_alternative_method(&self) -> PlatformResult<Vec<NetworkInterface>> {
         let mut interfaces = Vec::new();
 
@@ -579,6 +566,7 @@ impl LinuxNetworkManager {
     }
 
     /// Get IP address for a specific interface with more robust methods
+    #[cfg(test)]
     fn get_interface_ip_robust(&self, interface_name: &str) -> Option<IpAddr> {
         // First check if we're in Docker and have a configured server IP
         if self.is_running_in_docker() {
@@ -642,6 +630,7 @@ impl LinuxNetworkManager {
     }
 
     /// Get IP address for a specific interface
+    #[cfg(test)]
     fn get_interface_ip(&self, interface_name: &str) -> Option<IpAddr> {
         match Command::new("ip")
             .args(["addr", "show", interface_name])
@@ -684,12 +673,12 @@ impl LinuxNetworkManager {
     }
 
     /// Get available network namespaces
-    fn get_network_namespaces(&self) -> Vec<String> {
+    async fn get_network_namespaces(&self) -> Vec<String> {
         let mut namespaces = Vec::new();
 
         // Read from /var/run/netns if available
-        if let Ok(entries) = std::fs::read_dir("/var/run/netns") {
-            for entry in entries.flatten() {
+        if let Ok(mut entries) = tokio::fs::read_dir("/var/run/netns").await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
                 if let Some(name) = entry.file_name().to_str() {
                     namespaces.push(name.to_string());
                 }
@@ -698,6 +687,27 @@ impl LinuxNetworkManager {
 
         namespaces
     }
+}
+
+async fn interface_ip(interface_name: &str) -> Option<IpAddr> {
+    let output = command_output("ip", &["addr", "show", interface_name])
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .find_map(|line| {
+            let value = line.trim().strip_prefix("inet ")?;
+            value
+                .split_whitespace()
+                .next()?
+                .split('/')
+                .next()?
+                .parse()
+                .ok()
+        })
 }
 
 impl LinuxNetworkManager {
@@ -1109,7 +1119,7 @@ impl NetworkManager for LinuxNetworkManager {
         }
 
         // Check for network namespaces
-        let namespaces = self.get_network_namespaces();
+        let namespaces = self.get_network_namespaces().await;
         if !namespaces.is_empty() {
             diagnostic_messages.push(format!("Network namespaces detected: {:?}", namespaces));
             diagnostic_messages
@@ -1240,10 +1250,10 @@ mod tests {
         println!("Port 8080 available: {}", available);
     }
 
-    #[test]
-    fn test_network_namespaces() {
+    #[tokio::test]
+    async fn test_network_namespaces() {
         let manager = LinuxNetworkManager::new();
-        let namespaces = manager.get_network_namespaces();
+        let namespaces = manager.get_network_namespaces().await;
         // Namespaces list can be empty, that's fine
         println!("Network namespaces: {:?}", namespaces);
     }

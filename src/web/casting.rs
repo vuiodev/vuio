@@ -208,48 +208,29 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
 
             match target.kind {
                 TargetKind::Chromecast => {
-                    match crate::chromecast::client::ChromecastClient::connect(target.address).await
+                    match crate::chromecast::client::ChromecastClient::connect_and_load(
+                        target.address,
+                        &media_url,
+                        &media_file.mime_type,
+                        media_file.title.as_deref().unwrap_or(&media_file.filename),
+                    )
+                    .await
                     {
                         Ok(client) => {
-                            if let Err(e) = client.launch_media_receiver().await {
-                                return (
-                                    StatusCode::INTERNAL_SERVER_ERROR,
-                                    axum::Json(
-                                        serde_json::json!({ "error": format!("Chromecast launch error: {}", e) }),
-                                    ),
-                                );
-                            }
-                            match client
-                                .load(
-                                    &media_url,
-                                    &media_file.mime_type,
-                                    media_file.title.as_deref().unwrap_or(&media_file.filename),
-                                )
-                                .await
-                            {
-                                Ok(()) => {
-                                    register_cast_session(
-                                        &state,
-                                        &target.id,
-                                        &target.friendly_name,
-                                        &media_file.filename,
-                                        crate::runtime_state::CastTransport::Chromecast(
-                                            std::sync::Arc::new(client),
-                                        ),
-                                    )
-                                    .await;
-                                    (
-                                        StatusCode::OK,
-                                        axum::Json(serde_json::json!({ "status": "playing" })),
-                                    )
-                                }
-                                Err(e) => (
-                                    StatusCode::BAD_REQUEST,
-                                    axum::Json(
-                                        serde_json::json!({ "error": format!("Chromecast load error: {}", e) }),
-                                    ),
+                            register_cast_session(
+                                &state,
+                                &target.id,
+                                &target.friendly_name,
+                                &media_file.filename,
+                                crate::runtime_state::CastTransport::Chromecast(
+                                    std::sync::Arc::new(client),
                                 ),
-                            }
+                            )
+                            .await;
+                            (
+                                StatusCode::OK,
+                                axum::Json(serde_json::json!({ "status": "playing" })),
+                            )
                         }
                         Err(e) => (
                             StatusCode::INTERNAL_SERVER_ERROR,
@@ -462,53 +443,35 @@ pub async fn api_cast_to_target<D: DatabaseManager + 'static>(
             }
         }
         TargetKind::Chromecast => {
-            match crate::chromecast::client::ChromecastClient::connect(target.address).await {
+            match crate::chromecast::client::ChromecastClient::connect_and_load(
+                target.address,
+                &media_url,
+                &media_file.mime_type,
+                media_file.title.as_deref().unwrap_or(&media_file.filename),
+            )
+            .await
+            {
                 Ok(client) => {
-                    if let Err(e) = client.launch_media_receiver().await {
-                        return (
-                            StatusCode::INTERNAL_SERVER_ERROR,
-                            axum::Json(
-                                serde_json::json!({ "error": format!("Chromecast launch error: {}", e) }),
-                            ),
-                        );
-                    }
-                    match client
-                        .load(
-                            &media_url,
-                            &media_file.mime_type,
-                            media_file.title.as_deref().unwrap_or(&media_file.filename),
-                        )
-                        .await
-                    {
-                        Ok(()) => {
-                            register_cast_session(
-                                &state,
-                                &target.id,
-                                &target.friendly_name,
-                                &media_file.filename,
-                                crate::runtime_state::CastTransport::Chromecast(
-                                    std::sync::Arc::new(client),
-                                ),
-                            )
-                            .await;
-                            (
-                                StatusCode::OK,
-                                axum::Json(serde_json::json!({
-                                    "status": "casting",
-                                    "target": target.friendly_name,
-                                    "media": media_file.filename,
-                                    "protocol": "chromecast",
-                                    "compatibility": compat_result,
-                                })),
-                            )
-                        }
-                        Err(e) => (
-                            StatusCode::BAD_REQUEST,
-                            axum::Json(
-                                serde_json::json!({ "error": format!("Chromecast load error: {}", e) }),
-                            ),
-                        ),
-                    }
+                    register_cast_session(
+                        &state,
+                        &target.id,
+                        &target.friendly_name,
+                        &media_file.filename,
+                        crate::runtime_state::CastTransport::Chromecast(std::sync::Arc::new(
+                            client,
+                        )),
+                    )
+                    .await;
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({
+                            "status": "casting",
+                            "target": target.friendly_name,
+                            "media": media_file.filename,
+                            "protocol": "chromecast",
+                            "compatibility": compat_result,
+                        })),
+                    )
                 }
                 Err(e) => (
                     StatusCode::INTERNAL_SERVER_ERROR,
