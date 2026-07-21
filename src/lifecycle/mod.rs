@@ -39,6 +39,7 @@ include!("update.rs");
 mod tests {
     use super::*;
     use crate::database::MediaRepository;
+    use futures_util::StreamExt;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -70,10 +71,15 @@ mod tests {
             .await
             .unwrap();
         database.initialize().await.unwrap();
+        let policy = media::ScanPolicy::platform_default(temp.path(), false);
+        let filesystem_manager = create_platform_filesystem_manager();
         for (filename, _) in downloads {
             let completed = temp.path().join(filename);
             tokio::fs::write(&completed, b"media").await.unwrap();
-            index_media_file_path(&database, &completed).await.unwrap();
+            index_media_file_path(&database, &completed, &policy, filesystem_manager.as_ref())
+                .await
+                .unwrap()
+                .unwrap();
         }
         drop(database);
 
@@ -92,6 +98,39 @@ mod tests {
             assert_eq!(indexed.size, 5);
             assert_eq!(indexed.mime_type, mime_type);
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn watcher_index_helper_rejects_symlinked_media() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let media_root = temp.path().join("media");
+        tokio::fs::create_dir(&media_root).await.unwrap();
+        let outside = temp.path().join("outside.mp4");
+        tokio::fs::write(&outside, b"secret").await.unwrap();
+        let link = media_root.join("created.mp4");
+        symlink(&outside, &link).unwrap();
+
+        let database = database::redb::RedbDatabase::new(temp.path().join("watcher.redb"))
+            .await
+            .unwrap();
+        database.initialize().await.unwrap();
+        let policy = media::ScanPolicy::platform_default(&media_root, true);
+        let filesystem_manager = create_platform_filesystem_manager();
+
+        assert!(
+            index_media_file_path(&database, &link, &policy, filesystem_manager.as_ref(),)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(database
+            .stream_all_media_files()
+            .collect::<Vec<_>>()
+            .await
+            .is_empty());
     }
 
     #[test]

@@ -875,6 +875,21 @@ impl RedbDatabase {
             .iter()
             .map(|path| Self::canonical_path(path).map(|path| path.to_string_lossy().to_string()))
             .collect::<Result<Vec<_>>>()?;
+        self.bulk_remove_canonical_path_strings_impl(paths).await
+    }
+
+    pub(super) async fn bulk_remove_canonical_media_files_impl(
+        &self,
+        paths: &[PathBuf],
+    ) -> Result<usize> {
+        let paths = paths
+            .iter()
+            .map(|path| path.to_string_lossy().to_string())
+            .collect();
+        self.bulk_remove_canonical_path_strings_impl(paths).await
+    }
+
+    async fn bulk_remove_canonical_path_strings_impl(&self, paths: Vec<String>) -> Result<usize> {
         let (removed, removed_size) = self
             .execute_write(move |database| {
                 let transaction = database.begin_write()?;

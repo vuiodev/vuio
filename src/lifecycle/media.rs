@@ -691,9 +691,16 @@ async fn update_subtitle_index<D: DatabaseManager + 'static>(
 async fn index_media_file_path<D: DatabaseManager + ?Sized>(
     database: &D,
     path: &Path,
-) -> anyhow::Result<i64> {
-    let filesystem_manager = create_platform_filesystem_manager();
-    let mut media_file = media::build_media_file_from_path(path, filesystem_manager.as_ref()).await?;
+    policy: &media::ScanPolicy,
+    filesystem_manager: &dyn crate::platform::filesystem::FileSystemManager,
+) -> anyhow::Result<Option<i64>> {
+    let Some(path) = policy
+        .secure_canonical_path(path, filesystem_manager)
+        .await?
+    else {
+        return Ok(None);
+    };
+    let mut media_file = media::build_media_file_from_path(&path, filesystem_manager).await?;
     if let Some(existing) = database.get_file_by_path(&media_file.path).await? {
         media_file.id = existing.id;
         media_file.created_at = existing.created_at;
@@ -704,7 +711,19 @@ async fn index_media_file_path<D: DatabaseManager + ?Sized>(
         .await?
         .into_iter()
         .next()
+        .map(Some)
         .ok_or_else(|| anyhow::anyhow!("media upsert returned no ID for {}", path.display()))
+}
+
+async fn reconcile_rejected_watched_path<D: DatabaseManager + 'static>(
+    database: &Arc<D>,
+    policy: &media::ScanPolicy,
+    path: &Path,
+) -> anyhow::Result<media::ScanResult> {
+    let scope = path.parent().unwrap_or(&policy.root);
+    media::MediaScanner::with_database(database.clone())
+        .scan_directory_recursive_with_policy(&policy.for_subtree(scope))
+        .await
 }
 
 async fn import_changed_playlist<D: DatabaseManager + ?Sized>(
@@ -744,8 +763,18 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
             let Some(policy) = policy else {
                 return Ok(());
             };
+            let Some(secure_path) = policy
+                .secure_canonical_path(&path, app_state.filesystem_manager.as_ref())
+                .await?
+            else {
+                let scan = reconcile_rejected_watched_path(database, &policy, &path).await?;
+                if scan.has_changes() {
+                    increment_content_update_id(app_state).await;
+                }
+                return Ok(());
+            };
             if is_srt_path(&path) {
-                update_subtitle_index(&path, true, app_state).await?;
+                update_subtitle_index(&secure_path, true, app_state).await?;
                 return Ok(());
             }
             // Check if this is a directory or a file
@@ -791,7 +820,7 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                 info!("Media file created: {}", path.display());
 
                 if policy.allows_playlist(&path) {
-                    import_changed_playlist(database.as_ref(), &path).await?;
+                    import_changed_playlist(database.as_ref(), &secure_path).await?;
                     increment_content_update_id(app_state).await;
                     return Ok(());
                 }
@@ -800,7 +829,17 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                     return Ok(());
                 }
 
-                index_media_file_path(database.as_ref(), &path).await?;
+                if index_media_file_path(
+                    database.as_ref(),
+                    &path,
+                    &policy,
+                    app_state.filesystem_manager.as_ref(),
+                )
+                .await?
+                .is_none()
+                {
+                    return Ok(());
+                }
 
                 // Record atomic statistics
                 stats.record_files_processed(1);
@@ -817,14 +856,24 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
             let Some(policy) = policy else {
                 return Ok(());
             };
+            let Some(secure_path) = policy
+                .secure_canonical_path(&path, app_state.filesystem_manager.as_ref())
+                .await?
+            else {
+                let scan = reconcile_rejected_watched_path(database, &policy, &path).await?;
+                if scan.has_changes() {
+                    increment_content_update_id(app_state).await;
+                }
+                return Ok(());
+            };
             if is_srt_path(&path) {
-                update_subtitle_index(&path, true, app_state).await?;
+                update_subtitle_index(&secure_path, true, app_state).await?;
                 return Ok(());
             }
             info!("Media file modified: {}", path.display());
 
             if policy.allows_playlist(&path) {
-                import_changed_playlist(database.as_ref(), &path).await?;
+                import_changed_playlist(database.as_ref(), &secure_path).await?;
                 increment_content_update_id(app_state).await;
                 return Ok(());
             }
@@ -836,9 +885,9 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
             // A downloader or platform backend may report only Modify/CloseWrite,
             // without a preceding Create. Upsert missing paths so those event
             // shapes cannot leave a completed download absent from the database.
-            if let Some(existing_file) = database.get_file_by_path(&path).await? {
+            if let Some(existing_file) = database.get_file_by_path(&secure_path).await? {
                 let mut refreshed = media::build_media_file_from_path(
-                    &path,
+                    &secure_path,
                     app_state.filesystem_manager.as_ref(),
                 )
                 .await?;
@@ -855,8 +904,18 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state).await;
-            } else if path.is_file() {
-                index_media_file_path(database.as_ref(), &path).await?;
+            } else if secure_path.is_file() {
+                if index_media_file_path(
+                    database.as_ref(),
+                    &path,
+                    &policy,
+                    app_state.filesystem_manager.as_ref(),
+                )
+                .await?
+                .is_none()
+                {
+                    return Ok(());
+                }
                 stats.record_files_processed(1);
                 info!(
                     "Indexed media file first observed through a modification event: {}",
@@ -905,7 +964,20 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                     update_subtitle_index(&from, false, app_state).await?;
                 }
                 if is_srt_path(&to) {
-                    update_subtitle_index(&to, true, app_state).await?;
+                    let secure_to = media::ScanPolicy::for_path(&policies, &to)
+                        .map(|policy| async {
+                            policy
+                                .secure_canonical_path(
+                                    &to,
+                                    app_state.filesystem_manager.as_ref(),
+                                )
+                                .await
+                        });
+                    if let Some(result) = secure_to {
+                        if let Some(path) = result.await? {
+                            update_subtitle_index(&path, true, app_state).await?;
+                        }
+                    }
                 }
                 return Ok(());
             }
@@ -995,7 +1067,17 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                         database.remove_derived_content_by_source(&from).await?;
                     }
                     if to_playlist && to.is_file() {
-                        import_changed_playlist(database.as_ref(), &to).await?;
+                        let policy = media::ScanPolicy::for_path(&policies, &to)
+                            .expect("playlist rename has a destination policy");
+                        if let Some(path) = policy
+                            .secure_canonical_path(
+                                &to,
+                                app_state.filesystem_manager.as_ref(),
+                            )
+                            .await?
+                        {
+                            import_changed_playlist(database.as_ref(), &path).await?;
+                        }
                     }
                     increment_content_update_id(app_state).await;
                     return Ok(());
@@ -1020,7 +1102,18 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                         );
                     }
                     MediaRenameKind::Create => {
-                        index_media_file_path(database.as_ref(), &to).await?;
+                        if index_media_file_path(
+                            database.as_ref(),
+                            &to,
+                            media::ScanPolicy::for_path(&policies, &to)
+                                .expect("create rename has a destination policy"),
+                            app_state.filesystem_manager.as_ref(),
+                        )
+                        .await?
+                        .is_none()
+                        {
+                            return Ok(());
+                        }
                         stats.record_files_processed(1);
                         info!(
                             "Indexed completed media file after download rename: {}",
@@ -1053,8 +1146,16 @@ async fn handle_file_system_event<D: DatabaseManager + 'static>(
                                 from.display()
                             );
                         }
-                        index_media_file_path(database.as_ref(), &to).await?;
-                        stats.record_files_processed(1);
+                        let indexed = index_media_file_path(
+                            database.as_ref(),
+                            &to,
+                            media::ScanPolicy::for_path(&policies, &to)
+                                .expect("replace rename has a destination policy"),
+                            app_state.filesystem_manager.as_ref(),
+                        )
+                        .await?
+                        .is_some();
+                        stats.record_files_processed(indexed as u64);
                         info!("Renamed media file: {} -> {}", from.display(), to.display());
                         increment_content_update_id(app_state).await;
                     }

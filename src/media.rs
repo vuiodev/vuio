@@ -18,6 +18,9 @@ const BATCH_SIZE: usize = 1000;
 #[derive(Debug, Clone)]
 pub struct ScanPolicy {
     pub root: PathBuf,
+    /// The configured root remains fixed when a scan is narrowed to a subtree.
+    /// It is the security boundary used for canonical containment checks.
+    security_root: PathBuf,
     pub recursive: bool,
     pub case_sensitive: bool,
     extensions: HashSet<String>,
@@ -37,6 +40,7 @@ impl ScanPolicy {
             .collect();
         Self {
             root: PathBuf::from(&directory.path),
+            security_root: PathBuf::from(&directory.path),
             recursive: directory.recursive,
             case_sensitive: directory.case_sensitive.unwrap_or_else(|| {
                 detect_case_sensitivity(Path::new(&directory.path)).unwrap_or_else(|| {
@@ -62,6 +66,7 @@ impl ScanPolicy {
     pub fn platform_default(root: &Path, recursive: bool) -> Self {
         Self {
             root: root.to_path_buf(),
+            security_root: root.to_path_buf(),
             recursive,
             case_sensitive: detect_case_sensitivity(root).unwrap_or(!cfg!(target_os = "windows")),
             extensions: crate::platform::filesystem::get_supported_extensions()
@@ -86,6 +91,73 @@ impl ScanPolicy {
         let mut policy = self.clone();
         policy.root = root.to_path_buf();
         policy
+    }
+
+    /// Reject every symlink at or below the configured root, then canonicalize
+    /// and enforce component-aware containment. `None` is a deliberate policy
+    /// rejection, not a traversal failure.
+    pub(crate) async fn secure_canonical_path(
+        &self,
+        path: &Path,
+        filesystem_manager: &dyn FileSystemManager,
+    ) -> Result<Option<PathBuf>> {
+        // Inspect the unresolved spelling whenever it is below the configured
+        // root. This catches both a symlink entry and a symlinked directory in
+        // the relative path without rejecting platform aliases above the root
+        // (for example /var -> /private/var on macOS).
+        if self.path_starts_with(path, &self.security_root) {
+            let mut current = self.security_root.clone();
+            let root_components = self.security_root.components().count();
+            let components = std::iter::once(None).chain(
+                path.components()
+                    .skip(root_components)
+                    .map(|component| Some(component.as_os_str().to_owned())),
+            );
+            for component in components {
+                if let Some(component) = component {
+                    current.push(component);
+                }
+                let metadata = tokio::fs::symlink_metadata(&current).await?;
+                if metadata.file_type().is_symlink() {
+                    warn!("Skipping symbolic link: {}", current.display());
+                    return Ok(None);
+                }
+            }
+        }
+
+        let canonical_root = PathBuf::from(
+            filesystem_manager
+                .get_canonical_path(&self.security_root)
+                .map_err(|error| anyhow::anyhow!("failed to canonicalize media root: {error}"))?,
+        );
+        let canonical_path = PathBuf::from(
+            filesystem_manager
+                .get_canonical_path(path)
+                .map_err(|error| anyhow::anyhow!("failed to canonicalize media path: {error}"))?,
+        );
+        if !self.path_starts_with(&canonical_path, &canonical_root) {
+            warn!(
+                path = %path.display(),
+                target = %canonical_path.display(),
+                root = %canonical_root.display(),
+                "Skipping media path whose canonical target escapes its configured root"
+            );
+            return Ok(None);
+        }
+
+        // Recheck the final canonical object after resolution. Besides closing
+        // a narrow validation gap, this makes the intended regular-entry policy
+        // explicit for callers that already hold canonical paths.
+        if tokio::fs::symlink_metadata(&canonical_path)
+            .await?
+            .file_type()
+            .is_symlink()
+        {
+            warn!("Skipping symbolic link: {}", canonical_path.display());
+            return Ok(None);
+        }
+
+        Ok(Some(canonical_path))
     }
 
     pub fn for_path<'a>(policies: &'a [Self], path: &Path) -> Option<&'a Self> {
@@ -269,6 +341,7 @@ struct TraversalReport {
     uncertain_prefixes: Vec<PathBuf>,
     errors: Vec<ScanError>,
     root_complete: bool,
+    rejected_symlinks: usize,
 }
 
 /// Media scanner that uses the file system manager and database for efficient scanning
@@ -299,6 +372,16 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
     /// Simple directory scan that returns files without database operations
     pub async fn scan_directory_simple(&self, directory: &Path) -> Result<Vec<MediaFile>> {
+        if tokio::fs::symlink_metadata(directory)
+            .await?
+            .file_type()
+            .is_symlink()
+        {
+            return Err(anyhow::anyhow!(
+                "configured media directory is a symbolic link: {}",
+                directory.display()
+            ));
+        }
         // Use canonical path normalization for consistency
         let canonical_dir = match self.filesystem_manager.get_canonical_path(directory) {
             Ok(canonical) => PathBuf::from(canonical),
@@ -351,13 +434,15 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
     pub async fn scan_directory_with_policy(&self, policy: &ScanPolicy) -> Result<ScanResult> {
         let directory = &policy.root;
-        let canonical_dir = match self.filesystem_manager.get_canonical_path(directory) {
-            Ok(canonical) => PathBuf::from(canonical),
-            Err(error) => {
-                warn!("Failed to canonicalize {}: {error}", directory.display());
-                self.filesystem_manager.normalize_path(directory)
-            }
-        };
+        let canonical_dir = policy
+            .secure_canonical_path(directory, self.filesystem_manager.as_ref())
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "configured media directory is a symbolic link or escapes its root: {}",
+                    directory.display()
+                )
+            })?;
         self.filesystem_manager.validate_path(&canonical_dir)?;
         let mut effective_policy = policy.clone();
         effective_policy.root = canonical_dir.clone();
@@ -367,13 +452,27 @@ impl<D: DatabaseManager> MediaScanner<D> {
             .get_files_in_directory(&canonical_dir)
             .await?;
         let mut current_files = Vec::new();
+        let mut rejected_symlinks = 0usize;
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
-            if effective_policy.allows_media(&path) && tokio::fs::metadata(&path).await?.is_file() {
-                current_files.push(self.create_media_file_from_path(&path).await?);
+            let file_type = entry.file_type().await?;
+            if file_type.is_symlink() {
+                warn!("Skipping symbolic link: {}", path.display());
+                rejected_symlinks += 1;
+                continue;
+            }
+            if effective_policy.allows_media(&path) && file_type.is_file() {
+                if let Some(canonical_path) = policy
+                    .secure_canonical_path(&path, self.filesystem_manager.as_ref())
+                    .await?
+                {
+                    current_files.push(self.create_media_file_from_path(&canonical_path).await?);
+                } else {
+                    rejected_symlinks += 1;
+                }
             }
         }
-        if current_files.is_empty() && !existing_files.is_empty() {
+        if current_files.is_empty() && !existing_files.is_empty() && rejected_symlinks == 0 {
             let mut result = ScanResult::new();
             result.complete = false;
             result.total_scanned = 0;
@@ -514,7 +613,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             );
             let removed_count = self
                 .database_manager
-                .bulk_remove_media_files(&files_to_remove)
+                .bulk_remove_canonical_media_files(&files_to_remove)
                 .await?;
             tracing::debug!(
                 "Successfully removed {} out of {} requested files",
@@ -603,18 +702,15 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         let directory = &policy.root;
 
-        // Use canonical path normalization for consistent database storage
-        let canonical_root = match self.filesystem_manager.get_canonical_path(directory) {
-            Ok(canonical) => PathBuf::from(canonical),
-            Err(e) => {
-                warn!(
-                    "Failed to get canonical path for {}: {}, using basic normalization",
-                    directory.display(),
-                    e
-                );
-                self.filesystem_manager.normalize_path(directory)
-            }
-        };
+        let canonical_root = policy
+            .secure_canonical_path(directory, self.filesystem_manager.as_ref())
+            .await?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "configured media directory is a symbolic link or escapes its root: {}",
+                    directory.display()
+                )
+            })?;
 
         info!(
             "Starting parallel directory scan of: {}",
@@ -646,6 +742,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 uncertain_prefixes: Vec::new(),
                 errors: Vec::new(),
                 root_complete: true,
+                rejected_symlinks: 0,
             };
             for entry in WalkDir::new(&root_clone).skip_hidden(false) {
                 match entry {
@@ -654,6 +751,10 @@ impl<D: DatabaseManager> MediaScanner<D> {
                         if traversal_policy.allows_media(&path) {
                             report.file_paths.push(path);
                         }
+                    }
+                    Ok(entry) if entry.file_type().is_symlink() => {
+                        warn!("Skipping symbolic link: {}", entry.path().display());
+                        report.rejected_symlinks += 1;
                     }
                     Ok(_) => {}
                     Err(error) => {
@@ -683,7 +784,8 @@ impl<D: DatabaseManager> MediaScanner<D> {
             .keys()
             .filter(|path| path.starts_with(&canonical_root))
             .count();
-        let suspect_empty_root = total_files == 0 && existing_in_root > 0;
+        let suspect_empty_root =
+            total_files == 0 && existing_in_root > 0 && traversal.rejected_symlinks == 0;
         info!(
             "Found {} media files, processing in batches of {}",
             total_files, BATCH_SIZE
@@ -708,8 +810,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let mut processed = 0;
 
         for path in file_paths {
-            // jwalk descendants inherit the already-canonical root. It does not
-            // follow file symlinks, so ordinary entries require no syscall here.
+            let Some(path) = policy
+                .secure_canonical_path(&path, self.filesystem_manager.as_ref())
+                .await?
+            else {
+                continue;
+            };
             current_paths.insert(path.clone());
 
             // Create MediaFile from path
@@ -826,7 +932,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 files_to_remove.len()
             );
             self.database_manager
-                .bulk_remove_media_files(&files_to_remove)
+                .bulk_remove_canonical_media_files(&files_to_remove)
                 .await?;
             let removed_paths = files_to_remove.iter().collect::<HashSet<_>>();
             for (path, file) in existing_files_map.iter() {
@@ -857,13 +963,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
     /// Traverse and materialize a subtree without changing the database. Any
     /// traversal or metadata error fails the complete staging operation.
     pub async fn stage_directory_with_policy(&self, policy: &ScanPolicy) -> Result<Vec<MediaFile>> {
-        let canonical_root = PathBuf::from(
-            self.filesystem_manager
-                .get_canonical_path(&policy.root)
-                .map_err(|error| {
-                    anyhow::anyhow!("failed to canonicalize rename destination: {error}")
-                })?,
-        );
+        let Some(canonical_root) = policy
+            .secure_canonical_path(&policy.root, self.filesystem_manager.as_ref())
+            .await?
+        else {
+            return Ok(Vec::new());
+        };
         let mut traversal_policy = policy.clone();
         traversal_policy.root = canonical_root.clone();
         let recursive = traversal_policy.recursive;
@@ -871,6 +976,10 @@ impl<D: DatabaseManager> MediaScanner<D> {
             let mut paths = Vec::new();
             for entry in jwalk::WalkDir::new(&canonical_root).skip_hidden(false) {
                 let entry = entry.map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                if entry.file_type().is_symlink() {
+                    warn!("Skipping symbolic link: {}", entry.path().display());
+                    continue;
+                }
                 if entry.file_type().is_file() {
                     let path = entry.path();
                     if (!recursive && path.parent() != Some(canonical_root.as_path()))
@@ -886,7 +995,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
         .await??;
         let mut files = Vec::with_capacity(paths.len());
         for path in paths {
-            files.push(self.create_media_file_from_path(&path).await?);
+            if let Some(path) = policy
+                .secure_canonical_path(&path, self.filesystem_manager.as_ref())
+                .await?
+            {
+                files.push(self.create_media_file_from_path(&path).await?);
+            }
         }
         Ok(files)
     }
@@ -931,9 +1045,9 @@ pub(crate) async fn build_media_file_from_path(
         track_number: None,
         year: None,
         album_artist: None,
-        subtitle_available: tokio::fs::try_exists(path.with_extension("srt"))
+        subtitle_available: tokio::fs::symlink_metadata(path.with_extension("srt"))
             .await
-            .unwrap_or(false),
+            .is_ok_and(|metadata| metadata.is_file() && !metadata.file_type().is_symlink()),
         created_at: SystemTime::now(),
         updated_at: SystemTime::now(),
     };
@@ -1252,16 +1366,22 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn direct_scan_resolves_only_symlinked_media_entries() {
+    async fn direct_scan_rejects_internal_and_external_file_symlinks() {
         use std::os::unix::fs::symlink;
 
         let temp = tempdir().unwrap();
         let media_root = temp.path().join("media");
         tokio::fs::create_dir(&media_root).await.unwrap();
-        let target = temp.path().join("target.mp4");
-        tokio::fs::write(&target, b"video").await.unwrap();
-        let link = media_root.join("visible-name.mp4");
-        symlink(&target, &link).unwrap();
+        let internal_target = media_root.join("internal-target.mp4");
+        let external_target = temp.path().join("external-target.mp4");
+        tokio::fs::write(&internal_target, b"internal")
+            .await
+            .unwrap();
+        tokio::fs::write(&external_target, b"external")
+            .await
+            .unwrap();
+        symlink(&internal_target, media_root.join("internal-link.mp4")).unwrap();
+        symlink(&external_target, media_root.join("external-link.mp4")).unwrap();
 
         let database = Arc::new(
             RedbDatabase::new(temp.path().join("symlink.redb"))
@@ -1276,8 +1396,119 @@ mod tests {
 
         let result = scanner.scan_directory(&media_root).await.unwrap();
         assert_eq!(result.new_files.len(), 1);
-        assert_eq!(result.new_files[0].filename, "visible-name.mp4");
-        assert_eq!(result.new_files[0].path, target.canonicalize().unwrap());
+        assert_eq!(result.new_files[0].filename, "internal-target.mp4");
+        assert_eq!(
+            result.new_files[0].path,
+            internal_target.canonicalize().unwrap()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recursive_scan_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let media_root = temp.path().join("media");
+        let external = temp.path().join("external");
+        tokio::fs::create_dir(&media_root).await.unwrap();
+        tokio::fs::create_dir(&external).await.unwrap();
+        tokio::fs::write(external.join("secret.mp4"), b"secret")
+            .await
+            .unwrap();
+        symlink(&external, media_root.join("linked-directory")).unwrap();
+
+        let database = Arc::new(
+            RedbDatabase::new(temp.path().join("directory-symlink.redb"))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+        let scanner = MediaScanner::with_filesystem_manager(
+            Box::new(BaseFileSystemManager::new(true)),
+            database,
+        );
+
+        let result = scanner.scan_directory_recursive(&media_root).await.unwrap();
+        assert!(result.new_files.is_empty());
+        assert_eq!(result.total_scanned, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reconciliation_removes_file_replaced_by_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let media_root = temp.path().join("media");
+        tokio::fs::create_dir(&media_root).await.unwrap();
+        let indexed_path = media_root.join("movie.mp4");
+        tokio::fs::write(&indexed_path, b"video").await.unwrap();
+
+        let database = Arc::new(
+            RedbDatabase::new(temp.path().join("reconcile-symlink.redb"))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+        let scanner = MediaScanner::with_filesystem_manager(
+            Box::new(BaseFileSystemManager::new(true)),
+            database.clone(),
+        );
+        assert_eq!(
+            scanner
+                .scan_directory_recursive(&media_root)
+                .await
+                .unwrap()
+                .new_files
+                .len(),
+            1
+        );
+
+        let external = temp.path().join("outside.mp4");
+        tokio::fs::write(&external, b"outside").await.unwrap();
+        tokio::fs::remove_file(&indexed_path).await.unwrap();
+        symlink(&external, &indexed_path).unwrap();
+
+        let result = scanner.scan_directory_recursive(&media_root).await.unwrap();
+        assert_eq!(result.removed_files.len(), 1);
+        let remaining = database.stream_all_media_files().collect::<Vec<_>>().await;
+        assert!(remaining.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rename_staging_rejects_a_symlinked_destination_directory() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let media_root = temp.path().join("media");
+        let external = temp.path().join("external");
+        tokio::fs::create_dir(&media_root).await.unwrap();
+        tokio::fs::create_dir(&external).await.unwrap();
+        tokio::fs::write(external.join("secret.mp4"), b"secret")
+            .await
+            .unwrap();
+        let linked = media_root.join("renamed");
+        symlink(&external, &linked).unwrap();
+
+        let database = Arc::new(
+            RedbDatabase::new(temp.path().join("stage-symlink.redb"))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+        let scanner = MediaScanner::with_filesystem_manager(
+            Box::new(BaseFileSystemManager::new(true)),
+            database,
+        );
+        let policy = ScanPolicy::platform_default(&media_root, true);
+
+        assert!(scanner
+            .stage_directory_with_policy(&policy.for_subtree(&linked))
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
 #[test]

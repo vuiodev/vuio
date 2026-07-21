@@ -294,7 +294,9 @@ async fn test_cover_art_retrieval_and_xml() {
     let file_id = db_file.id.unwrap();
 
     // 6. Setup mock AppState
-    let config = Arc::new(AppConfig::default());
+    let mut config = AppConfig::default();
+    config.media.directories[0].path = media_dir.to_string_lossy().into_owned();
+    let config = Arc::new(config);
     let platform_info = Arc::new(PlatformInfo::detect().await.unwrap());
     let filesystem_manager = Arc::from(create_platform_filesystem_manager());
     let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));

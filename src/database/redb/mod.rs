@@ -948,6 +948,10 @@ impl MediaRepository for RedbDatabase {
         RedbDatabase::bulk_remove_media_files_impl(self, paths).await
     }
 
+    async fn bulk_remove_canonical_media_files(&self, paths: &[PathBuf]) -> Result<usize> {
+        RedbDatabase::bulk_remove_canonical_media_files_impl(self, paths).await
+    }
+
     async fn remove_media_under_path(&self, path: &Path) -> Result<RemovalSummary> {
         RedbDatabase::remove_media_under_path_impl(self, path).await
     }

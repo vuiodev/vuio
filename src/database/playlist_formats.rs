@@ -343,7 +343,14 @@ impl PlaylistFileManager {
 
         let mut imported_playlists = Vec::new();
 
-        if !directory.is_dir() {
+        let directory_metadata = tokio::fs::symlink_metadata(directory).await?;
+        if directory_metadata.file_type().is_symlink() {
+            return Err(anyhow!(
+                "Playlist directory cannot be a symbolic link: {}",
+                directory.display()
+            ));
+        }
+        if !directory_metadata.is_dir() {
             return Err(anyhow!("Path is not a directory: {}", directory.display()));
         }
 
@@ -351,8 +358,21 @@ impl PlaylistFileManager {
 
         while let Ok(Some(entry)) = entries.next_entry().await {
             let path = entry.path();
+            let file_type = match entry.file_type().await {
+                Ok(file_type) => file_type,
+                Err(error) => {
+                    warn!(
+                        "Failed to inspect playlist path {}: {}",
+                        path.display(),
+                        error
+                    );
+                    continue;
+                }
+            };
 
-            if path.is_file() {
+            if file_type.is_symlink() {
+                warn!("Skipping symbolic link: {}", path.display());
+            } else if file_type.is_file() {
                 if let Some(_format) = PlaylistFormat::from_extension(&path) {
                     if is_radio_playlist_path(&path) {
                         if let Err(e) = Self::import_radio_playlist(database, &path).await {
@@ -396,7 +416,10 @@ impl PlaylistFileManager {
         let mut dirs_to_scan = vec![directory.to_path_buf()];
 
         while let Some(current_dir) = dirs_to_scan.pop() {
-            if !current_dir.is_dir() {
+            let Ok(current_metadata) = tokio::fs::symlink_metadata(&current_dir).await else {
+                continue;
+            };
+            if current_metadata.file_type().is_symlink() || !current_metadata.is_dir() {
                 continue;
             }
 
@@ -410,8 +433,21 @@ impl PlaylistFileManager {
 
             while let Ok(Some(entry)) = entries.next_entry().await {
                 let path = entry.path();
+                let file_type = match entry.file_type().await {
+                    Ok(file_type) => file_type,
+                    Err(error) => {
+                        warn!(
+                            "Failed to inspect playlist path {}: {}",
+                            path.display(),
+                            error
+                        );
+                        continue;
+                    }
+                };
 
-                if path.is_dir() {
+                if file_type.is_symlink() {
+                    warn!("Skipping symbolic link: {}", path.display());
+                } else if file_type.is_dir() {
                     // Skip hidden directories
                     if path
                         .file_name()
@@ -419,7 +455,7 @@ impl PlaylistFileManager {
                     {
                         dirs_to_scan.push(path);
                     }
-                } else if path.is_file() && PlaylistFormat::from_extension(&path).is_some() {
+                } else if file_type.is_file() && PlaylistFormat::from_extension(&path).is_some() {
                     if is_radio_playlist_path(&path) {
                         if let Err(e) = Self::import_radio_playlist(database, &path).await {
                             warn!("Failed to import radio playlist {}: {}", path.display(), e);

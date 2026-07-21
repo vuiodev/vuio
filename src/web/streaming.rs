@@ -14,6 +14,34 @@ use tracing::{debug, error};
 
 use super::diagnostics::WebHandlerMetrics;
 
+async fn secure_indexed_path<D: DatabaseManager>(
+    state: &AppState<D>,
+    path: &std::path::Path,
+) -> Result<PathBuf, AppError> {
+    for policy in crate::media::ScanPolicy::policies(&state.current_config()) {
+        match policy
+            .secure_canonical_path(path, state.filesystem_manager.as_ref())
+            .await
+        {
+            Ok(Some(path)) => return Ok(path),
+            Ok(None) => {}
+            Err(error) => {
+                debug!(path = %path.display(), %error, "Rejected inaccessible indexed path");
+            }
+        }
+    }
+    state.web_metrics.record_error();
+    Err(AppError::NotFound)
+}
+
+async fn open_read_only_no_follow(path: &std::path::Path) -> std::io::Result<tokio::fs::File> {
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true).write(false);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW);
+    options.open(path).await
+}
+
 fn content_disposition(filename: &str) -> String {
     let mut fallback = String::with_capacity(filename.len().min(255));
     for character in filename.chars() {
@@ -98,6 +126,7 @@ pub async fn serve_media<D: DatabaseManager>(
                 .into_response(),
         );
     }
+    let media_path = secure_indexed_path(&state, &file_info.path).await?;
 
     // Record dynamic client telemetry for GET requests (playing)
     if method == Method::GET {
@@ -136,10 +165,7 @@ pub async fn serve_media<D: DatabaseManager>(
     }
 
     // Enforce read-only access to media files
-    let mut file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(&file_info.path)
+    let mut file = open_read_only_no_follow(&media_path)
         .await
         .map_err(AppError::Io)?;
 
@@ -348,15 +374,10 @@ pub async fn serve_subtitle<D: DatabaseManager>(
             AppError::NotFound
         })?;
 
-    let srt_path = PathBuf::from(&file_info.path).with_extension("srt");
-    if !tokio::fs::try_exists(&srt_path).await.unwrap_or(false) {
-        return Err(AppError::NotFound);
-    }
+    let media_path = secure_indexed_path(&state, &file_info.path).await?;
+    let srt_path = secure_indexed_path(&state, &media_path.with_extension("srt")).await?;
 
-    let file = tokio::fs::OpenOptions::new()
-        .read(true)
-        .write(false)
-        .open(&srt_path)
+    let file = open_read_only_no_follow(&srt_path)
         .await
         .map_err(AppError::Io)?;
 
@@ -395,11 +416,11 @@ pub async fn serve_cover<D: DatabaseManager>(
     if !file_info.mime_type.starts_with("audio/") {
         return Err(AppError::NotFound);
     }
+    let media_path = secure_indexed_path(&state, &file_info.path).await?;
 
     // 1. Primary: Search parent directory for cover images (fast)
-    if let Some(parent) = file_info.path.parent() {
-        let base_name = file_info
-            .path
+    if let Some(parent) = media_path.parent() {
+        let base_name = media_path
             .file_stem()
             .and_then(|s| s.to_str())
             .unwrap_or("");
@@ -414,12 +435,15 @@ pub async fn serve_cover<D: DatabaseManager>(
         for name in &cover_filenames {
             for ext in &extensions {
                 let img_path = parent.join(format!("{}.{}", name, ext));
-                if let Ok(metadata) = tokio::fs::metadata(&img_path).await {
-                    if metadata.is_file() {
+                if let Ok(metadata) = tokio::fs::symlink_metadata(&img_path).await {
+                    if metadata.is_file() && !metadata.file_type().is_symlink() {
                         let size = metadata.len();
                         if size <= 10 * 1024 * 1024 {
                             // Cap cover size to 10MB
-                            if let Ok(file) = tokio::fs::File::open(&img_path).await {
+                            let Ok(img_path) = secure_indexed_path(&state, &img_path).await else {
+                                continue;
+                            };
+                            if let Ok(file) = open_read_only_no_follow(&img_path).await {
                                 let content_type =
                                     crate::platform::filesystem::get_mime_type_for_extension(ext);
                                 let stream = tokio_util::io::ReaderStream::new(file);
@@ -436,7 +460,7 @@ pub async fn serve_cover<D: DatabaseManager>(
     }
 
     // 2. Secondary: Extract embedded artwork from audio tags using audiotags (blocking task)
-    let path = file_info.path.clone();
+    let path = media_path;
     let tag_result =
         tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
 
@@ -498,5 +522,19 @@ mod range_tests {
             parse_range_header("bytes=8-3", 10),
             Err(AppError::InvalidRange)
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn no_follow_open_rejects_a_last_moment_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("target.mp4");
+        let link = temp.path().join("link.mp4");
+        tokio::fs::write(&target, b"secret").await.unwrap();
+        symlink(&target, &link).unwrap();
+
+        assert!(open_read_only_no_follow(&link).await.is_err());
     }
 }

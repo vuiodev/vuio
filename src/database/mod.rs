@@ -655,6 +655,13 @@ pub trait MediaRepository: Send + Sync {
     /// Remove multiple media files by paths in a single batch operation.
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
 
+    /// Remove scanner-owned records whose paths are already canonical. This
+    /// avoids resolving a path that may have been replaced by a symlink after
+    /// it was indexed.
+    async fn bulk_remove_canonical_media_files(&self, paths: &[PathBuf]) -> Result<usize> {
+        self.bulk_remove_media_files(paths).await
+    }
+
     /// Atomically remove every media file at or below a path component boundary.
     async fn remove_media_under_path(&self, path: &Path) -> Result<RemovalSummary>;
 
