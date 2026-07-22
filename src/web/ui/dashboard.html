@@ -1160,6 +1160,21 @@
             <div id="tv-list-container" style="display: flex; flex-direction: column; gap: 0.75rem; margin: 0.25rem 0; max-height: 250px; overflow-y: auto; padding-right: 4px;">
                 <!-- TV buttons will be dynamically generated here -->
             </div>
+            <fieldset id="tv-remember-fieldset" style="border: 0; padding: 0.5rem 0.25rem 0; margin: 0; display: flex; flex-direction: column; gap: 0.45rem;">
+                <legend style="padding: 0; margin-bottom: 0.35rem; color: var(--text-secondary); font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;">Remember this device</legend>
+                <label style="display: flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.88rem; cursor: pointer; user-select: none;">
+                    <input type="radio" name="tv-remember" value="none" checked style="accent-color: var(--accent-color); cursor: pointer; margin: 0;">
+                    <span>Just this once</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.88rem; cursor: pointer; user-select: none;">
+                    <input type="radio" name="tv-remember" value="session" style="accent-color: var(--accent-color); cursor: pointer; margin: 0;">
+                    <span>For this session</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.88rem; cursor: pointer; user-select: none;">
+                    <input type="radio" name="tv-remember" value="forever" style="accent-color: var(--accent-color); cursor: pointer; margin: 0;">
+                    <span>Always</span>
+                </label>
+            </fieldset>
             <button onclick="closeTvModal()" style="background: rgba(255, 255, 255, 0.04); border: 1px solid var(--card-border); color: var(--text-secondary); border-radius: 10px; padding: 0.7rem; cursor: pointer; transition: all 0.2s; font-weight: 600;" onmouseover="this.style.background='rgba(255,255,255,0.08)'; this.style.color='var(--text-primary)';" onmouseout="this.style.background='rgba(255,255,255,0.04)'; this.style.color='var(--text-secondary)';">Cancel</button>
         </div>
     </div>
@@ -1173,6 +1188,29 @@
         let currentTrackIndex = -1;
         let imageList = [];
         let currentImageIndex = -1;
+
+        const PREFERRED_RENDERER_KEY = 'vuio.preferredRendererId';
+        function getPreferredRendererId() {
+            try {
+                const sess = sessionStorage.getItem(PREFERRED_RENDERER_KEY);
+                if (sess) return sess;
+                return localStorage.getItem(PREFERRED_RENDERER_KEY);
+            } catch { return null; }
+        }
+        function setPreferredRendererId(id, scope) {
+            try {
+                if (scope === 'session') sessionStorage.setItem(PREFERRED_RENDERER_KEY, id);
+                else if (scope === 'forever') localStorage.setItem(PREFERRED_RENDERER_KEY, id);
+            } catch {}
+        }
+        function selectedRememberScope() {
+            const checked = document.querySelector('input[name="tv-remember"]:checked');
+            return checked ? checked.value : 'none';
+        }
+        function resetRememberRadios() {
+            const none = document.querySelector('input[name="tv-remember"][value="none"]');
+            if (none) none.checked = true;
+        }
 
         function switchNav(nav) {
             activeNav = nav;
@@ -1296,6 +1334,15 @@
                         return;
                     }
                     
+                    const preferredId = getPreferredRendererId();
+                    const preferredMatch = preferredId
+                        ? renderers.find(r => String(r.id) === String(preferredId))
+                        : null;
+                    if (preferredMatch) {
+                        castPlaylistToRenderer(preferredMatch, folderName, fileIds);
+                        return;
+                    }
+
                     if (renderers.length === 1) {
                         // Only one TV found, cast immediately!
                         castPlaylistToRenderer(renderers[0], folderName, fileIds);
@@ -1312,6 +1359,7 @@
 
         function showRendererSelectionModal(renderers, folderName, fileIds) {
             document.getElementById('tv-modal-folder-name').textContent = folderName;
+            resetRememberRadios();
             const container = document.getElementById('tv-list-container');
             container.replaceChildren();
             
@@ -1319,6 +1367,10 @@
                 const btn = document.createElement('button');
                 btn.className = 'tv-select-btn';
                 btn.onclick = () => {
+                    const scope = selectedRememberScope();
+                    if (scope !== 'none') {
+                        setPreferredRendererId(renderer.id, scope);
+                    }
                     closeTvModal();
                     castPlaylistToRenderer(renderer, folderName, fileIds);
                 };
@@ -1377,6 +1429,15 @@
                         return;
                     }
                     
+                    const preferredId = getPreferredRendererId();
+                    const preferredMatch = preferredId
+                        ? renderers.find(r => String(r.id) === String(preferredId))
+                        : null;
+                    if (preferredMatch) {
+                        castFileToRenderer(preferredMatch, file);
+                        return;
+                    }
+
                     if (renderers.length === 1) {
                         castFileToRenderer(renderers[0], file);
                     } else {
@@ -1391,6 +1452,7 @@
 
         function showFileRendererSelectionModal(renderers, file) {
             document.getElementById('tv-modal-folder-name').textContent = file.title || file.name;
+            resetRememberRadios();
             const container = document.getElementById('tv-list-container');
             container.replaceChildren();
             
@@ -1398,6 +1460,10 @@
                 const btn = document.createElement('button');
                 btn.className = 'tv-select-btn';
                 btn.onclick = () => {
+                    const scope = selectedRememberScope();
+                    if (scope !== 'none') {
+                        setPreferredRendererId(renderer.id, scope);
+                    }
                     closeTvModal();
                     castFileToRenderer(renderer, file);
                 };
