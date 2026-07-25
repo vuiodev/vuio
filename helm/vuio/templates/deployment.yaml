@@ -57,6 +57,10 @@ spec:
             - name: VUIO_IP
               value: {{ .Values.env.VUIO_IP | quote }}
             {{- end }}
+            {{- if .Values.env.VUIO_AUTH }}
+            - name: VUIO_AUTH
+              value: {{ .Values.env.VUIO_AUTH | quote }}
+            {{- end }}
           volumeMounts:
             {{- if .Values.persistence.config.enabled }}
             - name: config

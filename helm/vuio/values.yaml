@@ -40,6 +40,8 @@ env:
   VUIO_DB_PATH: /config/media.db
   # Set VUIO_IP if hostNetwork is true, or use auto-detect
   VUIO_IP: ""
+  # Set to true to enable management authentication
+  VUIO_AUTH: ""
 
 service:
   type: ClusterIP

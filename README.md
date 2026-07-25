@@ -78,6 +78,7 @@ Options:
       --log-file <PATH>    Path to custom log file
       --log-level <LEVEL>  Set log level (off, error, warn, info, debug, trace)
       --update             Update binary to the latest version from GitHub
+      --auth               Enable administrative authentication
   -h, --help               Print help
   -V, --version            Print version
 ```
@@ -189,6 +190,8 @@ docker run -d \
 | `VUIO_DB_PATH` | /data/vuio.redb | Database file path |
 | `VUIO_MULTICAST_TTL` | 4 | Multicast TTL |
 | `VUIO_ANNOUNCE_INTERVAL` | 30 | SSDP announce interval (seconds) |
+| `VUIO_AUTH` | false | Enable administrative/management authentication |
+| `VUIO_ADMIN_TOKEN` | - | Pre-configured admin password token for sign in |
 
 **Find your host IP:**
 ```bash
@@ -522,12 +525,31 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
      -d '{"jsonrpc":"2.0","method":"tools/call","id":2,"params":{"name":"search_media","arguments":{"query":"matrix"}}}'
    ```
 
-3. **Cast to Bedroom TV**:
-   ```bash
-   curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/call","id":3,"params":{"name":"cast_media_to_renderer","arguments":{"file_id":42,"renderer_id":"uuid:renderer-id"}}}'
-   ```
+    ```
+
+## Security & Authentication
+
+By default, the web interface and management endpoints run without authentication for easy local usage.
+
+### Enabling Authentication
+
+To enable administrative/management authentication, start VuIO with either:
+- The `--auth` command-line option
+- The `VUIO_AUTH=true` environment variable
+
+When enabled:
+- Visits to the dashboard in the browser will be redirected to a secure sign-in page.
+- You must sign in using the administration token.
+- API endpoints (excluding DLNA/UPnP SOAP endpoints) will require a session cookie or bearer token.
+
+### Setting the Admin Token
+
+On startup, if no pre-defined token is found, VuIO generates a random cryptographically secure token and writes it to a file named `admin.token` in the configuration directory (e.g. `./admin.token`). Keep this file private.
+
+You can also set a pre-defined administration token via the `VUIO_ADMIN_TOKEN` environment variable:
+```bash
+export VUIO_ADMIN_TOKEN="your-custom-secure-token"
+```
 
 ---
 

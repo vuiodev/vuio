@@ -60,7 +60,7 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         ));
 
     Router::new()
-        .route("/login", get(auth::login_page).post(auth::login::<D>))
+        .route("/login", get(auth::login_page::<D>).post(auth::login::<D>))
         .route("/description.xml", get(soap::description_handler::<D>))
         .route("/ContentDirectory.xml", get(soap::content_directory_scpd))
         .route(

@@ -56,7 +56,7 @@ impl std::fmt::Debug for AuthState {
 }
 
 impl AuthState {
-    pub fn load(config: &ManagementConfig, config_path: &Path) -> Result<Self> {
+    pub fn load(config: &ManagementConfig, config_path: &Path, cli_auth: bool) -> Result<Self> {
         let token_path = config
             .token_file
             .as_deref()
@@ -98,8 +98,14 @@ impl AuthState {
                     .with_context(|| format!("invalid management network {network}"))
             })
             .collect::<Result<Vec<_>>>()?;
+
+        let env_auth = std::env::var("VUIO_AUTH")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let enabled = cli_auth || env_auth;
+
         Ok(Self {
-            enabled: config.enabled,
+            enabled,
             admin_token,
             sessions: Mutex::new(HashMap::new()),
             login_attempts: Mutex::new(HashMap::new()),
@@ -312,14 +318,265 @@ fn write_private_token(path: &Path, token: &str) -> Result<()> {
 #[derive(Deserialize)]
 pub struct LoginRequest {
     token: String,
+    save_device: Option<bool>,
 }
 
-pub async fn login_page() -> Html<&'static str> {
+pub async fn login_page<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+) -> Response {
+    if !state.auth.enabled() {
+        return axum::response::Redirect::to("/").into_response();
+    }
     Html(
-        r#"<!doctype html><meta charset="utf-8"><title>VuIO login</title>
-<form id="login"><input id="token" type="password" autocomplete="current-password" placeholder="Admin token"><button>Sign in</button></form>
-<p id="error"></p><script>document.getElementById('login').onsubmit=async(e)=>{e.preventDefault();const r=await fetch('/login',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({token:document.getElementById('token').value})});if(r.ok)location='/';else document.getElementById('error').textContent='Login failed';};</script>"#,
-    )
+        r#"<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Sign In - VuIO</title>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: #111827;
+            --card-border: rgba(255, 255, 255, 0.05);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --accent-color: #00f0ff;
+            --accent-glow: rgba(0, 240, 255, 0.4);
+            --error-color: #ef4444;
+        }
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+        body {
+            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            background: var(--bg-color);
+            color: var(--text-primary);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 1.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+        body::before {
+            content: '';
+            position: absolute;
+            width: 400px;
+            height: 400px;
+            background: radial-gradient(circle, var(--accent-glow) 0%, rgba(0,0,0,0) 70%);
+            top: -100px;
+            right: -100px;
+            z-index: 0;
+            pointer-events: none;
+            opacity: 0.5;
+        }
+        body::after {
+            content: '';
+            position: absolute;
+            width: 500px;
+            height: 500px;
+            background: radial-gradient(circle, rgba(99, 102, 241, 0.15) 0%, rgba(0,0,0,0) 70%);
+            bottom: -150px;
+            left: -150px;
+            z-index: 0;
+            pointer-events: none;
+            opacity: 0.5;
+        }
+        .login-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 20px;
+            width: 100%;
+            max-width: 400px;
+            padding: 2.5rem;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            backdrop-filter: blur(10px);
+            z-index: 10;
+            display: flex;
+            flex-direction: column;
+            gap: 1.75rem;
+            animation: fadeIn 0.6s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(15px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .header {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 0.5rem;
+            text-align: center;
+        }
+        .logo {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: linear-gradient(135deg, var(--accent-color), #6366f1);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            box-shadow: 0 0 20px var(--accent-glow);
+            margin-bottom: 0.5rem;
+            color: #fff;
+        }
+        h2 {
+            font-size: 1.6rem;
+            font-weight: 700;
+            letter-spacing: -0.025em;
+        }
+        .subtitle {
+            font-size: 0.88rem;
+            color: var(--text-secondary);
+        }
+        .input-group {
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+        .input-group label {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+        .input-wrapper {
+            position: relative;
+        }
+        input[type="password"] {
+            width: 100%;
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            padding: 0.85rem 1rem;
+            color: #fff;
+            font-family: inherit;
+            font-size: 0.95rem;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+        input[type="password"]:focus {
+            border-color: var(--accent-color);
+            background: rgba(255, 255, 255, 0.04);
+            box-shadow: 0 0 10px rgba(0, 240, 255, 0.15);
+        }
+        .checkbox-group {
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+            cursor: pointer;
+            user-select: none;
+        }
+        .checkbox-group input[type="checkbox"] {
+            accent-color: var(--accent-color);
+            width: 16px;
+            height: 16px;
+            cursor: pointer;
+        }
+        .checkbox-group span {
+            font-size: 0.88rem;
+            color: var(--text-secondary);
+            transition: color 0.2s;
+        }
+        .checkbox-group:hover span {
+            color: var(--text-primary);
+        }
+        button {
+            width: 100%;
+            background: linear-gradient(135deg, var(--accent-color), #6366f1);
+            border: none;
+            border-radius: 10px;
+            color: #fff;
+            padding: 0.9rem;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            box-shadow: 0 4px 15px rgba(99, 102, 241, 0.25);
+            transition: all 0.2s ease;
+            outline: none;
+        }
+        button:hover {
+            box-shadow: 0 4px 20px var(--accent-glow);
+            transform: translateY(-1px);
+        }
+        button:active {
+            transform: translateY(0);
+        }
+        .error-message {
+            font-size: 0.85rem;
+            color: var(--error-color);
+            background: rgba(239, 68, 68, 0.08);
+            border: 1px solid rgba(239, 68, 68, 0.15);
+            padding: 0.75rem;
+            border-radius: 8px;
+            display: none;
+            align-items: center;
+            gap: 0.5rem;
+            text-align: left;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="header">
+            <div class="logo">
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+            </div>
+            <h2>Sign In</h2>
+            <p class="subtitle">Management token is required</p>
+        </div>
+        <form id="login" style="display: flex; flex-direction: column; gap: 1.25rem;">
+            <div class="input-group">
+                <label for="token">Token</label>
+                <div class="input-wrapper">
+                    <input id="token" type="password" autocomplete="current-password" placeholder="Enter admin token" required autofocus>
+                </div>
+            </div>
+            <label class="checkbox-group">
+                <input id="save-device" type="checkbox">
+                <span>Save this device</span>
+            </label>
+            <div id="error" class="error-message"></div>
+            <button type="submit">Sign In</button>
+        </form>
+    </div>
+    <script>
+        document.getElementById('login').onsubmit = async (e) => {
+            e.preventDefault();
+            const token = document.getElementById('token').value;
+            const saveDevice = document.getElementById('save-device').checked;
+            const errEl = document.getElementById('error');
+            
+            errEl.style.display = 'none';
+
+            try {
+                const r = await fetch('/login', {
+                    method: 'POST',
+                    headers: { 'content-type': 'application/json' },
+                    body: JSON.stringify({ token, save_device: saveDevice })
+                });
+                if (r.ok) {
+                    location = '/';
+                } else {
+                    errEl.style.display = 'block';
+                    errEl.textContent = 'Invalid administration token';
+                }
+            } catch (err) {
+                errEl.style.display = 'block';
+                errEl.textContent = 'Connection failed';
+            }
+        };
+    </script>
+</body>
+</html>"#,
+    ).into_response()
 }
 
 pub async fn login<D: DatabaseManager>(
@@ -339,15 +596,21 @@ pub async fn login<D: DatabaseManager>(
     let Some(session) = state.auth.create_session(peer.ip()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+
+    let cookie_header = if request.save_device.unwrap_or(false) {
+        format!(
+            "vuio_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+            30 * 24 * 3600
+        )
+    } else {
+        format!(
+            "vuio_session={session}; HttpOnly; SameSite=Strict; Path=/"
+        )
+    };
+
     (
         StatusCode::NO_CONTENT,
-        [(
-            header::SET_COOKIE,
-            format!(
-                "vuio_session={session}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
-                state.auth.session_ttl.as_secs()
-            ),
-        )],
+        [(header::SET_COOKIE, cookie_header)],
     )
         .into_response()
 }
@@ -374,7 +637,7 @@ pub async fn require_management<D: DatabaseManager>(
     next: Next,
 ) -> Response {
     if !state.auth.enabled() {
-        return StatusCode::NOT_FOUND.into_response();
+        return next.run(request).await;
     }
     if !state.auth.network_allowed(peer.ip()) {
         return StatusCode::FORBIDDEN.into_response();
@@ -391,6 +654,10 @@ pub async fn require_management<D: DatabaseManager>(
         .session_from_headers(request.headers(), peer.ip())
         .is_some();
     if !bearer && !cookie {
+        let path = request.uri().path();
+        if request.method() == Method::GET && (path == "/" || path == "/logs" || (!path.starts_with("/api") && !path.starts_with("/sse"))) {
+            return axum::response::Redirect::to("/login").into_response();
+        }
         return StatusCode::UNAUTHORIZED.into_response();
     }
     if cookie

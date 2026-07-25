@@ -4,8 +4,8 @@ pub(super) fn default_cleanup_deleted_files() -> bool {
     true
 }
 
-pub(super) fn default_true() -> bool {
-    true
+pub(super) fn default_false() -> bool {
+    false
 }
 
 pub(super) fn default_session_ttl_hours() -> u64 {
@@ -40,7 +40,7 @@ pub struct AppConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ManagementConfig {
-    #[serde(default = "default_true")]
+    #[serde(default = "default_false")]
     pub enabled: bool,
     pub token_file: Option<String>,
     #[serde(default = "default_session_ttl_hours")]
@@ -52,7 +52,7 @@ pub struct ManagementConfig {
 impl Default for ManagementConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             token_file: None,
             session_ttl_hours: default_session_ttl_hours(),
             allowed_networks: Vec::new(),

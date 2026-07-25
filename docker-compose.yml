@@ -48,6 +48,9 @@ services:
       - VUIO_UUID=550e8400-e29b-41d4-a716-446655440000  
       - VUIO_IP=192.168.1.173  # Required for Docker host networking
       
+      # Enable administrative authentication
+      # - VUIO_AUTH=true
+      
       # Media Configuration
       - VUIO_MEDIA_DIRS=/media  # Comma-separated for multiple dirs: /media/movies,/media/tv,/media/music
       - VUIO_SCAN_ON_STARTUP=true

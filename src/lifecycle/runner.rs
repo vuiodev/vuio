@@ -131,6 +131,7 @@ where
     let auth = Arc::new(crate::web::auth::AuthState::load(
         &config.management,
         config_manager.get_config_path(),
+        cli_args.auth,
     )?);
     let app_state = AppState {
         config: config.clone(),
