@@ -550,7 +550,7 @@ pub async fn cast_media(
     // Some renderers accept DIDL metadata but silently refuse to load it.
     // Retry with an empty metadata field, which is valid AVTransport behavior
     // and is required by several older TV implementations.
-    warn!(
+    debug!(
         "Renderer did not start {}; retrying without DIDL metadata",
         media_url
     );
