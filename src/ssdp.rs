@@ -508,19 +508,6 @@ impl UnifiedSsdpService {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn media_renderer_search_does_not_receive_a_media_server_response() {
-        let request = "M-SEARCH * HTTP/1.1\r\n\
-            MAN: \"ssdp:discover\"\r\n\
-            ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
-        assert!(UnifiedSsdpService::msearch_response_types(request).is_empty());
-    }
-}
-
 /// Run SSDP as an owned lifecycle service until cancellation.
 pub async fn run_ssdp_service_until_cancelled<D: DatabaseManager>(
     state: AppState<D>,
@@ -595,3 +582,16 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
 // ============================================================================
 // Legacy implementations removed - now using UnifiedSsdpService with platform adapters
 // ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_renderer_search_does_not_receive_a_media_server_response() {
+        let request = "M-SEARCH * HTTP/1.1\r\n\
+            MAN: \"ssdp:discover\"\r\n\
+            ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
+        assert!(UnifiedSsdpService::msearch_response_types(request).is_empty());
+    }
+}
