@@ -117,15 +117,26 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
                 let response = String::from_utf8_lossy(&buf[..len]);
                 let mut location = None;
                 let mut usn = None;
+                let mut search_target = None;
                 for line in response.lines() {
-                    let lower = line.to_lowercase();
-                    if lower.starts_with("location:") {
-                        location = Some(line[9..].trim().to_string());
-                    } else if lower.starts_with("usn:") {
-                        usn = Some(line[4..].trim().to_string());
+                    if let Some((name, value)) = line.split_once(':') {
+                        match name.trim().to_ascii_lowercase().as_str() {
+                            "location" => location = Some(value.trim().to_string()),
+                            "usn" => usn = Some(value.trim().to_string()),
+                            "st" => search_target = Some(value.trim().to_string()),
+                            _ => {}
+                        }
                     }
                 }
-                if let Some(location) = location {
+                let is_renderer = search_target.as_deref().is_some_and(|target| {
+                    target
+                        .to_ascii_lowercase()
+                        .starts_with("urn:schemas-upnp-org:device:mediarenderer:")
+                });
+                if is_renderer && response.starts_with("HTTP/1.1 200") {
+                    let Some(location) = location else {
+                        continue;
+                    };
                     if locations.len() < 32
                         && !locations
                             .iter()
@@ -214,6 +225,7 @@ async fn fetch_tv_info(
     let mut model_name = String::new();
     let mut control_url = String::new();
     let mut udn = String::new();
+    let mut is_media_renderer = false;
     let mut in_av_transport_service = false;
     let mut current_element = String::new();
     let mut current_service_type = String::new();
@@ -236,6 +248,9 @@ async fn fetch_tv_info(
                     }
                     "UDN" if udn.is_empty() => {
                         udn = text;
+                    }
+                    "deviceType" if text.contains("MediaRenderer") => {
+                        is_media_renderer = true;
                     }
                     "serviceType" => {
                         current_service_type = text.clone();
@@ -267,7 +282,7 @@ async fn fetch_tv_info(
         buf.clear();
     }
 
-    if friendly_name.is_empty() || control_url.is_empty() {
+    if !is_media_renderer || friendly_name.is_empty() || control_url.is_empty() {
         return Ok(None);
     }
 
@@ -375,6 +390,16 @@ fn build_transport_uri_soap(
     title: &str,
     mime_type: &str,
 ) -> Result<String> {
+    build_transport_uri_soap_with_metadata(action, media_url, title, mime_type, true)
+}
+
+fn build_transport_uri_soap_with_metadata(
+    action: &str,
+    media_url: &str,
+    title: &str,
+    mime_type: &str,
+    include_metadata: bool,
+) -> Result<String> {
     anyhow::ensure!(
         matches!(action, "SetAVTransportURI" | "SetNextAVTransportURI"),
         "unsupported transport action"
@@ -391,28 +416,32 @@ fn build_transport_uri_soap(
         "invalid MIME type"
     );
 
-    let mut didl = Writer::new(Vec::new());
-    let mut root = BytesStart::new("DIDL-Lite");
-    root.push_attribute(("xmlns", "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"));
-    root.push_attribute(("xmlns:dc", "http://purl.org/dc/elements/1.1/"));
-    root.push_attribute(("xmlns:upnp", "urn:schemas-upnp-org:metadata-1-0/upnp/"));
-    didl.write_event(Event::Start(root))?;
-    let mut item = BytesStart::new("item");
-    item.push_attribute(("id", "0"));
-    item.push_attribute(("parentID", "0"));
-    item.push_attribute(("restricted", "1"));
-    didl.write_event(Event::Start(item))?;
-    write_text_element(&mut didl, "dc:title", title)?;
-    write_text_element(&mut didl, "upnp:class", media_class(mime_type))?;
-    let protocol_info = format!("http-get:*:{mime_type}:*");
-    let mut res = BytesStart::new("res");
-    res.push_attribute(("protocolInfo", protocol_info.as_str()));
-    didl.write_event(Event::Start(res))?;
-    didl.write_event(Event::Text(BytesText::new(media.as_str())))?;
-    didl.write_event(Event::End(BytesEnd::new("res")))?;
-    didl.write_event(Event::End(BytesEnd::new("item")))?;
-    didl.write_event(Event::End(BytesEnd::new("DIDL-Lite")))?;
-    let didl = String::from_utf8(didl.into_inner())?;
+    let didl = if include_metadata {
+        let mut didl = Writer::new(Vec::new());
+        let mut root = BytesStart::new("DIDL-Lite");
+        root.push_attribute(("xmlns", "urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/"));
+        root.push_attribute(("xmlns:dc", "http://purl.org/dc/elements/1.1/"));
+        root.push_attribute(("xmlns:upnp", "urn:schemas-upnp-org:metadata-1-0/upnp/"));
+        didl.write_event(Event::Start(root))?;
+        let mut item = BytesStart::new("item");
+        item.push_attribute(("id", "0"));
+        item.push_attribute(("parentID", "0"));
+        item.push_attribute(("restricted", "1"));
+        didl.write_event(Event::Start(item))?;
+        write_text_element(&mut didl, "dc:title", title)?;
+        write_text_element(&mut didl, "upnp:class", media_class(mime_type))?;
+        let protocol_info = format!("http-get:*:{mime_type}:*");
+        let mut res = BytesStart::new("res");
+        res.push_attribute(("protocolInfo", protocol_info.as_str()));
+        didl.write_event(Event::Start(res))?;
+        didl.write_event(Event::Text(BytesText::new(media.as_str())))?;
+        didl.write_event(Event::End(BytesEnd::new("res")))?;
+        didl.write_event(Event::End(BytesEnd::new("item")))?;
+        didl.write_event(Event::End(BytesEnd::new("DIDL-Lite")))?;
+        String::from_utf8(didl.into_inner())?
+    } else {
+        String::new()
+    };
 
     let mut soap = Writer::new(Vec::new());
     soap.write_event(Event::Decl(BytesDecl::new("1.0", Some("utf-8"), None)))?;
@@ -442,6 +471,61 @@ fn build_transport_uri_soap(
     Ok(String::from_utf8(soap.into_inner())?)
 }
 
+async fn set_transport_uri(
+    client: &reqwest::Client,
+    control_url: &reqwest::Url,
+    media_url: &str,
+    title: &str,
+    mime_type: &str,
+    include_metadata: bool,
+) -> Result<()> {
+    let body = build_transport_uri_soap_with_metadata(
+        "SetAVTransportURI",
+        media_url,
+        title,
+        mime_type,
+        include_metadata,
+    )?;
+    let response = client
+        .post(control_url.clone())
+        .header("Content-Type", "text/xml; charset=\"utf-8\"")
+        .header(
+            "SOAPAction",
+            "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
+        )
+        .body(body)
+        .send()
+        .await?;
+    if !response.status().is_success() {
+        return Err(renderer_error("SetAVTransportURI", response).await);
+    }
+    Ok(())
+}
+
+async fn playback_started(control_url: &str, media_url: &str) -> Option<bool> {
+    let mut observed = false;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let current_uri = get_position_info(control_url).await.ok();
+        let state = get_transport_state(control_url).await.ok();
+        observed |= current_uri.is_some() || state.is_some();
+
+        let uri_matches = current_uri.as_deref() == Some(media_url);
+        let active = state.as_deref().is_some_and(|value| value == "PLAYING");
+        if active && (uri_matches || current_uri.is_none()) {
+            return Some(true);
+        }
+        if uri_matches
+            && state
+                .as_deref()
+                .is_some_and(|value| matches!(value, "PAUSED_PLAYBACK" | "RECORDING"))
+        {
+            return Some(true);
+        }
+    }
+    observed.then_some(false)
+}
+
 /// Cast a media file to a TV by sending SOAP SetAVTransportURI + Play
 pub async fn cast_media(
     control_url: &str,
@@ -454,28 +538,32 @@ pub async fn cast_media(
         .timeout(Duration::from_secs(10))
         .redirect(reqwest::redirect::Policy::none())
         .build()?;
-    let set_uri_body = build_transport_uri_soap("SetAVTransportURI", media_url, title, mime_type)?;
-
-    let resp = client
-        .post(control_url.clone())
-        .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header(
-            "SOAPAction",
-            "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
-        )
-        .body(set_uri_body)
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        return Err(renderer_error("SetAVTransportURI", resp).await);
-    }
-
+    debug!("Casting {} to {}", media_url, control_url);
+    set_transport_uri(&client, &control_url, media_url, title, mime_type, true).await?;
     debug!("SetAVTransportURI succeeded on {}", control_url);
 
-    // Step 2: Play
     control_playback(control_url.as_str(), "Play").await?;
+    if playback_started(control_url.as_str(), media_url).await != Some(false) {
+        return Ok(());
+    }
 
+    // Some renderers accept DIDL metadata but silently refuse to load it.
+    // Retry with an empty metadata field, which is valid AVTransport behavior
+    // and is required by several older TV implementations.
+    warn!(
+        "Renderer did not start {}; retrying without DIDL metadata",
+        media_url
+    );
+    let _ = control_playback(control_url.as_str(), "Stop").await;
+    set_transport_uri(&client, &control_url, media_url, title, mime_type, false).await?;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    control_playback(control_url.as_str(), "Play").await?;
+    if playback_started(control_url.as_str(), media_url).await == Some(false) {
+        anyhow::bail!(
+            "TV accepted the cast commands but did not load the media URL {}",
+            media_url
+        );
+    }
     Ok(())
 }
 
@@ -674,6 +762,21 @@ mod tests {
         .unwrap();
         assert!(xml.contains("A &amp;amp; &amp;lt;B&amp;gt;"));
         assert!(!xml.contains("<dc:title>A &"));
+    }
+
+    #[test]
+    fn transport_xml_can_omit_metadata_for_strict_renderers() {
+        let xml = build_transport_uri_soap_with_metadata(
+            "SetAVTransportURI",
+            "http://192.168.1.2/media/7",
+            "Episode 7",
+            "video/x-matroska",
+            false,
+        )
+        .unwrap();
+        assert!(xml.contains("<CurrentURI>http://192.168.1.2/media/7</CurrentURI>"));
+        assert!(xml.contains("<CurrentURIMetaData></CurrentURIMetaData>"));
+        assert!(!xml.contains("DIDL-Lite"));
     }
 
     #[tokio::test]

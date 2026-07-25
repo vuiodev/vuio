@@ -1155,7 +1155,7 @@
                     <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="var(--accent-color)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
                     Play on TV
                 </h3>
-                <p id="tv-modal-subtitle" style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.4;">Select the destination TV screen to play folder "<span id="tv-modal-folder-name" style="color: var(--text-primary); font-weight: 600;"></span>"</p>
+                <p id="tv-modal-subtitle" style="font-size: 0.88rem; color: var(--text-secondary); line-height: 1.4;">Select the destination TV for "<span id="tv-modal-folder-name" style="color: var(--text-primary); font-weight: 600;"></span>"</p>
             </div>
             <div id="tv-list-container" style="display: flex; flex-direction: column; gap: 0.75rem; margin: 0.25rem 0; max-height: 250px; overflow-y: auto; padding-right: 4px;">
                 <!-- TV buttons will be dynamically generated here -->
@@ -1264,63 +1264,55 @@
         }
 
         function playVideoFolderOnTv(folderName) {
-            const targetPath = [...currentPath, folderName];
-            
-            // Filter all video files that reside in targetPath or any subdirectory
-            let folderVideos = filesData.filter(file => {
-                if (file.cat !== 'video') return false;
-                const comps = getRelativeComponents(file.path);
-                if (comps.length <= targetPath.length) return false;
-                for (let i = 0; i < targetPath.length; i++) {
-                    if (comps[i] !== targetPath[i]) return false;
-                }
-                return true;
-            });
-
-            if (folderVideos.length === 0) {
-                showToast("No video files found in this folder.", "error");
-                return;
-            }
-
-            // Sort playlist alphabetically by name
-            folderVideos.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
-            const fileIds = folderVideos.map(v => v.id);
-
-            showToast("Discovering TVs on local network...", "info");
-            
-            fetch('/api/renderers')
-                .then(res => res.json())
-                .then(renderers => {
-                    if (!Array.isArray(renderers) || renderers.length === 0) {
-                        showToast("No TVs found on your local network.", "error");
-                        return;
-                    }
-                    
-                    if (renderers.length === 1) {
-                        // Only one TV found, cast immediately!
-                        castPlaylistToRenderer(renderers[0], folderName, fileIds);
-                    } else {
-                        // Multiple TVs found, show selection modal
-                        showRendererSelectionModal(renderers, folderName, fileIds);
-                    }
-                })
-                .catch(err => {
-                    console.error("TV discovery failed", err);
-                    showToast("Failed to discover TVs: " + err, "error");
-                });
+            const components = [...currentPath, folderName];
+            discoverAndCast(
+                { kind: 'folder', components },
+                folderName
+            );
         }
 
-        function showRendererSelectionModal(renderers, folderName, fileIds) {
-            document.getElementById('tv-modal-folder-name').textContent = folderName;
+        function playVideoFileOnTv(file) {
+            discoverAndCast(
+                { kind: 'file', file_id: file.id },
+                file.title || file.name
+            );
+        }
+
+        async function discoverAndCast(source, label) {
+            showToast("Finding DLNA TVs...", "info");
+            try {
+                const response = await fetch('/api/renderers');
+                if (!response.ok) {
+                    throw new Error('TV discovery request failed: ' + response.status);
+                }
+                const renderers = await response.json();
+                if (!Array.isArray(renderers) || renderers.length === 0) {
+                    showToast("No DLNA TVs found on your local network.", "error");
+                    return;
+                }
+                if (renderers.length === 1) {
+                    await castToRenderer(renderers[0], source);
+                    return;
+                }
+                showRendererSelectionModal(renderers, label, source);
+            } catch (error) {
+                console.error("TV discovery failed", error);
+                showToast("Failed to discover TVs: " + error.message, "error");
+            }
+        }
+
+        function showRendererSelectionModal(renderers, label, source) {
+            document.getElementById('tv-modal-folder-name').textContent = label;
             const container = document.getElementById('tv-list-container');
             container.replaceChildren();
             
             renderers.forEach(renderer => {
                 const btn = document.createElement('button');
                 btn.className = 'tv-select-btn';
-                btn.onclick = () => {
+                btn.onclick = async () => {
+                    container.querySelectorAll('button').forEach(button => button.disabled = true);
                     closeTvModal();
-                    castPlaylistToRenderer(renderer, folderName, fileIds);
+                    await castToRenderer(renderer, source);
                 };
                 btn.innerHTML = `
                     <div class="tv-icon-wrapper">
@@ -1340,30 +1332,23 @@
             document.getElementById('tv-modal').style.display = 'none';
         }
 
-        function castPlaylistToRenderer(renderer, folderName, fileIds) {
-            showToast("Casting playlist to " + renderer.friendly_name + "...", "info");
-            
-            fetch('/api/cast/playlist', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    renderer_id: renderer.id,
-                    folder_name: folderName,
-                    file_ids: fileIds
-                })
-            })
-            .then(res => res.json())
-            .then(data => {
-                if (data.error) {
-                    showToast("Cast error: " + data.error, "error");
-                } else {
-                    showToast("Successfully playing on " + renderer.friendly_name + "!", "success");
+        async function castToRenderer(renderer, source) {
+            showToast("Casting to " + renderer.friendly_name + "...", "info");
+            try {
+                const response = await fetch('/api/cast', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ renderer_id: renderer.id, source })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || 'Cast request failed: ' + response.status);
                 }
-            })
-            .catch(err => {
-                console.error("Cast request failed", err);
-                showToast("Failed to cast to TV: " + err, "error");
-            });
+                showToast("Successfully playing on " + renderer.friendly_name + "!", "success");
+            } catch (error) {
+                console.error("Cast request failed", error);
+                showToast("Failed to cast to TV: " + error.message, "error");
+            }
         }
 
         function showToast(message, type = 'info') {
@@ -2103,6 +2088,18 @@
                     playAudioFile(file.id);
                 });
                 actionArea.prepend(playButton);
+            }
+            if (file.cat === 'video') {
+                const tvButton = document.createElement('button');
+                tvButton.className = 'btn-action';
+                tvButton.title = 'Play on TV';
+                tvButton.style.cssText = 'margin-right: 0.35rem; color: var(--accent-color);';
+                tvButton.innerHTML = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>';
+                tvButton.addEventListener('click', event => {
+                    event.stopPropagation();
+                    playVideoFileOnTv(file);
+                });
+                actionArea.prepend(tvButton);
             }
 
             const download = card.querySelector('.media-download');

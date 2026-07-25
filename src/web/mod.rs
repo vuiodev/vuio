@@ -39,6 +39,7 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         .layer(DefaultBodyLimit::max(SOAP_BODY_LIMIT));
 
     let json_routes = Router::new()
+        .route("/api/cast", post(casting::api_cast::<D>))
         .route("/api/cast/playlist", post(casting::api_cast_playlist::<D>))
         .route("/mcp/message", post(mcp::message_handler::<D>))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));

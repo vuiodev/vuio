@@ -1,7 +1,11 @@
 //! TV discovery and dashboard playlist-casting API handlers.
 
-use crate::{database::DatabaseManager, state::AppState};
+use crate::{
+    database::{DatabaseManager, FileLocation, MediaFileView},
+    state::AppState,
+};
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
+use std::{cmp::Ordering, collections::HashSet, path::PathBuf};
 use tracing::error;
 
 #[derive(serde::Deserialize)]
@@ -9,6 +13,19 @@ pub struct ApiCastPlaylistRequest {
     pub renderer_id: String,
     pub folder_name: String,
     pub file_ids: Vec<i64>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ApiCastRequest {
+    pub renderer_id: String,
+    pub source: ApiCastSource,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ApiCastSource {
+    File { file_id: i64 },
+    Folder { components: Vec<String> },
 }
 
 /// Discover UPnP/DLNA TVs and return their friendly names in JSON format
@@ -27,90 +44,224 @@ pub async fn api_list_renderers<D: DatabaseManager>(
     }
 }
 
+pub async fn api_cast<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
+    axum::Json(payload): axum::Json<ApiCastRequest>,
+) -> impl IntoResponse {
+    let result = match payload.source {
+        ApiCastSource::File { file_id } => {
+            let file = match state.database.get_file_location_by_id(file_id).await {
+                Ok(Some(file)) if file.mime_type.starts_with("video/") => file,
+                Ok(Some(_)) => {
+                    return cast_error(StatusCode::BAD_REQUEST, "Only video files can be cast");
+                }
+                Ok(None) => return cast_error(StatusCode::NOT_FOUND, "Video file not found"),
+                Err(error) => {
+                    error!(%error, file_id, "Failed to load video for casting");
+                    return cast_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
+                }
+            };
+            crate::web::mcp::cast_file_helper(&state, file.id, &payload.renderer_id).await
+        }
+        ApiCastSource::Folder { components } => {
+            let tracks = match resolve_video_folder(&state, &components).await {
+                Ok(tracks) if !tracks.is_empty() => tracks,
+                Ok(_) => {
+                    return cast_error(
+                        StatusCode::BAD_REQUEST,
+                        "No video files found in this folder",
+                    );
+                }
+                Err(message) => return cast_error(StatusCode::BAD_REQUEST, &message),
+            };
+            crate::web::mcp::cast_tracks_helper(&state, tracks, &payload.renderer_id, 0).await
+        }
+    };
+
+    match result {
+        Ok(value) => (StatusCode::OK, axum::Json(value)),
+        Err(message) => cast_error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+fn cast_error(status: StatusCode, message: &str) -> (StatusCode, axum::Json<serde_json::Value>) {
+    (status, axum::Json(serde_json::json!({ "error": message })))
+}
+
+async fn resolve_video_folder<D: DatabaseManager>(
+    state: &AppState<D>,
+    components: &[String],
+) -> Result<Vec<FileLocation>, String> {
+    if components.len() > 64
+        || components.iter().any(|component| {
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.contains('/')
+                || component.contains('\\')
+        })
+    {
+        return Err("Invalid folder path".to_string());
+    }
+
+    let directories = state.media_directories.read().await.clone();
+    let mut videos = Vec::new();
+    let mut seen = HashSet::new();
+    for directory in directories {
+        let root = PathBuf::from(&directory.path);
+        let folder = components
+            .iter()
+            .fold(root.clone(), |path, component| path.join(component));
+        let files = state
+            .database
+            .get_files_with_path_prefix(folder.to_string_lossy().as_ref())
+            .await
+            .map_err(|error| format!("Database error: {error}"))?;
+        for file in files {
+            if !file.mime_type().starts_with("video/") {
+                continue;
+            }
+            let Some(location) = file.to_file_location() else {
+                continue;
+            };
+            if seen.insert(location.id) {
+                let relative = file
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap_or(&file.path)
+                    .to_string_lossy()
+                    .into_owned();
+                videos.push((relative, location));
+            }
+        }
+    }
+    videos.sort_by(|left, right| natural_cmp(&left.0, &right.0));
+    Ok(videos.into_iter().map(|(_, file)| file).collect())
+}
+
+fn natural_cmp(left: &str, right: &str) -> Ordering {
+    let left = left.to_lowercase();
+    let right = right.to_lowercase();
+    let mut left_chars = left.chars().peekable();
+    let mut right_chars = right.chars().peekable();
+
+    loop {
+        match (left_chars.peek(), right_chars.peek()) {
+            (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                let left_number: String = std::iter::from_fn(|| {
+                    left_chars.next_if(|character| character.is_ascii_digit())
+                })
+                .collect();
+                let right_number: String = std::iter::from_fn(|| {
+                    right_chars.next_if(|character| character.is_ascii_digit())
+                })
+                .collect();
+                let order = left_number
+                    .trim_start_matches('0')
+                    .len()
+                    .cmp(&right_number.trim_start_matches('0').len())
+                    .then_with(|| {
+                        left_number
+                            .trim_start_matches('0')
+                            .cmp(right_number.trim_start_matches('0'))
+                    })
+                    .then_with(|| left_number.len().cmp(&right_number.len()));
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(_), Some(_)) => {
+                let order = left_chars.next().cmp(&right_chars.next());
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            _ => return left_chars.next().cmp(&right_chars.next()),
+        }
+    }
+}
+
+async fn create_and_cast_playlist<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    renderer_id: &str,
+    folder_name: &str,
+    file_ids: &[i64],
+) -> Result<serde_json::Value, String> {
+    let playlist_name = format!("Web Cast - {folder_name}");
+    let playlist_id = state
+        .database
+        .create_playlist(&playlist_name, None)
+        .await
+        .map_err(|error| format!("Failed to create cast playlist: {error}"))?;
+    let tracks = file_ids
+        .iter()
+        .enumerate()
+        .map(|(position, id)| (*id, position as u32))
+        .collect::<Vec<_>>();
+    if let Err(error) = state
+        .database
+        .batch_add_to_playlist(playlist_id, &tracks)
+        .await
+    {
+        let _ = state.database.delete_playlist(playlist_id).await;
+        return Err(format!("Failed to create cast playlist: {error}"));
+    }
+    crate::web::eventing::publish_content_change(state).await;
+    match crate::web::mcp::cast_playlist_helper(state, playlist_id, renderer_id, 0).await {
+        Ok(value) => Ok(value),
+        Err(error) => {
+            let _ = state.database.delete_playlist(playlist_id).await;
+            crate::web::eventing::publish_content_change(state).await;
+            Err(error)
+        }
+    }
+}
+
 /// Create a temporary playlist with the provided video files and cast it to the TV
 pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     axum::Json(payload): axum::Json<ApiCastPlaylistRequest>,
 ) -> impl IntoResponse {
-    // Read old web-cast playlists, but keep them until the replacement is complete.
-    let playlists = match state.database.get_playlists().await {
-        Ok(list) => list,
-        Err(e) => {
-            error!(error = %e, "Failed to list playlists for web casting");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
-            );
-        }
-    };
-
-    let old_web_cast_ids = playlists
-        .into_iter()
-        .filter(|playlist| playlist.name.starts_with("Web Cast - "))
-        .filter_map(|playlist| playlist.id)
-        .collect::<Vec<_>>();
-
-    // 2. Create the new playlist
-    let playlist_name = format!("Web Cast - {}", payload.folder_name);
-    let playlist_id = match state.database.create_playlist(&playlist_name, None).await {
-        Ok(id) => id,
-        Err(e) => {
-            error!(error = %e, "Failed to create web-cast playlist");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
-            );
-        }
-    };
-
-    // 3. Add file IDs to the playlist (batch add)
-    let tracks_to_add: Vec<(i64, u32)> = payload
-        .file_ids
-        .iter()
-        .enumerate()
-        .map(|(idx, &id)| (id, idx as u32))
-        .collect();
-
-    if let Err(e) = state
-        .database
-        .batch_add_to_playlist(playlist_id, &tracks_to_add)
-        .await
-    {
-        error!(error = %e, playlist_id, "Failed to add tracks to web-cast playlist");
-        match state.database.delete_playlist(playlist_id).await {
-            Ok(_) => {
-                // The transient playlist may have been browsed while the batch
-                // insert was in flight, so discard responses from that window.
-                crate::web::eventing::invalidate_browse_responses(&state).await;
-            }
-            Err(rollback_error) => {
-                error!(error = %rollback_error, playlist_id, "Failed to roll back incomplete web-cast playlist");
-                crate::web::eventing::publish_content_change(&state).await;
-            }
-        }
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(serde_json::json!({ "error": "Internal Server Error" })),
-        );
-    }
-
-    for old_id in old_web_cast_ids {
-        if let Err(error) = state.database.delete_playlist(old_id).await {
-            error!(%error, playlist_id = old_id, "Failed to delete superseded web-cast playlist");
-        }
-    }
-
-    // Publish before casting so a renderer-control failure cannot leave DLNA
-    // clients on the old browse generation.
-    crate::web::eventing::publish_content_change(&state).await;
-
-    // Cast the playlist starting at index 0 using our shared helper.
-    match crate::web::mcp::cast_playlist_helper(&state, playlist_id, &payload.renderer_id, 0).await
+    match create_and_cast_playlist(
+        &state,
+        &payload.renderer_id,
+        &payload.folder_name,
+        &payload.file_ids,
+    )
+    .await
     {
         Ok(result) => (StatusCode::OK, axum::Json(result)),
         Err(e) => (
             StatusCode::BAD_REQUEST,
             axum::Json(serde_json::json!({ "error": format!("Cast error: {}", e) })),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn episode_paths_use_natural_order() {
+        let mut paths = [
+            "Series/Episode 10.mkv",
+            "Series/Episode 2.mkv",
+            "Series/Episode 01.mkv",
+        ];
+        paths.sort_by(|left, right| natural_cmp(left, right));
+        assert_eq!(
+            paths,
+            [
+                "Series/Episode 01.mkv",
+                "Series/Episode 2.mkv",
+                "Series/Episode 10.mkv"
+            ]
+        );
+    }
+
+    #[test]
+    fn natural_order_is_case_insensitive() {
+        assert_eq!(natural_cmp("series/A.mkv", "Series/b.mkv"), Ordering::Less);
     }
 }

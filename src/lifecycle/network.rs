@@ -1,4 +1,6 @@
 /// Start SSDP service with platform abstraction
+const TV_DISCOVERY_INTERVAL: tokio::time::Duration = tokio::time::Duration::from_secs(30);
+
 async fn start_ssdp_service<D: DatabaseManager + 'static>(
     app_state: AppState<D>,
     cancellation: CancellationToken,
@@ -52,19 +54,20 @@ async fn start_http_server_task<D: DatabaseManager + 'static>(
 
     info!("HTTP server started successfully");
 
-    // Spawn background SSDP TV discovery cache refresher every 60s
+    // Keep one shared renderer snapshot fresh for the dashboard and MCP clients.
     let state_clone = app_state.clone();
     let discovery_cancellation = cancellation.clone();
     let tv_discovery = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(TV_DISCOVERY_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = discovery_cancellation.cancelled() => break,
-                _ = async {
+                _ = interval.tick() => {
                     if let Err(error) = state_clone.discovered_tvs.refresh().await {
                         tracing::warn!(%error, "Background renderer discovery failed");
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
-                } => {}
+                }
             }
         }
     });

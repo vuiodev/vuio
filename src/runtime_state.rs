@@ -3,7 +3,7 @@
 use crate::{state::SoapCacheKey, tv_control::DiscoveredTv};
 use axum::body::Bytes;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::Hash,
     time::{Duration, Instant},
 };
@@ -298,8 +298,32 @@ impl RendererCache {
     }
 
     pub async fn replace(&self, mut renderers: Vec<DiscoveredTv>) {
-        renderers.sort_by(|left, right| left.id.cmp(&right.id));
-        renderers.dedup_by(|left, right| left.id == right.id);
+        renderers.sort_by(|left, right| {
+            left.friendly_name
+                .to_lowercase()
+                .cmp(&right.friendly_name.to_lowercase())
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        let mut device_ids = HashSet::new();
+        let mut physical_devices = HashSet::new();
+        renderers.retain(|renderer| {
+            let id = renderer.id.trim().to_lowercase();
+            let physical = format!(
+                "{}|{}|{}",
+                renderer_ip(&renderer.location_url).unwrap_or_default(),
+                renderer.friendly_name.trim().to_lowercase(),
+                renderer.model_name.trim().to_lowercase()
+            );
+            if (!id.is_empty() && device_ids.contains(&id)) || physical_devices.contains(&physical)
+            {
+                return false;
+            }
+            if !id.is_empty() {
+                device_ids.insert(id);
+            }
+            physical_devices.insert(physical);
+            true
+        });
         renderers.truncate(RENDERER_CACHE_MAX_ENTRIES);
         *self.snapshot.write().await = RendererSnapshot {
             renderers,
@@ -391,5 +415,32 @@ mod tests {
         // response late. Its old epoch must not match a subsequent request.
         cache.insert(stale_key, Bytes::from_static(b"stale"));
         assert!(cache.get(&current_key).is_none());
+    }
+
+    fn renderer(id: &str, name: &str, model: &str, ip: &str) -> DiscoveredTv {
+        DiscoveredTv {
+            id: id.to_string(),
+            friendly_name: name.to_string(),
+            control_url: format!("http://{ip}:1400/control"),
+            location_url: format!("http://{ip}:1400/description.xml"),
+            model_name: model.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn renderer_cache_deduplicates_physical_tvs_and_sorts_by_name() {
+        let cache = RendererCache::new();
+        cache
+            .replace(vec![
+                renderer("uuid:z", "Bedroom", "TV", "192.168.1.10"),
+                renderer("uuid:a", "Living Room", "TV", "192.168.1.20"),
+                renderer("uuid:b", "Living Room", "TV", "192.168.1.20"),
+            ])
+            .await;
+
+        let renderers = cache.snapshot().await;
+        assert_eq!(renderers.len(), 2);
+        assert_eq!(renderers[0].friendly_name, "Bedroom");
+        assert_eq!(renderers[1].friendly_name, "Living Room");
     }
 }

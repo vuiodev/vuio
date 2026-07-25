@@ -142,24 +142,41 @@ pub mod state {
         }
         /// Get the server's IP address using unified logic from platform_info
         pub fn get_server_ip(&self) -> String {
+            // An explicit host address must win over container/interface auto-detection.
+            if let Ok(host_ip) = std::env::var("VUIO_IP") {
+                if !host_ip.is_empty() {
+                    return host_ip;
+                }
+            }
+
             // Check if server IP is explicitly configured (important for Docker)
-            if let Some(server_ip) = &self.config.server.ip {
+            if let Some(server_ip) = &self.current_config().server.ip {
                 if !server_ip.is_empty() && server_ip != "0.0.0.0" {
                     return server_ip.clone();
                 }
             }
 
             // Use the SSDP interface from config if it's a specific IP address
-            match &self.config.network.interface_selection {
-                crate::config::NetworkInterfaceConfig::Specific(ip) => {
-                    return ip.clone();
+            match &self.current_config().network.interface_selection {
+                crate::config::NetworkInterfaceConfig::Specific(interface) => {
+                    if interface.parse::<std::net::IpAddr>().is_ok() {
+                        return interface.clone();
+                    }
+                    if let Some(selected) = self
+                        .platform_info
+                        .network_interfaces
+                        .iter()
+                        .find(|candidate| candidate.name == *interface && candidate.is_up)
+                    {
+                        return selected.ip_address.to_string();
+                    }
                 }
                 _ => {
                     // For Auto or All, fallback to server interface if it's not 0.0.0.0
-                    if self.config.server.interface != "0.0.0.0"
-                        && !self.config.server.interface.is_empty()
+                    if self.current_config().server.interface != "0.0.0.0"
+                        && !self.current_config().server.interface.is_empty()
                     {
-                        return self.config.server.interface.clone();
+                        return self.current_config().server.interface.clone();
                     }
                 }
             }
@@ -169,16 +186,69 @@ pub mod state {
                 return primary_interface.ip_address.to_string();
             }
 
-            // Check if host IP is overridden via environment variable (for containers)
-            if let Ok(host_ip) = std::env::var("VUIO_IP") {
-                if !host_ip.is_empty() {
-                    return host_ip;
-                }
-            }
-
             // Last resort
             tracing::warn!("Could not auto-detect IP, falling back to 127.0.0.1");
             "127.0.0.1".to_string()
+        }
+
+        /// Pick the local address whose route reaches a renderer. Explicit
+        /// configuration still wins, which is required for host-networked
+        /// containers where the kernel reports an internal address.
+        pub async fn advertised_http_origin_for_peer(&self, peer_url: &str) -> String {
+            let has_explicit_address = std::env::var("VUIO_IP")
+                .is_ok_and(|value| !value.is_empty())
+                || self
+                    .current_config()
+                    .server
+                    .ip
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty() && value != "0.0.0.0")
+                || match &self.current_config().network.interface_selection {
+                    crate::config::NetworkInterfaceConfig::Specific(interface) => {
+                        interface.parse::<std::net::IpAddr>().is_ok()
+                            || self
+                                .platform_info
+                                .network_interfaces
+                                .iter()
+                                .any(|candidate| candidate.name == *interface && candidate.is_up)
+                    }
+                    _ => false,
+                }
+                || (!self.current_config().server.interface.is_empty()
+                    && self.current_config().server.interface != "0.0.0.0");
+            if has_explicit_address {
+                return self.advertised_http_origin();
+            }
+
+            let peer = reqwest::Url::parse(peer_url)
+                .ok()
+                .and_then(|url| url.host_str()?.parse::<std::net::IpAddr>().ok());
+            if let Some(peer) = peer {
+                let bind = match peer {
+                    std::net::IpAddr::V4(_) => "0.0.0.0:0",
+                    std::net::IpAddr::V6(_) => "[::]:0",
+                };
+                if let Ok(socket) = tokio::net::UdpSocket::bind(bind).await {
+                    if socket
+                        .connect(std::net::SocketAddr::new(peer, 9))
+                        .await
+                        .is_ok()
+                    {
+                        if let Ok(local) = socket.local_addr() {
+                            let host = match local.ip() {
+                                std::net::IpAddr::V4(ip) => ip.to_string(),
+                                std::net::IpAddr::V6(ip) => format!("[{ip}]"),
+                            };
+                            return format!(
+                                "http://{}:{}",
+                                host,
+                                self.current_config().server.port
+                            );
+                        }
+                    }
+                }
+            }
+            self.advertised_http_origin()
         }
 
         /// Absolute HTTP origin advertised to DLNA clients. Request `Host`

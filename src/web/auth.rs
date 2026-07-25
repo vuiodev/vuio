@@ -339,9 +339,7 @@ pub struct LoginRequest {
     save_device: Option<bool>,
 }
 
-pub async fn login_page<D: DatabaseManager>(
-    State(state): State<AppState<D>>,
-) -> Response {
+pub async fn login_page<D: DatabaseManager>(State(state): State<AppState<D>>) -> Response {
     if !state.auth.enabled() {
         return axum::response::Redirect::to("/").into_response();
     }
@@ -621,9 +619,7 @@ pub async fn login<D: DatabaseManager>(
             30 * 24 * 3600
         )
     } else {
-        format!(
-            "vuio_session={session}; HttpOnly; SameSite=Strict; Path=/"
-        )
+        format!("vuio_session={session}; HttpOnly; SameSite=Strict; Path=/")
     };
 
     (
@@ -673,7 +669,11 @@ pub async fn require_management<D: DatabaseManager>(
         .is_some();
     if !bearer && !cookie {
         let path = request.uri().path();
-        if request.method() == Method::GET && (path == "/" || path == "/logs" || (!path.starts_with("/api") && !path.starts_with("/sse"))) {
+        if request.method() == Method::GET
+            && (path == "/"
+                || path == "/logs"
+                || (!path.starts_with("/api") && !path.starts_with("/sse")))
+        {
             return axum::response::Redirect::to("/login").into_response();
         }
         return StatusCode::UNAUTHORIZED.into_response();

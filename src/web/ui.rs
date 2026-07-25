@@ -163,5 +163,8 @@ mod tests {
     fn dashboard_contains_no_runtime_data_markers() {
         assert!(!DASHBOARD_TEMPLATE.contains("__VUIO_"));
         assert!(DASHBOARD_TEMPLATE.contains("/api/server-info"));
+        assert!(DASHBOARD_TEMPLATE.contains("/api/cast"));
+        assert!(DASHBOARD_TEMPLATE.contains("playVideoFileOnTv(file)"));
+        assert!(DASHBOARD_TEMPLATE.contains("showRendererSelectionModal(renderers, label, source)"));
     }
 }

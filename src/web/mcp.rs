@@ -760,7 +760,14 @@ async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
         .and_then(|v| v.as_str())
         .ok_or("Missing 'renderer_id' parameter")?;
 
-    // Look up the media file
+    cast_file_helper(state, file_id, renderer_id).await
+}
+
+pub async fn cast_file_helper<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    file_id: i64,
+    renderer_id: &str,
+) -> Result<serde_json::Value, String> {
     let file = state
         .database
         .get_file_location_by_id(file_id)
@@ -788,9 +795,10 @@ async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
         ))?;
 
     // Build the media URL
-    let server_ip = state.get_server_ip();
-    let port = state.current_config().server.port;
-    let media_url = format!("http://{}:{}/media/{}", server_ip, port, file.id);
+    let origin = state
+        .advertised_http_origin_for_peer(&matched_tv.location_url)
+        .await;
+    let media_url = format!("{origin}/media/{}", file.id);
 
     let title = file.title.as_deref().unwrap_or(&file.filename);
 
@@ -798,6 +806,21 @@ async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
     tv_control::cast_media(&matched_tv.control_url, &media_url, title, &file.mime_type)
         .await
         .map_err(|e| format!("Cast error: {}", e))?;
+
+    {
+        let mut monitors = state.active_monitors.lock().await;
+        if let Some((_, cancellation)) = monitors.remove(&matched_tv.control_url) {
+            cancellation.cancel();
+        }
+    }
+    {
+        let mut casts = state.active_casts.lock().await;
+        casts.insert_labeled(
+            matched_tv.id.clone(),
+            matched_tv.friendly_name.clone(),
+            file.filename.clone(),
+        );
+    }
 
     Ok(serde_json::json!({
         "status": "playing",
@@ -1084,9 +1107,20 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
     renderer_id: &str,
     track_index: usize,
 ) -> Result<serde_json::Value, String> {
-    // Get playlist tracks
     let tracks = playlist_file_locations(state, playlist_id).await?;
+    let mut result = cast_tracks_helper(state, tracks, renderer_id, track_index).await?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("playlist_id".to_string(), serde_json::json!(playlist_id));
+    }
+    Ok(result)
+}
 
+pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    tracks: Vec<FileLocation>,
+    renderer_id: &str,
+    track_index: usize,
+) -> Result<serde_json::Value, String> {
     if tracks.is_empty() {
         return Err("Cannot cast an empty playlist".to_string());
     }
@@ -1119,9 +1153,10 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
         ))?;
 
     // Build the media URL
-    let server_ip = state.get_server_ip();
-    let port = state.current_config().server.port;
-    let media_url = format!("http://{}:{}/media/{}", server_ip, port, file_id);
+    let origin = state
+        .advertised_http_origin_for_peer(&matched_tv.location_url)
+        .await;
+    let media_url = format!("{origin}/media/{file_id}");
 
     let title = selected_track
         .title
@@ -1161,7 +1196,7 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
     if track_index + 1 < tracks.len() {
         let next_track = &tracks[track_index + 1];
         {
-            let next_media_url = format!("http://{}:{}/media/{}", server_ip, port, next_track.id);
+            let next_media_url = format!("{origin}/media/{}", next_track.id);
             let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
 
             // Queue on the TV and log/ignore failures on non-compliant devices
@@ -1205,9 +1240,10 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
 
     let state_clone = state.clone();
     let control_url_clone = matched_tv.control_url.clone();
-    let server_ip_clone = server_ip.clone();
+    let origin_clone = origin.clone();
     let matched_tv_friendly_name = matched_tv.friendly_name.clone();
     let matched_renderer_id = matched_tv.id.clone();
+    let monitor_tracks = tracks.clone();
 
     state.background_tasks.spawn(async move {
         let mut current_idx = track_index;
@@ -1243,24 +1279,11 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
                 Err(_) => "STOPPED".to_string(),
             };
 
-            // Fetch playlist tracks from DB to get the latest list
-            let latest_tracks = match tokio::select! {
-                _ = monitor_cancellation.cancelled() => break,
-                result = playlist_file_locations(&state_clone, playlist_id) => result,
-            } {
-                Ok(t) => t,
-                Err(_) => break,
-            };
-
-            if latest_tracks.is_empty() {
-                break;
-            }
-
             // If current track URI matches a track URL, check if the TV transitioned
             let mut matched_any = false;
-            for (idx, track) in latest_tracks.iter().enumerate() {
+            for (idx, track) in monitor_tracks.iter().enumerate() {
                 {
-                    let track_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, track.id);
+                    let track_media_url = format!("{origin_clone}/media/{}", track.id);
                     if current_uri == track_media_url {
                         matched_any = true;
                         if idx != current_idx {
@@ -1278,10 +1301,10 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
                             }
 
                             // Queue the next track if available
-                            if current_idx + 1 < latest_tracks.len() {
-                                let next_track = &latest_tracks[current_idx + 1];
+                            if current_idx + 1 < monitor_tracks.len() {
+                                let next_track = &monitor_tracks[current_idx + 1];
                                 {
-                                    let next_media_url = format!("http://{}:{}/media/{}", server_ip_clone, port, next_track.id);
+                                    let next_media_url = format!("{origin_clone}/media/{}", next_track.id);
                                     let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
                                     let queue_result = tokio::select! {
                                         _ = monitor_cancellation.cancelled() => break 'monitor,
@@ -1338,7 +1361,6 @@ pub async fn cast_playlist_helper<D: DatabaseManager + 'static>(
 
     Ok(serde_json::json!({
         "status": "playing",
-        "playlist_id": playlist_id,
         "tracks_count": tracks.len(),
         "current_index": track_index,
         "current_file": selected_track.filename,

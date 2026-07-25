@@ -247,23 +247,7 @@ impl UnifiedSsdpService {
         request: &str,
         addr: SocketAddr,
     ) {
-        let mut response_types = Vec::new();
-
-        if request.contains("ssdp:all") {
-            response_types.extend_from_slice(&[
-                "upnp:rootdevice",
-                "urn:schemas-upnp-org:device:MediaServer:1",
-                "urn:schemas-upnp-org:service:ContentDirectory:1",
-            ]);
-        } else if request.contains("upnp:rootdevice") {
-            response_types.push("upnp:rootdevice");
-        } else if request.contains("urn:schemas-upnp-org:device:MediaServer") {
-            response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
-        } else if request.contains("urn:schemas-upnp-org:service:ContentDirectory") {
-            response_types.push("urn:schemas-upnp-org:service:ContentDirectory:1");
-        } else if request.contains("ssdp:discover") {
-            response_types.push("urn:schemas-upnp-org:device:MediaServer:1");
-        }
+        let response_types = Self::msearch_response_types(request);
 
         let response_count = response_types.len();
         for response_type in response_types {
@@ -295,6 +279,25 @@ impl UnifiedSsdpService {
             if response_count > 1 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+        }
+    }
+
+    fn msearch_response_types(request: &str) -> Vec<&'static str> {
+        let request = request.to_ascii_lowercase();
+        if request.contains("ssdp:all") {
+            vec![
+                "upnp:rootdevice",
+                "urn:schemas-upnp-org:device:MediaServer:1",
+                "urn:schemas-upnp-org:service:ContentDirectory:1",
+            ]
+        } else if request.contains("upnp:rootdevice") {
+            vec!["upnp:rootdevice"]
+        } else if request.contains("urn:schemas-upnp-org:device:mediaserver") {
+            vec!["urn:schemas-upnp-org:device:MediaServer:1"]
+        } else if request.contains("urn:schemas-upnp-org:service:contentdirectory") {
+            vec!["urn:schemas-upnp-org:service:ContentDirectory:1"]
+        } else {
+            Vec::new()
         }
     }
 
@@ -502,6 +505,19 @@ impl UnifiedSsdpService {
             \r\n",
             SSDP_MULTICAST_IP, SSDP_PORT, server_ip, config.server.port, nt, usn
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_renderer_search_does_not_receive_a_media_server_response() {
+        let request = "M-SEARCH * HTTP/1.1\r\n\
+            MAN: \"ssdp:discover\"\r\n\
+            ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n";
+        assert!(UnifiedSsdpService::msearch_response_types(request).is_empty());
     }
 }
 
