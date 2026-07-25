@@ -42,6 +42,7 @@ pub struct AuthState {
     concurrency: Arc<tokio::sync::Semaphore>,
     session_ttl: Duration,
     allowed_networks: Vec<IpNet>,
+    token_path: PathBuf,
 }
 
 impl std::fmt::Debug for AuthState {
@@ -113,6 +114,7 @@ impl AuthState {
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_MANAGEMENT_CONCURRENCY)),
             session_ttl: Duration::from_secs(config.session_ttl_hours.max(1).saturating_mul(3600)),
             allowed_networks,
+            token_path,
         })
     }
 
@@ -126,6 +128,7 @@ impl AuthState {
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_MANAGEMENT_CONCURRENCY)),
             session_ttl: Duration::from_secs(3600),
             allowed_networks: Vec::new(),
+            token_path: PathBuf::from("admin.token"),
         }
     }
 
@@ -133,12 +136,27 @@ impl AuthState {
         self.enabled
     }
 
+    pub fn token_path(&self) -> &Path {
+        &self.token_path
+    }
+
     fn network_allowed(&self, address: IpAddr) -> bool {
-        address.is_loopback()
-            || self
-                .allowed_networks
-                .iter()
-                .any(|network| network.contains(&address))
+        if self.allowed_networks.is_empty() {
+            match address {
+                IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+                IpAddr::V6(ip) => {
+                    ip.is_loopback()
+                        || (ip.segments()[0] & 0xfe00) == 0xfc00 // Unique Local Address fc00::/7
+                        || (ip.segments()[0] & 0xffc0) == 0xfe80 // Link-Local Address fe80::/10
+                }
+            }
+        } else {
+            address.is_loopback()
+                || self
+                    .allowed_networks
+                    .iter()
+                    .any(|network| network.contains(&address))
+        }
     }
 
     fn bearer_valid(&self, headers: &HeaderMap) -> bool {

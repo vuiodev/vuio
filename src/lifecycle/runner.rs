@@ -139,7 +139,7 @@ where
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         database: database.clone(),
-        auth,
+        auth: auth.clone(),
         platform_info: platform_info.clone(),
         filesystem_manager,
         content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
@@ -381,6 +381,13 @@ where
         let db_path_str = db_path.to_string_lossy().to_string();
         let display_db_path = tail_with_ellipsis(&db_path_str, 41);
 
+        let auth_status = if auth.enabled() {
+            "Enabled (see token path below)".to_string()
+        } else {
+            "Disabled (Public Access)".to_string()
+        };
+        let display_auth = tail_with_ellipsis(&auth_status, 41);
+
         println!("┌────────────────────────────────────────────────────────┐");
         println!("│  VuIO Media Server                                     │");
         println!("├────────────────────────────────────────────────────────┤");
@@ -390,6 +397,7 @@ where
         println!("│  Address:    {:<41} │", display_url);
         println!("│  SSDP:       Active on port 1900                       │");
         println!("│  Database:   {:<41} │", display_db_path);
+        println!("│  Auth:       {:<41} │", display_auth);
         println!("│                                                        │");
         println!("│  Monitored Directories:                                │");
         if config.media.directories.is_empty() {
@@ -404,6 +412,12 @@ where
         println!("│                                                        │");
         println!("│  Press Ctrl+C to stop the server safely.               │");
         println!("└────────────────────────────────────────────────────────┘");
+
+        if auth.enabled() {
+            println!("Management Authentication is active.");
+            println!("Token file: {}", auth.token_path().display());
+            println!();
+        }
     }
 
     // One signal listener and one supervisor own the application lifetime.
