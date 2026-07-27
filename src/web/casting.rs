@@ -139,8 +139,6 @@ async fn resolve_video_folder<D: DatabaseManager>(
     Ok(videos.into_iter().map(|(_, file)| file).collect())
 }
 
-
-
 async fn create_and_cast_playlist<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     renderer_id: &str,
@@ -221,6 +219,9 @@ mod tests {
 
     #[test]
     fn natural_order_is_case_insensitive() {
-        assert_eq!(crate::natural_cmp("series/A.mkv", "Series/b.mkv"), std::cmp::Ordering::Less);
+        assert_eq!(
+            crate::natural_cmp("series/A.mkv", "Series/b.mkv"),
+            std::cmp::Ordering::Less
+        );
     }
 }

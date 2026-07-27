@@ -193,11 +193,7 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
         let fpath = canonical_root.join(fname);
         tokio::fs::write(&fpath, b"test").await.unwrap();
         database
-            .store_media_file(&MediaFile::new(
-                fpath,
-                4,
-                "video/x-matroska".to_string(),
-            ))
+            .store_media_file(&MediaFile::new(fpath, 4, "video/x-matroska".to_string()))
             .await
             .unwrap();
     }
@@ -251,4 +247,3 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
     assert!(pos_e02 < pos_e10, "e02 must precede e10");
     assert!(pos_e10 < pos_e32, "e10 must precede e32");
 }
-
