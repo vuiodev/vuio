@@ -162,3 +162,93 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
     assert!(root_probe.contains("<NumberReturned>1</NumberReturned>"));
     assert!(root_probe.contains("<TotalMatches>4</TotalMatches>"));
 }
+
+#[tokio::test]
+async fn dlna_browse_returns_naturally_sorted_episodes() {
+    let temp = tempdir().expect("temporary test directory");
+    let media_root = temp.path().join("shows");
+    tokio::fs::create_dir(&media_root)
+        .await
+        .expect("create media directory");
+    let canonical_root = media_root
+        .canonicalize()
+        .expect("canonical media directory");
+
+    // Create files in deliberate non-alphabetical/non-numerical order
+    let files = [
+        "Show.s01e10.mkv",
+        "Show.s01e02.mkv",
+        "Show.s01e01.mkv",
+        "Show.s01e32.mkv",
+    ];
+
+    let database = Arc::new(
+        RedbDatabase::new(temp.path().join("media.redb"))
+            .await
+            .expect("create database"),
+    );
+    database.initialize().await.expect("initialize database");
+
+    for fname in &files {
+        let fpath = canonical_root.join(fname);
+        tokio::fs::write(&fpath, b"test").await.unwrap();
+        database
+            .store_media_file(&MediaFile::new(
+                fpath,
+                4,
+                "video/x-matroska".to_string(),
+            ))
+            .await
+            .unwrap();
+    }
+
+    let monitored_directory = MonitoredDirectoryConfig {
+        path: media_root.to_string_lossy().into_owned(),
+        recursive: false,
+        case_sensitive: None,
+        extensions: Some(vec!["mkv".to_string()]),
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Warn,
+    };
+    let mut config = AppConfig::default();
+    config.server.ip = Some("127.0.0.1".to_string());
+    config.media.directories = vec![monitored_directory.clone()];
+    let config = Arc::new(config);
+    let state = AppState {
+        config: config.clone(),
+        live_config: Arc::new(vuio::state::LiveConfig::new(config.clone())),
+        media_directories: Arc::new(tokio::sync::RwLock::new(vec![monitored_directory])),
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        database,
+        auth: Arc::new(vuio::web::auth::AuthState::testing()),
+        platform_info: Arc::new(PlatformInfo::detect().await.expect("detect platform")),
+        filesystem_manager: Arc::from(create_platform_filesystem_manager()),
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        web_metrics: Arc::new(WebHandlerMetrics::new()),
+        runtime_diagnostics: Arc::new(SystemDiagnosticsSampler::new()),
+        lifecycle_stats: Arc::new(ApplicationStats::new()),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(BookmarkRegistry::new(
+            BOOKMARK_MAX_ENTRIES,
+        ))),
+        log_file_path: temp.path().join("vuio.log"),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(BrowseResponseCache::new())),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
+        discovered_tvs: Arc::new(RendererCache::new()),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        background_tasks: tokio_util::task::TaskTracker::new(),
+    };
+
+    let result_xml = browse(state, "video", 0, 10).await;
+    let pos_e01 = result_xml.find("Show.s01e01.mkv").expect("found e01");
+    let pos_e02 = result_xml.find("Show.s01e02.mkv").expect("found e02");
+    let pos_e10 = result_xml.find("Show.s01e10.mkv").expect("found e10");
+    let pos_e32 = result_xml.find("Show.s01e32.mkv").expect("found e32");
+
+    assert!(pos_e01 < pos_e02, "e01 must precede e02");
+    assert!(pos_e02 < pos_e10, "e02 must precede e10");
+    assert!(pos_e10 < pos_e32, "e10 must precede e32");
+}
+

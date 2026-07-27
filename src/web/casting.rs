@@ -5,7 +5,7 @@ use crate::{
     state::AppState,
 };
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
-use std::{cmp::Ordering, collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, path::PathBuf};
 use tracing::error;
 
 #[derive(serde::Deserialize)]
@@ -135,51 +135,11 @@ async fn resolve_video_folder<D: DatabaseManager>(
             }
         }
     }
-    videos.sort_by(|left, right| natural_cmp(&left.0, &right.0));
+    videos.sort_by(|left, right| crate::natural_cmp(&left.0, &right.0));
     Ok(videos.into_iter().map(|(_, file)| file).collect())
 }
 
-fn natural_cmp(left: &str, right: &str) -> Ordering {
-    let left = left.to_lowercase();
-    let right = right.to_lowercase();
-    let mut left_chars = left.chars().peekable();
-    let mut right_chars = right.chars().peekable();
 
-    loop {
-        match (left_chars.peek(), right_chars.peek()) {
-            (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
-                let left_number: String = std::iter::from_fn(|| {
-                    left_chars.next_if(|character| character.is_ascii_digit())
-                })
-                .collect();
-                let right_number: String = std::iter::from_fn(|| {
-                    right_chars.next_if(|character| character.is_ascii_digit())
-                })
-                .collect();
-                let order = left_number
-                    .trim_start_matches('0')
-                    .len()
-                    .cmp(&right_number.trim_start_matches('0').len())
-                    .then_with(|| {
-                        left_number
-                            .trim_start_matches('0')
-                            .cmp(right_number.trim_start_matches('0'))
-                    })
-                    .then_with(|| left_number.len().cmp(&right_number.len()));
-                if order != Ordering::Equal {
-                    return order;
-                }
-            }
-            (Some(_), Some(_)) => {
-                let order = left_chars.next().cmp(&right_chars.next());
-                if order != Ordering::Equal {
-                    return order;
-                }
-            }
-            _ => return left_chars.next().cmp(&right_chars.next()),
-        }
-    }
-}
 
 async fn create_and_cast_playlist<D: DatabaseManager + 'static>(
     state: &AppState<D>,
@@ -240,7 +200,6 @@ pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
 
     #[test]
     fn episode_paths_use_natural_order() {
@@ -249,7 +208,7 @@ mod tests {
             "Series/Episode 2.mkv",
             "Series/Episode 01.mkv",
         ];
-        paths.sort_by(|left, right| natural_cmp(left, right));
+        paths.sort_by(|left, right| crate::natural_cmp(left, right));
         assert_eq!(
             paths,
             [
@@ -262,6 +221,6 @@ mod tests {
 
     #[test]
     fn natural_order_is_case_insensitive() {
-        assert_eq!(natural_cmp("series/A.mkv", "Series/b.mkv"), Ordering::Less);
+        assert_eq!(crate::natural_cmp("series/A.mkv", "Series/b.mkv"), std::cmp::Ordering::Less);
     }
 }

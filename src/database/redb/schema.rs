@@ -378,6 +378,7 @@ impl DatabaseReadSession for RedbReadSession {
                 let paths = self.transaction.open_table(DIRECTORY_PATH_INDEX)?;
                 if let Some(directory_id) = paths.get(path.as_str())? {
                     let index = self.transaction.open_multimap_table(DIRECTORY_FILES)?;
+                    let mut matched_ids = Vec::new();
                     for id in index.get(directory_id.value())? {
                         let id = id?.value();
                         if let Some(family) = mime_family {
@@ -387,6 +388,25 @@ impl DatabaseReadSession for RedbReadSession {
                                 }
                             }
                         }
+                        matched_ids.push(id);
+                    }
+
+                    let mut file_entries = Vec::with_capacity(matched_ids.len());
+                    for id in matched_ids {
+                        if let Some(bytes) = files.get(id)? {
+                            let view = Self::view(bytes.value())?;
+                            let track_number = view.track_number();
+                            let filename = view.filename().to_owned();
+                            file_entries.push((id, track_number, filename));
+                        }
+                    }
+
+                    file_entries.sort_by(|a, b| match (a.1, b.1) {
+                        (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
+                        _ => crate::natural_cmp(&a.2, &b.2),
+                    });
+
+                    for (id, _, _) in file_entries {
                         emit_id!(id);
                     }
                 }
@@ -399,6 +419,7 @@ impl DatabaseReadSession for RedbReadSession {
             }
             MediaFileQuery::Album { album, artist } => {
                 let index = self.transaction.open_multimap_table(ALBUM_INDEX)?;
+                let mut matched_ids = Vec::new();
                 for id in index.get(album.as_str())? {
                     let id = id?.value();
                     if let Some(expected_artist) = artist {
@@ -409,6 +430,25 @@ impl DatabaseReadSession for RedbReadSession {
                             }
                         }
                     }
+                    matched_ids.push(id);
+                }
+
+                let mut file_entries = Vec::with_capacity(matched_ids.len());
+                for id in matched_ids {
+                    if let Some(bytes) = files.get(id)? {
+                        let view = Self::view(bytes.value())?;
+                        let track_number = view.track_number();
+                        let filename = view.filename().to_owned();
+                        file_entries.push((id, track_number, filename));
+                    }
+                }
+
+                file_entries.sort_by(|a, b| match (a.1, b.1) {
+                    (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
+                    _ => crate::natural_cmp(&a.2, &b.2),
+                });
+
+                for (id, _, _) in file_entries {
                     emit_id!(id);
                 }
             }
@@ -499,6 +539,8 @@ impl DatabaseReadSession for RedbReadSession {
         let family = mime_family.filter(|value| !value.is_empty()).unwrap_or("*");
         let (range_start, range_end) = RedbDatabase::directory_order_range(parent_id);
         let mut summary = VisitSummary::default();
+
+        let mut subdirs = Vec::new();
         for child in children.range(range_start.as_str()..range_end.as_str())? {
             let (_, child_id) = child?;
             let child_id = child_id.value();
@@ -509,19 +551,29 @@ impl DatabaseReadSession for RedbReadSession {
             {
                 continue;
             }
+            if let Some(path) = records.get(child_id)? {
+                let path = path.value().to_owned();
+                subdirs.push((child_id, path));
+            }
+        }
+
+        subdirs.sort_by(|a, b| {
+            let name_a = RedbDatabase::directory_name(&a.1);
+            let name_b = RedbDatabase::directory_name(&b.1);
+            crate::natural_cmp(name_a, name_b)
+        });
+
+        for (child_id, path) in &subdirs {
             summary.matched += 1;
             if summary.matched <= offset || summary.visited >= limit {
                 continue;
             }
-            if let Some(path) = records.get(child_id)? {
-                let path = path.value();
-                visitor(RedbDirectoryView {
-                    id: child_id,
-                    path,
-                    name: RedbDatabase::directory_name(path),
-                })?;
-                summary.visited += 1;
-            }
+            visitor(RedbDirectoryView {
+                id: *child_id,
+                path: path.as_str(),
+                name: RedbDatabase::directory_name(path),
+            })?;
+            summary.visited += 1;
         }
         Ok(summary)
     }

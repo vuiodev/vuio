@@ -259,13 +259,13 @@ impl RedbDatabase {
                 }
             }
 
-            // Sort subdirectories case-insensitively
-            directories.sort_by_cached_key(|directory| directory.name.to_lowercase());
+            // Sort subdirectories naturally (so e.g. "Season 2" < "Season 10")
+            directories.sort_by(|a, b| crate::natural_cmp(&a.name, &b.name));
 
-            // Sort files by track number if available, then case-insensitively by filename
+            // Sort files by track number if available, then naturally by filename
             files.sort_by(|a, b| match (a.track_number, b.track_number) {
                 (Some(ta), Some(tb)) if ta != tb => ta.cmp(&tb),
-                _ => a.filename.to_lowercase().cmp(&b.filename.to_lowercase()),
+                _ => crate::natural_cmp(&a.filename, &b.filename),
             });
 
             Ok((directories, files))

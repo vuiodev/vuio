@@ -266,3 +266,51 @@ pub mod state {
         }
     }
 }
+
+/// Natural comparison for strings containing embedded numbers.
+///
+/// Numeric segments are compared by value so that, e.g., "s01e2" < "s01e10".
+/// Non-numeric segments are compared case-insensitively.
+pub(crate) fn natural_cmp(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    let left = left.to_lowercase();
+    let right = right.to_lowercase();
+    let mut left_chars = left.chars().peekable();
+    let mut right_chars = right.chars().peekable();
+
+    loop {
+        match (left_chars.peek(), right_chars.peek()) {
+            (Some(a), Some(b)) if a.is_ascii_digit() && b.is_ascii_digit() => {
+                let left_number: String = std::iter::from_fn(|| {
+                    left_chars.next_if(|character| character.is_ascii_digit())
+                })
+                .collect();
+                let right_number: String = std::iter::from_fn(|| {
+                    right_chars.next_if(|character| character.is_ascii_digit())
+                })
+                .collect();
+                let order = left_number
+                    .trim_start_matches('0')
+                    .len()
+                    .cmp(&right_number.trim_start_matches('0').len())
+                    .then_with(|| {
+                        left_number
+                            .trim_start_matches('0')
+                            .cmp(right_number.trim_start_matches('0'))
+                    })
+                    .then_with(|| left_number.len().cmp(&right_number.len()));
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            (Some(_), Some(_)) => {
+                let order = left_chars.next().cmp(&right_chars.next());
+                if order != Ordering::Equal {
+                    return order;
+                }
+            }
+            _ => return left_chars.next().cmp(&right_chars.next()),
+        }
+    }
+}
