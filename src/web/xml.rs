@@ -141,7 +141,7 @@ fn write_directory<W: std::fmt::Write, D: DirectoryView>(
     };
     write!(
         output,
-        r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>"#,
+        r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="1"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class>"#,
         xml_escape(&container_id),
         xml_escape(object_id),
         xml_escape(container.name())
@@ -627,7 +627,7 @@ pub async fn generate_browse_response(
 
             let _ = write!(
                 &mut didl,
-                r#"<container id="{}" parentID="{}" restricted="1"><dc:title>{}</dc:title><upnp:class>object.container</upnp:class>"#,
+                r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="1"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class>"#,
                 xml_escape(&container_id),
                 xml_escape(object_id),
                 xml_escape(&container.name)
@@ -944,6 +944,48 @@ pub async fn generate_browse_response(
 
     debug!("Final XML response size: {} bytes", final_response.len());
     final_response
+}
+
+/// Single-container BrowseMetadata response. Samsung TVs probe folders this way and
+/// use `childCount` to decide whether a folder is empty.
+pub fn generate_container_metadata_response(
+    object_id: &str,
+    parent_id: &str,
+    title: &str,
+    child_count: usize,
+    update_id: u32,
+) -> String {
+    use std::fmt::Write;
+
+    let mut response = String::with_capacity(768);
+    response.push_str(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+            <Result>"#,
+    );
+    let mut didl = SoapResultWriter(&mut response);
+    didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:sec="http://www.sec.co.kr/">"#);
+    let _ = write!(
+        &mut didl,
+        r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="{child_count}"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>"#,
+        xml_escape(object_id),
+        xml_escape(parent_id),
+        xml_escape(title)
+    );
+    didl.push_str("</DIDL-Lite>");
+    let _ = write!(
+        &mut response,
+        r#"</Result>
+            <NumberReturned>1</NumberReturned>
+            <TotalMatches>1</TotalMatches>
+            <UpdateID>{update_id}</UpdateID>
+        </u:BrowseResponse>
+    </s:Body>
+</s:Envelope>"#
+    );
+    response
 }
 
 #[cfg(test)]
