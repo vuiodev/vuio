@@ -93,12 +93,8 @@ async fn browse_samsung_metadata(state: AppState, object_id: &str) -> String {
         USER_AGENT,
         HeaderValue::from_static("DLNADOC/1.50 SEC_HHP_[TV]UE40D7000/1.0"),
     );
-    let response = content_directory_control(
-        State(state),
-        headers,
-        browse_metadata_request(object_id),
-    )
-    .await;
+    let response =
+        content_directory_control(State(state), headers, browse_metadata_request(object_id)).await;
     assert_eq!(response.status(), StatusCode::OK);
     String::from_utf8(
         to_bytes(response.into_body(), 128 * 1024)
