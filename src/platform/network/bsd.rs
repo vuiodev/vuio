@@ -181,7 +181,7 @@ impl BsdNetworkManager {
         if let (Some(name), Some(ip_address)) = (current_interface, current_ip) {
             if !name.starts_with("lo") {
                 interfaces.push(NetworkInterface {
-                    name,
+                    name: name.clone(),
                     ip_address,
                     is_loopback: false,
                     is_up,
