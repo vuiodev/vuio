@@ -1,0 +1,30 @@
+[package]
+name = "vuio"
+version = "0.0.40"
+edition = "2021"
+authors = ["vyrti"]
+description = "VuIO media server command-line application"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vuiodev/vuio"
+homepage = "https://github.com/vuiodev/vuio"
+readme = "../../README.md"
+
+[[bin]]
+name = "vuio"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate_test_media"
+path = "src/bin/generate_test_media.rs"
+
+[dependencies]
+anyhow = "1.0"
+audiotags = "0.5"
+clap = { version = "4.6", features = ["derive"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+serde = { version = "1.0", features = ["derive"] }
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal"] }
+tracing = "0.1"
+uuid = { version = "1.24", features = ["v4"] }
+vuio-core = { path = "../vuio-core" }
