@@ -202,6 +202,7 @@ jobs:
             # Skip audio_integration_tests: audiotags ID3 write SIGSEGV under QEMU.
             # Skip samsungtv_browse / mcp / metrics: AppState harness SIGSEGV under
             # FreeBSD QEMU (sysinfo kinfo_getfile / getmntinfo).
+            # issue_24_pagination: ignored on aarch64 only (SIGSEGV under QEMU); still run on x86_64.
             cargo test --lib
             cargo test --test issue_24_pagination
             cargo test --test path_normalization_integration_tests
