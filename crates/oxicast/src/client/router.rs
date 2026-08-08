@@ -73,7 +73,9 @@ pub(crate) async fn route(
                 // Check for request-response correlation
                 if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
                     if request_id > 0 {
-                        request_tracker.resolve(request_id as u32, json.clone()).await;
+                        request_tracker
+                            .resolve(request_id as u32, json.clone())
+                            .await;
                     }
                 }
 
@@ -98,7 +100,9 @@ pub(crate) async fn route(
                 if matches!(classified, MediaMessageType::Status) {
                     if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
                         if request_id > 0 {
-                            request_tracker.resolve(request_id as u32, json.clone()).await;
+                            request_tracker
+                                .resolve(request_id as u32, json.clone())
+                                .await;
                         }
                     }
                 }
@@ -136,7 +140,9 @@ pub(crate) async fn route(
                         // Resolve the pending request so load_media() returns an error
                         if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
                             if request_id > 0 {
-                                request_tracker.resolve(request_id as u32, json.clone()).await;
+                                request_tracker
+                                    .resolve(request_id as u32, json.clone())
+                                    .await;
                             }
                         }
                     }
@@ -144,17 +150,23 @@ pub(crate) async fn route(
                         tracing::debug!("LOAD_CANCELLED");
                         if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
                             if request_id > 0 {
-                                request_tracker.resolve(request_id as u32, json.clone()).await;
+                                request_tracker
+                                    .resolve(request_id as u32, json.clone())
+                                    .await;
                             }
                         }
                     }
                     MediaMessageType::InvalidRequest => {
-                        let reason =
-                            json.get("reason").and_then(|r| r.as_str()).unwrap_or("unknown");
+                        let reason = json
+                            .get("reason")
+                            .and_then(|r| r.as_str())
+                            .unwrap_or("unknown");
                         tracing::debug!("invalid request: {reason}");
                         if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
                             if request_id > 0 {
-                                request_tracker.resolve(request_id as u32, json.clone()).await;
+                                request_tracker
+                                    .resolve(request_id as u32, json.clone())
+                                    .await;
                             }
                         }
                     }
@@ -238,12 +250,24 @@ fn parse_receiver_status(json: &serde_json::Value) -> Option<ReceiverStatus> {
 
     Some(ReceiverStatus {
         volume: Volume {
-            level: volume_obj.get("level").and_then(|l| l.as_f64()).unwrap_or(1.0) as f32,
-            muted: volume_obj.get("muted").and_then(|m| m.as_bool()).unwrap_or(false),
+            level: volume_obj
+                .get("level")
+                .and_then(|l| l.as_f64())
+                .unwrap_or(1.0) as f32,
+            muted: volume_obj
+                .get("muted")
+                .and_then(|m| m.as_bool())
+                .unwrap_or(false),
         },
         applications,
-        is_active_input: status.get("isActiveInput").and_then(|v| v.as_bool()).unwrap_or(false),
-        is_stand_by: status.get("isStandBy").and_then(|v| v.as_bool()).unwrap_or(false),
+        is_active_input: status
+            .get("isActiveInput")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        is_stand_by: status
+            .get("isStandBy")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
     })
 }
 
@@ -259,13 +283,16 @@ fn parse_media_status(json: &serde_json::Value) -> Option<MediaStatus> {
         _ => return None,
     };
 
-    let idle_reason = entry.get("idleReason").and_then(|r| r.as_str()).and_then(|r| match r {
-        "CANCELLED" => Some(IdleReason::Cancelled),
-        "INTERRUPTED" => Some(IdleReason::Interrupted),
-        "FINISHED" => Some(IdleReason::Finished),
-        "ERROR" => Some(IdleReason::Error),
-        _ => None,
-    });
+    let idle_reason = entry
+        .get("idleReason")
+        .and_then(|r| r.as_str())
+        .and_then(|r| match r {
+            "CANCELLED" => Some(IdleReason::Cancelled),
+            "INTERRUPTED" => Some(IdleReason::Interrupted),
+            "FINISHED" => Some(IdleReason::Finished),
+            "ERROR" => Some(IdleReason::Error),
+            _ => None,
+        });
 
     let volume_obj = entry.get("volume");
 
@@ -273,15 +300,20 @@ fn parse_media_status(json: &serde_json::Value) -> Option<MediaStatus> {
         media_session_id: entry.get("mediaSessionId")?.as_i64()? as i32,
         player_state,
         idle_reason,
-        current_time: entry.get("currentTime").and_then(|t| t.as_f64()).unwrap_or(0.0),
+        current_time: entry
+            .get("currentTime")
+            .and_then(|t| t.as_f64())
+            .unwrap_or(0.0),
         duration: entry
             .get("media")
             .and_then(|m| m.get("duration"))
             .and_then(|d| d.as_f64())
             .filter(|d| *d > 0.0),
         volume: Volume {
-            level: volume_obj.and_then(|v| v.get("level")).and_then(|l| l.as_f64()).unwrap_or(1.0)
-                as f32,
+            level: volume_obj
+                .and_then(|v| v.get("level"))
+                .and_then(|l| l.as_f64())
+                .unwrap_or(1.0) as f32,
             muted: volume_obj
                 .and_then(|v| v.get("muted"))
                 .and_then(|m| m.as_bool())
@@ -300,7 +332,10 @@ fn parse_media_status(json: &serde_json::Value) -> Option<MediaStatus> {
                     "LIVE" => StreamType::Live,
                     _ => StreamType::None,
                 },
-                duration: m.get("duration").and_then(|d| d.as_f64()).filter(|d| *d > 0.0),
+                duration: m
+                    .get("duration")
+                    .and_then(|d| d.as_f64())
+                    .filter(|d| *d > 0.0),
                 metadata: m.get("metadata").and_then(parse_metadata),
             })
         }),
@@ -308,30 +343,51 @@ fn parse_media_status(json: &serde_json::Value) -> Option<MediaStatus> {
 }
 
 fn parse_metadata(meta: &serde_json::Value) -> Option<MediaMetadata> {
-    let metadata_type = meta.get("metadataType").and_then(|t| t.as_u64()).unwrap_or(0);
+    let metadata_type = meta
+        .get("metadataType")
+        .and_then(|t| t.as_u64())
+        .unwrap_or(0);
     let images = parse_images(meta);
 
     match metadata_type {
         ns::METADATA_GENERIC => Some(MediaMetadata::Generic {
             title: meta.get("title").and_then(|t| t.as_str()).map(String::from),
-            subtitle: meta.get("subtitle").and_then(|s| s.as_str()).map(String::from),
+            subtitle: meta
+                .get("subtitle")
+                .and_then(|s| s.as_str())
+                .map(String::from),
             images,
         }),
         ns::METADATA_MOVIE => Some(MediaMetadata::Movie {
             title: meta.get("title").and_then(|t| t.as_str()).map(String::from),
-            subtitle: meta.get("subtitle").and_then(|s| s.as_str()).map(String::from),
-            studio: meta.get("studio").and_then(|s| s.as_str()).map(String::from),
+            subtitle: meta
+                .get("subtitle")
+                .and_then(|s| s.as_str())
+                .map(String::from),
+            studio: meta
+                .get("studio")
+                .and_then(|s| s.as_str())
+                .map(String::from),
             images,
         }),
         ns::METADATA_TV_SHOW => Some(MediaMetadata::TvShow {
-            series_title: meta.get("seriesTitle").and_then(|t| t.as_str()).map(String::from),
+            series_title: meta
+                .get("seriesTitle")
+                .and_then(|t| t.as_str())
+                .map(String::from),
             episode_title: meta
                 .get("episodeTitle")
                 .or_else(|| meta.get("title"))
                 .and_then(|t| t.as_str())
                 .map(String::from),
-            season: meta.get("season").and_then(|s| s.as_u64()).map(|s| s as u32),
-            episode: meta.get("episode").and_then(|e| e.as_u64()).map(|e| e as u32),
+            season: meta
+                .get("season")
+                .and_then(|s| s.as_u64())
+                .map(|s| s as u32),
+            episode: meta
+                .get("episode")
+                .and_then(|e| e.as_u64())
+                .map(|e| e as u32),
             images,
         }),
         ns::METADATA_MUSIC_TRACK => Some(MediaMetadata::MusicTrack {
@@ -341,32 +397,68 @@ fn parse_metadata(meta: &serde_json::Value) -> Option<MediaMetadata> {
                 .or_else(|| meta.get("albumArtist"))
                 .and_then(|a| a.as_str())
                 .map(String::from),
-            album_name: meta.get("albumName").and_then(|a| a.as_str()).map(String::from),
-            composer: meta.get("composer").and_then(|c| c.as_str()).map(String::from),
-            track_number: meta.get("trackNumber").and_then(|t| t.as_u64()).map(|t| t as u32),
-            disc_number: meta.get("discNumber").and_then(|d| d.as_u64()).map(|d| d as u32),
+            album_name: meta
+                .get("albumName")
+                .and_then(|a| a.as_str())
+                .map(String::from),
+            composer: meta
+                .get("composer")
+                .and_then(|c| c.as_str())
+                .map(String::from),
+            track_number: meta
+                .get("trackNumber")
+                .and_then(|t| t.as_u64())
+                .map(|t| t as u32),
+            disc_number: meta
+                .get("discNumber")
+                .and_then(|d| d.as_u64())
+                .map(|d| d as u32),
             images,
         }),
         ns::METADATA_PHOTO => Some(MediaMetadata::Photo {
             title: meta.get("title").and_then(|t| t.as_str()).map(String::from),
-            artist: meta.get("artist").and_then(|a| a.as_str()).map(String::from),
-            location: meta.get("location").and_then(|l| l.as_str()).map(String::from),
+            artist: meta
+                .get("artist")
+                .and_then(|a| a.as_str())
+                .map(String::from),
+            location: meta
+                .get("location")
+                .and_then(|l| l.as_str())
+                .map(String::from),
             latitude: meta.get("latitude").and_then(|l| l.as_f64()),
             longitude: meta.get("longitude").and_then(|l| l.as_f64()),
             width: meta.get("width").and_then(|w| w.as_u64()).map(|w| w as u32),
-            height: meta.get("height").and_then(|h| h.as_u64()).map(|h| h as u32),
+            height: meta
+                .get("height")
+                .and_then(|h| h.as_u64())
+                .map(|h| h as u32),
             images,
         }),
         ns::METADATA_AUDIOBOOK_CHAPTER => Some(MediaMetadata::AudiobookChapter {
-            book_title: meta.get("bookTitle").and_then(|t| t.as_str()).map(String::from),
-            chapter_title: meta.get("chapterTitle").and_then(|t| t.as_str()).map(String::from),
-            chapter_number: meta.get("chapterNumber").and_then(|n| n.as_u64()).map(|n| n as u32),
-            subtitle: meta.get("subtitle").and_then(|s| s.as_str()).map(String::from),
+            book_title: meta
+                .get("bookTitle")
+                .and_then(|t| t.as_str())
+                .map(String::from),
+            chapter_title: meta
+                .get("chapterTitle")
+                .and_then(|t| t.as_str())
+                .map(String::from),
+            chapter_number: meta
+                .get("chapterNumber")
+                .and_then(|n| n.as_u64())
+                .map(|n| n as u32),
+            subtitle: meta
+                .get("subtitle")
+                .and_then(|s| s.as_str())
+                .map(String::from),
             images,
         }),
         _ => Some(MediaMetadata::Generic {
             title: meta.get("title").and_then(|t| t.as_str()).map(String::from),
-            subtitle: meta.get("subtitle").and_then(|s| s.as_str()).map(String::from),
+            subtitle: meta
+                .get("subtitle")
+                .and_then(|s| s.as_str())
+                .map(String::from),
             images,
         }),
     }
@@ -410,13 +502,25 @@ mod tests {
         let (event_tx, event_rx) = mpsc::channel(64);
         let (state_holder, _watchers) = state::new_state();
         let (write_tx, write_rx) = mpsc::channel(64);
-        (tracker, event_tx, event_rx, state_holder, write_tx, write_rx)
+        (
+            tracker,
+            event_tx,
+            event_rx,
+            state_holder,
+            write_tx,
+            write_rx,
+        )
     }
 
     #[tokio::test]
     async fn test_ping_auto_reply() {
         let (tracker, event_tx, _event_rx, state, write_tx, mut write_rx) = setup().await;
-        let msg = build_message(ns::NS_HEARTBEAT, "receiver-0", "sender-0", r#"{"type":"PING"}"#);
+        let msg = build_message(
+            ns::NS_HEARTBEAT,
+            "receiver-0",
+            "sender-0",
+            r#"{"type":"PING"}"#,
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         // Should send PONG
@@ -430,7 +534,12 @@ mod tests {
     #[tokio::test]
     async fn test_pong_does_not_reply() {
         let (tracker, event_tx, _event_rx, state, write_tx, mut write_rx) = setup().await;
-        let msg = build_message(ns::NS_HEARTBEAT, "receiver-0", "sender-0", r#"{"type":"PONG"}"#);
+        let msg = build_message(
+            ns::NS_HEARTBEAT,
+            "receiver-0",
+            "sender-0",
+            r#"{"type":"PONG"}"#,
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         // Should NOT send anything
@@ -440,12 +549,19 @@ mod tests {
     #[tokio::test]
     async fn test_close_emits_raw_message() {
         let (tracker, event_tx, mut event_rx, state, write_tx, _write_rx) = setup().await;
-        let msg = build_message(ns::NS_CONNECTION, "web-123", "sender-0", r#"{"type":"CLOSE"}"#);
+        let msg = build_message(
+            ns::NS_CONNECTION,
+            "web-123",
+            "sender-0",
+            r#"{"type":"CLOSE"}"#,
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
         match event {
-            CastEvent::RawMessage { namespace, source, .. } => {
+            CastEvent::RawMessage {
+                namespace, source, ..
+            } => {
                 assert_eq!(namespace, ns::NS_CONNECTION);
                 assert_eq!(source, "web-123");
             }
@@ -456,7 +572,12 @@ mod tests {
     #[tokio::test]
     async fn test_close_does_not_emit_disconnected() {
         let (tracker, event_tx, mut event_rx, state, write_tx, _write_rx) = setup().await;
-        let msg = build_message(ns::NS_CONNECTION, "web-123", "sender-0", r#"{"type":"CLOSE"}"#);
+        let msg = build_message(
+            ns::NS_CONNECTION,
+            "web-123",
+            "sender-0",
+            r#"{"type":"CLOSE"}"#,
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
@@ -476,7 +597,12 @@ mod tests {
                 "applications": []
             }
         });
-        let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", &payload.to_string());
+        let msg = build_message(
+            ns::NS_RECEIVER,
+            "receiver-0",
+            "sender-0",
+            &payload.to_string(),
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         let value = rx.await.unwrap();
@@ -495,7 +621,12 @@ mod tests {
                 "applications": []
             }
         });
-        let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", &payload.to_string());
+        let msg = build_message(
+            ns::NS_RECEIVER,
+            "receiver-0",
+            "sender-0",
+            &payload.to_string(),
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
@@ -547,7 +678,12 @@ mod tests {
         let msg = build_message(ns::NS_MEDIA, "web-5", "sender-0", &payload.to_string());
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
-        assert_eq!(state.media_session_id.load(std::sync::atomic::Ordering::Relaxed), 77);
+        assert_eq!(
+            state
+                .media_session_id
+                .load(std::sync::atomic::Ordering::Relaxed),
+            77
+        );
     }
 
     #[tokio::test]
@@ -571,7 +707,10 @@ mod tests {
         // First event: MediaSessionEnded
         let event = event_rx.try_recv().unwrap();
         match event {
-            CastEvent::MediaSessionEnded { media_session_id, idle_reason } => {
+            CastEvent::MediaSessionEnded {
+                media_session_id,
+                idle_reason,
+            } => {
                 assert_eq!(media_session_id, 5);
                 assert_eq!(idle_reason, IdleReason::Finished);
             }
@@ -701,12 +840,22 @@ mod tests {
         let (tracker, event_tx, mut event_rx, state, write_tx, _write_rx) = setup().await;
 
         let payload = r#"{"data":"broadcast"}"#;
-        let msg = build_message("urn:x-cast:com.example.custom", "web-5", "sender-0", payload);
+        let msg = build_message(
+            "urn:x-cast:com.example.custom",
+            "web-5",
+            "sender-0",
+            payload,
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
 
         let event = event_rx.try_recv().unwrap();
         match event {
-            CastEvent::RawMessage { namespace, source, payload: p, .. } => {
+            CastEvent::RawMessage {
+                namespace,
+                source,
+                payload: p,
+                ..
+            } => {
                 assert_eq!(namespace, "urn:x-cast:com.example.custom");
                 assert_eq!(source, "web-5");
                 assert!(p.contains("broadcast"));
@@ -742,7 +891,12 @@ mod tests {
                 "applications": []
             }
         });
-        let msg = build_message(ns::NS_RECEIVER, "receiver-0", "sender-0", &payload.to_string());
+        let msg = build_message(
+            ns::NS_RECEIVER,
+            "receiver-0",
+            "sender-0",
+            &payload.to_string(),
+        );
         route(&msg, &tracker, &event_tx, &state, &write_tx).await;
         // requestId 0 should not consume the pending entry for id 1
         assert!(tracker.resolve(1, serde_json::json!({})).await);
@@ -780,8 +934,14 @@ mod tests {
 
     #[test]
     fn test_classify_media_message_all_types() {
-        assert!(matches!(classify_media_message("MEDIA_STATUS"), MediaMessageType::Status));
-        assert!(matches!(classify_media_message("LOAD_FAILED"), MediaMessageType::LoadFailed));
+        assert!(matches!(
+            classify_media_message("MEDIA_STATUS"),
+            MediaMessageType::Status
+        ));
+        assert!(matches!(
+            classify_media_message("LOAD_FAILED"),
+            MediaMessageType::LoadFailed
+        ));
         assert!(matches!(
             classify_media_message("LOAD_CANCELLED"),
             MediaMessageType::LoadCancelled
@@ -790,6 +950,9 @@ mod tests {
             classify_media_message("INVALID_REQUEST"),
             MediaMessageType::InvalidRequest
         ));
-        assert!(matches!(classify_media_message("WHATEVER"), MediaMessageType::Unknown));
+        assert!(matches!(
+            classify_media_message("WHATEVER"),
+            MediaMessageType::Unknown
+        ));
     }
 }

@@ -53,8 +53,9 @@ pub fn discover(timeout: Duration) -> Result<DiscoveryStream> {
 
     // Initialize mDNS on the calling thread so errors propagate immediately
     let mdns = ServiceDaemon::new().map_err(|e| Error::Discovery(format!("mDNS daemon: {e}")))?;
-    let receiver =
-        mdns.browse(SERVICE_TYPE).map_err(|e| Error::Discovery(format!("mDNS browse: {e}")))?;
+    let receiver = mdns
+        .browse(SERVICE_TYPE)
+        .map_err(|e| Error::Discovery(format!("mDNS browse: {e}")))?;
 
     let (tx, rx) = mpsc::channel(32);
 
@@ -88,14 +89,22 @@ fn discover_streaming(
                     continue;
                 }
 
-                let name =
-                    info.get_property_val_str("fn").unwrap_or(info.get_fullname()).to_string();
+                let name = info
+                    .get_property_val_str("fn")
+                    .unwrap_or(info.get_fullname())
+                    .to_string();
                 let model = info.get_property_val_str("md").map(String::from);
                 let uuid = info.get_property_val_str("id").map(String::from);
 
                 tracing::debug!("discovered: {name} at {ip}:{}", info.get_port());
 
-                let device = DeviceInfo { name, ip, port: info.get_port(), model, uuid };
+                let device = DeviceInfo {
+                    name,
+                    ip,
+                    port: info.get_port(),
+                    model,
+                    uuid,
+                };
                 if tx.blocking_send(device).is_err() {
                     break; // receiver dropped
                 }
@@ -142,8 +151,9 @@ fn discover_blocking(timeout: Duration) -> Result<Vec<DeviceInfo>> {
 
     let mdns = ServiceDaemon::new().map_err(|e| Error::Discovery(format!("mDNS daemon: {e}")))?;
 
-    let receiver =
-        mdns.browse(SERVICE_TYPE).map_err(|e| Error::Discovery(format!("mDNS browse: {e}")))?;
+    let receiver = mdns
+        .browse(SERVICE_TYPE)
+        .map_err(|e| Error::Discovery(format!("mDNS browse: {e}")))?;
 
     let mut devices = Vec::new();
     let mut seen = HashSet::new();
@@ -161,15 +171,23 @@ fn discover_blocking(timeout: Duration) -> Result<Vec<DeviceInfo>> {
                     continue;
                 }
 
-                let name =
-                    info.get_property_val_str("fn").unwrap_or(info.get_fullname()).to_string();
+                let name = info
+                    .get_property_val_str("fn")
+                    .unwrap_or(info.get_fullname())
+                    .to_string();
 
                 let model = info.get_property_val_str("md").map(String::from);
                 let uuid = info.get_property_val_str("id").map(String::from);
 
                 tracing::debug!("discovered: {name} at {ip}:{}", info.get_port());
 
-                devices.push(DeviceInfo { name, ip, port: info.get_port(), model, uuid });
+                devices.push(DeviceInfo {
+                    name,
+                    ip,
+                    port: info.get_port(),
+                    model,
+                    uuid,
+                });
             }
             Ok(_) => {}
             Err(e) => {

@@ -34,7 +34,12 @@ struct TaskHandles {
 
 impl TaskHandles {
     fn new(cancel: CancellationToken) -> Self {
-        Self { cancel, reader: None, writer: None, heartbeat: None }
+        Self {
+            cancel,
+            reader: None,
+            writer: None,
+            heartbeat: None,
+        }
     }
 
     /// Abort all running tasks and wait for them to finish.
@@ -195,16 +200,18 @@ impl CastClient {
                 last_activity: last_activity.clone(),
             },
         )));
-        handles.heartbeat = Some(heartbeat::spawn_heartbeat_task(heartbeat::HeartbeatConfig {
-            write_tx: write_tx.clone(),
-            interval: config.heartbeat_interval,
-            cancel: cancel.clone(),
-            last_activity: last_activity.clone(),
-            timeout: config.heartbeat_timeout,
-            alive: alive.clone(),
-            event_tx: event_tx.clone(),
-            connection_tx: state_holder.connection_tx.clone(),
-        }));
+        handles.heartbeat = Some(heartbeat::spawn_heartbeat_task(
+            heartbeat::HeartbeatConfig {
+                write_tx: write_tx.clone(),
+                interval: config.heartbeat_interval,
+                cancel: cancel.clone(),
+                last_activity: last_activity.clone(),
+                timeout: config.heartbeat_timeout,
+                alive: alive.clone(),
+                event_tx: event_tx.clone(),
+                connection_tx: state_holder.connection_tx.clone(),
+            },
+        ));
 
         // Send CONNECT to receiver-0
         write_tx
@@ -296,14 +303,20 @@ impl CastClient {
         // instead of draining its buffer for several more seconds.
         let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
             self.stop_media().await.ok();
-            self.send(channel::connection::close_msg("receiver-0")).await.ok();
+            self.send(channel::connection::close_msg("receiver-0"))
+                .await
+                .ok();
         })
         .await;
         self.inner.alive.store(false, Ordering::Release);
         // Deterministically stop all background tasks
         self.inner.task_handles.lock().await.shutdown().await;
         self.inner.request_tracker.clear().await;
-        let _ = self.inner.state.connection_tx.send(ConnectionState::Disconnected);
+        let _ = self
+            .inner
+            .state
+            .connection_tx
+            .send(ConnectionState::Disconnected);
         // Emit terminal Disconnected event, then drop the sender so
         // next_event() returns None instead of hanging forever.
         self.try_send_event(CastEvent::Disconnected(None));
@@ -340,9 +353,17 @@ impl CastClient {
         }
 
         let config = &self.inner.config;
-        tracing::info!("reconnecting to {}:{} (attempt {attempt})", config.host, config.port);
+        tracing::info!(
+            "reconnecting to {}:{} (attempt {attempt})",
+            config.host,
+            config.port
+        );
 
-        let _ = self.inner.state.connection_tx.send(ConnectionState::Reconnecting { attempt });
+        let _ = self
+            .inner
+            .state
+            .connection_tx
+            .send(ConnectionState::Reconnecting { attempt });
         self.try_send_event(CastEvent::Reconnecting { attempt });
 
         // 1. Deterministically shut down all old tasks
@@ -396,26 +417,33 @@ impl CastClient {
                 last_activity: self.inner.last_activity.clone(),
             },
         )));
-        handles.heartbeat = Some(heartbeat::spawn_heartbeat_task(heartbeat::HeartbeatConfig {
-            write_tx: new_write_tx,
-            interval: config.heartbeat_interval,
-            cancel,
-            last_activity: self.inner.last_activity.clone(),
-            timeout: config.heartbeat_timeout,
-            alive: self.inner.alive.clone(),
-            event_tx,
-            connection_tx: self.inner.state.connection_tx.clone(),
-        }));
+        handles.heartbeat = Some(heartbeat::spawn_heartbeat_task(
+            heartbeat::HeartbeatConfig {
+                write_tx: new_write_tx,
+                interval: config.heartbeat_interval,
+                cancel,
+                last_activity: self.inner.last_activity.clone(),
+                timeout: config.heartbeat_timeout,
+                alive: self.inner.alive.clone(),
+                event_tx,
+                connection_tx: self.inner.state.connection_tx.clone(),
+            },
+        ));
 
         *self.inner.task_handles.lock().await = handles;
 
         // 5. Re-establish Cast protocol connections
-        self.send(channel::connection::connect_msg("receiver-0")).await?;
+        self.send(channel::connection::connect_msg("receiver-0"))
+            .await?;
         if let Some(tid) = self.inner.transport_id.lock().await.as_ref() {
             self.send(channel::connection::connect_msg(tid)).await?;
         }
 
-        let _ = self.inner.state.connection_tx.send(ConnectionState::Connected);
+        let _ = self
+            .inner
+            .state
+            .connection_tx
+            .send(ConnectionState::Connected);
         self.try_send_event(CastEvent::Reconnected);
         tracing::info!("reconnected to {}:{}", config.host, config.port);
         Ok(())
@@ -437,7 +465,8 @@ impl CastClient {
     /// Launch an application on the device.
     pub async fn launch_app(&self, app: &CastApp) -> Result<Application> {
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::receiver::launch_app(id, app.app_id())).await?;
+        self.send(channel::receiver::launch_app(id, app.app_id()))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         tracing::debug!("launch_app response: {}", json);
         Self::check_device_error(&json)?;
@@ -448,9 +477,13 @@ impl CastClient {
 
         let status = router::parse_receiver_status_from_json(&json);
         if let Some(status) = status {
-            if let Some(app_info) = status.applications.into_iter().find(|a| a.app_id == target_id)
+            if let Some(app_info) = status
+                .applications
+                .into_iter()
+                .find(|a| a.app_id == target_id)
             {
-                self.send(channel::connection::connect_msg(&app_info.transport_id)).await?;
+                self.send(channel::connection::connect_msg(&app_info.transport_id))
+                    .await?;
                 *self.inner.transport_id.lock().await = Some(app_info.transport_id.clone());
                 *self.inner.session_id.lock().await = Some(app_info.session_id.clone());
                 return Ok(app_info);
@@ -471,7 +504,8 @@ impl CastClient {
                 if let CastEvent::ReceiverStatusChanged(ref rs) = event {
                     if let Some(app_info) = rs.applications.iter().find(|a| a.app_id == target_id) {
                         let app_info = app_info.clone();
-                        self.send(channel::connection::connect_msg(&app_info.transport_id)).await?;
+                        self.send(channel::connection::connect_msg(&app_info.transport_id))
+                            .await?;
                         *self.inner.transport_id.lock().await = Some(app_info.transport_id.clone());
                         *self.inner.session_id.lock().await = Some(app_info.session_id.clone());
                         return Ok(app_info);
@@ -488,7 +522,8 @@ impl CastClient {
     /// Stop the specified application.
     pub async fn stop_app(&self, session_id: &str) -> Result<()> {
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::receiver::stop_app(id, session_id)).await?;
+        self.send(channel::receiver::stop_app(id, session_id))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         *self.inner.transport_id.lock().await = None;
@@ -500,7 +535,8 @@ impl CastClient {
     pub async fn set_volume(&self, level: f32) -> Result<Volume> {
         let level = level.clamp(0.0, 1.0);
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::receiver::set_volume(id, Some(level), None)).await?;
+        self.send(channel::receiver::set_volume(id, Some(level), None))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         router::parse_receiver_status_from_json(&json)
@@ -511,7 +547,8 @@ impl CastClient {
     /// Mute or unmute the device.
     pub async fn set_muted(&self, muted: bool) -> Result<Volume> {
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::receiver::set_volume(id, None, Some(muted))).await?;
+        self.send(channel::receiver::set_volume(id, None, Some(muted)))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         router::parse_receiver_status_from_json(&json)
@@ -565,9 +602,11 @@ impl CastClient {
             }
         }
 
-        let status = router::parse_media_status_from_json(&json).ok_or_else(|| {
-            Error::LoadFailed { reason: "no media status in response".into(), detailed_error: None }
-        })?;
+        let status =
+            router::parse_media_status_from_json(&json).ok_or_else(|| Error::LoadFailed {
+                reason: "no media status in response".into(),
+                detailed_error: None,
+            })?;
 
         // The device sometimes sends an IDLE MEDIA_STATUS (clearing previous state)
         // before the actual LOAD_FAILED arrives. Detect this: if the response is
@@ -587,7 +626,8 @@ impl CastClient {
         let transport_id = self.get_transport_id().await?;
         let msid = self.get_media_session_id().await?;
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::media::play(id, &transport_id, msid)).await?;
+        self.send(channel::media::play(id, &transport_id, msid))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
@@ -598,7 +638,8 @@ impl CastClient {
         let transport_id = self.get_transport_id().await?;
         let msid = self.get_media_session_id().await?;
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::media::pause(id, &transport_id, msid)).await?;
+        self.send(channel::media::pause(id, &transport_id, msid))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
@@ -609,10 +650,14 @@ impl CastClient {
         let transport_id = self.get_transport_id().await?;
         let msid = self.get_media_session_id().await?;
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::media::stop(id, &transport_id, msid)).await?;
+        self.send(channel::media::stop(id, &transport_id, msid))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
-        self.inner.state.media_session_id.store(0, std::sync::atomic::Ordering::Relaxed);
+        self.inner
+            .state
+            .media_session_id
+            .store(0, std::sync::atomic::Ordering::Relaxed);
         router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
     }
 
@@ -621,7 +666,8 @@ impl CastClient {
         let transport_id = self.get_transport_id().await?;
         let msid = self.get_media_session_id().await?;
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::media::seek(id, &transport_id, msid, position)).await?;
+        self.send(channel::media::seek(id, &transport_id, msid, position))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
@@ -634,7 +680,8 @@ impl CastClient {
             Err(_) => return Ok(None),
         };
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::media::get_status(id, &transport_id)).await?;
+        self.send(channel::media::get_status(id, &transport_id))
+            .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         Ok(router::parse_media_status_from_json(&json))
@@ -698,8 +745,14 @@ impl CastClient {
         let transport_id = self.get_transport_id().await?;
         let msid = self.get_media_session_id().await?;
         let (id, rx) = self.inner.request_tracker.register().await;
-        self.send(channel::media::queue_insert(id, &transport_id, msid, items, insert_before))
-            .await?;
+        self.send(channel::media::queue_insert(
+            id,
+            &transport_id,
+            msid,
+            items,
+            insert_before,
+        ))
+        .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
         router::parse_media_status_from_json(&json).ok_or(Error::NoMediaSession)
@@ -741,7 +794,9 @@ impl CastClient {
         let server = crate::serve::FileServer::start("0.0.0.0:0").await?;
         let url = server.serve_file(path, content_type)?;
         let media = MediaInfo::new(&url, content_type);
-        let status = self.load_media(&media, autoplay, current_time, None).await?;
+        let status = self
+            .load_media(&media, autoplay, current_time, None)
+            .await?;
         Ok((server, status))
     }
 
@@ -801,17 +856,29 @@ impl CastClient {
                     .and_then(|c| c.as_i64())
                     .map(|c| format!("error code {c}")),
             }),
-            Some("LOAD_CANCELLED") => {
-                Err(Error::LoadFailed { reason: "load was cancelled".into(), detailed_error: None })
-            }
+            Some("LOAD_CANCELLED") => Err(Error::LoadFailed {
+                reason: "load was cancelled".into(),
+                detailed_error: None,
+            }),
             Some("INVALID_REQUEST") => {
-                let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("unknown");
+                let reason = json
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("unknown");
                 let req_id = json.get("requestId").and_then(|r| r.as_u64()).unwrap_or(0);
-                Err(Error::InvalidRequest { request_id: req_id as u32, reason: reason.to_string() })
+                Err(Error::InvalidRequest {
+                    request_id: req_id as u32,
+                    reason: reason.to_string(),
+                })
             }
             Some("LAUNCH_ERROR") => {
-                let reason = json.get("reason").and_then(|r| r.as_str()).unwrap_or("unknown");
-                Err(Error::LaunchFailed { reason: reason.to_string() })
+                let reason = json
+                    .get("reason")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("unknown");
+                Err(Error::LaunchFailed {
+                    reason: reason.to_string(),
+                })
             }
             _ => Ok(()),
         }
@@ -826,16 +893,34 @@ impl CastClient {
     }
 
     async fn get_transport_id(&self) -> Result<String> {
-        self.inner.transport_id.lock().await.clone().ok_or(Error::NoApplication)
+        self.inner
+            .transport_id
+            .lock()
+            .await
+            .clone()
+            .ok_or(Error::NoApplication)
     }
 
     async fn get_session_id(&self) -> Result<String> {
-        self.inner.session_id.lock().await.clone().ok_or(Error::NoApplication)
+        self.inner
+            .session_id
+            .lock()
+            .await
+            .clone()
+            .ok_or(Error::NoApplication)
     }
 
     async fn get_media_session_id(&self) -> Result<i32> {
-        let id = self.inner.state.media_session_id.load(std::sync::atomic::Ordering::Relaxed);
-        if id > 0 { Ok(id) } else { Err(Error::NoMediaSession) }
+        let id = self
+            .inner
+            .state
+            .media_session_id
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if id > 0 {
+            Ok(id)
+        } else {
+            Err(Error::NoMediaSession)
+        }
     }
 }
 
@@ -971,8 +1056,10 @@ pub(crate) fn spawn_auto_reconnect(client: CastClient) {
                 return;
             }
 
-            let is_disconnected =
-                matches!(*conn_rx.borrow_and_update(), state::ConnectionState::Disconnected);
+            let is_disconnected = matches!(
+                *conn_rx.borrow_and_update(),
+                state::ConnectionState::Disconnected
+            );
 
             if is_disconnected {
                 tracing::info!("auto-reconnect: connection lost, attempting recovery");

@@ -65,13 +65,16 @@ impl FileServer {
     pub async fn start(bind: &str) -> Result<Self> {
         let files: Arc<RwLock<HashMap<String, FileEntry>>> = Arc::new(RwLock::new(HashMap::new()));
 
-        let app = Router::new().route("/file/{id}", get(serve_file)).with_state(files.clone());
+        let app = Router::new()
+            .route("/file/{id}", get(serve_file))
+            .with_state(files.clone());
 
         let listener = tokio::net::TcpListener::bind(bind)
             .await
             .map_err(|e| Error::Internal(format!("bind file server: {e}")))?;
-        let addr =
-            listener.local_addr().map_err(|e| Error::Internal(format!("local addr: {e}")))?;
+        let addr = listener
+            .local_addr()
+            .map_err(|e| Error::Internal(format!("local addr: {e}")))?;
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
@@ -93,7 +96,12 @@ impl FileServer {
 
         tracing::info!("file server started on http://{lan_ip}:{}", addr.port());
 
-        Ok(Self { addr, lan_ip, files, _shutdown: shutdown_tx })
+        Ok(Self {
+            addr,
+            lan_ip,
+            files,
+            _shutdown: shutdown_tx,
+        })
     }
 
     /// Register a local file for serving.
@@ -106,12 +114,21 @@ impl FileServer {
         }
 
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let id = format!("{:x}", COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let id = format!(
+            "{:x}",
+            COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        );
         let url = format!("http://{}:{}/file/{id}", self.lan_ip, self.addr.port());
 
         match self.files.write() {
             Ok(mut files) => {
-                files.insert(id, FileEntry { path, content_type: content_type.to_string() });
+                files.insert(
+                    id,
+                    FileEntry {
+                        path,
+                        content_type: content_type.to_string(),
+                    },
+                );
                 Ok(url)
             }
             Err(_) => Err(Error::Internal("file registry lock poisoned".into())),
@@ -200,8 +217,14 @@ async fn serve_file(
             if let Ok(v) = format!("bytes {start}-{end}/{file_size}").parse() {
                 h.insert(header::CONTENT_RANGE, v);
             }
-            h.insert(header::ACCEPT_RANGES, header::HeaderValue::from_static("bytes"));
-            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, header::HeaderValue::from_static("*"));
+            h.insert(
+                header::ACCEPT_RANGES,
+                header::HeaderValue::from_static("bytes"),
+            );
+            h.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                header::HeaderValue::from_static("*"),
+            );
 
             (StatusCode::PARTIAL_CONTENT, h, Body::from_stream(stream)).into_response()
         }
@@ -213,8 +236,14 @@ async fn serve_file(
             if let Ok(v) = file_size.to_string().parse() {
                 h.insert(header::CONTENT_LENGTH, v);
             }
-            h.insert(header::ACCEPT_RANGES, header::HeaderValue::from_static("bytes"));
-            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, header::HeaderValue::from_static("*"));
+            h.insert(
+                header::ACCEPT_RANGES,
+                header::HeaderValue::from_static("bytes"),
+            );
+            h.insert(
+                header::ACCESS_CONTROL_ALLOW_ORIGIN,
+                header::HeaderValue::from_static("*"),
+            );
 
             (StatusCode::OK, h, Body::from_stream(stream)).into_response()
         }
@@ -237,21 +266,37 @@ fn parse_range(header: &str, file_size: u64) -> Option<(u64, u64)> {
         let suffix: u64 = parts[1].parse().ok()?;
         let start = file_size.saturating_sub(suffix);
         let end = file_size - 1;
-        return if start <= end { Some((start, end)) } else { None };
+        return if start <= end {
+            Some((start, end))
+        } else {
+            None
+        };
     }
 
     let start: u64 = parts[0].parse().ok()?;
 
-    let end: u64 = if parts[1].is_empty() { file_size - 1 } else { parts[1].parse().ok()? };
+    let end: u64 = if parts[1].is_empty() {
+        file_size - 1
+    } else {
+        parts[1].parse().ok()?
+    };
 
-    if start <= end && end < file_size { Some((start, end)) } else { None }
+    if start <= end && end < file_size {
+        Some((start, end))
+    } else {
+        None
+    }
 }
 
 fn detect_lan_ip() -> Result<String> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0")
         .map_err(|e| Error::Internal(format!("UDP bind: {e}")))?;
-    socket.connect("8.8.8.8:80").map_err(|e| Error::Internal(format!("UDP connect: {e}")))?;
-    let addr = socket.local_addr().map_err(|e| Error::Internal(format!("local addr: {e}")))?;
+    socket
+        .connect("8.8.8.8:80")
+        .map_err(|e| Error::Internal(format!("UDP connect: {e}")))?;
+    let addr = socket
+        .local_addr()
+        .map_err(|e| Error::Internal(format!("local addr: {e}")))?;
     Ok(addr.ip().to_string())
 }
 

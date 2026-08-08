@@ -28,7 +28,9 @@ pub async fn read_message<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Re
     }
     if len > 65_536 {
         // 64KB limit per Cast protocol specification
-        return Err(Error::Framing(format!("message too large: {len} bytes (max 65536)")));
+        return Err(Error::Framing(format!(
+            "message too large: {len} bytes (max 65536)"
+        )));
     }
 
     // Read the protobuf payload
@@ -70,7 +72,10 @@ pub async fn write_message<W: tokio::io::AsyncWrite + Unpin>(
         }
     })?;
 
-    writer.flush().await.map_err(|e| Error::Framing(format!("flush: {e}")))?;
+    writer
+        .flush()
+        .await
+        .map_err(|e| Error::Framing(format!("flush: {e}")))?;
 
     Ok(())
 }

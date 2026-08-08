@@ -42,7 +42,12 @@ pub fn load(
         "customData": custom_data.unwrap_or(&serde_json::json!({})),
     });
 
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Build a PLAY (resume) request.
@@ -52,7 +57,12 @@ pub fn play(request_id: u32, transport_id: &str, media_session_id: i32) -> CastM
         "requestId": request_id,
         "mediaSessionId": media_session_id,
     });
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Build a PAUSE request.
@@ -62,7 +72,12 @@ pub fn pause(request_id: u32, transport_id: &str, media_session_id: i32) -> Cast
         "requestId": request_id,
         "mediaSessionId": media_session_id,
     });
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Build a STOP media request (ends the media session).
@@ -73,7 +88,12 @@ pub fn stop(request_id: u32, transport_id: &str, media_session_id: i32) -> CastM
         "mediaSessionId": media_session_id,
         "customData": {},
     });
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Build a SEEK request.
@@ -89,7 +109,12 @@ pub fn seek(
         "mediaSessionId": media_session_id,
         "currentTime": position,
     });
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Build a GET_STATUS request for the media channel.
@@ -98,7 +123,12 @@ pub fn get_status(request_id: u32, transport_id: &str) -> CastMessage {
         "type": ns::MSG_GET_STATUS,
         "requestId": request_id,
     });
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Serialize a QueueItem's media into the wire JSON format (reuses load's logic).
@@ -152,7 +182,12 @@ pub fn queue_load(
         "repeatMode": repeat,
     });
 
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Build a QUEUE_INSERT request.
@@ -176,7 +211,12 @@ pub fn queue_insert(
         payload["insertBefore"] = serde_json::json!(before);
     }
 
-    build_message(ns::NS_MEDIA, ns::SENDER_ID, transport_id, &payload.to_string())
+    build_message(
+        ns::NS_MEDIA,
+        ns::SENDER_ID,
+        transport_id,
+        &payload.to_string(),
+    )
 }
 
 /// Insert a field into a JSON map only if the value is Some.
@@ -194,20 +234,35 @@ fn serialize_metadata(meta: &MediaMetadata) -> serde_json::Value {
     let mut m = serde_json::Map::new();
 
     match meta {
-        MediaMetadata::Generic { title, subtitle, images } => {
+        MediaMetadata::Generic {
+            title,
+            subtitle,
+            images,
+        } => {
             m.insert("metadataType".into(), 0.into());
             insert_opt(&mut m, "title", title);
             insert_opt(&mut m, "subtitle", subtitle);
             m.insert("images".into(), serialize_images(images));
         }
-        MediaMetadata::Movie { title, subtitle, studio, images } => {
+        MediaMetadata::Movie {
+            title,
+            subtitle,
+            studio,
+            images,
+        } => {
             m.insert("metadataType".into(), 1.into());
             insert_opt(&mut m, "title", title);
             insert_opt(&mut m, "subtitle", subtitle);
             insert_opt(&mut m, "studio", studio);
             m.insert("images".into(), serialize_images(images));
         }
-        MediaMetadata::TvShow { series_title, episode_title, season, episode, images } => {
+        MediaMetadata::TvShow {
+            series_title,
+            episode_title,
+            season,
+            episode,
+            images,
+        } => {
             m.insert("metadataType".into(), 2.into());
             insert_opt(&mut m, "seriesTitle", series_title);
             insert_opt(&mut m, "title", episode_title);
@@ -304,7 +359,11 @@ mod tests {
             title: Some("Test Movie".into()),
             subtitle: None,
             studio: Some("Studio X".into()),
-            images: vec![Image { url: "http://img.jpg".into(), width: Some(800), height: None }],
+            images: vec![Image {
+                url: "http://img.jpg".into(),
+                width: Some(800),
+                height: None,
+            }],
         });
         let msg = load(1, "t", "s", &media, true, 0.0, None);
         let p = parse_payload(&msg);
@@ -359,14 +418,14 @@ mod tests {
     #[test]
     fn test_queue_load_includes_metadata_and_duration() {
         let items = vec![QueueItem {
-            media: MediaInfo::new("url1", "video/mp4").duration(300.0).metadata(
-                MediaMetadata::Movie {
+            media: MediaInfo::new("url1", "video/mp4")
+                .duration(300.0)
+                .metadata(MediaMetadata::Movie {
                     title: Some("Movie 1".into()),
                     subtitle: None,
                     studio: None,
                     images: vec![],
-                },
-            ),
+                }),
             autoplay: true,
             start_time: 0.0,
         }];
@@ -422,8 +481,11 @@ mod tests {
     #[test]
     fn test_serialize_metadata_all_types() {
         // Generic (type 0)
-        let meta =
-            MediaMetadata::Generic { title: Some("Title".into()), subtitle: None, images: vec![] };
+        let meta = MediaMetadata::Generic {
+            title: Some("Title".into()),
+            subtitle: None,
+            images: vec![],
+        };
         let json = serialize_metadata(&meta);
         assert_eq!(json["metadataType"], 0);
 
@@ -494,7 +556,10 @@ mod tests {
         let json = serialize_metadata(&meta);
         let obj = json.as_object().unwrap();
         assert_eq!(obj["title"], "Movie");
-        assert!(!obj.contains_key("subtitle"), "None subtitle should be omitted");
+        assert!(
+            !obj.contains_key("subtitle"),
+            "None subtitle should be omitted"
+        );
         assert!(!obj.contains_key("studio"), "None studio should be omitted");
         assert!(obj.contains_key("metadataType"));
         assert!(obj.contains_key("images"));
@@ -503,8 +568,16 @@ mod tests {
     #[test]
     fn test_serialize_images_with_dimensions() {
         let images = vec![
-            Image { url: "http://a.jpg".into(), width: Some(100), height: Some(200) },
-            Image { url: "http://b.jpg".into(), width: None, height: None },
+            Image {
+                url: "http://a.jpg".into(),
+                width: Some(100),
+                height: Some(200),
+            },
+            Image {
+                url: "http://b.jpg".into(),
+                width: None,
+                height: None,
+            },
         ];
         let json = serialize_images(&images);
         let arr = json.as_array().unwrap();

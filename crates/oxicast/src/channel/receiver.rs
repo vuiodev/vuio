@@ -10,7 +10,12 @@ pub fn get_status(request_id: u32) -> CastMessage {
         "type": ns::MSG_GET_STATUS,
         "requestId": request_id,
     });
-    build_message(ns::NS_RECEIVER, ns::SENDER_ID, ns::RECEIVER_ID, &payload.to_string())
+    build_message(
+        ns::NS_RECEIVER,
+        ns::SENDER_ID,
+        ns::RECEIVER_ID,
+        &payload.to_string(),
+    )
 }
 
 /// Build a LAUNCH request for an application.
@@ -20,7 +25,12 @@ pub fn launch_app(request_id: u32, app_id: &str) -> CastMessage {
         "requestId": request_id,
         "appId": app_id,
     });
-    build_message(ns::NS_RECEIVER, ns::SENDER_ID, ns::RECEIVER_ID, &payload.to_string())
+    build_message(
+        ns::NS_RECEIVER,
+        ns::SENDER_ID,
+        ns::RECEIVER_ID,
+        &payload.to_string(),
+    )
 }
 
 /// Build a STOP request for an application.
@@ -30,7 +40,12 @@ pub fn stop_app(request_id: u32, session_id: &str) -> CastMessage {
         "requestId": request_id,
         "sessionId": session_id,
     });
-    build_message(ns::NS_RECEIVER, ns::SENDER_ID, ns::RECEIVER_ID, &payload.to_string())
+    build_message(
+        ns::NS_RECEIVER,
+        ns::SENDER_ID,
+        ns::RECEIVER_ID,
+        &payload.to_string(),
+    )
 }
 
 /// Build a SET_VOLUME request.
@@ -47,7 +62,12 @@ pub fn set_volume(request_id: u32, level: Option<f32>, muted: Option<bool>) -> C
         "requestId": request_id,
         "volume": volume,
     });
-    build_message(ns::NS_RECEIVER, ns::SENDER_ID, ns::RECEIVER_ID, &payload.to_string())
+    build_message(
+        ns::NS_RECEIVER,
+        ns::SENDER_ID,
+        ns::RECEIVER_ID,
+        &payload.to_string(),
+    )
 }
 
 #[cfg(test)]

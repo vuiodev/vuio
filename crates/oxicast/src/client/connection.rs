@@ -37,7 +37,9 @@ pub async fn connect(host: &str, port: u16, verify_tls: bool) -> Result<TlsStrea
         for cert in certs_result.certs {
             let _ = root_store.add(cert);
         }
-        ClientConfig::builder().with_root_certificates(root_store).with_no_client_auth()
+        ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
     } else {
         ClientConfig::builder()
             .dangerous()
@@ -62,8 +64,10 @@ pub async fn connect(host: &str, port: u16, verify_tls: bool) -> Result<TlsStrea
         })
         .map_err(|e: Error| Error::Tls(format!("invalid host: {e}")))?;
 
-    let tls_stream =
-        connector.connect(server_name, tcp).await.map_err(|e| Error::Tls(format!("{e}")))?;
+    let tls_stream = connector
+        .connect(server_name, tcp)
+        .await
+        .map_err(|e| Error::Tls(format!("{e}")))?;
 
     tracing::debug!("TLS connection established to {addr}");
     Ok(tls_stream)

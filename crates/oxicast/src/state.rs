@@ -58,7 +58,11 @@ pub(crate) fn new_state() -> (Arc<StateHolder>, StateWatchers) {
             connection_tx,
             media_session_id: Arc::new(AtomicI32::new(0)),
         }),
-        StateWatchers { media: media_rx, receiver: receiver_rx, connection: connection_rx },
+        StateWatchers {
+            media: media_rx,
+            receiver: receiver_rx,
+            connection: connection_rx,
+        },
     )
 }
 
@@ -91,7 +95,10 @@ mod tests {
             idle_reason: None,
             current_time: 10.0,
             duration: Some(120.0),
-            volume: crate::types::Volume { level: 1.0, muted: false },
+            volume: crate::types::Volume {
+                level: 1.0,
+                muted: false,
+            },
             media: None,
         };
         let _ = state.media_tx.send(Some(status.clone()));
@@ -107,9 +114,14 @@ mod tests {
 
         let _ = state.connection_tx.send(ConnectionState::Disconnected);
         watchers.connection.changed().await.unwrap();
-        assert_eq!(*watchers.connection.borrow_and_update(), ConnectionState::Disconnected);
+        assert_eq!(
+            *watchers.connection.borrow_and_update(),
+            ConnectionState::Disconnected
+        );
 
-        let _ = state.connection_tx.send(ConnectionState::Reconnecting { attempt: 3 });
+        let _ = state
+            .connection_tx
+            .send(ConnectionState::Reconnecting { attempt: 3 });
         watchers.connection.changed().await.unwrap();
         assert_eq!(
             *watchers.connection.borrow_and_update(),
@@ -118,7 +130,10 @@ mod tests {
 
         let _ = state.connection_tx.send(ConnectionState::Connected);
         watchers.connection.changed().await.unwrap();
-        assert_eq!(*watchers.connection.borrow_and_update(), ConnectionState::Connected);
+        assert_eq!(
+            *watchers.connection.borrow_and_update(),
+            ConnectionState::Connected
+        );
     }
 
     #[test]

@@ -39,19 +39,31 @@ pub fn is_ping(msg: &CastMessage) -> bool {
     if msg.namespace != ns::NS_HEARTBEAT {
         return false;
     }
-    msg.payload_utf8.as_deref().is_some_and(|p| p.contains("\"PING\""))
+    msg.payload_utf8
+        .as_deref()
+        .is_some_and(|p| p.contains("\"PING\""))
 }
 
 /// Build a PONG response message.
 pub fn pong() -> CastMessage {
     let payload = serde_json::json!({ "type": ns::MSG_PONG });
-    build_message(ns::NS_HEARTBEAT, ns::SENDER_ID, ns::RECEIVER_ID, &payload.to_string())
+    build_message(
+        ns::NS_HEARTBEAT,
+        ns::SENDER_ID,
+        ns::RECEIVER_ID,
+        &payload.to_string(),
+    )
 }
 
 /// Build a PING message.
 pub fn ping() -> CastMessage {
     let payload = serde_json::json!({ "type": ns::MSG_PING });
-    build_message(ns::NS_HEARTBEAT, ns::SENDER_ID, ns::RECEIVER_ID, &payload.to_string())
+    build_message(
+        ns::NS_HEARTBEAT,
+        ns::SENDER_ID,
+        ns::RECEIVER_ID,
+        &payload.to_string(),
+    )
 }
 
 /// Check if a message is a heartbeat PONG.
@@ -60,7 +72,9 @@ pub fn is_pong(msg: &CastMessage) -> bool {
     if msg.namespace != ns::NS_HEARTBEAT {
         return false;
     }
-    msg.payload_utf8.as_deref().is_some_and(|p| p.contains("\"PONG\""))
+    msg.payload_utf8
+        .as_deref()
+        .is_some_and(|p| p.contains("\"PONG\""))
 }
 
 /// Configuration for spawning a heartbeat task.
@@ -236,8 +250,10 @@ mod tests {
         touch(&la);
 
         // Wait for at least one PING
-        let msg =
-            tokio::time::timeout(Duration::from_secs(1), write_rx.recv()).await.unwrap().unwrap();
+        let msg = tokio::time::timeout(Duration::from_secs(1), write_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert!(is_ping(&msg));
 
         cancel.cancel();
@@ -269,8 +285,10 @@ mod tests {
         });
 
         // Should receive HeartbeatTimeout event
-        let event =
-            tokio::time::timeout(Duration::from_secs(2), event_rx.recv()).await.unwrap().unwrap();
+        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(event, CastEvent::HeartbeatTimeout);
         assert!(!alive.load(Ordering::Acquire));
     }

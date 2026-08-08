@@ -397,7 +397,10 @@ impl Volume {
     /// Create a new volume with muted=false. Level is clamped to [0.0, 1.0].
     #[must_use]
     pub fn new(level: f32) -> Self {
-        Self { level: level.clamp(0.0, 1.0), muted: false }
+        Self {
+            level: level.clamp(0.0, 1.0),
+            muted: false,
+        }
     }
 
     /// Create a muted volume at level 0.
@@ -406,7 +409,10 @@ impl Volume {
     /// Use `set_muted(true)` on the client to mute without changing the level.
     #[must_use]
     pub fn muted() -> Self {
-        Self { level: 0.0, muted: true }
+        Self {
+            level: 0.0,
+            muted: true,
+        }
     }
 }
 

@@ -21,7 +21,11 @@ pub struct RequestTracker {
 impl RequestTracker {
     /// Create a new request tracker with the given default timeout.
     pub fn new(timeout: Duration) -> Self {
-        Self { counter: AtomicU32::new(0), pending: Mutex::new(HashMap::new()), timeout }
+        Self {
+            counter: AtomicU32::new(0),
+            pending: Mutex::new(HashMap::new()),
+            timeout,
+        }
     }
 
     /// Allocate a new request ID and register a pending response.
@@ -131,7 +135,9 @@ mod tests {
     async fn test_id_wrapping_skips_zero() {
         let tracker = RequestTracker::new(Duration::from_secs(5));
         // Set counter to u32::MAX - 1 so next fetch_add returns MAX-1, +1 = MAX
-        tracker.counter.store(u32::MAX - 1, std::sync::atomic::Ordering::Relaxed);
+        tracker
+            .counter
+            .store(u32::MAX - 1, std::sync::atomic::Ordering::Relaxed);
         let (id1, _) = tracker.register().await;
         assert_eq!(id1, u32::MAX);
         // Next: fetch_add(1) wraps to MAX, wrapping_add(1) = 0, skip 0 → fetch_add again → 1
