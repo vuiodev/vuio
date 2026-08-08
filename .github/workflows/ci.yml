@@ -107,17 +107,21 @@ jobs:
             target: aarch64-apple-darwin
           - runner: ubuntu-latest
             target: x86_64-unknown-freebsd
+            freebsd_arch: x86_64
+          - runner: ubuntu-latest
+            target: aarch64-unknown-freebsd
+            freebsd_arch: aarch64
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
       - name: Install Rust toolchain (stable)
-        if: matrix.target != 'x86_64-unknown-freebsd'
+        if: ${{ !contains(matrix.target, 'freebsd') }}
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Cache Cargo dependencies
-        if: matrix.target != 'x86_64-unknown-freebsd'
+        if: ${{ !contains(matrix.target, 'freebsd') }}
         uses: actions/cache@v6
         with:
           path: |
@@ -161,16 +165,17 @@ jobs:
             echo "CC_armv7_unknown_linux_gnueabihf=$HOME/bin/arm-linux-gnueabihf-gcc-wrap" >> "$GITHUB_ENV"
           fi
       - name: Build project
-        if: matrix.target != 'x86_64-unknown-freebsd'
+        if: ${{ !contains(matrix.target, 'freebsd') }}
         run: cargo build --target ${{ matrix.target }}
       - name: Run tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-unknown-freebsd'
+        if: ${{ matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc' && !contains(matrix.target, 'freebsd') }}
         run: cargo test --target ${{ matrix.target }}
       - name: Build and test in FreeBSD VM
-        if: matrix.target == 'x86_64-unknown-freebsd'
+        if: ${{ contains(matrix.target, 'freebsd') }}
         uses: vmactions/freebsd-vm@v1
         with:
           release: "14"
+          arch: ${{ matrix.freebsd_arch }}
           usesh: true
           sync: rsync
           copyback: false
@@ -178,10 +183,17 @@ jobs:
           cache-after-prepare: true
           prepare: |
             pkg install -y curl bash git
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+            if [ "$(uname -m)" = "aarch64" ]; then
+              # aarch64-unknown-freebsd is Rust tier 3; rustup host toolchains are unreliable.
+              pkg install -y rust
+            else
+              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+            fi
           run: |
             set -e
-            . "$HOME/.cargo/env"
+            if [ "$(uname -m)" != "aarch64" ]; then
+              . "$HOME/.cargo/env"
+            fi
             rustc -vV
             cargo build
             # Skip audio_integration_tests: audiotags ID3 write SIGSEGV under QEMU.
