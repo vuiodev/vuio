@@ -107,6 +107,41 @@ fn format_duration(duration_seconds: u64) -> String {
     format!("{:02}:{:02}:{:02}", hours, minutes, seconds)
 }
 
+/// Samsung TVs append a MIME-derived extension to `dc:title`. If the title already
+/// ends with the file's extension (common when falling back to `filename`), strip it.
+fn strip_matching_media_extension(base: &str, filename: &str) -> String {
+    let Some(ext) = std::path::Path::new(filename)
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty())
+    else {
+        return base.to_string();
+    };
+    let suffix_len = ext.len() + 1; // '.' + ext
+    if base.len() > suffix_len {
+        let maybe = &base[base.len() - suffix_len..];
+        if maybe.as_bytes()[0] == b'.' && maybe[1..].eq_ignore_ascii_case(ext) {
+            return base[..base.len() - suffix_len].to_string();
+        }
+    }
+    base.to_string()
+}
+
+fn didl_display_title(
+    title: Option<&str>,
+    filename: &str,
+    client: crate::web::client::DlnaClientProfile,
+) -> String {
+    let base = title.unwrap_or(filename);
+    match client {
+        crate::web::client::DlnaClientProfile::SamsungTv
+        | crate::web::client::DlnaClientProfile::SamsungTvQ => {
+            strip_matching_media_extension(base, filename)
+        }
+        _ => base.to_string(),
+    }
+}
+
 #[derive(Clone)]
 pub struct BrowseRenderContext {
     pub client: crate::web::client::DlnaClientProfile,
@@ -179,13 +214,13 @@ fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
     let mime = file.mime_type();
     let is_radio = mime == "audio/radio";
     let has_srt = file.subtitle_available();
-    let title = file.title().unwrap_or(file.filename());
+    let title = didl_display_title(file.title(), file.filename(), context.client);
     write!(
         output,
         r#"<item id="{}" parentID="{}" restricted="1"><dc:title>{}"#,
         file_id,
         xml_escape(object_id),
-        xml_escape(title)
+        xml_escape(&title)
     )?;
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
         output.write_char('.')?;
@@ -698,7 +733,7 @@ pub async fn generate_browse_response(
             let upnp_class = get_upnp_class(&file.mime_type);
 
             let has_srt = file.subtitle_available;
-            let mut title = file.title.clone().unwrap_or_else(|| file.filename.clone());
+            let mut title = didl_display_title(file.title.as_deref(), &file.filename, client);
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
                 title.push('.');
             }
@@ -991,6 +1026,7 @@ pub fn generate_container_metadata_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::web::client::DlnaClientProfile;
 
     #[test]
     fn xml_escape_handles_markup_unicode_and_invalid_controls() {
@@ -1008,5 +1044,41 @@ mod tests {
         write!(&mut SoapResultWriter(&mut output), "{}", xml_escape("A&B"))
             .expect("write nested XML");
         assert_eq!(output, "A&amp;amp;B");
+    }
+
+    #[test]
+    fn samsung_strips_matching_extension_from_filename_fallback() {
+        assert_eq!(
+            didl_display_title(None, "movie.mp4", DlnaClientProfile::SamsungTv),
+            "movie"
+        );
+        assert_eq!(
+            didl_display_title(None, "movie.MP4", DlnaClientProfile::SamsungTvQ),
+            "movie"
+        );
+        assert_eq!(
+            didl_display_title(Some("clip.mp4"), "clip.mp4", DlnaClientProfile::SamsungTv),
+            "clip"
+        );
+    }
+
+    #[test]
+    fn samsung_keeps_titles_without_matching_extension() {
+        assert_eq!(
+            didl_display_title(Some("My Film"), "movie.mp4", DlnaClientProfile::SamsungTv),
+            "My Film"
+        );
+    }
+
+    #[test]
+    fn non_samsung_keeps_filename_when_title_missing() {
+        assert_eq!(
+            didl_display_title(None, "movie.mp4", DlnaClientProfile::Standard),
+            "movie.mp4"
+        );
+        assert_eq!(
+            didl_display_title(None, "movie.mp4", DlnaClientProfile::LgTv),
+            "movie.mp4"
+        );
     }
 }
