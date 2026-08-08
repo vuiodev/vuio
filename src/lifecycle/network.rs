@@ -54,7 +54,7 @@ async fn start_http_server_task<D: DatabaseManager + 'static>(
 
     info!("HTTP server started successfully");
 
-    // Keep one shared renderer snapshot fresh for the dashboard and MCP clients.
+    // Keep one shared DLNA, Google Cast, and AirPlay renderer snapshot fresh.
     let state_clone = app_state.clone();
     let discovery_cancellation = cancellation.clone();
     let tv_discovery = tokio::spawn(async move {
@@ -65,7 +65,7 @@ async fn start_http_server_task<D: DatabaseManager + 'static>(
                 _ = discovery_cancellation.cancelled() => break,
                 _ = interval.tick() => {
                     if let Err(error) = state_clone.discovered_tvs.refresh().await {
-                        tracing::warn!(%error, "Background renderer discovery failed");
+                        tracing::warn!(%error, "Background multi-protocol renderer discovery failed");
                     }
                 }
             }

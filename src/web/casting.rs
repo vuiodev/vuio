@@ -28,7 +28,7 @@ pub enum ApiCastSource {
     Folder { components: Vec<String> },
 }
 
-/// Discover UPnP/DLNA TVs and return their friendly names in JSON format
+/// Discover supported playback devices and return their public details as JSON.
 pub async fn api_list_renderers<D: DatabaseManager>(
     State(state): State<AppState<D>>,
 ) -> impl IntoResponse {
@@ -38,7 +38,7 @@ pub async fn api_list_renderers<D: DatabaseManager>(
             error!(error = %e, "TV discovery request failed");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                axum::Json(Vec::<crate::tv_control::DiscoveredTv>::new()),
+                axum::Json(Vec::<crate::casting::RendererDevice>::new()),
             )
         }
     }
@@ -175,7 +175,7 @@ async fn create_and_cast_playlist<D: DatabaseManager + 'static>(
     }
 }
 
-/// Create a temporary playlist with the provided video files and cast it to the TV
+/// Create a temporary playlist with the provided video files and cast it to the device.
 pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     axum::Json(payload): axum::Json<ApiCastPlaylistRequest>,

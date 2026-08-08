@@ -1,6 +1,6 @@
 //! Small bounded runtime registries. Media records and indexes remain owned by ReDB.
 
-use crate::{state::SoapCacheKey, tv_control::DiscoveredTv};
+use crate::{casting::RendererDevice, state::SoapCacheKey};
 use axum::body::Bytes;
 use std::{
     collections::{HashMap, HashSet},
@@ -264,7 +264,7 @@ impl Default for ActiveCastRegistry {
 
 #[derive(Default)]
 struct RendererSnapshot {
-    renderers: Vec<DiscoveredTv>,
+    renderers: Vec<RendererDevice>,
     refreshed_at: Option<Instant>,
 }
 
@@ -273,6 +273,7 @@ struct RendererSnapshot {
 pub struct RendererCache {
     snapshot: tokio::sync::RwLock<RendererSnapshot>,
     refresh: tokio::sync::Mutex<()>,
+    casting: crate::casting::CastingManager,
 }
 
 impl RendererCache {
@@ -280,10 +281,11 @@ impl RendererCache {
         Self {
             snapshot: tokio::sync::RwLock::new(RendererSnapshot::default()),
             refresh: tokio::sync::Mutex::new(()),
+            casting: crate::casting::CastingManager::new(),
         }
     }
 
-    pub async fn snapshot(&self) -> Vec<DiscoveredTv> {
+    pub async fn snapshot(&self) -> Vec<RendererDevice> {
         self.snapshot.read().await.renderers.clone()
     }
 
@@ -293,11 +295,15 @@ impl RendererCache {
             .await
             .renderers
             .iter()
-            .find(|renderer| renderer_ip(&renderer.location_url).as_deref() == Some(ip))
+            .find(|renderer| {
+                renderer
+                    .peer_ip()
+                    .is_some_and(|address| address.to_string() == ip)
+            })
             .map(|renderer| renderer.friendly_name.clone())
     }
 
-    pub async fn replace(&self, mut renderers: Vec<DiscoveredTv>) {
+    pub async fn replace(&self, mut renderers: Vec<RendererDevice>) {
         renderers.sort_by(|left, right| {
             left.friendly_name
                 .to_lowercase()
@@ -309,8 +315,12 @@ impl RendererCache {
         renderers.retain(|renderer| {
             let id = renderer.id.trim().to_lowercase();
             let physical = format!(
-                "{}|{}|{}",
-                renderer_ip(&renderer.location_url).unwrap_or_default(),
+                "{:?}|{}|{}|{}",
+                renderer.protocol,
+                renderer
+                    .peer_ip()
+                    .map(|address| address.to_string())
+                    .unwrap_or_default(),
                 renderer.friendly_name.trim().to_lowercase(),
                 renderer.model_name.trim().to_lowercase()
             );
@@ -331,7 +341,7 @@ impl RendererCache {
         };
     }
 
-    pub async fn get_or_refresh(&self) -> anyhow::Result<Vec<DiscoveredTv>> {
+    pub async fn get_or_refresh(&self) -> anyhow::Result<Vec<RendererDevice>> {
         if let Some(renderers) = self.usable_snapshot(RENDERER_CACHE_FRESH_TTL).await {
             return Ok(renderers);
         }
@@ -341,9 +351,9 @@ impl RendererCache {
             return Ok(renderers);
         }
 
-        match crate::tv_control::discover_tvs().await {
-            Ok(renderers) => {
-                self.replace(renderers).await;
+        match self.casting.discover(Duration::from_secs(3)).await {
+            Ok(discovery) => {
+                self.replace_discovery(discovery).await;
                 Ok(self.snapshot().await)
             }
             Err(error) => {
@@ -357,14 +367,76 @@ impl RendererCache {
         }
     }
 
-    pub async fn refresh(&self) -> anyhow::Result<Vec<DiscoveredTv>> {
+    pub async fn refresh(&self) -> anyhow::Result<Vec<RendererDevice>> {
         let _refresh_guard = self.refresh.lock().await;
-        let renderers = crate::tv_control::discover_tvs().await?;
-        self.replace(renderers).await;
+        let discovery = self.casting.discover(Duration::from_secs(3)).await?;
+        self.replace_discovery(discovery).await;
         Ok(self.snapshot().await)
     }
 
-    async fn usable_snapshot(&self, ttl: Duration) -> Option<Vec<DiscoveredTv>> {
+    async fn replace_discovery(&self, mut discovery: crate::casting::DiscoveryBatch) {
+        if !discovery.failed_protocols.is_empty() {
+            let snapshot = self.snapshot.read().await;
+            if snapshot
+                .refreshed_at
+                .is_some_and(|time| time.elapsed() <= RENDERER_CACHE_STALE_TTL)
+            {
+                discovery.devices.extend(
+                    snapshot
+                        .renderers
+                        .iter()
+                        .filter(|renderer| discovery.failed_protocols.contains(&renderer.protocol))
+                        .cloned(),
+                );
+            }
+        }
+        self.replace(discovery.devices).await;
+    }
+
+    pub fn validate(
+        &self,
+        renderer: &RendererDevice,
+        item: &crate::casting::PlaybackItem,
+    ) -> Result<(), String> {
+        self.casting.validate(renderer, item)
+    }
+
+    pub async fn play(
+        &self,
+        renderer: &RendererDevice,
+        item: &crate::casting::PlaybackItem,
+    ) -> anyhow::Result<()> {
+        self.casting.play(renderer, item).await
+    }
+
+    pub async fn control(
+        &self,
+        renderer: &RendererDevice,
+        action: crate::casting::PlaybackAction,
+    ) -> anyhow::Result<()> {
+        self.casting.control(renderer, action).await
+    }
+
+    pub async fn status(
+        &self,
+        renderer: &RendererDevice,
+    ) -> anyhow::Result<crate::casting::PlaybackStatus> {
+        self.casting.status(renderer).await
+    }
+
+    pub async fn queue_next(
+        &self,
+        renderer: &RendererDevice,
+        item: &crate::casting::PlaybackItem,
+    ) -> anyhow::Result<bool> {
+        self.casting.queue_next(renderer, item).await
+    }
+
+    pub async fn shutdown(&self) {
+        self.casting.shutdown().await;
+    }
+
+    async fn usable_snapshot(&self, ttl: Duration) -> Option<Vec<RendererDevice>> {
         let snapshot = self.snapshot.read().await;
         let refreshed_at = snapshot.refreshed_at?;
         if refreshed_at.elapsed() <= ttl {
@@ -379,14 +451,6 @@ impl Default for RendererCache {
     fn default() -> Self {
         Self::new()
     }
-}
-
-fn renderer_ip(url: &str) -> Option<String> {
-    let authority = url.split("://").nth(1)?.split('/').next()?;
-    if let Some(ipv6) = authority.strip_prefix('[') {
-        return Some(ipv6.split(']').next()?.to_string());
-    }
-    Some(authority.split(':').next()?.to_string())
 }
 
 #[cfg(test)]
@@ -417,13 +481,31 @@ mod tests {
         assert!(cache.get(&current_key).is_none());
     }
 
-    fn renderer(id: &str, name: &str, model: &str, ip: &str) -> DiscoveredTv {
-        DiscoveredTv {
+    fn renderer(id: &str, name: &str, model: &str, ip: &str) -> RendererDevice {
+        let control_url = format!("http://{ip}:1400/control");
+        let location_url = format!("http://{ip}:1400/description.xml");
+        RendererDevice {
             id: id.to_string(),
             friendly_name: name.to_string(),
-            control_url: format!("http://{ip}:1400/control"),
-            location_url: format!("http://{ip}:1400/description.xml"),
+            control_url: control_url.clone(),
+            location_url: location_url.clone(),
             model_name: model.to_string(),
+            protocol: crate::casting::RendererProtocol::Dlna,
+            capabilities: crate::casting::RendererCapabilities {
+                video: true,
+                audio: true,
+                image: true,
+                playlists: true,
+                controls: vec![
+                    crate::casting::PlaybackAction::Play,
+                    crate::casting::PlaybackAction::Pause,
+                    crate::casting::PlaybackAction::Stop,
+                ],
+            },
+            endpoint: crate::casting::RendererEndpoint::Dlna {
+                control_url,
+                location_url,
+            },
         }
     }
 

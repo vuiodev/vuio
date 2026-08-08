@@ -446,6 +446,7 @@ where
 
     info!("Shutting down gracefully...");
     shutdown.cancel();
+    app_state.discovered_tvs.shutdown().await;
     background_tasks.close();
     if let Err(error) = file_watcher.stop_watching().await {
         warn!("Failed to stop file watcher cleanly: {}", error);
