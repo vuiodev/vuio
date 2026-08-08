@@ -31,6 +31,10 @@ fn decode_base64(s: &str) -> Vec<u8> {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI when writing ID3 via audiotags (QEMU guest)"
+)]
 async fn test_audio_implementation_and_features() {
     // 1. Setup temporary directory for media and database
     let temp_dir = tempdir().unwrap();
@@ -245,6 +249,10 @@ Version=2
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI when writing ID3 via audiotags (QEMU guest)"
+)]
 async fn test_cover_art_retrieval_and_xml() {
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
@@ -374,6 +382,10 @@ async fn test_cover_art_retrieval_and_xml() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI when writing ID3 via audiotags (QEMU guest)"
+)]
 async fn test_radio_playlist_import() {
     use axum::extract::{ConnectInfo, Path, State};
     use axum::http::StatusCode;

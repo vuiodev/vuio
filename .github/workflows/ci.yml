@@ -86,6 +86,7 @@ jobs:
       github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -104,15 +105,19 @@ jobs:
             target: aarch64-pc-windows-msvc
           - runner: macos-14
             target: aarch64-apple-darwin
+          - runner: ubuntu-latest
+            target: x86_64-unknown-freebsd
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
       - name: Install Rust toolchain (stable)
+        if: matrix.target != 'x86_64-unknown-freebsd'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Cache Cargo dependencies
+        if: matrix.target != 'x86_64-unknown-freebsd'
         uses: actions/cache@v6
         with:
           path: |
@@ -134,19 +139,58 @@ jobs:
       - name: Configure cross-linker (Linux ARM)
         if: runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf')
         run: |
-          mkdir -p ~/.cargo
+          mkdir -p ~/.cargo "$HOME/bin"
           if [ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]; then
             echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
             echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
           elif [ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]; then
+            # Ubuntu's armhf cross GCC rejects -mno-omit-leaf-frame-pointer from cc-rs/ring.
+            cat > "$HOME/bin/arm-linux-gnueabihf-gcc-wrap" <<'EOF'
+          #!/usr/bin/env bash
+          args=()
+          for arg in "$@"; do
+            if [[ "$arg" != "-mno-omit-leaf-frame-pointer" ]]; then
+              args+=("$arg")
+            fi
+          done
+          exec arm-linux-gnueabihf-gcc "${args[@]}"
+          EOF
+            chmod +x "$HOME/bin/arm-linux-gnueabihf-gcc-wrap"
             echo '[target.armv7-unknown-linux-gnueabihf]' >> ~/.cargo/config.toml
-            echo 'linker = "arm-linux-gnueabihf-gcc"' >> ~/.cargo/config.toml
+            echo "linker = \"$HOME/bin/arm-linux-gnueabihf-gcc-wrap\"" >> ~/.cargo/config.toml
+            echo "CC_armv7_unknown_linux_gnueabihf=$HOME/bin/arm-linux-gnueabihf-gcc-wrap" >> "$GITHUB_ENV"
           fi
       - name: Build project
+        if: matrix.target != 'x86_64-unknown-freebsd'
         run: cargo build --target ${{ matrix.target }}
       - name: Run tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc'
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-unknown-freebsd'
         run: cargo test --target ${{ matrix.target }}
+      - name: Build and test in FreeBSD VM
+        if: matrix.target == 'x86_64-unknown-freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14"
+          usesh: true
+          sync: rsync
+          copyback: false
+          mem: "6144"
+          cache-after-prepare: true
+          prepare: |
+            pkg install -y curl bash git
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            rustc -vV
+            cargo build
+            # Skip audio_integration_tests: audiotags ID3 write SIGSEGV under QEMU.
+            # Skip samsungtv_browse / mcp / metrics: AppState harness SIGSEGV under
+            # FreeBSD QEMU (sysinfo kinfo_getfile / getmntinfo).
+            cargo test --lib
+            cargo test --test issue_24_pagination
+            cargo test --test path_normalization_integration_tests
+            cargo test --test regression_tests
 
 
   # ===================================================================
@@ -160,6 +204,7 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release')
     # This job no longer depends on test_and_check
     runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -192,10 +237,15 @@ jobs:
             target: aarch64-apple-darwin
             os-arch: macos-arm64
             asset_ext: .tar.gz
+          - runner: ubuntu-latest
+            target: x86_64-unknown-freebsd
+            os-arch: freebsd-x86_64
+            asset_ext: .tar.gz
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
       - name: Install Rust toolchain
+        if: matrix.target != 'x86_64-unknown-freebsd'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -214,16 +264,48 @@ jobs:
       - name: Configure cross-linker (Linux ARM)
         if: runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf')
         run: |
-          mkdir -p ~/.cargo
+          mkdir -p ~/.cargo "$HOME/bin"
           if [ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]; then
             echo '[target.aarch64-unknown-linux-gnu]' >> ~/.cargo/config.toml
             echo 'linker = "aarch64-linux-gnu-gcc"' >> ~/.cargo/config.toml
           elif [ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]; then
+            # Ubuntu's armhf cross GCC rejects -mno-omit-leaf-frame-pointer from cc-rs/ring.
+            cat > "$HOME/bin/arm-linux-gnueabihf-gcc-wrap" <<'EOF'
+          #!/usr/bin/env bash
+          args=()
+          for arg in "$@"; do
+            if [[ "$arg" != "-mno-omit-leaf-frame-pointer" ]]; then
+              args+=("$arg")
+            fi
+          done
+          exec arm-linux-gnueabihf-gcc "${args[@]}"
+          EOF
+            chmod +x "$HOME/bin/arm-linux-gnueabihf-gcc-wrap"
             echo '[target.armv7-unknown-linux-gnueabihf]' >> ~/.cargo/config.toml
-            echo 'linker = "arm-linux-gnueabihf-gcc"' >> ~/.cargo/config.toml
+            echo "linker = \"$HOME/bin/arm-linux-gnueabihf-gcc-wrap\"" >> ~/.cargo/config.toml
+            echo "CC_armv7_unknown_linux_gnueabihf=$HOME/bin/arm-linux-gnueabihf-gcc-wrap" >> "$GITHUB_ENV"
           fi
       - name: Build binary
+        if: matrix.target != 'x86_64-unknown-freebsd'
         run: cargo build --release --target ${{ matrix.target }}
+      - name: Build binary in FreeBSD VM
+        if: matrix.target == 'x86_64-unknown-freebsd'
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14"
+          usesh: true
+          sync: rsync
+          copyback: true
+          mem: "6144"
+          cache-after-prepare: true
+          prepare: |
+            pkg install -y curl bash git
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            rustc -vV
+            cargo build --release
       - name: Package artifacts
         shell: bash
         run: |
@@ -238,7 +320,11 @@ jobs:
           fi
           VERSION=${VERSION_TAG#v}
           echo "Building artifacts for version: $VERSION_TAG"
-          BINARY_PATH_PREFIX="target/${{ matrix.target }}/release"
+          if [ "${{ matrix.target }}" == "x86_64-unknown-freebsd" ]; then
+            BINARY_PATH_PREFIX="target/release"
+          else
+            BINARY_PATH_PREFIX="target/${{ matrix.target }}/release"
+          fi
           ASSET_NAME="${{ env.BINARY_NAME }}-${{ matrix.os-arch }}${{ matrix.asset_ext }}"
           if [ "${{ runner.os }}" == "Windows" ]; then
             BINARY_FILE="${{ env.BINARY_NAME }}.exe"

@@ -14,6 +14,10 @@ use vuio::state::AppState;
 use vuio::web::diagnostics::{get_prometheus_metrics, get_web_metrics, WebHandlerMetrics};
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (metrics integration harness)"
+)]
 async fn test_metrics_endpoints_data() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test_metrics.redb");

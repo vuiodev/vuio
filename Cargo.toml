@@ -49,7 +49,8 @@ serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
 ipnet = "2.12"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 audiotags = "0.5"
 quick-xml = "0.41"
 percent-encoding = "2.3"

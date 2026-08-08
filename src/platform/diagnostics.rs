@@ -65,6 +65,13 @@ impl DiagnosticsCollector {
     fn new() -> Self {
         Self {
             system: sysinfo::System::new_all(),
+            // sysinfo 0.39 FreeBSD disk enumeration calls getmntinfo and then
+            // slice::from_raw_parts with a pointer that fails Rust's alignment
+            // UB checks (abort in debug; real UB risk in release). Skip disks
+            // on FreeBSD until upstream is fixed; metrics stay at zeros.
+            #[cfg(target_os = "freebsd")]
+            disks: sysinfo::Disks::new(),
+            #[cfg(not(target_os = "freebsd"))]
             disks: sysinfo::Disks::new_with_refreshed_list(),
             networks: sysinfo::Networks::new_with_refreshed_list(),
         }
@@ -72,6 +79,7 @@ impl DiagnosticsCollector {
 
     fn refresh(&mut self) -> RuntimeDiagnostics {
         self.system.refresh_all();
+        #[cfg(not(target_os = "freebsd"))]
         self.disks.refresh(true);
         self.networks.refresh(true);
 

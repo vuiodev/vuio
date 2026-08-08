@@ -1,8 +1,7 @@
 #![cfg(target_os = "freebsd")]
 
-use super::{InterfaceType, NetworkInterface, PlatformResult};
+use super::PlatformResult;
 use std::collections::HashMap;
-use std::net::IpAddr;
 use std::process::Command;
 
 /// Get BSD version information

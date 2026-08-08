@@ -95,6 +95,10 @@ async fn make_test_state() -> (TempDir, AppState) {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
 async fn content_publication_and_cache_only_invalidation_have_distinct_revisions() {
     use axum::body::Bytes;
     use std::sync::atomic::Ordering;
@@ -130,6 +134,10 @@ async fn content_publication_and_cache_only_invalidation_have_distinct_revisions
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
 async fn test_mcp_initialize_and_tools_list() {
     let temp_dir = tempdir().unwrap();
     let db_path = temp_dir.path().join("test_mcp.redb");
@@ -366,6 +374,10 @@ async fn test_mcp_initialize_and_tools_list() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
 async fn sse_disconnect_removes_client_immediately() {
     let (_temp, state) = make_test_state().await;
     let response = sse_handler(State(state.clone()), ConnectInfo(test_peer()))
@@ -387,6 +399,10 @@ async fn sse_disconnect_removes_client_immediately() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
 async fn blocked_mcp_send_does_not_hold_clients_mutex() {
     let (_temp, state) = make_test_state().await;
     let (sender, receiver) = tokio::sync::mpsc::channel(1);
@@ -428,6 +444,10 @@ async fn blocked_mcp_send_does_not_hold_clients_mutex() {
 }
 
 #[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
 async fn post_endpoints_enforce_tiered_body_limits() {
     let (_temp, state) = make_test_state().await;
     let router = create_router(state);
