@@ -8,25 +8,36 @@ The VuIO Media Server exposes a variety of endpoints for Web UI rendering, media
 
 These APIs are used by the Web UI to interact with media rendering devices.
 
-### Discover local smart TVs
-Discovers UPnP/DLNA MediaRenderer devices on the local network.
-* **Endpoint**: `GET /api/tvs`
+### Discover local playback devices
+Discovers DLNA, Chromecast, and compatible AirPlay renderers on the local network.
+* **Endpoint**: `GET /api/renderers`
 * **Response**: `200 OK`
   ```json
   [
-    "Bedroom TV",
-    "Living Room TV"
+    {
+      "id": "chromecast:01234567",
+      "friendly_name": "Living Room TV",
+      "model_name": "Chromecast",
+      "protocol": "chromecast",
+      "capabilities": {
+        "video": true,
+        "audio": true,
+        "image": true,
+        "playlists": true,
+        "controls": ["play", "pause", "stop"]
+      }
+    }
   ]
   ```
 
 ### Cast playlist to TV
-Creates a temporary playlist and starts casting it to the selected TV screen.
+Creates a temporary playlist and starts casting it to the selected playback device.
 * **Endpoint**: `POST /api/cast/playlist`
 * **Content-Type**: `application/json`
 * **Request Payload**:
   ```json
   {
-    "tv_name": "Bedroom TV",
+    "renderer_id": "chromecast:01234567",
     "folder_name": "Season 5",
     "file_ids": [343, 330, 331]
   }
@@ -40,7 +51,9 @@ Creates a temporary playlist and starts casting it to the selected TV screen.
     "current_index": 0,
     "current_file": "Kuhnya.s05.e01.tahiy.mkv",
     "queued_next_file": "Kuhnya.s05.e02.tahiy.mkv",
-    "tv": "Bedroom TV",
+    "renderer": "Living Room TV",
+    "renderer_id": "chromecast:01234567",
+    "protocol": "chromecast",
     "media_url": "http://192.168.1.170:8080/media/343"
   }
   ```

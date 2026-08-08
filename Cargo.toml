@@ -1,9 +1,13 @@
+[workspace]
+members = [".", "crates/oxicast"]
+resolver = "2"
+
 [package]
 name = "vuio"
 version = "0.0.39"
 edition = "2021"
 authors = ["vyrti"]
-description = "A cross-platform DLNA/UPnP media server with advanced audio features, real-time file monitoring, and robust database management"
+description = "A cross-platform DLNA, Chromecast, and AirPlay media server with advanced audio features and real-time file monitoring"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
@@ -56,6 +60,8 @@ quick-xml = "0.41"
 percent-encoding = "2.3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"] }
 socket2 = { version = "0.6", features = ["all"] }
+mdns-sd = { version = "0.20", default-features = false, features = ["async"] }
+oxicast = { path = "crates/oxicast", default-features = false }
 
 redb = "4.1"
 jwalk = "0.9"

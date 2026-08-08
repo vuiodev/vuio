@@ -1,6 +1,7 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
+pub mod casting;
 pub mod config;
 pub mod database;
 pub mod error;

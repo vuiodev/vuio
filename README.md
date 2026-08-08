@@ -1,6 +1,6 @@
 # VuIO Media Server
 
-A cross-platform DLNA/UPnP media server written in Rust. Streams video, audio, and images to any DLNA-compatible device (smart TVs, receivers, game consoles).
+A cross-platform media server written in Rust. Streams video, audio, and images to DLNA, Chromecast/Google TV, and compatible AirPlay video receivers.
 Less than 8Mb of RAM needed
 
 Built with Tokio, Axum, and Redb for high performance and reliability.
@@ -10,8 +10,9 @@ Built with Tokio, Axum, and Redb for high performance and reliability.
 ## Features
 
 - **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
+- **Multi-protocol Casting** - Play directly on DLNA, Chromecast/Google TV, and compatible AirPlay video receivers
 - **Web Interface** - Modern dashboard showing server status, scanned files, and directories
-- **AI Agent & MCP Integration** - AI agents (voice assistants, chatbots, and autonomous agents) can interact with your media library and control playback on smart TVs on the local network.
+- **AI Agent & MCP Integration** - AI agents (voice assistants, chatbots, and autonomous agents) can interact with your media library and control playback on discovered devices on the local network.
 - **Global Search** - Instant search across all indexed filenames and paths
 - **HTTP Range Streaming** - Seek support for large media files
 - **Multi-format Support** - MKV, MP4, AVI, MP3, FLAC, WAV, AAC, OGG, JPEG, PNG, and more
@@ -44,6 +45,12 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 - **Sleek Dashboard**: Real-time server status, monitored directories, and database statistics.
 - **Media Explorer**: Browse all scanned videos, music, and pictures directly in your web browser.
 - **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
+
+### Casting compatibility
+
+The dashboard and MCP tools discover DLNA renderers through SSDP, Chromecast and Google TV devices through `_googlecast._tcp` mDNS, and URL-video-capable AirPlay receivers through `_airplay._tcp` mDNS. Chromecast uses Google's Default Media Receiver and does not require a custom Cast application ID.
+
+Casting is direct-play only. DLNA behavior is unchanged. Chromecast accepts supported MP4, WebM, MPEG-TS, MP3, M4A, OGG, WAV, FLAC, and common image containers, subject to the codecs supported by the receiving model. AirPlay support is limited to unpaired receivers that advertise URL-video playback and to progressive MP4 video; AirPlay audio, mirroring, protected media, and AirPlay 2 pairing are not supported. Unsupported files produce an error instead of being transcoded or silently skipped.
 
 ## Quick Start
 
@@ -479,7 +486,7 @@ To support instant directory listings for directories containing 1000+ files, Vu
 
 ## AI Agent & MCP Integration
 
-VuIO supports the **Model Context Protocol (MCP)**, allowing AI agents (like voice assistants, chatbots, and autonomous agents) to interact with your media library and control playback on smart TVs on the local network.
+VuIO supports the **Model Context Protocol (MCP)**, allowing AI agents (like voice assistants, chatbots, and autonomous agents) to interact with your media library and control playback on discovered devices on the local network.
 
 ### Transport Protocols
 
@@ -497,7 +504,7 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
 | `browse_folder` | `path` (string), `category` (optional string) | Browse files and directories in a specific folder path |
 | `get_media_info` | `file_id` (integer) | Fetch detailed metadata for a file by its ID |
 | `get_server_stats` | None | Retrieve media counts, library size, and server URL info |
-| `list_renderers` | None | List DLNA/UPnP MediaRenderers with stable IDs |
+| `list_renderers` | None | List DLNA, Chromecast, and compatible AirPlay renderers with stable IDs |
 | `cast_media_to_renderer` | `file_id` (integer), `renderer_id` (string) | Start playing a media file on a discovered renderer |
 | `control_renderer` | `renderer_id` (string), `action` ("play"\|"pause"\|"stop") | Send playback control commands to a renderer |
 | `list_media` | `category` (optional string), `limit` (optional integer) | Retrieve a flat list of indexed media files (all, audio, video, image) |
@@ -511,7 +518,7 @@ The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP 
 
 ### Example Usage
 
-1. **Discover TVs**:
+1. **Discover playback devices**:
    ```bash
    curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
      -H "Content-Type: application/json" \
@@ -557,6 +564,15 @@ export VUIO_ADMIN_TOKEN="your-custom-secure-token"
 
 Contributions welcome! Please ensure cross-platform compatibility is maintained.
 Input license = output license
+
+## Credits & Third-Party Code
+
+This project includes modified code from the following open-source library:
+
+* **oxicast**: Async Google Cast (Chromecast) client for Rust
+  * **Original Author:** Dennis Kribl (https://github.com/denniskribl/oxicast)
+  * **License:** Dual-licensed under MIT / Apache-2.0
+  * **Local fork:** `crates/oxicast` (ring TLS; no aws-lc)
 
 ## License
 
