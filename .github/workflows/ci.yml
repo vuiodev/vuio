@@ -16,10 +16,12 @@ on:
           - test
           - release
           - docker
+          - test-freebsd-aarch64
+          - release-freebsd-aarch64
         required: true
         default: 'test'
       tag_name:
-        description: 'Required for "release" or "docker" task: The tag for the action (e.g., v1.0.1)'
+        description: 'Required for "release", "release-freebsd-aarch64", or "docker" task: The tag for the action (e.g., v1.0.1)'
         required: false
 
 env:
@@ -107,21 +109,17 @@ jobs:
             target: aarch64-apple-darwin
           - runner: ubuntu-latest
             target: x86_64-unknown-freebsd
-            freebsd_arch: x86_64
-          - runner: ubuntu-latest
-            target: aarch64-unknown-freebsd
-            freebsd_arch: aarch64
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
       - name: Install Rust toolchain (stable)
-        if: ${{ !contains(matrix.target, 'freebsd') }}
+        if: matrix.target != 'x86_64-unknown-freebsd'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
       - name: Cache Cargo dependencies
-        if: ${{ !contains(matrix.target, 'freebsd') }}
+        if: matrix.target != 'x86_64-unknown-freebsd'
         uses: actions/cache@v6
         with:
           path: |
@@ -165,17 +163,16 @@ jobs:
             echo "CC_armv7_unknown_linux_gnueabihf=$HOME/bin/arm-linux-gnueabihf-gcc-wrap" >> "$GITHUB_ENV"
           fi
       - name: Build project
-        if: ${{ !contains(matrix.target, 'freebsd') }}
+        if: matrix.target != 'x86_64-unknown-freebsd'
         run: cargo build --target ${{ matrix.target }}
       - name: Run tests
-        if: ${{ matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc' && !contains(matrix.target, 'freebsd') }}
+        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-unknown-freebsd'
         run: cargo test --target ${{ matrix.target }}
       - name: Build and test in FreeBSD VM
-        if: ${{ contains(matrix.target, 'freebsd') }}
+        if: matrix.target == 'x86_64-unknown-freebsd'
         uses: vmactions/freebsd-vm@v1
         with:
           release: "14"
-          arch: ${{ matrix.freebsd_arch }}
           usesh: true
           sync: rsync
           copyback: false
@@ -183,26 +180,52 @@ jobs:
           cache-after-prepare: true
           prepare: |
             pkg install -y curl bash git
-            # FreeBSD reports arm64; Linux-style aarch64 is uncommon here.
-            arch="$(uname -m)"
-            if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
-              # aarch64-unknown-freebsd is Rust tier 3; rustup has no host installer.
-              pkg install -y rust
-            else
-              curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
-            fi
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           run: |
             set -e
-            arch="$(uname -m)"
-            if [ "$arch" != "arm64" ] && [ "$arch" != "aarch64" ]; then
-              . "$HOME/.cargo/env"
-            fi
+            . "$HOME/.cargo/env"
             rustc -vV
             cargo build
             # Skip audio_integration_tests: audiotags ID3 write SIGSEGV under QEMU.
             # Skip samsungtv_browse / mcp / metrics: AppState harness SIGSEGV under
             # FreeBSD QEMU (sysinfo kinfo_getfile / getmntinfo).
-            # issue_24_pagination: ignored on aarch64 only (SIGSEGV under QEMU); still run on x86_64.
+            cargo test --lib
+            cargo test --test issue_24_pagination
+            cargo test --test path_normalization_integration_tests
+            cargo test --test regression_tests
+
+
+  # ===================================================================
+  # Manual FreeBSD aarch64 test (QEMU is too slow for push/PR matrix)
+  # ===================================================================
+  test_freebsd_aarch64:
+    name: Test on aarch64-unknown-freebsd (manual)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test-freebsd-aarch64'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Build and test in FreeBSD aarch64 VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14"
+          arch: aarch64
+          usesh: true
+          sync: rsync
+          copyback: false
+          mem: "6144"
+          cache-after-prepare: true
+          prepare: |
+            pkg install -y curl bash git rust
+          run: |
+            set -e
+            rustc -vV
+            cargo build
+            # Skip audio_integration_tests: audiotags ID3 write SIGSEGV under QEMU.
+            # Skip samsungtv_browse / mcp / metrics: AppState harness SIGSEGV under
+            # FreeBSD QEMU (sysinfo kinfo_getfile / getmntinfo).
+            # issue_24_pagination: ignored on aarch64 (SIGSEGV under QEMU).
             cargo test --lib
             cargo test --test issue_24_pagination
             cargo test --test path_normalization_integration_tests
@@ -355,6 +378,62 @@ jobs:
         with:
           name: release-artifact-${{ matrix.os-arch }}
           path: ${{ env.BINARY_NAME }}-*
+
+  # ===================================================================
+  # Manual FreeBSD aarch64 release build (too slow for automatic matrix)
+  # ===================================================================
+  release_freebsd_aarch64:
+    name: Build release for aarch64-unknown-freebsd (manual)
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release-freebsd-aarch64'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Require tag_name
+        run: |
+          if [ -z "${{ github.event.inputs.tag_name }}" ]; then
+            echo "Error: The 'tag_name' input is required when running the 'release-freebsd-aarch64' task."
+            exit 1
+          fi
+      - name: Build release binary in FreeBSD aarch64 VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14"
+          arch: aarch64
+          usesh: true
+          sync: rsync
+          copyback: true
+          mem: "6144"
+          cache-after-prepare: true
+          prepare: |
+            pkg install -y curl bash git rust
+          run: |
+            set -e
+            rustc -vV
+            cargo build --release
+      - name: Package artifact
+        shell: bash
+        run: |
+          VERSION_TAG="${{ github.event.inputs.tag_name }}"
+          echo "Building FreeBSD aarch64 artifact for version: $VERSION_TAG"
+          ASSET_NAME="${{ env.BINARY_NAME }}-freebsd-arm64.tar.gz"
+          tar -czf "$ASSET_NAME" -C target/release "${{ env.BINARY_NAME }}"
+          ls -la "$ASSET_NAME"
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifact-freebsd-arm64
+          path: ${{ env.BINARY_NAME }}-freebsd-arm64.tar.gz
+      - name: Upload asset to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION_TAG="${{ github.event.inputs.tag_name }}"
+          ASSET_NAME="${{ env.BINARY_NAME }}-freebsd-arm64.tar.gz"
+          gh release upload "$VERSION_TAG" "$ASSET_NAME" --clobber
 
   # ===================================================================
   # Job 3: Create GitHub Release

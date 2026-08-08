@@ -1,0 +1,6 @@
+/target
+website/node_modules/
+website/dist/
+website/src/content/docs/readme.md
+.DS_Store
+.env

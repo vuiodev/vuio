@@ -18,9 +18,9 @@ use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::tv_control;
 use crate::web::format::format_bytes;
 use crate::{
+    casting::{PlaybackAction, PlaybackItem, PlaybackState},
     database::{
         DatabaseManager, DatabaseReadSession, DirectoryView, FileLocation, MediaFileQuery,
         MediaFileView,
@@ -112,7 +112,7 @@ fn get_tools_list() -> serde_json::Value {
             },
             {
                 "name": "list_renderers",
-                "description": "List cached UPnP/DLNA MediaRenderer devices and their stable IDs.",
+                "description": "List cached DLNA, Chromecast, and AirPlay renderers with their stable IDs and capabilities.",
                 "inputSchema": {
                     "type": "object",
                     "properties": {}
@@ -735,7 +735,9 @@ async fn tool_list_renderers<D: DatabaseManager>(
                 "id": tv.id,
                 "friendly_name": tv.friendly_name,
                 "model": tv.model_name,
-                "location": tv.location_url
+                "location": tv.location_url,
+                "protocol": tv.protocol,
+                "capabilities": tv.capabilities
             })
         })
         .collect();
@@ -800,16 +802,17 @@ pub async fn cast_file_helper<D: DatabaseManager + 'static>(
         .await;
     let media_url = format!("{origin}/media/{}", file.id);
 
-    let title = file.title.as_deref().unwrap_or(&file.filename);
-
-    // Cast
-    tv_control::cast_media(&matched_tv.control_url, &media_url, title, &file.mime_type)
+    let item = playback_item(&file, &origin);
+    state.discovered_tvs.validate(matched_tv, &item)?;
+    state
+        .discovered_tvs
+        .play(matched_tv, &item)
         .await
         .map_err(|e| format!("Cast error: {}", e))?;
 
     {
         let mut monitors = state.active_monitors.lock().await;
-        if let Some((_, cancellation)) = monitors.remove(&matched_tv.control_url) {
+        if let Some((_, cancellation)) = monitors.remove(&matched_tv.id) {
             cancellation.cancel();
         }
     }
@@ -827,6 +830,7 @@ pub async fn cast_file_helper<D: DatabaseManager + 'static>(
         "file": file.filename,
         "renderer": matched_tv.friendly_name,
         "renderer_id": matched_tv.id,
+        "protocol": matched_tv.protocol,
         "media_url": media_url
     }))
 }
@@ -845,10 +849,10 @@ async fn tool_control_renderer<D: DatabaseManager>(
         .and_then(|v| v.as_str())
         .ok_or("Missing 'action' parameter")?;
 
-    let soap_action = match action {
-        "play" => "Play",
-        "pause" => "Pause",
-        "stop" => "Stop",
+    let playback_action = match action {
+        "play" => PlaybackAction::Play,
+        "pause" => PlaybackAction::Pause,
+        "stop" => PlaybackAction::Stop,
         _ => {
             return Err(format!(
                 "Unknown action '{}'. Use play, pause, or stop.",
@@ -876,7 +880,9 @@ async fn tool_control_renderer<D: DatabaseManager>(
                 .join(", ")
         ))?;
 
-    tv_control::control_playback(&matched_tv.control_url, soap_action)
+    state
+        .discovered_tvs
+        .control(matched_tv, playback_action)
         .await
         .map_err(|e| format!("Control error: {}", e))?;
 
@@ -884,7 +890,8 @@ async fn tool_control_renderer<D: DatabaseManager>(
         "status": "ok",
         "action": action,
         "renderer": matched_tv.friendly_name,
-        "renderer_id": matched_tv.id
+        "renderer_id": matched_tv.id,
+        "protocol": matched_tv.protocol
     }))
 }
 async fn tool_list_playlists<D: DatabaseManager>(
@@ -1067,12 +1074,22 @@ async fn tool_get_playlist_tracks<D: DatabaseManager + 'static>(
 
 pub async fn cached_renderers<D: DatabaseManager>(
     state: &AppState<D>,
-) -> Result<Vec<tv_control::DiscoveredTv>, String> {
+) -> Result<Vec<crate::casting::RendererDevice>, String> {
     state
         .discovered_tvs
         .get_or_refresh()
         .await
         .map_err(|e| format!("TV discovery error: {}", e))
+}
+
+fn playback_item(file: &FileLocation, origin: &str) -> PlaybackItem {
+    PlaybackItem {
+        id: file.id,
+        url: format!("{origin}/media/{}", file.id),
+        title: file.title.clone().unwrap_or_else(|| file.filename.clone()),
+        filename: file.filename.clone(),
+        mime_type: file.mime_type.clone(),
+    }
 }
 
 async fn playlist_file_locations<D: DatabaseManager + 'static>(
@@ -1133,7 +1150,6 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
         ));
     }
 
-    // Get selected track
     let selected_track = &tracks[track_index];
     let file_id = selected_track.id;
 
@@ -1158,20 +1174,18 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
         .await;
     let media_url = format!("{origin}/media/{file_id}");
 
-    let title = selected_track
-        .title
-        .as_deref()
-        .unwrap_or(&selected_track.filename);
-
-    // Cast selected track
-    tv_control::cast_media(
-        &matched_tv.control_url,
-        &media_url,
-        title,
-        &selected_track.mime_type,
-    )
-    .await
-    .map_err(|e| format!("Cast error: {}", e))?;
+    let playback_items = tracks
+        .iter()
+        .map(|track| playback_item(track, &origin))
+        .collect::<Vec<_>>();
+    for item in playback_items.iter().skip(track_index) {
+        state.discovered_tvs.validate(matched_tv, item)?;
+    }
+    state
+        .discovered_tvs
+        .play(matched_tv, &playback_items[track_index])
+        .await
+        .map_err(|e| format!("Cast error: {}", e))?;
 
     // Register active cast in global state
     {
@@ -1186,34 +1200,18 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
     // Cancel existing monitor for this TV if any
     {
         let mut monitors = state.active_monitors.lock().await;
-        if let Some((_, cancellation)) = monitors.remove(&matched_tv.control_url) {
+        if let Some((_, cancellation)) = monitors.remove(&matched_tv.id) {
             cancellation.cancel();
         }
     }
 
-    // Queue the next track if available (DLNA automatic transitioning)
     let mut queued_file = None;
-    if track_index + 1 < tracks.len() {
-        let next_track = &tracks[track_index + 1];
-        {
-            let next_media_url = format!("{origin}/media/{}", next_track.id);
-            let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
-
-            // Queue on the TV and log/ignore failures on non-compliant devices
-            match tv_control::set_next_media(
-                &matched_tv.control_url,
-                &next_media_url,
-                next_title,
-                &next_track.mime_type,
-            )
-            .await
-            {
-                Ok(_) => {
-                    queued_file = Some(next_track.filename.clone());
-                }
-                Err(e) => {
-                    tracing::warn!("SetNextAVTransportURI not supported by TV: {}", e);
-                }
+    if let Some(next_item) = playback_items.get(track_index + 1) {
+        match state.discovered_tvs.queue_next(matched_tv, next_item).await {
+            Ok(true) => queued_file = Some(next_item.filename.clone()),
+            Ok(false) => {}
+            Err(error) => {
+                tracing::warn!(%error, "Renderer does not support native next-item queueing");
             }
         }
     }
@@ -1224,7 +1222,7 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
     {
         let mut monitors = state.active_monitors.lock().await;
         if monitors.len() >= crate::runtime_state::ACTIVE_CAST_MAX_ENTRIES
-            && !monitors.contains_key(&matched_tv.control_url)
+            && !monitors.contains_key(&matched_tv.id)
         {
             if let Some(oldest_key) = monitors.keys().next().cloned() {
                 if let Some((_, oldest)) = monitors.remove(&oldest_key) {
@@ -1233,122 +1231,111 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
             }
         }
         monitors.insert(
-            matched_tv.control_url.clone(),
+            matched_tv.id.clone(),
             (monitor_id, monitor_cancellation.clone()),
         );
     }
 
     let state_clone = state.clone();
-    let control_url_clone = matched_tv.control_url.clone();
-    let origin_clone = origin.clone();
+    let matched_renderer = matched_tv.clone();
     let matched_tv_friendly_name = matched_tv.friendly_name.clone();
     let matched_renderer_id = matched_tv.id.clone();
-    let monitor_tracks = tracks.clone();
+    let monitor_items = playback_items.clone();
 
     state.background_tasks.spawn(async move {
         let mut current_idx = track_index;
         let mut consecutive_stopped = 0;
 
         'monitor: loop {
-            // Check cancellation or sleep 4s
             tokio::select! {
                 _ = monitor_cancellation.cancelled() => {
-                    debug!("Queue monitor cancelled for TV: {}", control_url_clone);
+                    debug!("Queue monitor cancelled for renderer: {}", matched_renderer_id);
                     break;
                 }
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(4)) => {}
             }
 
-            // Poll TV current playing track URI and transport state
-            let current_uri = match tokio::select! {
+            let status = match tokio::select! {
                 _ = monitor_cancellation.cancelled() => break,
-                result = tv_control::get_position_info(&control_url_clone) => result,
+                result = state_clone.discovered_tvs.status(&matched_renderer) => result,
             } {
-                Ok(uri) => uri,
-                Err(e) => {
-                    debug!("Queue monitor failed to get position info: {}", e);
+                Ok(status) => status,
+                Err(error) => {
+                    debug!(%error, "Queue monitor failed to get renderer status");
                     continue;
                 }
             };
 
-            let transport_state = match tokio::select! {
-                _ = monitor_cancellation.cancelled() => break,
-                result = tv_control::get_transport_state(&control_url_clone) => result,
-            } {
-                Ok(st) => st,
-                Err(_) => "STOPPED".to_string(),
-            };
+            let reported_idx = status
+                .current_url
+                .as_deref()
+                .and_then(|url| monitor_items.iter().position(|item| item.url == url));
+            if let Some(idx) = reported_idx.filter(|idx| *idx != current_idx) {
+                current_idx = idx;
+                update_active_cast(
+                    &state_clone,
+                    &matched_renderer_id,
+                    &matched_tv_friendly_name,
+                    &monitor_items[current_idx].filename,
+                )
+                .await;
+                queue_following_item(
+                    &state_clone,
+                    &matched_renderer,
+                    &monitor_items,
+                    current_idx,
+                    &monitor_cancellation,
+                )
+                .await;
+            }
 
-            // If current track URI matches a track URL, check if the TV transitioned
-            let mut matched_any = false;
-            for (idx, track) in monitor_tracks.iter().enumerate() {
-                {
-                    let track_media_url = format!("{origin_clone}/media/{}", track.id);
-                    if current_uri == track_media_url {
-                        matched_any = true;
-                        if idx != current_idx {
-                            info!("Queue monitor: TV transitioned to track index {} ({})", idx, track.filename);
-                            current_idx = idx;
-
-                            // Update active cast state with new playing file
-                            {
-                                let mut casts = state_clone.active_casts.lock().await;
-                                casts.insert_labeled(
-                                    matched_renderer_id.clone(),
-                                    matched_tv_friendly_name.clone(),
-                                    track.filename.clone(),
-                                );
-                            }
-
-                            // Queue the next track if available
-                            if current_idx + 1 < monitor_tracks.len() {
-                                let next_track = &monitor_tracks[current_idx + 1];
-                                {
-                                    let next_media_url = format!("{origin_clone}/media/{}", next_track.id);
-                                    let next_title = next_track.title.as_deref().unwrap_or(&next_track.filename);
-                                    let queue_result = tokio::select! {
-                                        _ = monitor_cancellation.cancelled() => break 'monitor,
-                                        result = tv_control::set_next_media(
-                                            &control_url_clone,
-                                            &next_media_url,
-                                            next_title,
-                                            &next_track.mime_type,
-                                        ) => result,
-                                    };
-                                    if let Err(e) = queue_result {
-                                        warn!("Queue monitor: Failed to queue next track: {}", e);
-                                    } else {
-                                        debug!("Queue monitor: Queued next track index {} ({})", current_idx + 1, next_track.filename);
-                                    }
-                                }
-                            }
-                        }
+            match status.state {
+                PlaybackState::Finished if current_idx + 1 < monitor_items.len() => {
+                    current_idx += 1;
+                    let next = &monitor_items[current_idx];
+                    let play_result = tokio::select! {
+                        _ = monitor_cancellation.cancelled() => break 'monitor,
+                        result = state_clone.discovered_tvs.play(&matched_renderer, next) => result,
+                    };
+                    if let Err(error) = play_result {
+                        warn!(%error, "Queue monitor failed to start the next item");
+                        break;
+                    }
+                    update_active_cast(
+                        &state_clone,
+                        &matched_renderer_id,
+                        &matched_tv_friendly_name,
+                        &next.filename,
+                    )
+                    .await;
+                    queue_following_item(
+                        &state_clone,
+                        &matched_renderer,
+                        &monitor_items,
+                        current_idx,
+                        &monitor_cancellation,
+                    )
+                    .await;
+                    consecutive_stopped = 0;
+                }
+                PlaybackState::Finished => break,
+                PlaybackState::Stopped | PlaybackState::Error if reported_idx.is_none() => {
+                    consecutive_stopped += 1;
+                    if consecutive_stopped >= 5 {
                         break;
                     }
                 }
-            }
-
-            // If TV is stopped and not playing any of our tracks, increment stop checks count
-            if matched_any {
-                consecutive_stopped = 0;
-            } else if transport_state == "STOPPED" {
-                consecutive_stopped += 1;
-                if consecutive_stopped >= 5 {
-                    info!("Queue monitor: TV stopped playing the playlist (exited after 5 consecutive stopped checks)");
-                    break;
-                }
-            } else {
-                consecutive_stopped = 0;
+                _ => consecutive_stopped = 0,
             }
         }
 
         let removed_current_monitor = {
             let mut monitors = state_clone.active_monitors.lock().await;
             let is_current = monitors
-                .get(&control_url_clone)
+                .get(&matched_renderer_id)
                 .is_some_and(|(current_id, _)| *current_id == monitor_id);
             if is_current {
-                monitors.remove(&control_url_clone);
+                monitors.remove(&matched_renderer_id);
             }
             is_current
         };
@@ -1367,8 +1354,43 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
         "queued_next_file": queued_file,
         "renderer": matched_tv.friendly_name,
         "renderer_id": matched_tv.id,
+        "protocol": matched_tv.protocol,
         "media_url": media_url
     }))
+}
+
+async fn update_active_cast<D: DatabaseManager>(
+    state: &AppState<D>,
+    renderer_id: &str,
+    renderer_name: &str,
+    filename: &str,
+) {
+    state.active_casts.lock().await.insert_labeled(
+        renderer_id.to_string(),
+        renderer_name.to_string(),
+        filename.to_string(),
+    );
+}
+
+async fn queue_following_item<D: DatabaseManager>(
+    state: &AppState<D>,
+    renderer: &crate::casting::RendererDevice,
+    items: &[PlaybackItem],
+    current_index: usize,
+    cancellation: &tokio_util::sync::CancellationToken,
+) {
+    let Some(next) = items.get(current_index + 1) else {
+        return;
+    };
+    let result = tokio::select! {
+        _ = cancellation.cancelled() => return,
+        result = state.discovered_tvs.queue_next(renderer, next) => result,
+    };
+    match result {
+        Ok(true) => debug!(filename = %next.filename, "Queued next renderer item"),
+        Ok(false) => {}
+        Err(error) => warn!(%error, "Failed to queue next renderer item"),
+    }
 }
 
 async fn tool_cast_playlist_to_renderer<D: DatabaseManager + 'static>(
