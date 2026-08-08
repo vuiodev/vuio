@@ -1,0 +1,495 @@
+use super::{
+    BaseFileSystemManager, FileInfo, FilePermissions, FileSystemError, FileSystemManager, MediaFile,
+};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+use tokio::fs;
+
+/// Windows-specific file system manager
+pub struct WindowsFileSystemManager {
+    base: BaseFileSystemManager,
+    path_normalizer: Box<dyn super::PathNormalizer>,
+}
+
+impl WindowsFileSystemManager {
+    /// Create a new Windows file system manager
+    pub fn new() -> Self {
+        let path_normalizer = Box::new(super::WindowsPathNormalizer::new());
+        Self {
+            base: BaseFileSystemManager::with_normalizer(
+                false,
+                Box::new(super::WindowsPathNormalizer::new()),
+            ),
+            path_normalizer,
+        }
+    }
+
+    /// Check if a path is a UNC path (\\server\share\path)
+    fn is_unc_path(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+        path_str.starts_with(r"\\") && path_str.len() > 2
+    }
+
+    /// Check if a path contains a drive letter (C:\path)
+    fn has_drive_letter(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+        path_str.len() >= 3
+            && path_str.chars().nth(1) == Some(':')
+            && path_str.chars().nth(2) == Some('\\')
+    }
+
+    /// Normalize Windows path separators, case, and handle drive letters
+    fn normalize_windows_path(&self, path: &Path) -> PathBuf {
+        let path_str = path.to_string_lossy();
+
+        // Convert forward slashes to backslashes
+        let with_backslashes = path_str.replace('/', r"\");
+
+        // Handle UNC paths - don't modify server/share case
+        if self.is_unc_path(path) {
+            let normalized = with_backslashes.to_lowercase();
+            if let Some(first_sep) = normalized
+                .find('\\')
+                .and_then(|p| normalized[p + 1..].find('\\'))
+            {
+                let server_share_part_end = 1 + first_sep + 1;
+                if let Some(second_sep) = normalized[server_share_part_end..].find('\\') {
+                    let server_share = &normalized[..server_share_part_end + second_sep];
+                    let rest_of_path = &normalized[server_share_part_end + second_sep..];
+                    return PathBuf::from(format!(
+                        "{}{}",
+                        server_share,
+                        rest_of_path.to_lowercase()
+                    ));
+                }
+            }
+            return PathBuf::from(normalized);
+        }
+
+        // Handle drive letter paths - preserve uppercase drive letter
+        if (self.has_drive_letter(Path::new(&with_backslashes))
+            || self.looks_like_drive_letter(&with_backslashes))
+            && with_backslashes.len() >= 2
+        {
+            let Some(drive_letter) = with_backslashes.chars().next() else {
+                return PathBuf::from(with_backslashes);
+            };
+            let drive_letter = drive_letter.to_ascii_uppercase();
+            let rest = &with_backslashes[1..].to_lowercase();
+            return PathBuf::from(format!("{}{}", drive_letter, rest));
+        }
+
+        // For other paths, convert to lowercase
+        PathBuf::from(with_backslashes.to_lowercase())
+    }
+
+    /// Validate Windows-specific path constraints
+    fn validate_windows_path(&self, path: &Path) -> Result<(), FileSystemError> {
+        // First run common validation
+        self.base.validate_path_common(path)?;
+
+        let path_str = path.to_string_lossy();
+
+        // Check for invalid Windows characters (excluding colon which is handled separately)
+        let invalid_chars = ['<', '>', '"', '|', '?', '*'];
+        for &invalid_char in &invalid_chars {
+            if path_str.contains(invalid_char) {
+                return Err(FileSystemError::InvalidWindowsCharacter {
+                    path: path.display().to_string(),
+                    character: invalid_char,
+                    reason: format!("Windows paths cannot contain the '{}' character. This character is reserved by the Windows file system.", invalid_char),
+                });
+            }
+        }
+
+        // Handle colon validation separately with proper logic
+        if path_str.contains(':') && !self.is_valid_colon_usage(path) {
+            let colon_details = self.get_colon_validation_details(path);
+            return Err(FileSystemError::InvalidColonUsage {
+                path: path.display().to_string(),
+                details: colon_details,
+            });
+        }
+
+        // Check for reserved Windows names
+        let reserved_names = [
+            "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+            "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+        ];
+
+        if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+            let filename_upper = filename.to_uppercase();
+            let name_without_ext = filename_upper.split('.').next().unwrap_or(&filename_upper);
+
+            if reserved_names.contains(&name_without_ext) {
+                return Err(FileSystemError::ReservedName {
+                    path: path.display().to_string(),
+                    reserved_name: name_without_ext.to_string(),
+                });
+            }
+        }
+
+        // Check path length limits
+        if path_str.len() > 260 && !path_str.starts_with(r"\\?\") {
+            return Err(FileSystemError::PathTooLong {
+                path: path.display().to_string(),
+                details: format!("Path length is {} characters, which exceeds the Windows MAX_PATH limit of 260 characters. Consider using shorter names or enabling long path support.", path_str.len()),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Get Windows-specific file permissions
+    async fn get_windows_permissions(
+        &self,
+        path: &Path,
+    ) -> Result<FilePermissions, FileSystemError> {
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .await?
+            .metadata()
+            .await?;
+        let std_permissions = metadata.permissions();
+
+        let mut platform_details = HashMap::new();
+
+        // On Windows, we can check basic read-only status
+        let readonly = std_permissions.readonly();
+        platform_details.insert("readonly".to_string(), readonly.to_string());
+
+        // For more detailed Windows ACL information, we would need to use Windows APIs
+        // This is a simplified implementation
+        let permissions = FilePermissions {
+            readable: true,  // Always readable for media files
+            writable: false, // Enforce read-only access to media files
+            executable: path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(|ext| ext.to_lowercase())
+                .map(|ext| matches!(ext.as_str(), "exe" | "bat" | "cmd" | "com" | "msi" | "ps1"))
+                .unwrap_or(false),
+            platform_details,
+        };
+
+        Ok(permissions)
+    }
+
+    /// Check if a file is hidden on Windows
+    fn is_hidden_windows(&self, path: &Path) -> bool {
+        // On Windows, files starting with '.' are not necessarily hidden
+        // The hidden attribute is set via file attributes, but we'll use a simple heuristic
+        if let Some(filename) = path.file_name().and_then(|name| name.to_str()) {
+            // Common Windows hidden files
+            matches!(
+                filename.to_lowercase().as_str(),
+                "thumbs.db" | "desktop.ini" | ".ds_store" | "hiberfil.sys" | "pagefile.sys"
+            ) || filename.starts_with('.')
+        } else {
+            false
+        }
+    }
+
+    /// Handle case-insensitive file matching for Windows
+    #[allow(dead_code)]
+    fn find_actual_case(&self, path: &Path) -> Option<PathBuf> {
+        // This is a simplified implementation
+        // In a full implementation, we would use Windows APIs to find the actual case
+        // For now, we'll just return the path as-is since Windows is case-insensitive
+        Some(path.to_path_buf())
+    }
+
+    /// Check if colon usage in the path is valid for Windows
+    fn is_valid_colon_usage(&self, path: &Path) -> bool {
+        let path_str = path.to_string_lossy();
+
+        // UNC paths can have colons in network addresses (\\server:port\share)
+        if self.is_unc_path(path) {
+            return self.validate_unc_colon_usage(&path_str);
+        }
+
+        // Drive letter paths should only have colon at position 1
+        if self.has_drive_letter(path) || self.looks_like_drive_letter(&path_str) {
+            return self.validate_drive_letter_colon_usage(&path_str);
+        }
+
+        // Relative paths should not contain colons
+        !path_str.contains(':')
+    }
+
+    /// Check if a path string looks like it starts with a drive letter (more flexible than has_drive_letter)
+    fn looks_like_drive_letter(&self, path_str: &str) -> bool {
+        path_str.len() >= 2
+            && path_str.chars().nth(1) == Some(':')
+            && path_str
+                .chars()
+                .nth(0)
+                .map(|c| c.is_ascii_alphabetic())
+                .unwrap_or(false)
+    }
+
+    /// Validate colon usage in drive letter paths
+    fn validate_drive_letter_colon_usage(&self, path_str: &str) -> bool {
+        // Find all colon positions
+        let colon_positions: Vec<usize> = path_str.match_indices(':').map(|(i, _)| i).collect();
+
+        // Should only have one colon at position 1 (after drive letter)
+        colon_positions.len() == 1 && colon_positions[0] == 1
+    }
+
+    /// Validate colon usage in UNC paths
+    fn validate_unc_colon_usage(&self, path_str: &str) -> bool {
+        // UNC paths: \\server:port\share or \\server\share
+        // Colons are allowed in the server:port portion
+        if !path_str.starts_with(r"\\") {
+            return false;
+        }
+
+        // Split into components: ["", "", "server:port", "share", ...]
+        let components: Vec<&str> = path_str.split('\\').collect();
+        if components.len() < 4 {
+            return false; // Invalid UNC path structure
+        }
+
+        // Check if colons only appear in the server component (index 2)
+        for (i, component) in components.iter().enumerate() {
+            if component.contains(':') && i != 2 {
+                return false; // Colon in wrong position
+            }
+        }
+
+        true
+    }
+
+    /// Get detailed information about why colon validation failed
+    fn get_colon_validation_details(&self, path: &Path) -> String {
+        let path_str = path.to_string_lossy();
+        let colon_positions: Vec<usize> = path_str.match_indices(':').map(|(i, _)| i).collect();
+
+        if colon_positions.is_empty() {
+            return "No colons found in path".to_string();
+        }
+
+        let mut details = Vec::new();
+
+        // Check if it's a UNC path
+        if path_str.starts_with(r"\\") {
+            details.push("Detected UNC network path format".to_string());
+
+            let components: Vec<&str> = path_str.split('\\').collect();
+            if components.len() < 4 {
+                details.push("Invalid UNC path structure - should be \\\\server\\share or \\\\server:port\\share".to_string());
+            } else {
+                for (i, component) in components.iter().enumerate() {
+                    if component.contains(':') {
+                        if i == 2 {
+                            details.push(format!(
+                                "Valid colon usage in server component: '{}'",
+                                component
+                            ));
+                        } else {
+                            details.push(format!("Invalid colon in component {} ('{}'): colons only allowed in server component", i, component));
+                        }
+                    }
+                }
+            }
+        }
+        // Check if it looks like a drive letter path
+        else if self.looks_like_drive_letter(&path_str) {
+            details.push("Detected drive letter path format".to_string());
+
+            if colon_positions.len() == 1 && colon_positions[0] == 1 {
+                details.push("Valid drive letter colon usage".to_string());
+            } else if colon_positions.len() > 1 {
+                details.push(format!("Multiple colons found at positions: {:?} - only one colon allowed at position 1", colon_positions));
+            } else if colon_positions[0] != 1 {
+                details.push(format!(
+                    "Colon at wrong position {} - drive letter colon must be at position 1",
+                    colon_positions[0]
+                ));
+            }
+        }
+        // Relative path or other format
+        else {
+            details.push("Relative or non-standard path format".to_string());
+            details.push(format!(
+                "Found colons at positions: {:?} - colons not allowed in relative paths",
+                colon_positions
+            ));
+            details.push("Suggestion: Remove colons from file/directory names or use absolute paths with proper drive letters".to_string());
+        }
+
+        // Add examples of valid usage
+        if details
+            .iter()
+            .any(|d| d.contains("Invalid") || d.contains("not allowed"))
+        {
+            details.push("Valid colon usage examples:".to_string());
+            details.push("  - Drive letters: C:\\Users\\Documents, D:\\Media".to_string());
+            details.push(
+                "  - UNC paths: \\\\server\\share, \\\\192.168.1.100:8080\\media".to_string(),
+            );
+            details.push("  - Relative paths: Do not use colons in relative paths".to_string());
+        }
+
+        details.join("\n")
+    }
+}
+
+#[async_trait::async_trait]
+impl FileSystemManager for WindowsFileSystemManager {
+    async fn scan_media_directory(&self, path: &Path) -> Result<Vec<MediaFile>, FileSystemError> {
+        self.validate_windows_path(path)?;
+
+        if !self.is_accessible(path).await {
+            return Err(FileSystemError::AccessDenied {
+                path: path.display().to_string(),
+                reason: "Directory is not accessible or requires elevated permissions".to_string(),
+            });
+        }
+
+        // Use the base implementation for scanning
+        self.base.scan_directory_common(path).await
+    }
+
+    fn normalize_path(&self, path: &Path) -> PathBuf {
+        self.normalize_windows_path(path)
+    }
+
+    fn get_canonical_path(&self, path: &Path) -> Result<String, super::PathNormalizationError> {
+        self.path_normalizer.to_canonical(path)
+    }
+
+    async fn is_accessible(&self, path: &Path) -> bool {
+        // For directories, check if we can read the directory
+        if path.is_dir() {
+            tokio::fs::read_dir(path).await.is_ok()
+        } else {
+            // For files, try to access the path with read-only access
+            tokio::fs::OpenOptions::new()
+                .read(true)
+                .write(false)
+                .open(path)
+                .await
+                .is_ok()
+        }
+    }
+
+    async fn get_file_info(&self, path: &Path) -> Result<FileInfo, FileSystemError> {
+        // Enforce read-only access to media files
+        let metadata = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(false)
+            .open(path)
+            .await?
+            .metadata()
+            .await?;
+
+        let permissions = self.get_windows_permissions(path).await?;
+
+        let mime_type = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(super::get_mime_type_for_extension)
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+
+        let is_hidden = self.is_hidden_windows(path);
+
+        let mut platform_metadata = HashMap::new();
+        platform_metadata.insert(
+            "is_unc_path".to_string(),
+            self.is_unc_path(path).to_string(),
+        );
+        platform_metadata.insert(
+            "has_drive_letter".to_string(),
+            self.has_drive_letter(path).to_string(),
+        );
+
+        Ok(FileInfo {
+            size: metadata.len(),
+            modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            permissions,
+            mime_type,
+            is_hidden,
+            metadata: platform_metadata,
+        })
+    }
+
+    fn paths_equal(&self, path1: &Path, path2: &Path) -> bool {
+        // Windows paths are case-insensitive - use path normalizer for comparison
+        match (
+            self.path_normalizer.to_canonical(path1),
+            self.path_normalizer.to_canonical(path2),
+        ) {
+            (Ok(norm1), Ok(norm2)) => norm1 == norm2,
+            _ => {
+                // Fallback to basic comparison if normalization fails
+                path1.to_string_lossy().to_lowercase() == path2.to_string_lossy().to_lowercase()
+            }
+        }
+    }
+
+    fn validate_path(&self, path: &Path) -> Result<(), FileSystemError> {
+        self.validate_windows_path(path)
+    }
+
+    async fn canonicalize_path(&self, path: &Path) -> Result<String, FileSystemError> {
+        // First resolve symbolic links and relative components
+        match fs::canonicalize(path).await {
+            Ok(canonical_path) => {
+                // Then apply Windows-specific path normalization to the resolved path
+                self.path_normalizer
+                    .to_canonical(&canonical_path)
+                    .map_err(|e| {
+                        FileSystemError::Platform(format!(
+                            "Windows path normalization failed: {}",
+                            e
+                        ))
+                    })
+            }
+            Err(err) => {
+                // If canonicalization fails, try to provide a helpful error
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    Err(FileSystemError::PathNotFound {
+                        path: path.display().to_string(),
+                    })
+                } else if err.kind() == std::io::ErrorKind::PermissionDenied {
+                    Err(FileSystemError::AccessDenied {
+                        path: path.display().to_string(),
+                        reason: "Permission denied when accessing path".to_string(),
+                    })
+                } else {
+                    Err(FileSystemError::Platform(format!(
+                        "Windows canonicalization failed: {}",
+                        err
+                    )))
+                }
+            }
+        }
+    }
+
+    fn matches_extension(&self, path: &Path, extensions: &[String]) -> bool {
+        if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+            // Windows is case-insensitive
+            let ext_lower = ext.to_lowercase();
+            extensions
+                .iter()
+                .any(|allowed| allowed.to_lowercase() == ext_lower)
+        } else {
+            false
+        }
+    }
+}
+
+impl Default for WindowsFileSystemManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests;

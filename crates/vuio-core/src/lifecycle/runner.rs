@@ -1,0 +1,507 @@
+use super::*;
+
+pub(super) async fn create_lifecycle_backup<D: DatabaseManager>(
+    database: &Arc<D>,
+    config: &AppConfig,
+) -> anyhow::Result<PathBuf> {
+    let database_path = config.get_database_path().with_extension("redb");
+    let backup_dir = database_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("backups");
+    tokio::fs::create_dir_all(&backup_dir).await?;
+    let filename = format!(
+        "vuio-{}-{}.redb",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
+        uuid::Uuid::new_v4().simple()
+    );
+    let destination = backup_dir.join(filename);
+    database.create_backup(&destination).await?;
+
+    let mut entries = tokio::fs::read_dir(&backup_dir).await?;
+    let mut backups = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("redb") {
+            backups.push(path);
+        }
+    }
+    backups.sort();
+    let remove_count = backups.len().saturating_sub(3);
+    for old in backups.into_iter().take(remove_count) {
+        tokio::fs::remove_file(old).await?;
+    }
+    Ok(destination)
+}
+
+pub(super) async fn run_with_database<D, Initialize, InitializeFuture, Restore, RestoreFuture>(
+    runtime_options: RuntimeOptions,
+    initialize_backend: Initialize,
+    restore_backend: Restore,
+) -> anyhow::Result<()>
+where
+    D: DatabaseManager + 'static,
+    Initialize: FnOnce(Arc<AppConfig>) -> InitializeFuture,
+    InitializeFuture: std::future::Future<Output = anyhow::Result<D>>,
+    Restore: FnOnce(Arc<AppConfig>, PathBuf) -> RestoreFuture,
+    RestoreFuture: std::future::Future<Output = anyhow::Result<()>>,
+{
+    // Initialize logging with options
+    let log_file_path = runtime_options.log_file.as_ref().map(PathBuf::from);
+    logging::init_logging_with_options(
+        runtime_options.log_level.as_deref(),
+        log_file_path.clone(),
+        runtime_options.debug,
+    )
+    .context("Failed to initialize logging")?;
+
+    info!("Starting VuIO Server...");
+
+    let shutdown = ShutdownCoordinator::from_token(runtime_options.cancellation.clone());
+    let cancellation = shutdown.token();
+    let background_tasks = tokio_util::task::TaskTracker::new();
+
+    // Detect platform information with comprehensive diagnostics
+    let platform_info = match detect_platform_with_diagnostics().await {
+        Ok(info) => Arc::new(info),
+        Err(e) => {
+            error!("Failed to detect platform information: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Security checks removed for faster startup
+
+    // Initialize configuration manager with file watching
+    let config_manager = match initialize_config_manager(
+        &platform_info,
+        runtime_options.config_path.clone(),
+        runtime_options.config_override.clone(),
+        cancellation.clone(),
+        background_tasks.clone(),
+    )
+    .await
+    {
+        Ok(manager) => Arc::new(manager),
+        Err(e) => {
+            error!("Failed to initialize configuration manager: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Get the current configuration
+    let config = Arc::new(config_manager.get_config().await);
+
+    if let Some(backup) = runtime_options.restore_backup.as_deref() {
+        restore_backend(config.clone(), PathBuf::from(backup))
+            .await
+            .with_context(|| format!("Failed to restore database backup {backup}"))?;
+        info!("Restored database backup from {}", backup);
+    }
+
+    // Initialize database manager
+    let database = match initialize_backend(config.clone()).await {
+        Ok(db) => Arc::new(db),
+        Err(e) => {
+            error!("Failed to initialize database: {}", e);
+            return Err(e);
+        }
+    };
+
+    if config.database.backup_enabled {
+        match create_lifecycle_backup(&database, &config).await {
+            Ok(path) => info!("Created startup database backup at {}", path.display()),
+            Err(error) => warn!("Startup database backup failed: {}", error),
+        }
+    }
+
+    // Initialize file system watcher
+    let file_watcher = match initialize_file_watcher(&config).await {
+        Ok(watcher) => Arc::new(watcher),
+        Err(e) => {
+            error!("Failed to initialize file system watcher: {}", e);
+            return Err(e);
+        }
+    };
+
+    // Create shared application state
+    let filesystem_manager: Arc<dyn crate::platform::filesystem::FileSystemManager> =
+        Arc::from(create_platform_filesystem_manager());
+    let resolved_log_file =
+        log_file_path.unwrap_or_else(crate::config::AppConfig::get_platform_log_file_path);
+    let lifecycle_stats = Arc::new(ApplicationStats::new());
+    let auth = Arc::new(crate::web::auth::AuthState::load(
+        &config.management,
+        config_manager.get_config_path(),
+        runtime_options.auth,
+    )?);
+    let app_state = AppState {
+        config: config.clone(),
+        live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        database: database.clone(),
+        auth: auth.clone(),
+        platform_info: platform_info.clone(),
+        filesystem_manager,
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        web_metrics: Arc::new(crate::web::diagnostics::WebHandlerMetrics::new()),
+        runtime_diagnostics: Arc::new(crate::platform::diagnostics::SystemDiagnosticsSampler::new()),
+        lifecycle_stats: lifecycle_stats.clone(),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::BookmarkRegistry::new(crate::runtime_state::BOOKMARK_MAX_ENTRIES),
+        )),
+        log_file_path: resolved_log_file,
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::BrowseResponseCache::new(),
+        )),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            crate::runtime_state::ActiveCastRegistry::new(),
+        )),
+        discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: cancellation.clone(),
+        background_tasks: background_tasks.clone(),
+    };
+
+    let ApplicationContext {
+        config,
+        config_manager,
+        database,
+        file_watcher,
+        platform_info,
+        app_state,
+    } = ApplicationContext {
+        config,
+        config_manager,
+        database,
+        file_watcher,
+        platform_info,
+        app_state,
+    };
+
+    let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
+
+    if config.database.backup_enabled {
+        let backup_database = database.clone();
+        let backup_state = app_state.clone();
+        let backup_cancellation = cancellation.clone();
+        services.spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            interval.tick().await;
+            loop {
+                tokio::select! {
+                    _ = backup_cancellation.cancelled() => break,
+                    _ = interval.tick() => {
+                        let current = backup_state.current_config();
+                        if current.database.backup_enabled {
+                            if let Err(error) = create_lifecycle_backup(&backup_database, &current).await {
+                                warn!("Periodic database backup failed: {}", error);
+                            }
+                        }
+                    }
+                }
+            }
+            ("database backup", Ok(()))
+        });
+    }
+
+    let subscription_handle = {
+        let subscriptions = app_state.upnp_subscriptions.clone();
+        let active_casts = app_state.active_casts.clone();
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                tokio::select! {
+                    _ = cancellation.cancelled() => break,
+                    _ = interval.tick() => {
+                        let now = std::time::Instant::now();
+                        subscriptions
+                            .lock()
+                            .await
+                            .retain(|_, subscription| subscription.expires_at > now);
+                        active_casts.lock().await.prune();
+                    }
+                }
+            }
+        })
+    };
+    services.spawn(async move {
+        (
+            "subscription cleanup",
+            subscription_handle.await.map_err(anyhow::Error::from),
+        )
+    });
+
+    // Start file system monitoring
+    match start_file_monitoring(
+        file_watcher.clone(),
+        app_state.clone(),
+        cancellation.clone(),
+    )
+    .await
+    {
+        Ok(Some(handle)) => {
+            services.spawn(async move {
+                (
+                    "media monitoring",
+                    handle.await.map_err(anyhow::Error::from),
+                )
+            });
+        }
+        Ok(None) => {}
+        Err(e) => {
+            warn!("Failed to start file system monitoring: {}", e);
+            warn!("Continuing without real-time file monitoring");
+        }
+    }
+
+    // Scan only after the watcher is active. This closes the startup blind
+    // window: a download that lands while the scan is running is either found
+    // by the scan or delivered by the watcher (and duplicate upserts are safe).
+    if let Err(e) = perform_initial_media_scan(&config, &database).await {
+        error!("Failed to perform initial media scan: {}", e);
+        return Err(e);
+    }
+    refresh_unavailable_roots(&app_state).await?;
+
+    // Perform initial playlist file scan after media scan so referenced files exist.
+    if let Err(e) = perform_initial_playlist_scan(&config, &database).await {
+        // Log warning but don't fail startup - playlists are not critical
+        warn!("Failed to scan playlist files: {}", e);
+    }
+
+    // Start runtime platform adaptation services
+    let adaptation_handle = start_platform_adaptation(
+        platform_info.clone(),
+        config_manager.clone(),
+        file_watcher.clone(),
+        app_state.clone(),
+        cancellation.clone(),
+    )
+    .await?;
+    services.spawn(async move {
+        (
+            "platform adaptation",
+            adaptation_handle.await.map_err(anyhow::Error::from),
+        )
+    });
+
+    // Start atomic application statistics monitoring
+    let monitoring_handle = start_atomic_monitoring(
+        database.clone(),
+        lifecycle_stats.clone(),
+        cancellation.clone(),
+    )
+    .await?;
+    services.spawn(async move {
+        (
+            "maintenance",
+            monitoring_handle.await.map_err(anyhow::Error::from),
+        )
+    });
+
+    // Start SSDP discovery service with platform abstraction
+    let ssdp_handle = start_ssdp_service(app_state.clone(), cancellation.clone()).await?;
+    services.spawn(async move {
+        let result = ssdp_handle
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result);
+        ("SSDP", result)
+    });
+
+    // Start the HTTP server as a background task
+    let network_handles =
+        match start_http_server_task(app_state.clone(), cancellation.clone()).await {
+            Ok(handles) => handles,
+            Err(e) => {
+                error!("Failed to start HTTP server: {}", e);
+                return Err(e);
+            }
+        };
+    services.spawn(async move {
+        let result = network_handles
+            .http
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(|result| result);
+        ("HTTP", result)
+    });
+    services.spawn(async move {
+        (
+            "TV discovery",
+            network_handles
+                .tv_discovery
+                .await
+                .map_err(anyhow::Error::from),
+        )
+    });
+
+    // Determine if console logging is verbose
+    let is_rust_log_set = std::env::var("RUST_LOG").is_ok();
+    let in_docker = AppConfig::is_running_in_docker();
+    let console_is_verbose = runtime_options.debug
+        || is_rust_log_set
+        || runtime_options.log_level.is_some()
+        || in_docker;
+
+    if !console_is_verbose {
+        let display_ip =
+            if config.server.interface == "0.0.0.0" || config.server.interface.is_empty() {
+                if let Some(primary) = platform_info.get_primary_interface() {
+                    primary.ip_address.to_string()
+                } else {
+                    "127.0.0.1".to_string()
+                }
+            } else {
+                config.server.interface.clone()
+            };
+        let web_url = format!("http://{}:{}", display_ip, config.server.port);
+        let db_path = config.get_database_path().with_extension("redb");
+
+        fn tail_with_ellipsis(value: &str, max_chars: usize) -> String {
+            let count = value.chars().count();
+            if count <= max_chars {
+                return value.to_owned();
+            }
+            let tail = value
+                .chars()
+                .skip(count.saturating_sub(max_chars.saturating_sub(3)))
+                .collect::<String>();
+            format!("...{tail}")
+        }
+
+        let display_name = tail_with_ellipsis(&config.server.name, 41);
+        let display_url = tail_with_ellipsis(&web_url, 41);
+
+        let db_path_str = db_path.to_string_lossy().to_string();
+        let display_db_path = tail_with_ellipsis(&db_path_str, 41);
+
+        let auth_status = if auth.enabled() {
+            "Enabled (see token path below)".to_string()
+        } else {
+            "Disabled (Public Access)".to_string()
+        };
+        let display_auth = tail_with_ellipsis(&auth_status, 41);
+
+        println!("┌────────────────────────────────────────────────────────┐");
+        println!("│  VuIO Media Server                                     │");
+        println!("├────────────────────────────────────────────────────────┤");
+        println!("│  Name:       {:<41} │", display_name);
+        println!("│  Version:    {:<41} │", env!("CARGO_PKG_VERSION"));
+        println!("│  Status:     Online & Streaming                        │");
+        println!("│  Address:    {:<41} │", display_url);
+        println!("│  SSDP:       Active on port 1900                       │");
+        println!("│  Database:   {:<41} │", display_db_path);
+        println!("│  Auth:       {:<41} │", display_auth);
+        println!("│                                                        │");
+        println!("│  Monitored Directories:                                │");
+        if config.media.directories.is_empty() {
+            println!("│    (none configured)                                   │");
+        } else {
+            for dir in &config.media.directories {
+                let path_str = &dir.path;
+                let display_path = tail_with_ellipsis(path_str, 49);
+                println!("│    • {:<49} │", display_path);
+            }
+        }
+        println!("│                                                        │");
+        println!("│  Press Ctrl+C to stop the server safely.               │");
+        println!("└────────────────────────────────────────────────────────┘");
+
+        if auth.enabled() {
+            println!("Management Authentication is active.");
+            println!("Token file: {}", auth.token_path().display());
+            println!();
+        }
+    }
+
+    // One signal listener and one supervisor own the application lifetime.
+    let mut shutdown_error = None;
+    tokio::select! {
+        _ = cancellation.cancelled() => {
+            info!("Received host shutdown request");
+        }
+        completed = services.join_next() => {
+            let failure = match completed {
+                Some(Ok((name, Ok(())))) => anyhow::anyhow!("critical service {name} stopped unexpectedly"),
+                Some(Ok((name, Err(error)))) => anyhow::anyhow!("critical service {name} failed: {error}"),
+                Some(Err(error)) => anyhow::anyhow!("critical service task panicked: {error}"),
+                None => anyhow::anyhow!("all lifecycle services stopped unexpectedly"),
+            };
+            error!("{}", failure);
+            shutdown_error = Some(failure);
+        }
+    }
+
+    info!("Shutting down gracefully...");
+    shutdown.cancel();
+    app_state.discovered_tvs.shutdown().await;
+    background_tasks.close();
+    if let Err(error) = file_watcher.stop_watching().await {
+        warn!("Failed to stop file watcher cleanly: {}", error);
+    }
+
+    let shutdown_timeout = std::time::Duration::from_secs(10);
+    let shutdown_start = std::time::Instant::now();
+    let joined = tokio::time::timeout(shutdown_timeout, async {
+        while let Some(result) = services.join_next().await {
+            match result {
+                Ok((name, Err(error))) => warn!("Service {} stopped with error: {}", name, error),
+                Err(error) => warn!("Service join failed during shutdown: {}", error),
+                _ => {}
+            }
+        }
+        background_tasks.wait().await;
+    })
+    .await;
+    if joined.is_err() {
+        warn!(
+            "Shutdown timeout reached after {:?}; aborting remaining services",
+            shutdown_timeout
+        );
+        services.abort_all();
+    }
+
+    if app_state.current_config().database.backup_enabled {
+        match create_lifecycle_backup(&database, &app_state.current_config()).await {
+            Ok(path) => info!("Created shutdown database backup at {}", path.display()),
+            Err(error) => warn!("Shutdown database backup failed: {}", error),
+        }
+    }
+    if let Err(e) = perform_graceful_shutdown(&database, &lifecycle_stats).await {
+        error!("Error during graceful shutdown: {}", e);
+    }
+    info!("Shutdown completed in {:?}", shutdown_start.elapsed());
+
+    if let Some(error) = shutdown_error {
+        Err(error)
+    } else {
+        Ok(())
+    }
+}
+
+pub(super) async fn run_application(runtime_options: RuntimeOptions) -> anyhow::Result<()> {
+    run_with_database::<database::redb::RedbDatabase, _, _, _, _>(
+        runtime_options,
+        |config| async move { initialize_database(&config).await },
+        |config, backup| async move {
+            let database_path = config.get_database_path().with_extension("redb");
+            database::redb::RedbDatabase::restore_backup_file(backup, database_path).await
+        },
+    )
+    .await
+}
+
+/// Top-level owner of VuIO startup, services, and shutdown.
+pub struct ApplicationRunner;
+
+impl ApplicationRunner {
+    pub async fn run(options: RuntimeOptions) -> anyhow::Result<()> {
+        run_application(options).await
+    }
+}

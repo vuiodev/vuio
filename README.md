@@ -7,6 +7,16 @@ Built with Tokio, Axum, and Redb for high performance and reliability.
 
 **Supported platforms:** Windows, Linux, macOS, Docker (x64 and ARM64)
 
+## Rust workspace
+
+The repository separates the reusable server from its process entry point:
+
+- `crates/vuio-core` contains the complete embeddable VuIO runtime: configuration, database, media indexing, discovery, casting, HTTP/DLNA/MCP services, and graceful lifecycle control.
+- `crates/vuio-cli` is the binary-only `vuio` package. It owns command-line parsing, process signals, and self-update behavior, then delegates to `vuio-core`.
+- `crates/oxicast` is the local Google Cast client dependency.
+
+Rust applications embed the server with `vuio_core::runtime::VuioRuntime`; they do not need to launch or bundle the `vuio` command-line executable.
+
 ## Features
 
 - **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
@@ -37,7 +47,7 @@ Once installed, start the server using:
 vuio /path/to/media
 ```
 
-For a detailed guide on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](api.md).
+For a detailed guide on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](docs/api.md).
 
 ## Web Interface & Search
 
