@@ -183,15 +183,18 @@ jobs:
           cache-after-prepare: true
           prepare: |
             pkg install -y curl bash git
-            if [ "$(uname -m)" = "aarch64" ]; then
-              # aarch64-unknown-freebsd is Rust tier 3; rustup host toolchains are unreliable.
+            # FreeBSD reports arm64; Linux-style aarch64 is uncommon here.
+            arch="$(uname -m)"
+            if [ "$arch" = "arm64" ] || [ "$arch" = "aarch64" ]; then
+              # aarch64-unknown-freebsd is Rust tier 3; rustup has no host installer.
               pkg install -y rust
             else
               curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
             fi
           run: |
             set -e
-            if [ "$(uname -m)" != "aarch64" ]; then
+            arch="$(uname -m)"
+            if [ "$arch" != "arm64" ] && [ "$arch" != "aarch64" ]; then
               . "$HOME/.cargo/env"
             fi
             rustc -vV
