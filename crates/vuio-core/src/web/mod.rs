@@ -41,6 +41,18 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
     let json_routes = Router::new()
         .route("/api/cast", post(casting::api_cast::<D>))
         .route("/api/cast/playlist", post(casting::api_cast_playlist::<D>))
+        .route(
+            "/api/renderers/pair/start",
+            post(casting::api_pairing_start::<D>),
+        )
+        .route(
+            "/api/renderers/pair/finish",
+            post(casting::api_pairing_finish::<D>),
+        )
+        .route(
+            "/api/renderers/pair/forget",
+            post(casting::api_pairing_forget::<D>),
+        )
         .route("/mcp/message", post(mcp::message_handler::<D>))
         .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
 

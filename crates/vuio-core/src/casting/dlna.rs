@@ -24,6 +24,7 @@ impl CastProvider for DlnaProvider {
                 location_url: tv.location_url.clone(),
                 model_name: tv.model_name,
                 protocol: RendererProtocol::Dlna,
+                pairing: super::PairingStatus::NotRequired,
                 capabilities: RendererCapabilities {
                     video: true,
                     audio: true,

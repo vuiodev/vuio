@@ -107,6 +107,7 @@ impl CastProvider for ChromecastProvider {
                     .unwrap_or("Google Cast")
                     .to_string(),
                 protocol: RendererProtocol::Chromecast,
+                pairing: super::PairingStatus::NotRequired,
                 capabilities: RendererCapabilities {
                     video: true,
                     audio: true,

@@ -22,6 +22,23 @@ pub struct ApiCastRequest {
 }
 
 #[derive(serde::Deserialize)]
+pub struct ApiPairingStartRequest {
+    pub renderer_id: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ApiPairingFinishRequest {
+    pub renderer_id: String,
+    pub challenge_id: String,
+    pub pin: String,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ApiPairingForgetRequest {
+    pub renderer_id: String,
+}
+
+#[derive(serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApiCastSource {
     File { file_id: i64 },
@@ -44,6 +61,87 @@ pub async fn api_list_renderers<D: DatabaseManager>(
     }
 }
 
+async fn renderer_by_id<D: DatabaseManager>(
+    state: &AppState<D>,
+    renderer_id: &str,
+) -> Result<crate::casting::RendererDevice, (StatusCode, axum::Json<serde_json::Value>)> {
+    let renderers = state
+        .discovered_tvs
+        .get_or_refresh()
+        .await
+        .map_err(|error| {
+            error!(%error, "Renderer lookup failed");
+            cast_error(StatusCode::INTERNAL_SERVER_ERROR, "Device discovery failed")
+        })?;
+    renderers
+        .into_iter()
+        .find(|renderer| renderer.id == renderer_id)
+        .ok_or_else(|| cast_error(StatusCode::NOT_FOUND, "Playback device not found"))
+}
+
+pub async fn api_pairing_start<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    axum::Json(payload): axum::Json<ApiPairingStartRequest>,
+) -> impl IntoResponse {
+    let renderer = match renderer_by_id(&state, &payload.renderer_id).await {
+        Ok(renderer) => renderer,
+        Err(response) => return response.into_response(),
+    };
+    match state.discovered_tvs.begin_pairing(&renderer).await {
+        Ok(challenge) => (StatusCode::OK, axum::Json(serde_json::json!(challenge))).into_response(),
+        Err(error) => {
+            error!(%error, renderer_id = %renderer.id, "AirPlay pairing start failed");
+            cast_error(StatusCode::BAD_REQUEST, &error.to_string()).into_response()
+        }
+    }
+}
+
+pub async fn api_pairing_finish<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    axum::Json(payload): axum::Json<ApiPairingFinishRequest>,
+) -> impl IntoResponse {
+    let renderer = match renderer_by_id(&state, &payload.renderer_id).await {
+        Ok(renderer) => renderer,
+        Err(response) => return response.into_response(),
+    };
+    match state
+        .discovered_tvs
+        .finish_pairing(renderer.protocol, &payload.challenge_id, payload.pin.trim())
+        .await
+    {
+        Ok(()) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "paired": true })),
+        )
+            .into_response(),
+        Err(error) => {
+            error!(%error, renderer_id = %renderer.id, "AirPlay pairing finish failed");
+            cast_error(StatusCode::BAD_REQUEST, &error.to_string()).into_response()
+        }
+    }
+}
+
+pub async fn api_pairing_forget<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    axum::Json(payload): axum::Json<ApiPairingForgetRequest>,
+) -> impl IntoResponse {
+    let renderer = match renderer_by_id(&state, &payload.renderer_id).await {
+        Ok(renderer) => renderer,
+        Err(response) => return response.into_response(),
+    };
+    match state.discovered_tvs.forget_pairing(&renderer).await {
+        Ok(removed) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "removed": removed })),
+        )
+            .into_response(),
+        Err(error) => {
+            error!(%error, renderer_id = %renderer.id, "AirPlay pairing removal failed");
+            cast_error(StatusCode::BAD_REQUEST, &error.to_string()).into_response()
+        }
+    }
+}
+
 pub async fn api_cast<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     axum::Json(payload): axum::Json<ApiCastRequest>,
@@ -51,7 +149,7 @@ pub async fn api_cast<D: DatabaseManager + 'static>(
     let result = match payload.source {
         ApiCastSource::File { file_id } => {
             let file = match state.database.get_file_location_by_id(file_id).await {
-                Ok(Some(file)) if file.mime_type.starts_with("video/") => file,
+                Ok(Some(file)) if is_castable_video_mime(&file.mime_type) => file,
                 Ok(Some(_)) => {
                     return cast_error(StatusCode::BAD_REQUEST, "Only video files can be cast");
                 }
@@ -118,7 +216,7 @@ async fn resolve_video_folder<D: DatabaseManager>(
             .await
             .map_err(|error| format!("Database error: {error}"))?;
         for file in files {
-            if !file.mime_type().starts_with("video/") {
+            if !is_castable_video_mime(file.mime_type()) {
                 continue;
             }
             let Some(location) = file.to_file_location() else {
@@ -137,6 +235,14 @@ async fn resolve_video_folder<D: DatabaseManager>(
     }
     videos.sort_by(|left, right| crate::natural_cmp(&left.0, &right.0));
     Ok(videos.into_iter().map(|(_, file)| file).collect())
+}
+
+fn is_castable_video_mime(mime: &str) -> bool {
+    mime.starts_with("video/")
+        || matches!(
+            mime.split(';').next().unwrap_or(mime).trim(),
+            "application/vnd.apple.mpegurl" | "application/x-mpegurl"
+        )
 }
 
 async fn create_and_cast_playlist<D: DatabaseManager + 'static>(

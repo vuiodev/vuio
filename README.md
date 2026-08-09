@@ -58,9 +58,9 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 
 ### Casting compatibility
 
-The dashboard and MCP tools discover DLNA renderers through SSDP, Chromecast and Google TV devices through `_googlecast._tcp` mDNS, and URL-video-capable AirPlay receivers through `_airplay._tcp` mDNS. Chromecast uses Google's Default Media Receiver and does not require a custom Cast application ID.
+The dashboard and MCP tools discover DLNA renderers through SSDP, Chromecast and Google TV devices through `_googlecast._tcp` mDNS, and URL-video-capable AirPlay receivers through `_airplay._tcp` mDNS. Chromecast uses Google's Default Media Receiver and does not require a custom Cast application ID. The dashboard always asks which discovered renderer to use for each new cast.
 
-Casting is direct-play only. DLNA behavior is unchanged. Chromecast accepts supported MP4, WebM, MPEG-TS, MP3, M4A, OGG, WAV, FLAC, and common image containers, subject to the codecs supported by the receiving model. AirPlay support is limited to unpaired receivers that advertise URL-video playback and to progressive MP4 video; AirPlay audio, mirroring, protected media, and AirPlay 2 pairing are not supported. Unsupported files produce an error instead of being transcoded or silently skipped.
+Casting is direct-play only. DLNA behavior is unchanged. Chromecast accepts supported MP4, WebM, MPEG-TS, MP3, M4A, OGG, WAV, FLAC, and common image containers, subject to the codecs supported by the receiving model. AirPlay supports legacy URL-video receivers and paired AirPlay 2 receivers, including encrypted control/event channels, NTP timing, and persistent PIN pairing. AirPlay-native MP4/M4V, MOV, HLS, and MPEG-TS containers are accepted; the codecs still have to be supported by the receiving model. Pairing keys are stored in the operating-system credential vault when available, with a permission-restricted local fallback. Unsupported files produce an error instead of being transcoded or silently skipped; VuIO does not invoke ffmpeg or another external transcoder.
 
 ## Quick Start
 

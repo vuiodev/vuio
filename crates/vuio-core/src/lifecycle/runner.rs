@@ -135,6 +135,14 @@ where
         config_manager.get_config_path(),
         runtime_options.auth,
     )?);
+    let airplay_credentials = config_manager
+        .get_config_path()
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join("airplay-pairings.json");
+    let renderer_cache = crate::runtime_state::RendererCache::persistent(airplay_credentials)
+        .await
+        .context("Failed to initialize AirPlay credential storage")?;
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
@@ -160,7 +168,7 @@ where
         active_casts: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::ActiveCastRegistry::new(),
         )),
-        discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
+        discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: cancellation.clone(),
         background_tasks: background_tasks.clone(),

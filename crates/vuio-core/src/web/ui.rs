@@ -166,5 +166,8 @@ mod tests {
         assert!(DASHBOARD_TEMPLATE.contains("/api/cast"));
         assert!(DASHBOARD_TEMPLATE.contains("playVideoFileOnTv(file)"));
         assert!(DASHBOARD_TEMPLATE.contains("showRendererSelectionModal(renderers, label, source)"));
+        assert!(!DASHBOARD_TEMPLATE.contains("renderers.length === 1"));
+        assert!(DASHBOARD_TEMPLATE.contains("renderer.pairing === 'required'"));
+        assert!(DASHBOARD_TEMPLATE.contains("/api/renderers/pair/start"));
     }
 }
