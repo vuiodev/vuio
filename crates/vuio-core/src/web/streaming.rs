@@ -71,7 +71,7 @@ pub async fn serve_media<D: DatabaseManager>(
 ) -> Result<Response, AppError> {
     let start_time = Instant::now();
 
-    let file_id = id.parse::<i64>().map_err(|_| {
+    let file_id = media_id_from_path_segment(&id).ok_or_else(|| {
         state.web_metrics.record_error();
         AppError::NotFound
     })?;
@@ -270,6 +270,22 @@ pub async fn serve_media<D: DatabaseManager>(
     Ok(response_builder.status(response_status).body(body)?)
 }
 
+fn media_id_from_path_segment(segment: &str) -> Option<i64> {
+    let id = match segment.split_once('.') {
+        Some((id, extension)) => {
+            if extension.is_empty()
+                || extension.len() > 16
+                || !extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+            {
+                return None;
+            }
+            id
+        }
+        None => segment,
+    };
+    id.parse().ok()
+}
+
 // Helper function to parse range header manually
 fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
     if file_size == 0 {
@@ -461,6 +477,15 @@ mod range_tests {
         assert!(value.contains("filename*=UTF-8''r%C3%A9sum%C3%A9%22%0D%0A%2Emkv"));
         assert!(!value.split("filename*=",).next().unwrap().contains('\r'));
         assert!(!value.split("filename*=",).next().unwrap().contains('\n'));
+    }
+
+    #[test]
+    fn media_paths_accept_a_safe_format_extension() {
+        assert_eq!(media_id_from_path_segment("15"), Some(15));
+        assert_eq!(media_id_from_path_segment("15.mp4"), Some(15));
+        assert_eq!(media_id_from_path_segment("15.m3u8"), Some(15));
+        assert_eq!(media_id_from_path_segment("15."), None);
+        assert_eq!(media_id_from_path_segment("15.mp4/cover"), None);
     }
 
     #[test]

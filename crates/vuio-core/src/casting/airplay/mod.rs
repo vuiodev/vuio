@@ -272,6 +272,27 @@ impl AirplayProvider {
         );
         let setup_body = binary_plist(plist::Value::Dictionary(setup))?;
         let mut cseq = 1;
+        let mut qualifier = plist::Dictionary::new();
+        qualifier.insert(
+            "qualifier".into(),
+            plist::Value::Array(vec![plist::Value::String("txtAirPlay".into())]),
+        );
+        let qualifier_body = binary_plist(plist::Value::Dictionary(qualifier))?;
+        let info_response = secure_request(
+            &mut connection,
+            "GET",
+            "/info",
+            &session_id,
+            &mut cseq,
+            "application/x-apple-binary-plist",
+            &qualifier_body,
+        )
+        .await?;
+        anyhow::ensure!(
+            (200..300).contains(&info_response.status),
+            "AirPlay 2 capability negotiation failed with status {}",
+            info_response.status
+        );
         let setup_response = secure_request(
             &mut connection,
             "SETUP",
@@ -514,7 +535,7 @@ fn ensure_airplay_play_accepted(status: u16, body: &[u8]) -> anyhow::Result<()> 
     }
     if status == 404 {
         anyhow::bail!(
-            "this receiver does not expose direct AirPlay video playback; use its Chromecast renderer instead (AirPlay returned 404)"
+            "this receiver rejected VuIO's AirPlay 2 video session (404); use its Chromecast renderer until this AirPlay video negotiation is supported"
         );
     }
     anyhow::bail!(
@@ -1077,10 +1098,10 @@ mod tests {
     }
 
     #[test]
-    fn direct_video_404_explains_the_receiver_limitation() {
+    fn direct_video_404_explains_the_negotiation_limitation() {
         let error = ensure_airplay_play_accepted(404, &[]).unwrap_err();
         let message = error.to_string();
-        assert!(message.contains("does not expose direct AirPlay video playback"));
+        assert!(message.contains("rejected VuIO's AirPlay 2 video session"));
         assert!(message.contains("Chromecast"));
     }
 

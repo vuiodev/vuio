@@ -35,7 +35,7 @@ pub async fn cast_file_helper<D: DatabaseManager + 'static>(
     let origin = state
         .advertised_http_origin_for_peer(&matched_tv.location_url)
         .await;
-    let media_url = format!("{origin}/media/{}", file.id);
+    let media_url = playback_url(&file, &origin);
 
     let item = playback_item(&file, &origin);
     state.discovered_tvs.validate(matched_tv, &item)?;
@@ -142,10 +142,25 @@ pub async fn cached_renderers<D: DatabaseManager>(
 pub(crate) fn playback_item(file: &FileLocation, origin: &str) -> PlaybackItem {
     PlaybackItem {
         id: file.id,
-        url: format!("{origin}/media/{}", file.id),
+        url: playback_url(file, origin),
         title: file.title.clone().unwrap_or_else(|| file.filename.clone()),
         filename: file.filename.clone(),
         mime_type: file.mime_type.clone(),
+    }
+}
+
+fn playback_url(file: &FileLocation, origin: &str) -> String {
+    let extension = std::path::Path::new(&file.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        });
+    match extension {
+        Some(extension) => format!("{origin}/media/{}.{extension}", file.id),
+        None => format!("{origin}/media/{}", file.id),
     }
 }
 
@@ -208,7 +223,6 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
     }
 
     let selected_track = &tracks[track_index];
-    let file_id = selected_track.id;
 
     let renderers = cached_renderers(state).await?;
 
@@ -229,7 +243,7 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
     let origin = state
         .advertised_http_origin_for_peer(&matched_tv.location_url)
         .await;
-    let media_url = format!("{origin}/media/{file_id}");
+    let media_url = playback_url(selected_track, &origin);
 
     let playback_items = tracks
         .iter()
