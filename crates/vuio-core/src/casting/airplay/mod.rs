@@ -27,6 +27,9 @@ use self::{
 const SERVICE_TYPE: &str = "_airplay._tcp.local.";
 const MAX_RESPONSE_BYTES: usize = 256 * 1024;
 const PAIRING_TTL: Duration = Duration::from_secs(120);
+const AIRPLAY_VIDEO_V1: u64 = 1 << 0;
+const AIRPLAY_VIDEO_V2: u64 = 1 << 49;
+const AIRPLAY_2_ENABLED: bool = false;
 
 struct PendingPairing {
     renderer_id: String,
@@ -809,7 +812,7 @@ impl CastProvider for AirplayProvider {
                 .filter(|value| !value.is_empty())
                 .unwrap_or(info.get_fullname());
             let id = format!("airplay:{raw_id}");
-            let pairing = if features & (1 << 49) == 0 {
+            let pairing = if !airplay2_enabled() || features & AIRPLAY_VIDEO_V2 == 0 {
                 PairingStatus::NotRequired
             } else if self.credentials.is_paired(&id).await {
                 PairingStatus::Paired
@@ -862,12 +865,12 @@ impl CastProvider for AirplayProvider {
 
     async fn play(&self, device: &RendererDevice, item: &PlaybackItem) -> anyhow::Result<()> {
         self.validate(item).map_err(anyhow::Error::msg)?;
-        if self.credentials.is_paired(&device.id).await {
+        if airplay2_enabled() && self.credentials.is_paired(&device.id).await {
             return self.secure_play(device, item).await;
         }
         anyhow::ensure!(
-            device.pairing != PairingStatus::Required,
-            "AirPlay pairing is required for this receiver"
+            device.pairing == PairingStatus::NotRequired,
+            "AirPlay 2 playback is disabled"
         );
         let session = self.session_for_play(device).await;
         self.request(
@@ -986,6 +989,7 @@ impl CastProvider for AirplayProvider {
     }
 
     async fn begin_pairing(&self, device: &RendererDevice) -> anyhow::Result<PairingChallenge> {
+        anyhow::ensure!(airplay2_enabled(), "AirPlay 2 pairing is disabled");
         anyhow::ensure!(
             device.protocol == RendererProtocol::Airplay,
             "renderer protocol mismatch"
@@ -1020,6 +1024,7 @@ impl CastProvider for AirplayProvider {
     }
 
     async fn finish_pairing(&self, challenge_id: &str, pin: &str) -> anyhow::Result<()> {
+        anyhow::ensure!(airplay2_enabled(), "AirPlay 2 pairing is disabled");
         anyhow::ensure!(
             valid_pin(pin),
             "enter the PIN displayed by the AirPlay receiver"
@@ -1109,9 +1114,11 @@ fn supports_url_video(features: Option<&str>) -> bool {
 }
 
 fn supports_url_video_bits(bits: u64) -> bool {
-    const AIRPLAY_VIDEO_V1: u64 = 1 << 0;
-    const AIRPLAY_VIDEO_V2: u64 = 1 << 49;
-    bits & (AIRPLAY_VIDEO_V1 | AIRPLAY_VIDEO_V2) != 0
+    bits & AIRPLAY_VIDEO_V1 != 0 || (airplay2_enabled() && bits & AIRPLAY_VIDEO_V2 != 0)
+}
+
+fn airplay2_enabled() -> bool {
+    AIRPLAY_2_ENABLED
 }
 
 fn parse_features(features: Option<&str>) -> Option<u64> {
@@ -1253,10 +1260,19 @@ mod tests {
     fn feature_parser_requires_url_video_bit() {
         assert!(supports_url_video(Some("0x1,0x0")));
         assert!(supports_url_video(Some("3")));
-        assert!(supports_url_video(Some("0x7F8AD0,0x18BCF46")));
+        assert!(!supports_url_video(Some("0x0,0x20000")));
+        assert!(!supports_url_video(Some("0x7F8AD0,0x18BCF46")));
         assert!(!supports_url_video(Some("0x200")));
         assert!(!supports_url_video(Some("invalid")));
         assert!(!supports_url_video(None));
+    }
+
+    #[test]
+    fn airplay2_is_disabled() {
+        assert!(!airplay2_enabled());
+        assert!(!supports_url_video_bits(AIRPLAY_VIDEO_V2));
+        assert!(supports_url_video_bits(AIRPLAY_VIDEO_V1));
+        assert!(supports_url_video_bits(AIRPLAY_VIDEO_V1 | AIRPLAY_VIDEO_V2));
     }
 
     #[test]
@@ -1315,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn native_airplay_video_matrix_accepts_airplay2_containers() {
+    fn native_airplay_video_matrix_accepts_supported_containers() {
         for (mime, filename) in [
             ("video/mp4", "movie.mp4"),
             ("video/x-m4v", "movie.m4v"),
