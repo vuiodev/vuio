@@ -37,6 +37,7 @@ struct PendingPairing {
 
 struct SecureSession {
     control: std::sync::Arc<Mutex<SecureControl>>,
+    _remote_control: Option<std::sync::Arc<Mutex<AirplayConnection>>>,
     session_id: String,
     event_task: tokio::task::JoinHandle<()>,
     feedback_task: tokio::task::JoinHandle<()>,
@@ -214,7 +215,6 @@ impl AirplayProvider {
     ) -> anyhow::Result<()> {
         let (mut connection, shared_secret) = self.verified_connection(device).await?;
         let session_id = uuid::Uuid::new_v4().to_string().to_uppercase();
-        let http_session_id = uuid::Uuid::new_v4().to_string();
         let media_id = uuid::Uuid::new_v4().to_string();
         let device_id = controller_device_id();
         let rtsp_session_bytes = uuid::Uuid::new_v4().into_bytes();
@@ -350,37 +350,110 @@ impl AirplayProvider {
             );
         }
 
-        let mut play = plist::Dictionary::new();
-        play.insert(
+        let seed_bytes = uuid::Uuid::new_v4().into_bytes();
+        let seed = u64::from_be_bytes(seed_bytes[..8].try_into()?) & i64::MAX as u64;
+        let mut remote_control_stream = plist::Dictionary::new();
+        remote_control_stream.insert("type".into(), plist::Value::Integer(130.into()));
+        remote_control_stream.insert("controlType".into(), plist::Value::Integer(1.into()));
+        remote_control_stream.insert(
+            "channelID".into(),
+            plist::Value::String(format!("{session_id}-RCS-1")),
+        );
+        remote_control_stream.insert(
+            "clientUUID".into(),
+            plist::Value::String(uuid::Uuid::new_v4().to_string().to_uppercase()),
+        );
+        remote_control_stream.insert(
+            "clientTypeUUID".into(),
+            plist::Value::String("A6B27562-B43A-4F2D-B75F-82391E250194".into()),
+        );
+        remote_control_stream.insert("seed".into(), plist::Value::Integer(seed.into()));
+        remote_control_stream.insert("wantsDedicatedSocket".into(), plist::Value::Boolean(false));
+        let mut remote_control_setup = plist::Dictionary::new();
+        remote_control_setup.insert(
+            "streams".into(),
+            plist::Value::Array(vec![plist::Value::Dictionary(remote_control_stream)]),
+        );
+        let remote_control_setup_body =
+            binary_plist(plist::Value::Dictionary(remote_control_setup))?;
+        let remote_control_response = secure_request(
+            &mut connection,
+            "SETUP",
+            &rtsp_session,
+            &session_id,
+            &mut cseq,
+            "application/x-apple-binary-plist",
+            &remote_control_setup_body,
+        )
+        .await?;
+        anyhow::ensure!(
+            (200..300).contains(&remote_control_response.status),
+            "AirPlay 2 remote-control SETUP failed with status {}",
+            remote_control_response.status
+        );
+        let (remote_control_stream_id, remote_control_data_port) =
+            parse_remote_control_stream(&remote_control_response.body)?;
+        let mut remote_control_connection = if let Some(data_port) = remote_control_data_port {
+            let data_address = SocketAddr::new(socket_endpoint(device)?.ip(), data_port);
+            let mut remote_control_connection = AirplayConnection::connect(data_address).await?;
+            let data_salt = format!("DataStream-Salt{seed}");
+            remote_control_connection.secure(SessionKeys {
+                write_key: derive_key(
+                    &shared_secret,
+                    data_salt.as_bytes(),
+                    b"DataStream-Output-Encryption-Key",
+                )?,
+                read_key: derive_key(
+                    &shared_secret,
+                    data_salt.as_bytes(),
+                    b"DataStream-Input-Encryption-Key",
+                )?,
+            });
+            Some(remote_control_connection)
+        } else {
+            None
+        };
+
+        let mut item_parameters = plist::Dictionary::new();
+        item_parameters.insert(
             "Content-Location".into(),
             plist::Value::String(item.url.clone()),
         );
-        play.insert("Start-Position-Seconds".into(), plist::Value::Real(0.0));
-        play.insert("mediaType".into(), plist::Value::String("file".into()));
-        play.insert("streamType".into(), plist::Value::Integer(1.into()));
-        play.insert("uuid".into(), plist::Value::String(media_id));
-        play.insert("rate".into(), plist::Value::Real(1.0));
-        play.insert("volume".into(), plist::Value::Real(1.0));
-        play.insert(
-            "mightSupportStorePastisKeyRequests".into(),
-            plist::Value::Boolean(true),
-        );
-        play.insert(
+        let content_url = reqwest::Url::parse(&item.url).context("parsing AirPlay media URL")?;
+        let content_host = content_url
+            .host_str()
+            .context("AirPlay media URL omitted its host")?;
+        let content_host = if content_host.contains(':') {
+            format!("[{content_host}]")
+        } else {
+            content_host.to_string()
+        };
+        let content_authority = match content_url.port() {
+            Some(port) => format!("{content_host}:{port}"),
+            None => content_host,
+        };
+        item_parameters.insert("host".into(), plist::Value::String(content_authority));
+        item_parameters.insert("Start-Position".into(), plist::Value::Real(0.0));
+        item_parameters.insert("mediaType".into(), plist::Value::String("file".into()));
+        item_parameters.insert("streamType".into(), plist::Value::Integer(1.into()));
+        item_parameters.insert("uuid".into(), plist::Value::String(media_id));
+        item_parameters.insert("volume".into(), plist::Value::Real(1.0));
+        item_parameters.insert(
             "playbackRestrictions".into(),
             plist::Value::Integer(0.into()),
         );
-        play.insert(
+        item_parameters.insert(
             "referenceRestrictions".into(),
             plist::Value::Integer(3.into()),
         );
-        play.insert("SenderMACAddress".into(), plist::Value::String(device_id));
-        play.insert("model".into(), plist::Value::String("iPhone14,3".into()));
-        play.insert(
+        item_parameters.insert("SenderMACAddress".into(), plist::Value::String(device_id));
+        item_parameters.insert("model".into(), plist::Value::String("iPhone14,3".into()));
+        item_parameters.insert(
             "clientBundleID".into(),
             plist::Value::String("dev.vuio.app".into()),
         );
-        play.insert("clientProcName".into(), plist::Value::String("VuIO".into()));
-        play.insert(
+        item_parameters.insert("clientProcName".into(), plist::Value::String("VuIO".into()));
+        item_parameters.insert(
             "osBuildVersion".into(),
             plist::Value::String("20G1116".into()),
         );
@@ -392,41 +465,72 @@ impl AirplayProvider {
             "bonjourMs",
             "postAuthMs",
         ] {
-            play.insert(field.into(), plist::Value::Integer(0.into()));
+            item_parameters.insert(field.into(), plist::Value::Integer(0.into()));
         }
-        let play_body = binary_plist(plist::Value::Dictionary(play))?;
-        let response = secure_http_request(
-            &mut connection,
-            "POST",
-            "/play",
-            &http_session_id,
-            "application/x-apple-binary-plist",
-            &play_body,
-        )
-        .await?;
-        ensure_airplay_play_accepted(response.status, &response.body)?;
-        let rate_response = secure_request(
-            &mut connection,
-            "POST",
-            "/rate?value=1.000000",
-            &session_id,
-            &mut cseq,
-            "application/octet-stream",
-            &[],
-        )
-        .await?;
-        anyhow::ensure!(
-            (200..300).contains(&rate_response.status),
-            "AirPlay 2 rate command failed with status {}",
-            rate_response.status
+        let mut play_command = plist::Dictionary::new();
+        play_command.insert(
+            "type".into(),
+            plist::Value::String("insertPlayQueueItem".into()),
         );
+        play_command.insert("item".into(), plist::Value::Dictionary(item_parameters));
+        let play_body = binary_plist(plist::Value::Dictionary(play_command))?;
+        let play_response = if let Some(remote_control) = &mut remote_control_connection {
+            remote_control.data_stream_request(&play_body).await?
+        } else {
+            let command_body = shared_remote_control_body(&play_body)?;
+            let response = secure_command_request(
+                &mut connection,
+                &session_id,
+                remote_control_stream_id,
+                &mut cseq,
+                &command_body,
+            )
+            .await?;
+            trace_remote_control_response(response.status, &response.body);
+            anyhow::ensure!(
+                (200..300).contains(&response.status),
+                "AirPlay 2 play command failed with status {}",
+                response.status
+            );
+            response.body
+        };
+        ensure_remote_control_command_accepted(&play_response)?;
+
+        let mut rate_command = plist::Dictionary::new();
+        rate_command.insert("type".into(), plist::Value::String("setRate".into()));
+        rate_command.insert("rate".into(), plist::Value::Real(1.0));
+        let rate_body = binary_plist(plist::Value::Dictionary(rate_command))?;
+        let rate_response = if let Some(remote_control) = &mut remote_control_connection {
+            remote_control.data_stream_request(&rate_body).await?
+        } else {
+            let command_body = shared_remote_control_body(&rate_body)?;
+            let response = secure_command_request(
+                &mut connection,
+                &session_id,
+                remote_control_stream_id,
+                &mut cseq,
+                &command_body,
+            )
+            .await?;
+            trace_remote_control_response(response.status, &response.body);
+            anyhow::ensure!(
+                (200..300).contains(&response.status),
+                "AirPlay 2 rate command failed with status {}",
+                response.status
+            );
+            response.body
+        };
+        ensure_remote_control_command_accepted(&rate_response)?;
+        let (event_reply_sender, _event_replies) = tokio::sync::mpsc::unbounded_channel();
         let event_task = tokio::spawn(async move {
-            if let Err(error) = event_connection.serve_events().await {
+            if let Err(error) = event_connection.serve_events(event_reply_sender).await {
                 tracing::debug!(%error, "AirPlay event channel closed");
             }
         });
         let timing_task = tokio::spawn(run_timing_server(timing_socket));
         let control = std::sync::Arc::new(Mutex::new(SecureControl { connection, cseq }));
+        let remote_control =
+            remote_control_connection.map(|connection| std::sync::Arc::new(Mutex::new(connection)));
         let feedback_control = control.clone();
         let feedback_session_id = session_id.clone();
         let feedback_task = tokio::spawn(async move {
@@ -456,6 +560,7 @@ impl AirplayProvider {
             device.id.clone(),
             ActiveSession::Secure(Box::new(SecureSession {
                 control,
+                _remote_control: remote_control,
                 session_id,
                 event_task,
                 feedback_task,
@@ -473,6 +578,14 @@ fn controller_device_id() -> String {
         .map(|byte| format!("{byte:02X}"))
         .collect::<Vec<_>>()
         .join(":")
+}
+
+fn dacp_id(session_id: &str) -> String {
+    session_id
+        .chars()
+        .filter(|character| *character != '-')
+        .take(16)
+        .collect()
 }
 
 async fn run_timing_server(socket: tokio::net::UdpSocket) {
@@ -513,35 +626,85 @@ fn binary_plist(value: plist::Value) -> anyhow::Result<Vec<u8>> {
     Ok(body)
 }
 
-fn airplay_error_detail(body: &[u8]) -> String {
-    if body.is_empty() {
-        return String::new();
-    }
-    if let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(body)) {
-        return format!(" ({value:?})");
-    }
-    let text = String::from_utf8_lossy(body);
-    let text = text.trim().chars().take(200).collect::<String>();
-    if text.is_empty() {
-        String::new()
-    } else {
-        format!(" ({text})")
-    }
+fn shared_remote_control_body(data: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut parameters = plist::Dictionary::new();
+    parameters.insert("data".into(), plist::Value::Data(data.to_vec()));
+    let mut message = plist::Dictionary::new();
+    message.insert("params".into(), plist::Value::Dictionary(parameters));
+    binary_plist(plist::Value::Dictionary(message))
 }
 
-fn ensure_airplay_play_accepted(status: u16, body: &[u8]) -> anyhow::Result<()> {
-    if (200..300).contains(&status) {
+fn parse_remote_control_stream(body: &[u8]) -> anyhow::Result<(u64, Option<u16>)> {
+    let value = plist::Value::from_reader(std::io::Cursor::new(body))
+        .context("decoding AirPlay remote-control SETUP response")?;
+    tracing::debug!(response = ?value, "received AirPlay remote-control SETUP response");
+    let stream = value
+        .as_dictionary()
+        .and_then(|dictionary| dictionary.get("streams"))
+        .and_then(plist::Value::as_array)
+        .and_then(|streams| streams.first())
+        .and_then(plist::Value::as_dictionary)
+        .context("AirPlay remote-control SETUP did not return a stream")?;
+    let stream_id = stream
+        .get("streamID")
+        .and_then(plist::Value::as_unsigned_integer)
+        .context("AirPlay remote-control SETUP did not return a valid stream ID")?;
+    let data_port = stream
+        .get("dataPort")
+        .and_then(plist::Value::as_unsigned_integer)
+        .map(u16::try_from)
+        .transpose()
+        .context("AirPlay remote-control SETUP returned an invalid data port")?;
+    Ok((stream_id, data_port))
+}
+
+fn ensure_remote_control_command_accepted(body: &[u8]) -> anyhow::Result<()> {
+    if body.is_empty() {
         return Ok(());
     }
-    if status == 404 {
-        anyhow::bail!(
-            "this receiver rejected VuIO's AirPlay 2 video session (404); use its Chromecast renderer until this AirPlay video negotiation is supported"
+    let value = plist::Value::from_reader(std::io::Cursor::new(body))
+        .context("decoding AirPlay remote-control command response")?;
+    let dictionary = value
+        .as_dictionary()
+        .context("AirPlay remote-control command response was not a dictionary")?;
+    if let Some(data) = dictionary
+        .get("params")
+        .and_then(plist::Value::as_dictionary)
+        .and_then(|parameters| parameters.get("data"))
+        .and_then(plist::Value::as_data)
+    {
+        return ensure_remote_control_command_accepted(data);
+    }
+    tracing::debug!(
+        keys = ?dictionary.keys().collect::<Vec<_>>(),
+        "received AirPlay remote-control command response"
+    );
+    let response = dictionary
+        .get("response")
+        .and_then(plist::Value::as_dictionary)
+        .unwrap_or(dictionary);
+    if let Some(error) = response
+        .get("errorCode")
+        .and_then(plist::Value::as_signed_integer)
+    {
+        anyhow::ensure!(
+            error == 0,
+            "AirPlay 2 command failed with error code {error}"
         );
     }
-    anyhow::bail!(
-        "AirPlay 2 play failed with status {status}{}",
-        airplay_error_detail(body)
-    )
+    Ok(())
+}
+
+fn trace_remote_control_response(status: u16, body: &[u8]) {
+    if let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(body)) {
+        tracing::debug!(status, response = ?value, "received AirPlay remote-control response");
+    } else {
+        tracing::debug!(
+            status,
+            body = %String::from_utf8_lossy(body),
+            "received AirPlay remote-control response"
+        );
+    }
 }
 
 async fn secure_request(
@@ -563,7 +726,7 @@ async fn secure_request(
             &[
                 ("User-Agent", "AirPlay/550.10".to_string()),
                 ("CSeq", sequence.to_string()),
-                ("DACP-ID", session_id.replace('-', "")),
+                ("DACP-ID", dacp_id(session_id)),
                 ("Active-Remote", "1".to_string()),
                 ("X-Apple-Session-ID", session_id.to_string()),
                 ("X-Apple-ProtocolVersion", "1".to_string()),
@@ -575,29 +738,37 @@ async fn secure_request(
         .await
 }
 
-async fn secure_http_request(
+async fn secure_command_request(
     connection: &mut AirplayConnection,
-    method: &str,
-    path: &str,
     session_id: &str,
-    content_type: &str,
+    stream_id: u64,
+    cseq: &mut u32,
     body: &[u8],
 ) -> anyhow::Result<transport::Response> {
-    connection
-        .request(
-            method,
-            path,
-            "HTTP/1.1",
+    let sequence = *cseq;
+    *cseq = cseq.saturating_add(1);
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        connection.request_while_serving_events(
+            "POST",
+            "/command",
+            "RTSP/1.0",
             &[
                 ("User-Agent", "AirPlay/550.10".to_string()),
-                ("X-Apple-Session-ID", session_id.to_string()),
-                ("X-Apple-ProtocolVersion", "1".to_string()),
-                ("X-Apple-Stream-ID", "1".to_string()),
-                ("Content-Type", content_type.to_string()),
+                ("CSeq", sequence.to_string()),
+                ("DACP-ID", dacp_id(session_id)),
+                ("Active-Remote", "1".to_string()),
+                ("X-Apple-StreamID", stream_id.to_string()),
+                (
+                    "Content-Type",
+                    "application/x-apple-binary-plist".to_string(),
+                ),
             ],
             body,
-        )
-        .await
+        ),
+    )
+    .await
+    .context("AirPlay remote-control command timed out")?
 }
 
 #[async_trait]
@@ -1098,11 +1269,38 @@ mod tests {
     }
 
     #[test]
-    fn direct_video_404_explains_the_negotiation_limitation() {
-        let error = ensure_airplay_play_accepted(404, &[]).unwrap_err();
-        let message = error.to_string();
-        assert!(message.contains("rejected VuIO's AirPlay 2 video session"));
-        assert!(message.contains("Chromecast"));
+    fn remote_control_play_response_rejects_receiver_error() {
+        let mut response = plist::Dictionary::new();
+        response.insert("errorCode".into(), plist::Value::Integer(17.into()));
+        let body = binary_plist(plist::Value::Dictionary(response)).unwrap();
+        assert!(ensure_remote_control_command_accepted(&body).is_err());
+        assert!(ensure_remote_control_command_accepted(&[]).is_ok());
+    }
+
+    #[test]
+    fn shared_remote_control_message_wraps_binary_command_as_data() {
+        let command = binary_plist(plist::Value::String("play".into())).unwrap();
+        let body = shared_remote_control_body(&command).unwrap();
+        let message = plist::Value::from_reader(std::io::Cursor::new(body)).unwrap();
+        let dictionary = message.as_dictionary().unwrap();
+        assert!(!dictionary.contains_key("type"));
+        assert_eq!(
+            dictionary
+                .get("params")
+                .and_then(plist::Value::as_dictionary)
+                .and_then(|parameters| parameters.get("data"))
+                .and_then(plist::Value::as_data),
+            Some(command.as_slice())
+        );
+    }
+
+    #[test]
+    fn remote_control_play_response_unwraps_shared_transport_reply() {
+        let mut response = plist::Dictionary::new();
+        response.insert("errorCode".into(), plist::Value::Integer(17.into()));
+        let response = binary_plist(plist::Value::Dictionary(response)).unwrap();
+        let body = shared_remote_control_body(&response).unwrap();
+        assert!(ensure_remote_control_command_accepted(&body).is_err());
     }
 
     #[test]

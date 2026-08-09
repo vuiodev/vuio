@@ -5,6 +5,7 @@ use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const DATA_STREAM_HEADER_BYTES: usize = 32;
 
 pub struct AirplayConnection {
     stream: tokio::net::TcpStream,
@@ -64,6 +65,40 @@ impl AirplayConnection {
         headers: &[(&str, String)],
         body: &[u8],
     ) -> Result<Response> {
+        self.write_request(method, path, protocol, headers, body)
+            .await?;
+        self.read_response().await
+    }
+
+    pub async fn request_while_serving_events(
+        &mut self,
+        method: &str,
+        path: &str,
+        protocol: &str,
+        headers: &[(&str, String)],
+        body: &[u8],
+    ) -> Result<Response> {
+        self.write_request(method, path, protocol, headers, body)
+            .await?;
+        loop {
+            while !self.plain_buffer.windows(2).any(|window| window == b"\r\n") {
+                self.read_plain_chunk().await?;
+            }
+            if self.plain_buffer.starts_with(b"HTTP/") || self.plain_buffer.starts_with(b"RTSP/") {
+                return self.read_response().await;
+            }
+            self.handle_http_event_request().await?;
+        }
+    }
+
+    async fn write_request(
+        &mut self,
+        method: &str,
+        path: &str,
+        protocol: &str,
+        headers: &[(&str, String)],
+        body: &[u8],
+    ) -> Result<()> {
         let mut message = format!("{method} {path} {protocol}\r\n").into_bytes();
         let mut has_length = false;
         for (name, value) in headers {
@@ -82,30 +117,163 @@ impl AirplayConnection {
         }
         message.extend_from_slice(b"\r\n");
         message.extend_from_slice(body);
-        self.write_plain(&message).await?;
-        self.read_response().await
+        self.write_plain(&message).await
     }
 
-    pub async fn serve_events(mut self) -> Result<()> {
+    pub async fn serve_events(
+        mut self,
+        replies: tokio::sync::mpsc::UnboundedSender<(u64, Vec<u8>)>,
+    ) -> Result<()> {
         loop {
-            while !complete_message(&self.plain_buffer)? {
-                anyhow::ensure!(
-                    self.plain_buffer.len() <= MAX_MESSAGE_BYTES,
-                    "AirPlay event exceeded {MAX_MESSAGE_BYTES} bytes"
-                );
+            while self.plain_buffer.len() < 4 {
                 self.read_plain_chunk().await?;
             }
-            let header_end = self
-                .plain_buffer
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .context("AirPlay event omitted its headers")?;
-            let header = std::str::from_utf8(&self.plain_buffer[..header_end])?;
-            let length = content_length(header)?;
-            self.plain_buffer.drain(..header_end + 4 + length);
-            self.write_plain(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nAudio-Latency: 0\r\n\r\n")
-                .await?;
+            if starts_data_stream_message(&self.plain_buffer) {
+                let message = loop {
+                    if let Some(message) = take_data_stream_message(&mut self.plain_buffer)? {
+                        break message;
+                    }
+                    self.read_plain_chunk().await?;
+                };
+                if message.message_type.starts_with(b"sync") {
+                    let reply = data_stream_frame(b"rply", b"\0\0\0\0", message.sequence, &[])?;
+                    self.write_plain(&reply).await?;
+                } else if message.message_type.starts_with(b"rply") {
+                    let _ = replies.send((message.sequence, message.body));
+                } else {
+                    tracing::debug!(
+                        sequence = message.sequence,
+                        message_type = ?String::from_utf8_lossy(&message.message_type),
+                        "ignored unrelated AirPlay event data-stream message"
+                    );
+                }
+                continue;
+            }
+            self.handle_http_event_request().await?;
         }
+    }
+
+    async fn handle_http_event_request(&mut self) -> Result<()> {
+        while !complete_message(&self.plain_buffer)? {
+            anyhow::ensure!(
+                self.plain_buffer.len() <= MAX_MESSAGE_BYTES,
+                "AirPlay event exceeded {MAX_MESSAGE_BYTES} bytes"
+            );
+            self.read_plain_chunk().await?;
+        }
+        let header_end = self
+            .plain_buffer
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .context("AirPlay event omitted its headers")?;
+        let header = std::str::from_utf8(&self.plain_buffer[..header_end])?;
+        let length = content_length(header)?;
+        let request_line = header
+            .lines()
+            .next()
+            .unwrap_or("unknown AirPlay event")
+            .to_string();
+        let protocol = request_line
+            .split_whitespace()
+            .nth(2)
+            .unwrap_or("HTTP/1.1")
+            .to_string();
+        let cseq = header_value(header, "cseq").map(str::to_string);
+        let stream_id = header_value(header, "x-apple-stream-id").map(str::to_string);
+        let content_type = header_value(header, "content-type").map(str::to_string);
+        let body = &self.plain_buffer[header_end + 4..header_end + 4 + length];
+        if let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(body)) {
+            let dictionary = value.as_dictionary();
+            let keys = dictionary
+                .map(|dictionary| dictionary.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let nested = dictionary
+                .and_then(|dictionary| dictionary.get("params"))
+                .and_then(plist::Value::as_dictionary)
+                .and_then(|parameters| parameters.get("data"))
+                .and_then(plist::Value::as_data)
+                .and_then(|data| plist::Value::from_reader(std::io::Cursor::new(data)).ok());
+            let nested_dictionary = nested.as_ref().and_then(plist::Value::as_dictionary);
+            let nested_keys = nested_dictionary
+                .map(|dictionary| dictionary.keys().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            let nested_type = nested_dictionary
+                .and_then(|dictionary| dictionary.get("type"))
+                .and_then(plist::Value::as_string);
+            let nested_error = nested_dictionary
+                .and_then(|dictionary| dictionary.get("errorCode"))
+                .and_then(plist::Value::as_signed_integer);
+            let nested_name = nested_dictionary
+                .and_then(|dictionary| dictionary.get("name"))
+                .and_then(plist::Value::as_string);
+            let nested_reason = nested_dictionary.and_then(|dictionary| dictionary.get("reason"));
+            let nested_item_uuid = nested_dictionary
+                .and_then(|dictionary| dictionary.get("itemCurrent"))
+                .and_then(plist::Value::as_dictionary)
+                .and_then(|item| item.get("uuid"))
+                .and_then(plist::Value::as_string);
+            tracing::debug!(
+                request_line,
+                cseq,
+                stream_id,
+                content_type,
+                ?keys,
+                ?nested_keys,
+                nested_type,
+                nested_error,
+                nested_name,
+                ?nested_reason,
+                nested_item_uuid,
+                "received AirPlay event"
+            );
+        } else {
+            tracing::debug!(request_line, body_length = length, "received AirPlay event");
+        }
+        self.plain_buffer.drain(..header_end + 4 + length);
+        let mut response =
+            format!("{protocol} 200 OK\r\nContent-Length: 0\r\nAudio-Latency: 0\r\n");
+        if let Some(cseq) = cseq {
+            response.push_str(&format!("CSeq: {cseq}\r\n"));
+        }
+        response.push_str("\r\n");
+        self.write_plain(response.as_bytes()).await
+    }
+
+    pub async fn data_stream_request(&mut self, body: &[u8]) -> Result<Vec<u8>> {
+        let sequence = self.send_data_stream_request(body).await?;
+
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let message = loop {
+                    if let Some(message) = take_data_stream_message(&mut self.plain_buffer)? {
+                        break message;
+                    }
+                    self.read_plain_chunk().await?;
+                };
+                if message.message_type.starts_with(b"sync") {
+                    let reply = data_stream_frame(b"rply", b"\0\0\0\0", message.sequence, &[])?;
+                    self.write_plain(&reply).await?;
+                    continue;
+                }
+                if message.message_type.starts_with(b"rply") && message.sequence == sequence {
+                    return Ok(message.body);
+                }
+                tracing::debug!(
+                    sequence = message.sequence,
+                    message_type = ?String::from_utf8_lossy(&message.message_type),
+                    "ignored unrelated AirPlay data-stream message"
+                );
+            }
+        })
+        .await
+        .context("AirPlay remote-control reply timed out")?
+    }
+
+    pub async fn send_data_stream_request(&mut self, body: &[u8]) -> Result<u64> {
+        let sequence = u64::from_be_bytes(uuid::Uuid::new_v4().into_bytes()[..8].try_into()?);
+        let request = data_stream_frame(b"sync", b"comm", sequence, body)?;
+        self.write_plain(&request).await?;
+        Ok(sequence)
     }
 
     async fn write_plain(&mut self, bytes: &[u8]) -> Result<()> {
@@ -156,6 +324,70 @@ impl AirplayConnection {
         anyhow::ensure!(read != 0, "AirPlay receiver closed the connection");
         Ok(())
     }
+}
+
+struct DataStreamMessage {
+    message_type: [u8; 12],
+    sequence: u64,
+    body: Vec<u8>,
+}
+
+fn data_stream_frame(
+    message_type: &[u8; 4],
+    command: &[u8; 4],
+    sequence: u64,
+    body: &[u8],
+) -> Result<Vec<u8>> {
+    let size = DATA_STREAM_HEADER_BYTES
+        .checked_add(body.len())
+        .context("AirPlay data-stream message is too large")?;
+    anyhow::ensure!(
+        size <= MAX_MESSAGE_BYTES,
+        "AirPlay data-stream message is too large"
+    );
+    let size = u32::try_from(size).context("AirPlay data-stream message is too large")?;
+    let mut frame = Vec::with_capacity(size as usize);
+    frame.extend_from_slice(&size.to_be_bytes());
+    frame.extend_from_slice(message_type);
+    frame.extend_from_slice(&[0; 8]);
+    frame.extend_from_slice(command);
+    frame.extend_from_slice(&sequence.to_be_bytes());
+    frame.extend_from_slice(&0u32.to_be_bytes());
+    frame.extend_from_slice(body);
+    Ok(frame)
+}
+
+fn take_data_stream_message(buffer: &mut Vec<u8>) -> Result<Option<DataStreamMessage>> {
+    if buffer.len() < DATA_STREAM_HEADER_BYTES {
+        return Ok(None);
+    }
+    let size = u32::from_be_bytes(buffer[..4].try_into()?) as usize;
+    anyhow::ensure!(
+        (DATA_STREAM_HEADER_BYTES..=MAX_MESSAGE_BYTES).contains(&size),
+        "invalid AirPlay data-stream message size"
+    );
+    if buffer.len() < size {
+        return Ok(None);
+    }
+    let message_type = buffer[4..16].try_into()?;
+    let sequence = u64::from_be_bytes(buffer[20..28].try_into()?);
+    let body = buffer[DATA_STREAM_HEADER_BYTES..size].to_vec();
+    buffer.drain(..size);
+    Ok(Some(DataStreamMessage {
+        message_type,
+        sequence,
+        body,
+    }))
+}
+
+fn starts_data_stream_message(buffer: &[u8]) -> bool {
+    buffer
+        .get(..4)
+        .and_then(|size| <[u8; 4]>::try_from(size).ok())
+        .map(u32::from_be_bytes)
+        .is_some_and(|size| {
+            (DATA_STREAM_HEADER_BYTES as u32..=MAX_MESSAGE_BYTES as u32).contains(&size)
+        })
 }
 
 fn take_response(buffer: &mut Vec<u8>) -> Result<Option<Response>> {
@@ -216,6 +448,15 @@ fn content_length(header: &str) -> Result<usize> {
     Ok(0)
 }
 
+fn header_value<'a>(header: &'a str, expected_name: &str) -> Option<&'a str> {
+    header.split("\r\n").skip(1).find_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.trim()
+            .eq_ignore_ascii_case(expected_name)
+            .then(|| value.trim())
+    })
+}
+
 fn complete_message(buffer: &[u8]) -> Result<bool> {
     let Some(header_end) = buffer.windows(4).position(|window| window == b"\r\n\r\n") else {
         return Ok(false);
@@ -244,6 +485,21 @@ mod tests {
             Some("yes")
         );
         assert_eq!(take_response(&mut bytes).unwrap().unwrap().status, 204);
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn data_stream_parser_preserves_following_frame() {
+        let mut bytes = data_stream_frame(b"sync", b"comm", 7, b"one").unwrap();
+        bytes.extend(data_stream_frame(b"rply", b"\0\0\0\0", 8, b"two").unwrap());
+        let first = take_data_stream_message(&mut bytes).unwrap().unwrap();
+        assert_eq!(&first.message_type[..4], b"sync");
+        assert_eq!(first.sequence, 7);
+        assert_eq!(first.body, b"one");
+        let second = take_data_stream_message(&mut bytes).unwrap().unwrap();
+        assert_eq!(&second.message_type[..4], b"rply");
+        assert_eq!(second.sequence, 8);
+        assert_eq!(second.body, b"two");
         assert!(bytes.is_empty());
     }
 }
