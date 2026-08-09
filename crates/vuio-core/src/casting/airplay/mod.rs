@@ -214,6 +214,21 @@ impl AirplayProvider {
     ) -> anyhow::Result<()> {
         let (mut connection, shared_secret) = self.verified_connection(device).await?;
         let session_id = uuid::Uuid::new_v4().to_string().to_uppercase();
+        let http_session_id = uuid::Uuid::new_v4().to_string();
+        let media_id = uuid::Uuid::new_v4().to_string();
+        let device_id = controller_device_id();
+        let rtsp_session_bytes = uuid::Uuid::new_v4().into_bytes();
+        let rtsp_session_id = u32::from_be_bytes([
+            rtsp_session_bytes[0],
+            rtsp_session_bytes[1],
+            rtsp_session_bytes[2],
+            rtsp_session_bytes[3],
+        ]);
+        let rtsp_session = format!(
+            "rtsp://{}/{}",
+            connection.local_addr()?.ip(),
+            rtsp_session_id
+        );
         let bind_address = match socket_endpoint(device)?.ip() {
             std::net::IpAddr::V4(_) => "0.0.0.0:0",
             std::net::IpAddr::V6(_) => "[::]:0",
@@ -222,10 +237,7 @@ impl AirplayProvider {
         let timing_port = i64::from(timing_socket.local_addr()?.port());
 
         let mut setup = plist::Dictionary::new();
-        setup.insert(
-            "deviceID".into(),
-            plist::Value::String(controller_device_id()),
-        );
+        setup.insert("deviceID".into(), plist::Value::String(device_id.clone()));
         setup.insert(
             "sessionUUID".into(),
             plist::Value::String(session_id.clone()),
@@ -235,7 +247,6 @@ impl AirplayProvider {
             plist::Value::Integer(timing_port.into()),
         );
         setup.insert("timingProtocol".into(), plist::Value::String("NTP".into()));
-        setup.insert("isRemoteControlOnly".into(), plist::Value::Boolean(false));
         setup.insert("isMultiSelectAirPlay".into(), plist::Value::Boolean(true));
         setup.insert(
             "groupContainsGroupLeader".into(),
@@ -246,19 +257,25 @@ impl AirplayProvider {
             "statsCollectionEnabled".into(),
             plist::Value::Boolean(false),
         );
+        setup.insert("macAddress".into(), plist::Value::String(device_id.clone()));
         setup.insert("name".into(), plist::Value::String("VuIO".into()));
-        setup.insert("model".into(), plist::Value::String("VuIO".into()));
-        setup.insert("osName".into(), plist::Value::String("VuIO".into()));
+        setup.insert("model".into(), plist::Value::String("iPhone14,3".into()));
+        setup.insert(
+            "osBuildVersion".into(),
+            plist::Value::String("20F66".into()),
+        );
+        setup.insert("osName".into(), plist::Value::String("iPhone OS".into()));
+        setup.insert("osVersion".into(), plist::Value::String("16.5".into()));
         setup.insert(
             "sourceVersion".into(),
-            plist::Value::String("550.10".into()),
+            plist::Value::String("690.7.1".into()),
         );
         let setup_body = binary_plist(plist::Value::Dictionary(setup))?;
         let mut cseq = 1;
         let setup_response = secure_request(
             &mut connection,
             "SETUP",
-            "/stream",
+            &rtsp_session,
             &session_id,
             &mut cseq,
             "application/x-apple-binary-plist",
@@ -294,7 +311,7 @@ impl AirplayProvider {
                 b"Events-Write-Encryption-Key",
             )?,
         });
-        for (method, path) in [("POST", "/feedback"), ("RECORD", "/stream")] {
+        for (method, path) in [("POST", "/feedback"), ("RECORD", rtsp_session.as_str())] {
             let response = secure_request(
                 &mut connection,
                 method,
@@ -320,25 +337,53 @@ impl AirplayProvider {
         play.insert("Start-Position-Seconds".into(), plist::Value::Real(0.0));
         play.insert("mediaType".into(), plist::Value::String("file".into()));
         play.insert("streamType".into(), plist::Value::Integer(1.into()));
-        play.insert("uuid".into(), plist::Value::String(session_id.clone()));
+        play.insert("uuid".into(), plist::Value::String(media_id));
         play.insert("rate".into(), plist::Value::Real(1.0));
         play.insert("volume".into(), plist::Value::Real(1.0));
+        play.insert(
+            "mightSupportStorePastisKeyRequests".into(),
+            plist::Value::Boolean(true),
+        );
+        play.insert(
+            "playbackRestrictions".into(),
+            plist::Value::Integer(0.into()),
+        );
+        play.insert(
+            "referenceRestrictions".into(),
+            plist::Value::Integer(3.into()),
+        );
+        play.insert("SenderMACAddress".into(), plist::Value::String(device_id));
+        play.insert("model".into(), plist::Value::String("iPhone14,3".into()));
+        play.insert(
+            "clientBundleID".into(),
+            plist::Value::String("dev.vuio.app".into()),
+        );
+        play.insert("clientProcName".into(), plist::Value::String("VuIO".into()));
+        play.insert(
+            "osBuildVersion".into(),
+            plist::Value::String("20G1116".into()),
+        );
+        for field in [
+            "secureConnectionMs",
+            "infoMs",
+            "connectMs",
+            "authMs",
+            "bonjourMs",
+            "postAuthMs",
+        ] {
+            play.insert(field.into(), plist::Value::Integer(0.into()));
+        }
         let play_body = binary_plist(plist::Value::Dictionary(play))?;
-        let response = secure_request(
+        let response = secure_http_request(
             &mut connection,
             "POST",
             "/play",
-            &session_id,
-            &mut cseq,
+            &http_session_id,
             "application/x-apple-binary-plist",
             &play_body,
         )
         .await?;
-        anyhow::ensure!(
-            (200..300).contains(&response.status),
-            "AirPlay 2 play failed with status {}",
-            response.status
-        );
+        ensure_airplay_play_accepted(response.status, &response.body)?;
         let rate_response = secure_request(
             &mut connection,
             "POST",
@@ -447,6 +492,37 @@ fn binary_plist(value: plist::Value) -> anyhow::Result<Vec<u8>> {
     Ok(body)
 }
 
+fn airplay_error_detail(body: &[u8]) -> String {
+    if body.is_empty() {
+        return String::new();
+    }
+    if let Ok(value) = plist::Value::from_reader(std::io::Cursor::new(body)) {
+        return format!(" ({value:?})");
+    }
+    let text = String::from_utf8_lossy(body);
+    let text = text.trim().chars().take(200).collect::<String>();
+    if text.is_empty() {
+        String::new()
+    } else {
+        format!(" ({text})")
+    }
+}
+
+fn ensure_airplay_play_accepted(status: u16, body: &[u8]) -> anyhow::Result<()> {
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    if status == 404 {
+        anyhow::bail!(
+            "this receiver does not expose direct AirPlay video playback; use its Chromecast renderer instead (AirPlay returned 404)"
+        );
+    }
+    anyhow::bail!(
+        "AirPlay 2 play failed with status {status}{}",
+        airplay_error_detail(body)
+    )
+}
+
 async fn secure_request(
     connection: &mut AirplayConnection,
     method: &str,
@@ -468,6 +544,31 @@ async fn secure_request(
                 ("CSeq", sequence.to_string()),
                 ("DACP-ID", session_id.replace('-', "")),
                 ("Active-Remote", "1".to_string()),
+                ("X-Apple-Session-ID", session_id.to_string()),
+                ("X-Apple-ProtocolVersion", "1".to_string()),
+                ("X-Apple-Stream-ID", "1".to_string()),
+                ("Content-Type", content_type.to_string()),
+            ],
+            body,
+        )
+        .await
+}
+
+async fn secure_http_request(
+    connection: &mut AirplayConnection,
+    method: &str,
+    path: &str,
+    session_id: &str,
+    content_type: &str,
+    body: &[u8],
+) -> anyhow::Result<transport::Response> {
+    connection
+        .request(
+            method,
+            path,
+            "HTTP/1.1",
+            &[
+                ("User-Agent", "AirPlay/550.10".to_string()),
                 ("X-Apple-Session-ID", session_id.to_string()),
                 ("X-Apple-ProtocolVersion", "1".to_string()),
                 ("X-Apple-Stream-ID", "1".to_string()),
@@ -973,6 +1074,14 @@ mod tests {
         assert_ne!(features & (1 << 46), 0);
         assert_ne!(features & (1 << 48), 0);
         assert_ne!(features & (1 << 49), 0);
+    }
+
+    #[test]
+    fn direct_video_404_explains_the_receiver_limitation() {
+        let error = ensure_airplay_play_accepted(404, &[]).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("does not expose direct AirPlay video playback"));
+        assert!(message.contains("Chromecast"));
     }
 
     #[test]

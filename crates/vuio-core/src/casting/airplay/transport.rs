@@ -50,6 +50,12 @@ impl AirplayConnection {
         });
     }
 
+    pub fn local_addr(&self) -> Result<SocketAddr> {
+        self.stream
+            .local_addr()
+            .context("reading the local AirPlay socket address")
+    }
+
     pub async fn request(
         &mut self,
         method: &str,
