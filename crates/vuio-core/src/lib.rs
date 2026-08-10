@@ -125,8 +125,6 @@ pub type DefaultDatabase = crate::database::redb::RedbDatabase;
 #[doc(hidden)]
 pub type DefaultAppState = crate::state::AppState<DefaultDatabase>;
 
-
-
 /// Natural comparison for strings containing embedded numbers.
 ///
 /// Numeric segments are compared by value so that, e.g., "s01e2" < "s01e10".

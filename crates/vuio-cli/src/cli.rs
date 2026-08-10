@@ -81,4 +81,3 @@ struct Args {
     #[arg(long)]
     auth: bool,
 }
-

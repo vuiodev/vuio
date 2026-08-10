@@ -221,8 +221,10 @@ jobs:
             ~/.cargo/git/db/
             target/
           key: msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+      # No --locked: Cargo.lock is deliberately gitignored in this repo, so a
+      # fresh checkout has none and --locked would fail before compiling.
       - name: Check the crate with default features
-        run: cargo check -p vuio-core --locked
+        run: cargo check -p vuio-core
 
   # ===================================================================
   # Run Tests and Checks (Push, Pull Requests, or Manual 'test' run)
