@@ -7,16 +7,6 @@ Built with Tokio, Axum, and Redb for high performance and reliability.
 
 **Supported platforms:** Windows, Linux, macOS, Docker (x64 and ARM64)
 
-## Rust workspace
-
-The repository separates the reusable server from its process entry point:
-
-- `crates/vuio-core` contains the complete embeddable VuIO runtime: configuration, database, media indexing, discovery, casting, HTTP/DLNA/MCP services, and graceful lifecycle control.
-- `crates/vuio-cli` is the binary-only `vuio` package. It owns command-line parsing, process signals, and self-update behavior, then delegates to `vuio-core`.
-- `crates/oxicast` is the local Google Cast client dependency.
-
-Rust applications embed the server with `vuio_core::runtime::VuioRuntime`; they do not need to launch or bundle the `vuio` command-line executable.
-
 ## Features
 
 - **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
@@ -55,50 +45,6 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 - **Sleek Dashboard**: Real-time server status, monitored directories, and database statistics.
 - **Media Explorer**: Browse all scanned videos, music, and pictures directly in your web browser.
 - **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
-
-### Casting compatibility
-
-The dashboard and MCP tools discover DLNA renderers through SSDP, Chromecast and Google TV devices through `_googlecast._tcp` mDNS, and URL-video-capable AirPlay receivers through `_airplay._tcp` mDNS. Chromecast uses Google's Default Media Receiver and does not require a custom Cast application ID. The dashboard asks which discovered renderer to use for each new cast, and can remember that choice for the session or permanently; a remembered device is used directly, and the confirmation offers a way back to the picker.
-
-Casting is direct-play only. DLNA behavior is unchanged. Chromecast accepts supported MP4, WebM, MPEG-TS, MP3, M4A, OGG, WAV, FLAC, and common image containers, subject to the codecs supported by the receiving model. AirPlay is offered for receivers that advertise AirPlay video v1 (feature bit 0), which is the `POST /play` URL-video endpoint — Apple TV, macOS, and legacy receivers. VuIO performs Pair-Verify with a stored PIN pairing, or transient Pair Setup where the receiver advertises system/CoreUtils pairing (no PIN and nothing persisted), then opens an encrypted control session with an RTSP `SETUP`/`RECORD`, serves the reverse event channel and an NTP timing server, and starts playback with an HTTP `POST /play` carrying the media URL as-is; the receiver fetches the file directly from VuIO over HTTP with range support. Third-party sets that advertise only AirPlay video v2 (bit 49, e.g. Sony Android TV) expose no URL-video surface to a non-Apple sender — every HTTP video path answers 404, and the play-queue command channel cannot be bound — so they are listed for audio only (`video: false, audio: true`); cast video to those over Chromecast or DLNA. Pairing keys are stored in VuIO's database.
-
-#### AirPlay receiver compatibility
-
-AirPlay receivers fall into two groups, and the difference decides whether VuIO can cast video to them.
-
-**URL-video receivers** advertise feature bit 0 (`SupportsAirPlayVideoV1`) and implement `POST /play`, the endpoint that hands the receiver a URL to fetch. Apple TV, macOS, and legacy receivers do this, and VuIO drives them: Pair-Verify with a stored PIN pairing (or transient Pair Setup where the receiver advertises system/CoreUtils pairing, which needs no PIN and stores nothing), an encrypted control session with RTSP `SETUP`/`RECORD`, the reverse event channel, an NTP timing server, then `POST /play` with the media URL as-is.
-
-**Audio and mirroring receivers** — most third-party AirPlay 2 TVs, including Sony Android TV — advertise only bit 49 (`SupportsAirPlayVideoV2`) and expose no URL-video endpoint at all. They are listed as audio-only renderers, so music casts to them and video does not. Set `VUIO_AIRPLAY_ALLOW_V2_ONLY=1` to offer video anyway and have the cast report exactly what the receiver answered.
-
-##### Why video does not work on these sets
-
-This is not a codec, container, or file problem: a 404 is the receiver reporting that the URL path does not exist, and it is returned before the request body naming the media is ever examined. The same 404 comes back for an H.264 High / AAC LC MP4 that plays fine over Chromecast to the same TV. An iPad cannot play video to these sets either.
-
-Probing a Sony XR-75X90L (AirPlay SDK 3.6.0.72, `features=0x7F8AD0,0x18BCF46`) found:
-
-| Request | Result |
-| --- | --- |
-| `OPTIONS *` | 200 — `ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, FLUSHBUFFERED, TEARDOWN, OPTIONS, POST, GET, PUT` |
-| `/play`, `/playback-info`, `/server-info`, `/scrub`, `/playqueue`, `/rate`, `/stop` | 404, over both HTTP and RTSP |
-| `POST /command` | 400 on a malformed body — the endpoint exists |
-| `POST /command` with `{"params":{"data":…}}` | 500 for every payload, including an empty one — nothing can be bound to it |
-| `SETUP` with `isRemoteControlOnly` | 200 |
-| `SETUP` for the type-130 remote-control stream | 400 — refused |
-| `SETUP` stream types 96 / 103 / 110 | 400 (96 succeeds once a media session exists, see below) |
-| Port scan | only 7000 open for AirPlay; 8008/8009 are Chromecast, 52323 is DLNA |
-
-The `Public` method list is pure RAOP audio plus mirroring, and the type-130 stream that carries Apple's play-queue command set is refused — pyatv likewise only attempts that stream against Apple TV and HomePod. `/fp-setup` exists (400, not 404), which points at FairPlay as the gate. That is Apple-proprietary and not reproducible from public documentation, so these sets grant video to authenticated Apple senders and to nobody else. Cast video to them over Chromecast or DLNA, both of which VuIO supports and which work on the same hardware.
-
-##### Audio on these sets
-
-Audio is a different story. The same Sony grants a buffered-audio stream:
-
-```
-SETUP (type 96, sr 44100, spf 352) → 200
-{"streams":[{"type":96,"dataPort":45528,"controlPort":41402}]}
-```
-
-VuIO streams audio to these receivers. AirPlay never carries MP3 — its `audioFormat` bitmask covers only PCM, ALAC, AAC-LC, AAC-ELD and OPUS — so, exactly like an iPhone, VuIO decodes the source itself and pushes `PCM/44100/16/2` (`0x800`). MP3, M4A/AAC, FLAC, WAV, ALAC and Vorbis are decoded with Symphonia and resampled to 44.1 kHz stereo. A realtime AirPlay receiver hardcodes ALAC and ignores the `ct`/`audioFormat` it is offered, so each 352-frame packet is wrapped in an uncompressed ALAC element, encrypted with ChaCha20-Poly1305 (key: the first 32 bytes of the pairing secret, verbatim), and paced in real time against an NTP timing server with clock-sync packets on the control channel. Track title, artist, album and cover art are read from the file's tags and pushed as DMAP metadata, and a `progress` parameter drives the receiver's seek bar. Casting a folder hands the whole queue to the receiver, which plays through it gaplessly on one RTP timeline; the receiver's own remote reaches the sender as DACP command codes on the event channel, so its next/previous buttons skip tracks. Audio therefore reaches receivers that cannot play video at all, and the renderer list reports `video: false, audio: true` for them. Volume stays under the receiver's control: these sets report their own level and forward their remote's volume presses to the sender.
 
 ## Quick Start
 
@@ -156,29 +102,6 @@ vuio --update
 git clone https://github.com/vuiodev/vuio.git
 cd vuio
 docker-compose -f docker-compose.yml up
-```
-
-### Docker Compose
-
-```yaml
-services:
-  vuio:
-    image: vuio:latest
-    container_name: vuio-server
-    restart: unless-stopped
-    network_mode: host  # Required for DLNA multicast
-    cap_add:
-      - NET_ADMIN
-      - NET_RAW
-    volumes:
-      - ./vuio-config:/config
-      - /path/to/media:/media:ro
-    environment:
-      - VUIO_IP=192.168.1.100      # Your host IP (required)
-      - VUIO_PORT=8080
-      - VUIO_MEDIA_DIRS=/media
-      - VUIO_SERVER_NAME=VuIO
-      - VUIO_DB_PATH=/data/vuio.redb
 ```
 
 ### Docker Volume Mounting
@@ -277,7 +200,7 @@ You can deploy VuIO to a Kubernetes cluster using the provided Helm chart.
 You can install the chart directly from GitHub Container Registry without cloning the repository:
 
 ```bash
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.35
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.41
 ```
 
 #### Local Installation
@@ -620,7 +543,7 @@ This project includes modified code from the following open-source library:
 * **oxicast**: Async Google Cast (Chromecast) client for Rust
   * **Original Author:** Dennis Kribl (https://github.com/denniskribl/oxicast)
   * **License:** Dual-licensed under MIT / Apache-2.0
-  * **Local fork:** `crates/oxicast` (ring TLS; no aws-lc)
+  * **Local fork:** `crates/vuio-cast` (ring TLS; no aws-lc)
 
 ## License
 
