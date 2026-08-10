@@ -1166,6 +1166,21 @@
             <div id="tv-list-container" style="display: flex; flex-direction: column; gap: 0.75rem; margin: 0.25rem 0; max-height: 250px; overflow-y: auto; padding-right: 4px;">
                 <!-- TV buttons will be dynamically generated here -->
             </div>
+            <fieldset id="tv-remember-fieldset" style="border: 0; padding: 0.5rem 0.25rem 0; margin: 0; display: flex; flex-direction: column; gap: 0.45rem;">
+                <legend style="padding: 0; margin-bottom: 0.35rem; color: var(--text-secondary); font-size: 0.75rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em;">Remember this device</legend>
+                <label style="display: flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.88rem; cursor: pointer; user-select: none;">
+                    <input type="radio" name="tv-remember" value="none" checked style="accent-color: var(--accent-color); cursor: pointer; margin: 0;">
+                    <span>Just this once</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.88rem; cursor: pointer; user-select: none;">
+                    <input type="radio" name="tv-remember" value="session" style="accent-color: var(--accent-color); cursor: pointer; margin: 0;">
+                    <span>For this session</span>
+                </label>
+                <label style="display: flex; align-items: center; gap: 0.55rem; color: var(--text-secondary); font-size: 0.88rem; cursor: pointer; user-select: none;">
+                    <input type="radio" name="tv-remember" value="forever" style="accent-color: var(--accent-color); cursor: pointer; margin: 0;">
+                    <span>Always</span>
+                </label>
+            </fieldset>
             <button onclick="closeTvModal()" style="background: rgba(255, 255, 255, 0.04); border: 1px solid var(--card-border); color: var(--text-secondary); border-radius: 10px; padding: 0.7rem; cursor: pointer; transition: all 0.2s; font-weight: 600;" onmouseover="this.style.background='rgba(255,255,255,0.08)'; this.style.color='var(--text-primary)';" onmouseout="this.style.background='rgba(255,255,255,0.04)'; this.style.color='var(--text-secondary)';">Cancel</button>
         </div>
     </div>
@@ -1275,7 +1290,7 @@
         function playVideoFolderOnTv(folderName) {
             const components = [...currentPath, folderName];
             discoverAndCast(
-                { kind: 'folder', components },
+                { kind: 'folder', components, media: 'video' },
                 folderName
             );
         }
@@ -1302,7 +1317,54 @@
             );
         }
 
-        async function discoverAndCast(source, label) {
+        // A remembered device skips the picker. Session storage wins over local
+        // so "for this session" can temporarily override "always".
+        const PREFERRED_RENDERER_KEY = 'vuio.preferredRendererId';
+
+        function getPreferredRendererId() {
+            try {
+                return sessionStorage.getItem(PREFERRED_RENDERER_KEY)
+                    || localStorage.getItem(PREFERRED_RENDERER_KEY);
+            } catch { return null; }
+        }
+
+        function setPreferredRendererId(id, scope) {
+            try {
+                if (scope === 'session') sessionStorage.setItem(PREFERRED_RENDERER_KEY, id);
+                else if (scope === 'forever') localStorage.setItem(PREFERRED_RENDERER_KEY, id);
+            } catch { /* private browsing: fall back to asking every time */ }
+        }
+
+        function clearPreferredRenderer() {
+            try {
+                sessionStorage.removeItem(PREFERRED_RENDERER_KEY);
+                localStorage.removeItem(PREFERRED_RENDERER_KEY);
+            } catch { /* nothing stored */ }
+        }
+
+        function selectedRememberScope() {
+            const checked = document.querySelector('input[name="tv-remember"]:checked');
+            return checked ? checked.value : 'none';
+        }
+
+        function resetRememberRadios() {
+            const none = document.querySelector('input[name="tv-remember"][value="none"]');
+            if (none) none.checked = true;
+        }
+
+        // The single path to playback: pairs first when the receiver needs it,
+        // so a remembered device cannot bypass the PIN step.
+        async function castWithPairing(renderer, source) {
+            if (renderer.pairing === 'required') {
+                const paired = await pairAirplayRenderer(renderer);
+                if (!paired) return false;
+                renderer.pairing = 'paired';
+            }
+            await castToRenderer(renderer, source);
+            return true;
+        }
+
+        async function discoverAndCast(source, label, ignorePreferred = false) {
             showToast("Finding playback devices...", "info");
             try {
                 const response = await fetch('/api/renderers');
@@ -1314,6 +1376,21 @@
                     showToast("No compatible playback devices found on your local network.", "error");
                     return;
                 }
+
+                const preferredId = ignorePreferred ? null : getPreferredRendererId();
+                const preferred = preferredId
+                    ? renderers.find(r => String(r.id) === String(preferredId))
+                    : null;
+                if (preferred) {
+                    // Offer a way back to the picker, or the choice is a trap.
+                    showToast('Casting to ' + preferred.friendly_name + '. Click to pick a different device.', 'info', () => {
+                        clearPreferredRenderer();
+                        discoverAndCast(source, label, true);
+                    });
+                    await castWithPairing(preferred, source);
+                    return;
+                }
+
                 showRendererSelectionModal(renderers, label, source);
             } catch (error) {
                 console.error("Playback device discovery failed", error);
@@ -1323,6 +1400,7 @@
 
         function showRendererSelectionModal(renderers, label, source) {
             document.getElementById('tv-modal-folder-name').textContent = label;
+            resetRememberRadios();
             const container = document.getElementById('tv-list-container');
             container.replaceChildren();
             
@@ -1331,13 +1409,13 @@
                 btn.className = 'tv-select-btn';
                 btn.onclick = async () => {
                     container.querySelectorAll('button').forEach(button => button.disabled = true);
+                    const scope = selectedRememberScope();
                     closeTvModal();
-                    if (renderer.pairing === 'required') {
-                        const paired = await pairAirplayRenderer(renderer);
-                        if (!paired) return;
-                        renderer.pairing = 'paired';
+                    const started = await castWithPairing(renderer, source);
+                    // Only remember a device that actually accepted the cast.
+                    if (started && scope !== 'none') {
+                        setPreferredRendererId(renderer.id, scope);
                     }
-                    await castToRenderer(renderer, source);
                 };
                 btn.innerHTML = `
                     <div class="tv-icon-wrapper">
@@ -1482,7 +1560,7 @@
             }
         }
 
-        function showToast(message, type = 'info') {
+        function showToast(message, type = 'info', onClick = null) {
             let container = document.getElementById('toast-container');
             if (!container) {
                 container = document.createElement('div');
@@ -1511,6 +1589,14 @@
             toast.style.transition = 'all 0.3s cubic-bezier(0.16, 1, 0.3, 1)';
             
             toast.textContent = message;
+            if (onClick) {
+                toast.style.cursor = 'pointer';
+                toast.style.textDecoration = 'underline';
+                toast.addEventListener('click', () => {
+                    toast.remove();
+                    onClick();
+                });
+            }
             container.appendChild(toast);
             
             setTimeout(() => {
