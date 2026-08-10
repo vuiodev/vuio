@@ -2,6 +2,7 @@
 
 mod audio;
 mod credentials;
+mod dacp;
 mod pair_verify;
 mod raop;
 mod transient;
@@ -60,6 +61,12 @@ struct SecureSession {
     audio_tasks: Vec<tokio::task::JoinHandle<()>>,
     /// Tracks queued behind the one playing, drained by the RTP sender.
     audio_queue: Option<AudioQueue>,
+    /// The advertised control endpoint. Held for its lifetime only: dropping it
+    /// withdraws the mDNS service and stops the listener.
+    #[allow(dead_code)]
+    dacp: Option<dacp::DacpServer>,
+    /// Pause/skip flags the RTP sender polls, for audio sessions.
+    transport: Option<std::sync::Arc<raop::Transport>>,
     /// RTSP session URI, needed to TEARDOWN so the receiver stops rendering
     /// instead of playing out whatever it has buffered.
     rtsp_session: String,
@@ -508,11 +515,31 @@ impl AirplayProvider {
             )?,
         });
         let (event_sender, _event_replies) = tokio::sync::mpsc::unbounded_channel();
+        let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
         let mut event_task = AbortOnDrop(Some(tokio::spawn(async move {
-            if let Err(error) = event_connection.serve_events(event_sender).await {
+            if let Err(error) = event_connection
+                .serve_events_with_commands(event_sender, Some(command_sender))
+                .await
+            {
                 tracing::debug!(%error, "AirPlay audio event channel closed");
             }
         })));
+
+        // The receiver's remote reaches us as DACP command codes on that channel.
+        let transport = std::sync::Arc::new(raop::Transport::default());
+        let session_transport = transport.clone();
+        let remote_transport = transport.clone();
+        tokio::spawn(async move {
+            use std::sync::atomic::Ordering;
+            while let Some(command) = commands.recv().await {
+                tracing::info!(command, "AirPlay receiver remote command");
+                match command.as_str() {
+                    "nextitem" => remote_transport.skip_next.store(true, Ordering::Relaxed),
+                    "previtem" => remote_transport.restart.store(true, Ordering::Relaxed),
+                    _ => {}
+                }
+            }
+        });
 
         // RECORD goes after the session SETUP and before the stream SETUP; the
         // reverse order yields RECORD=500 / FLUSH=455.
@@ -596,6 +623,18 @@ impl AirplayProvider {
         let control = std::sync::Arc::new(Mutex::new(control));
         let mut feedback_task = AbortOnDrop(Some(spawn_feedback_task(control.clone())));
 
+        // Advertise the control endpoint before audio starts, so the receiver
+        // has somewhere to send its remote's button presses.
+        let local_ip = control.lock().await.connection.local_addr()?.ip();
+        let dacp_id = control.lock().await.headers.dacp_id.clone();
+        let dacp = match dacp::DacpServer::start(&dacp_id, local_ip, transport.clone()).await {
+            Ok(server) => Some(server),
+            Err(error) => {
+                tracing::warn!(%error, "AirPlay DACP controls unavailable");
+                None
+            }
+        };
+
         let queue: AudioQueue = std::sync::Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let stream_queue = queue.clone();
         let stream_control = control.clone();
@@ -609,6 +648,7 @@ impl AirplayProvider {
                     stream_control,
                     stream_rtsp_session,
                     stream_session,
+                    transport,
                 )
                 .await
             {
@@ -625,6 +665,8 @@ impl AirplayProvider {
                 timing_task: timing_task.take(),
                 audio_tasks: vec![stream_task, sync_task.take()],
                 audio_queue: Some(queue),
+                dacp,
+                transport: Some(session_transport),
                 rtsp_session: rtsp_session.clone(),
             })),
         );
@@ -889,6 +931,8 @@ impl AirplayProvider {
                 timing_task: timing_task.take(),
                 audio_tasks: Vec::new(),
                 audio_queue: None,
+                dacp: None,
+                transport: None,
                 rtsp_session: rtsp_session.clone(),
             })),
         );
@@ -1754,14 +1798,52 @@ impl CastProvider for AirplayProvider {
     async fn control(&self, device: &RendererDevice, action: PlaybackAction) -> anyhow::Result<()> {
         let mut sessions = self.sessions.lock().await;
         if let Some(ActiveSession::Secure(session)) = sessions.get_mut(&device.id) {
-            let is_audio = session.audio_queue.is_some();
             let rtsp_session = session.rtsp_session.clone();
+
+            // An audio session is a push stream: pausing it means sending
+            // silence rather than issuing a rate change, which has no meaning
+            // for RTP.
+            if let Some(transport) = session.transport.clone() {
+                match action {
+                    PlaybackAction::Play => {
+                        transport
+                            .paused
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    PlaybackAction::Pause => {
+                        transport
+                            .paused
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        return Ok(());
+                    }
+                    PlaybackAction::Stop => {}
+                }
+            }
+
+            if action == PlaybackAction::Stop {
+                // TEARDOWN is best effort: a receiver commonly drops the
+                // connection the moment it accepts one, so a missing response
+                // still means the session ended. Reporting that as a failure
+                // would leave the session in the map and the UI stuck.
+                let mut control = session.control.lock().await;
+                match control.rtsp("TEARDOWN", &rtsp_session, None, &[]).await {
+                    Ok(response) => {
+                        tracing::debug!(status = response.status, "AirPlay session torn down")
+                    }
+                    Err(error) => tracing::debug!(
+                        %error,
+                        "AirPlay receiver closed the connection on TEARDOWN, which ends the session anyway"
+                    ),
+                }
+                drop(control);
+                // Dropping the session aborts its streaming and keep-alive tasks.
+                sessions.remove(&device.id);
+                return Ok(());
+            }
+
             let mut control = session.control.lock().await;
-            // `/rate` is an RTSP command and `/stop` a plain-HTTP one, but an
-            // audio session has neither: it ends with TEARDOWN, which is what
-            // makes the receiver drop whatever it still has buffered.
             let response = match action {
-                _ if is_audio => control.rtsp("TEARDOWN", &rtsp_session, None, &[]).await,
                 PlaybackAction::Play => {
                     control
                         .rtsp("POST", "/rate?value=1.000000", None, &[])
@@ -1772,7 +1854,7 @@ impl CastProvider for AirplayProvider {
                         .rtsp("POST", "/rate?value=0.000000", None, &[])
                         .await
                 }
-                PlaybackAction::Stop => control.http("POST", "/stop", &[], &[]).await,
+                PlaybackAction::Stop => unreachable!("stop is handled above"),
             }?;
             anyhow::ensure!(
                 (200..300).contains(&response.status),
@@ -1780,10 +1862,6 @@ impl CastProvider for AirplayProvider {
                 response.status,
                 describe_body(&response.body)
             );
-            drop(control);
-            if action == PlaybackAction::Stop || is_audio {
-                sessions.remove(&device.id);
-            }
             return Ok(());
         }
         drop(sessions);

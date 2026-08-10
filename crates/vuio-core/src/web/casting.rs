@@ -22,6 +22,13 @@ pub struct ApiCastRequest {
 }
 
 #[derive(serde::Deserialize)]
+pub struct ApiCastControlRequest {
+    pub renderer_id: String,
+    /// `play`, `pause` or `stop`.
+    pub action: String,
+}
+
+#[derive(serde::Deserialize)]
 pub struct ApiPairingStartRequest {
     pub renderer_id: String,
 }
@@ -191,6 +198,52 @@ pub async fn api_cast<D: DatabaseManager + 'static>(
     match result {
         Ok(value) => (StatusCode::OK, axum::Json(value)),
         Err(message) => cast_error(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+/// Control what is already playing on a renderer.
+///
+/// Stopping matters for push protocols like AirPlay audio: the sender has to
+/// tear the session down, otherwise the receiver keeps rendering.
+pub async fn api_cast_control<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
+    axum::Json(payload): axum::Json<ApiCastControlRequest>,
+) -> impl IntoResponse {
+    let action = match payload.action.to_ascii_lowercase().as_str() {
+        "play" => crate::casting::PlaybackAction::Play,
+        "pause" => crate::casting::PlaybackAction::Pause,
+        "stop" => crate::casting::PlaybackAction::Stop,
+        other => {
+            return cast_error(
+                StatusCode::BAD_REQUEST,
+                &format!("Unknown action '{other}'. Use play, pause or stop."),
+            );
+        }
+    };
+
+    let renderers = match state.discovered_tvs.get_or_refresh().await {
+        Ok(renderers) => renderers,
+        Err(error) => {
+            return cast_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string());
+        }
+    };
+    let Some(renderer) = renderers
+        .iter()
+        .find(|renderer| renderer.id == payload.renderer_id)
+    else {
+        return cast_error(StatusCode::NOT_FOUND, "No renderer found with that ID");
+    };
+
+    match state.discovered_tvs.control(renderer, action).await {
+        Ok(()) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "status": "ok",
+                "action": payload.action,
+                "renderer": renderer.friendly_name,
+            })),
+        ),
+        Err(error) => cast_error(StatusCode::BAD_REQUEST, &error.to_string()),
     }
 }
 

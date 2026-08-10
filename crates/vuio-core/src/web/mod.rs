@@ -40,6 +40,7 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
 
     let json_routes = Router::new()
         .route("/api/cast", post(casting::api_cast::<D>))
+        .route("/api/cast/control", post(casting::api_cast_control::<D>))
         .route("/api/cast/playlist", post(casting::api_cast_playlist::<D>))
         .route(
             "/api/renderers/pair/start",

@@ -12,6 +12,8 @@ pub struct AirplayConnection {
     secure: Option<SecureState>,
     wire_buffer: Vec<u8>,
     plain_buffer: Vec<u8>,
+    /// Where receiver-pushed media commands are delivered, when serving events.
+    commands: Option<tokio::sync::mpsc::UnboundedSender<String>>,
 }
 
 struct SecureState {
@@ -40,6 +42,7 @@ impl AirplayConnection {
             secure: None,
             wire_buffer: Vec::new(),
             plain_buffer: Vec::new(),
+            commands: None,
         })
     }
 
@@ -130,9 +133,20 @@ impl AirplayConnection {
     }
 
     pub async fn serve_events(
-        mut self,
+        self,
         replies: tokio::sync::mpsc::UnboundedSender<(u64, Vec<u8>)>,
     ) -> Result<()> {
+        self.serve_events_with_commands(replies, None).await
+    }
+
+    /// Serve the event channel, forwarding any `sendMediaRemoteCommand` the
+    /// receiver pushes (its remote's transport buttons) to `commands`.
+    pub async fn serve_events_with_commands(
+        mut self,
+        replies: tokio::sync::mpsc::UnboundedSender<(u64, Vec<u8>)>,
+        commands: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    ) -> Result<()> {
+        self.commands = commands;
         loop {
             while self.plain_buffer.len() < 4 {
                 self.read_plain_chunk().await?;
@@ -215,6 +229,21 @@ impl AirplayConnection {
             let nested_name = nested_dictionary
                 .and_then(|dictionary| dictionary.get("name"))
                 .and_then(plist::Value::as_string);
+            // The receiver's own remote arrives here as DACP command codes.
+            if let Some(sender) = &self.commands {
+                let is_command = dictionary
+                    .and_then(|dictionary| dictionary.get("type"))
+                    .and_then(plist::Value::as_string)
+                    == Some("sendMediaRemoteCommand");
+                if is_command {
+                    if let Some(command) = dictionary
+                        .and_then(|dictionary| dictionary.get("value"))
+                        .and_then(plist::Value::as_string)
+                    {
+                        let _ = sender.send(command.to_string());
+                    }
+                }
+            }
             let nested_reason = nested_dictionary.and_then(|dictionary| dictionary.get("reason"));
             let nested_item_uuid = nested_dictionary
                 .and_then(|dictionary| dictionary.get("itemCurrent"))

@@ -442,8 +442,11 @@ where
     }
 
     info!("Shutting down gracefully...");
-    shutdown.cancel();
+    // Tear renderer sessions down first: a receiver keeps rendering what it has
+    // buffered unless it is told to stop, and the control connection has to
+    // still be alive to tell it.
     app_state.discovered_tvs.shutdown().await;
+    shutdown.cancel();
     background_tasks.close();
     if let Err(error) = file_watcher.stop_watching().await {
         warn!("Failed to stop file watcher cleanly: {}", error);

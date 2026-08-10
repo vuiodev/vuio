@@ -916,6 +916,12 @@
     </style>
 </head>
 <body>
+    <!-- Appears once something is casting, so playback can always be stopped
+         even when the receiver offers no controls of its own. -->
+    <button id="stop-cast-btn" onclick="stopCurrentCast()" style="display:none; position:fixed; bottom:1.5rem; left:1.5rem; z-index:9998; align-items:center; gap:0.5rem; background:#1e293b; color:#fff; border:1px solid #ef4444; border-radius:999px; padding:0.7rem 1.2rem; font-size:0.9rem; font-weight:600; cursor:pointer;">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
+        Stop casting
+    </button>
     <div class="container">
         <header>
             <div class="brand-section">
@@ -1424,6 +1430,36 @@
             }
         }
 
+        // Remembered so playback can be stopped without re-picking the device.
+        let lastCastRenderer = null;
+
+        async function stopCurrentCast() {
+            if (!lastCastRenderer) {
+                showToast("Nothing is casting from this page.", "info");
+                return;
+            }
+            const name = lastCastRenderer.friendly_name;
+            const rendererId = lastCastRenderer.id;
+            // Stopping is one-way: once asked, this page is no longer casting
+            // regardless of what the receiver says, so clear the control first.
+            document.getElementById('stop-cast-btn').style.display = 'none';
+            lastCastRenderer = null;
+            try {
+                const response = await fetch('/api/cast/control', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ renderer_id: rendererId, action: 'stop' })
+                });
+                const data = await response.json().catch(() => ({}));
+                if (!response.ok || data.error) {
+                    throw new Error(data.error || 'Stop request failed');
+                }
+                showToast("Stopped playback on " + name + ".", "success");
+            } catch (error) {
+                showToast("Stopped, but the receiver reported: " + error.message, "info");
+            }
+        }
+
         async function castToRenderer(renderer, source) {
             showToast("Casting to " + renderer.friendly_name + "...", "info");
             try {
@@ -1437,6 +1473,9 @@
                     throw new Error(data.error || 'Cast request failed: ' + response.status);
                 }
                 showToast("Successfully playing on " + renderer.friendly_name + "!", "success");
+                lastCastRenderer = renderer;
+                const stopButton = document.getElementById('stop-cast-btn');
+                if (stopButton) stopButton.style.display = 'inline-flex';
             } catch (error) {
                 console.error("Cast request failed", error);
                 showToast("Failed to cast to device: " + error.message, "error");

@@ -277,15 +277,29 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
         }
     }
 
+    // Hand the renderer as much of the queue as it will take. A renderer with a
+    // real queue (AirPlay audio) accepts the whole remainder and advances on its
+    // own; one without accepts nothing and the status monitor below drives the
+    // transitions instead.
     let mut queued_file = None;
-    if let Some(next_item) = playback_items.get(track_index + 1) {
+    let mut queued_count = 0usize;
+    for next_item in playback_items.iter().skip(track_index + 1) {
         match state.discovered_tvs.queue_next(matched_tv, next_item).await {
-            Ok(true) => queued_file = Some(next_item.filename.clone()),
-            Ok(false) => {}
+            Ok(true) => {
+                if queued_file.is_none() {
+                    queued_file = Some(next_item.filename.clone());
+                }
+                queued_count += 1;
+            }
+            Ok(false) => break,
             Err(error) => {
                 tracing::warn!(%error, "Renderer does not support native next-item queueing");
+                break;
             }
         }
+    }
+    if queued_count > 0 {
+        tracing::info!(queued_count, "Queued tracks on the renderer");
     }
 
     // Spawn new queue monitor to dynamically handle subsequent track transitions

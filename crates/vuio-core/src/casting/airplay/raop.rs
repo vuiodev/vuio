@@ -20,6 +20,18 @@ const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the receiver's seek bar is refreshed.
 const PROGRESS_INTERVAL: Duration = Duration::from_secs(2);
 
+/// Transport requests the receiver's own remote can make of the sender.
+#[derive(Default)]
+pub struct Transport {
+    /// Advance to the next queued track.
+    pub skip_next: std::sync::atomic::AtomicBool,
+    /// Restart the current track, which is what a "previous" press does first.
+    pub restart: std::sync::atomic::AtomicBool,
+    /// While set, silence is sent instead of audio. The stream has to keep
+    /// flowing to hold the receiver's clock, so a pause cannot simply stop.
+    pub paused: std::sync::atomic::AtomicBool,
+}
+
 /// Seconds between the NTP epoch (1900) and the Unix epoch (1970).
 const NTP_UNIX_OFFSET: u64 = 2_208_988_800;
 
@@ -215,6 +227,7 @@ impl AudioSender {
         control: std::sync::Arc<tokio::sync::Mutex<super::SecureControl>>,
         rtsp_session: String,
         receiver_session: Option<String>,
+        transport: std::sync::Arc<Transport>,
     ) -> Result<()> {
         let started = tokio::time::Instant::now();
         let mut total_frames: u64 = 0;
@@ -228,8 +241,33 @@ impl AudioSender {
         // the track's lifetime -- the position is the only thing that moves.
         let mut track_start = self.rtptime();
         let mut track_end = track_start;
+        // Kept so a "previous" press can reopen what is playing.
+        let mut current_path: Option<std::path::PathBuf> = None;
 
         loop {
+            // Honour the receiver remote's transport buttons between packets.
+            if transport
+                .restart
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                if let Some(path) = current_path.clone() {
+                    if let Ok(reopened) =
+                        tokio::task::spawn_blocking(move || PcmSource::open(&path)).await?
+                    {
+                        tracing::info!("AirPlay audio restarting the current track");
+                        announce = Some(reopened.metadata().clone());
+                        source = Some(reopened);
+                    }
+                }
+            }
+            if transport
+                .skip_next
+                .swap(false, std::sync::atomic::Ordering::Relaxed)
+            {
+                tracing::info!("AirPlay audio skipping to the next track");
+                source = None;
+            }
+
             // Announce a track once its first packet position is known, so the
             // receiver's seek bar starts from the right place.
             if let Some(metadata) = announce.take() {
@@ -252,6 +290,20 @@ impl AudioSender {
                 .await;
                 last_progress = tokio::time::Instant::now();
             }
+            // A paused stream keeps its timeline alive with silence; stopping
+            // outright would make the receiver drop the session.
+            if transport.paused.load(std::sync::atomic::Ordering::Relaxed) {
+                self.send_packet(&silence, is_first_packet).await?;
+                is_first_packet = false;
+                total_frames += FRAMES_PER_PACKET as u64;
+                let stream_position = total_frames as f64 / f64::from(SAMPLE_RATE);
+                let elapsed = started.elapsed().as_secs_f64();
+                if stream_position > elapsed {
+                    tokio::time::sleep(Duration::from_secs_f64(stream_position - elapsed)).await;
+                }
+                continue;
+            }
+
             let frames = match source.as_mut().map(|s| s.read_frames(FRAMES_PER_PACKET)) {
                 Some(Ok(Some(frames))) => frames,
                 other => {
@@ -262,6 +314,7 @@ impl AudioSender {
                     let next = queue.lock().await.pop_front();
                     match next {
                         Some(path) => {
+                            current_path = Some(path.clone());
                             match tokio::task::spawn_blocking(move || PcmSource::open(&path))
                                 .await
                                 .context("joining the AirPlay audio decoder")?
