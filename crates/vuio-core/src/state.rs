@@ -201,9 +201,10 @@ impl<D: DatabaseManager> AppState<D> {
             return self.advertised_http_origin();
         }
 
-        let peer = reqwest::Url::parse(peer_url)
+        let peer = peer_url
+            .parse::<http::Uri>()
             .ok()
-            .and_then(|url| url.host_str()?.parse::<std::net::IpAddr>().ok());
+            .and_then(|url| url.host()?.parse::<std::net::IpAddr>().ok());
         if let Some(peer) = peer {
             let bind = match peer {
                 std::net::IpAddr::V4(_) => "0.0.0.0:0",

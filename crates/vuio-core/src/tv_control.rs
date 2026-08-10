@@ -1,5 +1,6 @@
+use crate::http_client::{HttpClient, HttpResponse};
 use anyhow::{Context, Result};
-use futures_util::StreamExt;
+use http::Uri;
 use quick_xml::events::{BytesDecl, BytesEnd, BytesStart, BytesText, Event};
 use quick_xml::{Reader, Writer};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -10,74 +11,50 @@ use tracing::{debug, warn};
 const MAX_RENDERER_ERROR_BYTES: usize = 64 * 1024;
 const MAX_RENDERER_SOAP_BYTES: usize = 256 * 1024;
 
-struct CappedBody {
-    text: String,
-    truncated: bool,
+/// POST a SOAP envelope to a renderer's AVTransport control endpoint.
+///
+/// Every AVTransport call VuIO makes has this shape, so the body cap, headers
+/// and `SOAPAction` quoting live in one place rather than in five copies.
+async fn soap_request(
+    client: &HttpClient,
+    control_url: &Uri,
+    soap_action: &str,
+    body: String,
+) -> Result<HttpResponse> {
+    let request = http::Request::post(control_url.clone())
+        .header("Content-Type", "text/xml; charset=\"utf-8\"")
+        .header(
+            "SOAPAction",
+            format!("\"urn:schemas-upnp-org:service:AVTransport:1#{soap_action}\""),
+        )
+        .body(crate::http_client::body(body))
+        .context("could not build the SOAP request")?;
+    client.send(request, MAX_RENDERER_SOAP_BYTES).await
 }
 
-async fn read_response_body_capped(
-    response: reqwest::Response,
-    limit: usize,
-) -> Result<CappedBody> {
-    let mut bytes =
-        Vec::with_capacity(response.content_length().unwrap_or(0).min(limit as u64) as usize);
-    let mut truncated = response
-        .content_length()
-        .is_some_and(|length| length > limit as u64);
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.context("failed while reading renderer response body")?;
-        let remaining = limit.saturating_sub(bytes.len());
-        if chunk.len() > remaining {
-            bytes.extend_from_slice(&chunk[..remaining]);
-            truncated = true;
-            break;
-        }
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() == limit {
-            if stream.next().await.transpose()?.is_some() {
-                truncated = true;
-            }
-            break;
-        }
-    }
-    Ok(CappedBody {
-        text: String::from_utf8_lossy(&bytes).into_owned(),
-        truncated,
-    })
+fn renderer_error(operation: &str, response: &HttpResponse) -> anyhow::Error {
+    // The body was already read under the SOAP cap; an error message quotes
+    // only the smaller error cap of it.
+    let shown = MAX_RENDERER_ERROR_BYTES.min(response.body.len());
+    let truncated = response.truncated || shown < response.body.len();
+    let suffix = if truncated { " [truncated]" } else { "" };
+    anyhow::anyhow!(
+        "{} failed (HTTP {}): {}{}",
+        operation,
+        response.status,
+        String::from_utf8_lossy(&response.body[..shown]),
+        suffix
+    )
 }
 
-async fn renderer_error(operation: &str, response: reqwest::Response) -> anyhow::Error {
-    let status = response.status();
-    match read_response_body_capped(response, MAX_RENDERER_ERROR_BYTES).await {
-        Ok(body) => {
-            let suffix = if body.truncated { " [truncated]" } else { "" };
-            anyhow::anyhow!(
-                "{} failed (HTTP {}): {}{}",
-                operation,
-                status,
-                body.text,
-                suffix
-            )
-        }
-        Err(error) => anyhow::anyhow!(
-            "{} failed (HTTP {}); error body could not be read: {:#}",
-            operation,
-            status,
-            error
-        ),
-    }
-}
-
-async fn renderer_soap_body(response: reqwest::Response, operation: &str) -> Result<String> {
-    let body = read_response_body_capped(response, MAX_RENDERER_SOAP_BYTES).await?;
+fn renderer_soap_body(response: &HttpResponse, operation: &str) -> Result<String> {
     anyhow::ensure!(
-        !body.truncated,
+        !response.truncated,
         "{} response exceeded {} bytes",
         operation,
         MAX_RENDERER_SOAP_BYTES
     );
-    Ok(body.text)
+    Ok(response.text())
 }
 
 /// A discovered UPnP MediaRenderer (TV/speaker/player) on the network
@@ -160,10 +137,7 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
     );
 
     let mut tvs = Vec::new();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = HttpClient::new(Duration::from_secs(5));
 
     for (location, usn, responder) in locations {
         match fetch_tv_info(&client, &location, &usn, responder).await {
@@ -188,36 +162,21 @@ pub async fn discover_tvs() -> Result<Vec<DiscoveredTv>> {
 
 /// Fetch and parse a UPnP device descriptor XML to extract TV info
 async fn fetch_tv_info(
-    client: &reqwest::Client,
+    client: &HttpClient,
     location: &str,
     discovery_usn: &str,
     responder: IpAddr,
 ) -> Result<Option<DiscoveredTv>> {
     const MAX_DESCRIPTOR_BYTES: usize = 256 * 1024;
     let location_url = validate_renderer_url(location, Some(responder))?;
-    let response = client.get(location_url.clone()).send().await?;
+    let response = client.get(&location_url, MAX_DESCRIPTOR_BYTES).await?;
     anyhow::ensure!(
-        response.status().is_success(),
+        response.status.is_success(),
         "renderer descriptor returned {}",
-        response.status()
+        response.status
     );
-    if let Some(length) = response.content_length() {
-        anyhow::ensure!(
-            length <= MAX_DESCRIPTOR_BYTES as u64,
-            "renderer descriptor is too large"
-        );
-    }
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        anyhow::ensure!(
-            bytes.len().saturating_add(chunk.len()) <= MAX_DESCRIPTOR_BYTES,
-            "renderer descriptor is too large"
-        );
-        bytes.extend_from_slice(&chunk);
-    }
-    let body = std::str::from_utf8(&bytes).context("renderer descriptor is not UTF-8")?;
+    anyhow::ensure!(!response.truncated, "renderer descriptor is too large");
+    let body = std::str::from_utf8(&response.body).context("renderer descriptor is not UTF-8")?;
 
     let mut reader = Reader::from_str(body);
 
@@ -286,8 +245,8 @@ async fn fetch_tv_info(
         return Ok(None);
     }
 
-    let full_control_url =
-        validate_renderer_url(location_url.join(&control_url)?.as_str(), Some(responder))?;
+    let joined = crate::http_client::join_path(&location_url, &control_url)?;
+    let full_control_url = validate_renderer_url(&joined.to_string(), Some(responder))?;
 
     Ok(Some(DiscoveredTv {
         id: if udn.is_empty() {
@@ -335,19 +294,22 @@ fn normalize_ip(address: IpAddr) -> IpAddr {
     }
 }
 
-fn validate_renderer_url(raw: &str, expected_peer: Option<IpAddr>) -> Result<reqwest::Url> {
-    let url = reqwest::Url::parse(raw).context("invalid renderer URL")?;
-    anyhow::ensure!(url.scheme() == "http", "renderer URL must use HTTP");
+fn validate_renderer_url(raw: &str, expected_peer: Option<IpAddr>) -> Result<Uri> {
     anyhow::ensure!(
-        url.username().is_empty() && url.password().is_none(),
-        "renderer URL credentials are forbidden"
-    );
-    anyhow::ensure!(
-        url.fragment().is_none(),
+        !crate::http_client::has_fragment(raw),
         "renderer URL fragments are forbidden"
     );
+    let url: Uri = raw.parse().context("invalid renderer URL")?;
+    anyhow::ensure!(
+        url.scheme_str() == Some("http"),
+        "renderer URL must use HTTP"
+    );
+    anyhow::ensure!(
+        !crate::http_client::has_credentials(&url),
+        "renderer URL credentials are forbidden"
+    );
     let address = normalize_ip(
-        url.host_str()
+        url.host()
             .context("renderer URL has no host")?
             .parse::<IpAddr>()
             .context("renderer URL host must be a numeric address")?,
@@ -404,11 +366,12 @@ fn build_transport_uri_soap_with_metadata(
         matches!(action, "SetAVTransportURI" | "SetNextAVTransportURI"),
         "unsupported transport action"
     );
-    let media = reqwest::Url::parse(media_url).context("invalid media URL")?;
+    let media: Uri = media_url.parse().context("invalid media URL")?;
     anyhow::ensure!(
-        matches!(media.scheme(), "http" | "https"),
+        matches!(media.scheme_str(), Some("http") | Some("https")),
         "media URL must use HTTP(S)"
     );
+    let media = media.to_string();
     anyhow::ensure!(
         !mime_type.is_empty()
             && mime_type.is_ascii()
@@ -472,8 +435,8 @@ fn build_transport_uri_soap_with_metadata(
 }
 
 async fn set_transport_uri(
-    client: &reqwest::Client,
-    control_url: &reqwest::Url,
+    client: &HttpClient,
+    control_url: &Uri,
     media_url: &str,
     title: &str,
     mime_type: &str,
@@ -486,18 +449,9 @@ async fn set_transport_uri(
         mime_type,
         include_metadata,
     )?;
-    let response = client
-        .post(control_url.clone())
-        .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header(
-            "SOAPAction",
-            "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"",
-        )
-        .body(body)
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        return Err(renderer_error("SetAVTransportURI", response).await);
+    let response = soap_request(client, control_url, "SetAVTransportURI", body).await?;
+    if !response.status.is_success() {
+        return Err(renderer_error("SetAVTransportURI", &response));
     }
     Ok(())
 }
@@ -534,16 +488,13 @@ pub async fn cast_media(
     mime_type: &str,
 ) -> Result<()> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = HttpClient::new(Duration::from_secs(10));
     debug!("Casting {} to {}", media_url, control_url);
     set_transport_uri(&client, &control_url, media_url, title, mime_type, true).await?;
     debug!("SetAVTransportURI succeeded on {}", control_url);
 
-    control_playback(control_url.as_str(), "Play").await?;
-    if playback_started(control_url.as_str(), media_url).await != Some(false) {
+    control_playback(&control_url.to_string(), "Play").await?;
+    if playback_started(&control_url.to_string(), media_url).await != Some(false) {
         return Ok(());
     }
 
@@ -554,11 +505,11 @@ pub async fn cast_media(
         "Renderer did not start {}; retrying without DIDL metadata",
         media_url
     );
-    let _ = control_playback(control_url.as_str(), "Stop").await;
+    let _ = control_playback(&control_url.to_string(), "Stop").await;
     set_transport_uri(&client, &control_url, media_url, title, mime_type, false).await?;
     tokio::time::sleep(Duration::from_millis(150)).await;
-    control_playback(control_url.as_str(), "Play").await?;
-    if playback_started(control_url.as_str(), media_url).await == Some(false) {
+    control_playback(&control_url.to_string(), "Play").await?;
+    if playback_started(&control_url.to_string(), media_url).await == Some(false) {
         anyhow::bail!(
             "TV accepted the cast commands but did not load the media URL {}",
             media_url
@@ -574,12 +525,7 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
         matches!(action, "Play" | "Pause" | "Stop"),
         "unsupported playback action"
     );
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-
-    let soap_action = format!("urn:schemas-upnp-org:service:AVTransport:1#{}", action);
+    let client = HttpClient::new(Duration::from_secs(10));
 
     let speed_element = if action == "Play" {
         "<Speed>1</Speed>"
@@ -600,16 +546,10 @@ pub async fn control_playback(control_url: &str, action: &str) -> Result<()> {
 </s:Envelope>"#
     );
 
-    let resp = client
-        .post(control_url.clone())
-        .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header("SOAPAction", format!("\"{}\"", soap_action))
-        .body(body)
-        .send()
-        .await?;
+    let resp = soap_request(&client, &control_url, action, body).await?;
 
-    if !resp.status().is_success() {
-        return Err(renderer_error(&format!("{action} command"), resp).await);
+    if !resp.status.is_success() {
+        return Err(renderer_error(&format!("{action} command"), &resp));
     }
 
     debug!("{} command succeeded on {}", action, control_url);
@@ -624,25 +564,13 @@ pub async fn set_next_media(
     mime_type: &str,
 ) -> Result<()> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = HttpClient::new(Duration::from_secs(10));
     let body = build_transport_uri_soap("SetNextAVTransportURI", media_url, title, mime_type)?;
 
-    let resp = client
-        .post(control_url.clone())
-        .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header(
-            "SOAPAction",
-            "\"urn:schemas-upnp-org:service:AVTransport:1#SetNextAVTransportURI\"",
-        )
-        .body(body)
-        .send()
-        .await?;
+    let resp = soap_request(&client, &control_url, "SetNextAVTransportURI", body).await?;
 
-    if !resp.status().is_success() {
-        return Err(renderer_error("SetNextAVTransportURI", resp).await);
+    if !resp.status.is_success() {
+        return Err(renderer_error("SetNextAVTransportURI", &resp));
     }
 
     debug!("SetNextAVTransportURI succeeded on {}", control_url);
@@ -652,10 +580,7 @@ pub async fn set_next_media(
 /// Query what media URI is currently active/playing on the TV
 pub async fn get_position_info(control_url: &str) -> Result<String> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = HttpClient::new(Duration::from_secs(5));
 
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
@@ -667,22 +592,13 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
     </s:Body>
 </s:Envelope>"#;
 
-    let resp = client
-        .post(control_url)
-        .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header(
-            "SOAPAction",
-            "\"urn:schemas-upnp-org:service:AVTransport:1#GetPositionInfo\"",
-        )
-        .body(body)
-        .send()
-        .await?;
+    let resp = soap_request(&client, &control_url, "GetPositionInfo", body.to_owned()).await?;
 
-    if !resp.status().is_success() {
-        return Err(renderer_error("GetPositionInfo", resp).await);
+    if !resp.status.is_success() {
+        return Err(renderer_error("GetPositionInfo", &resp));
     }
 
-    let text = renderer_soap_body(resp, "GetPositionInfo").await?;
+    let text = renderer_soap_body(&resp, "GetPositionInfo")?;
 
     // Extract TrackURI
     if let Some(uri_part) = text.split("<TrackURI>").nth(1) {
@@ -697,10 +613,7 @@ pub async fn get_position_info(control_url: &str) -> Result<String> {
 /// Query the current transport state (PLAYING, STOPPED, PAUSED_PLAYBACK) of the TV
 pub async fn get_transport_state(control_url: &str) -> Result<String> {
     let control_url = validate_renderer_url(control_url, None)?;
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
+    let client = HttpClient::new(Duration::from_secs(5));
 
     let body = r#"<?xml version="1.0" encoding="utf-8"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"
@@ -712,22 +625,13 @@ pub async fn get_transport_state(control_url: &str) -> Result<String> {
     </s:Body>
 </s:Envelope>"#;
 
-    let resp = client
-        .post(control_url)
-        .header("Content-Type", "text/xml; charset=\"utf-8\"")
-        .header(
-            "SOAPAction",
-            "\"urn:schemas-upnp-org:service:AVTransport:1#GetTransportInfo\"",
-        )
-        .body(body)
-        .send()
-        .await?;
+    let resp = soap_request(&client, &control_url, "GetTransportInfo", body.to_owned()).await?;
 
-    if !resp.status().is_success() {
-        return Err(renderer_error("GetTransportInfo", resp).await);
+    if !resp.status.is_success() {
+        return Err(renderer_error("GetTransportInfo", &resp));
     }
 
-    let text = renderer_soap_body(resp, "GetTransportInfo").await?;
+    let text = renderer_soap_body(&resp, "GetTransportInfo")?;
     if let Some(state_part) = text.split("<CurrentTransportState>").nth(1) {
         if let Some(state) = state_part.split("</CurrentTransportState>").next() {
             return Ok(state.trim().to_string());

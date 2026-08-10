@@ -78,6 +78,7 @@ internal_modules!(
     config,
     database,
     error,
+    http_client,
     lifecycle,
     logging,
     media,

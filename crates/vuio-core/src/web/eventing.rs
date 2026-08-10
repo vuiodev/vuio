@@ -200,15 +200,18 @@ fn validate_upnp_callback(
         .unwrap_or(raw)
         .trim()
         .trim_start_matches('<');
-    let url = reqwest::Url::parse(candidate).ok()?;
-    if url.scheme() != "http" {
+    if crate::http_client::has_fragment(candidate) {
         return None;
     }
-    if !url.username().is_empty() || url.password().is_some() || url.port() == Some(0) {
+    let url = candidate.parse::<http::Uri>().ok()?;
+    if url.scheme_str() != Some("http") {
+        return None;
+    }
+    if crate::http_client::has_credentials(&url) || url.port_u16() == Some(0) {
         return None;
     }
 
-    let address = normalize_ip(url.host_str()?.parse::<IpAddr>().ok()?);
+    let address = normalize_ip(url.host()?.parse::<IpAddr>().ok()?);
     if is_forbidden_callback_address(address) {
         return None;
     }
@@ -241,41 +244,44 @@ async fn send_event_notification(
         update_id
     );
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-    {
-        Ok(client) => client,
-        Err(_) => return false,
-    };
-    match client
-        .request(
-            reqwest::Method::from_bytes(b"NOTIFY")
+    // The subscriber's answer to a NOTIFY carries nothing we act on, so only
+    // enough is read to drain the connection.
+    const MAX_ACK_BYTES: usize = 8 * 1024;
+
+    let request = http::Request::builder()
+        .method(
+            http::Method::from_bytes(b"NOTIFY")
                 .expect("NOTIFY is a valid constant HTTP extension method"),
-            callback_url,
         )
+        .uri(callback_url)
         .header("CONTENT-TYPE", "text/xml; charset=\"utf-8\"")
         .header("NT", "upnp:event")
         .header("NTS", "upnp:propchange")
         .header("SID", sid)
         .header("SEQ", sequence.to_string())
-        .body(event_body)
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => true,
+        .body(crate::http_client::body(event_body));
+
+    let request = match request {
+        Ok(request) => request,
+        Err(e) => {
+            warn!("Could not build the event notification for {callback_url}: {e}");
+            return false;
+        }
+    };
+
+    let client = crate::http_client::HttpClient::new(std::time::Duration::from_secs(3));
+    match client.send(request, MAX_ACK_BYTES).await {
+        Ok(response) if response.status.is_success() => true,
         Ok(response) => {
             warn!(
                 "UPnP event callback {} returned {}",
-                callback_url,
-                response.status()
+                callback_url, response.status
             );
             false
         }
         Err(e) => {
             warn!(
-                "Failed to send event notification to {}: {}",
+                "Failed to send event notification to {}: {:#}",
                 callback_url, e
             );
             false

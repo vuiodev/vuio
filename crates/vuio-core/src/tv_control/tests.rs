@@ -37,15 +37,3 @@ fn transport_xml_can_omit_metadata_for_strict_renderers() {
     assert!(xml.contains("<CurrentURIMetaData></CurrentURIMetaData>"));
     assert!(!xml.contains("DIDL-Lite"));
 }
-
-#[tokio::test]
-async fn renderer_response_reader_caps_and_marks_truncation() {
-    let response: reqwest::Response = axum::http::Response::builder()
-        .header(axum::http::header::CONTENT_LENGTH, "10")
-        .body(b"0123456789".to_vec())
-        .unwrap()
-        .into();
-    let body = read_response_body_capped(response, 8).await.unwrap();
-    assert_eq!(body.text, "01234567");
-    assert!(body.truncated);
-}
