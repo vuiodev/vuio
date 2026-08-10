@@ -2,14 +2,26 @@
 name = "vuio-core"
 version = "0.0.41"
 edition = "2021"
+# Raising this is a minor release, never a patch. The floor is set by the
+# dependency graph rather than by anything in this crate: `sysinfo` requires
+# 1.95 and `redb` 1.89, so lowering it means dropping or gating those first.
+rust-version = "1.95"
 authors = ["vyrti"]
 description = "Embeddable VuIO media server runtime"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 documentation = "https://docs.rs/vuio-core"
+readme = "README.md"
 keywords = ["dlna", "upnp", "server", "streaming", "ssdp"]
 categories = ["multimedia", "network-programming"]
+
+[package.metadata.docs.rs]
+# docs.rs documents the published surface, so `unstable-internals` stays off:
+# the internal modules are `#[doc(hidden)]` and would bury the seven items that
+# are actually promised.
+all-features = false
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "vuio_core"

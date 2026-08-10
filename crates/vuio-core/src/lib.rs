@@ -1,4 +1,48 @@
+//! The embeddable VuIO media server runtime.
+//!
+//! Start a complete DLNA/UPnP server — discovery, indexing, streaming, casting
+//! and the management API — inside a host application, with no process, no
+//! command line and no signal handling of its own.
+//!
+//! ```no_run
+//! use vuio_core::{Runtime, RuntimeOptions};
+//!
+//! # async fn example() -> vuio_core::Result<()> {
+//! let vuio = Runtime::start(
+//!     RuntimeOptions::new()
+//!         .media_dir("/srv/media")
+//!         .port(8080)
+//!         .server_name("Lounge"),
+//! );
+//!
+//! vuio.wait().await
+//! # }
+//! ```
+//!
+//! # Stability
+//!
+//! This crate targets devices whose firmware is updated rarely, so it promises
+//! a surface small enough to keep: [`Runtime`], [`RuntimeHandle`],
+//! [`RuntimeOptions`], [`RuntimeStatus`], [`Error`], [`ErrorKind`] and
+//! [`Result`], and nothing else. Within a major release these keep their
+//! names, signatures and behaviour, and stay `Send + Sync + 'static`. None of
+//! them names a type from another crate, so a dependency's major release
+//! cannot break a caller.
+//!
+//! Hosts needing to browse, search or control the server use its HTTP and MCP
+//! APIs rather than Rust types — the same surface the dashboard and
+//! `vuio-tower` drive, and one that works from any language.
+//!
+//! The `unstable-internals` feature opens the crate's internals for the
+//! integration tests. It carries no stability promise whatsoever and must
+//! never be enabled by a dependent crate. See the crate README for the full
+//! policy, including the MSRV and feature rules.
+
 #![deny(unsafe_op_in_unsafe_fn)]
+// Only the facade is documented under default features; with
+// `unstable-internals` every internal module turns public and the lint would
+// fire on code that carries no promise and no obligation to explain itself.
+#![cfg_attr(not(feature = "unstable-internals"), deny(missing_docs))]
 // Making the modules internal revealed ~110 items with no caller inside the
 // crate: they existed only as public API. They are still reachable under
 // `unstable-internals` (the tests use many of them), so the lint only fires in

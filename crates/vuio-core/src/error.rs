@@ -342,7 +342,9 @@ mod tests {
 // foreign type at all — a source is erased to a boxed `std::error::Error`, so a
 // dependency's major release can never break this signature.
 
-/// The kind of failure an [`Error`] represents.
+// `struct@` disambiguates from thiserror's `Error` derive macro, which is in
+// scope in this module.
+/// The kind of failure an [`struct@Error`] represents.
 ///
 /// New kinds may be added in future releases, which is why this enum is
 /// `#[non_exhaustive]`: match with a `_` arm.
