@@ -226,6 +226,7 @@ impl AirplayConnection {
                 cseq,
                 stream_id,
                 content_type,
+                payload = ?value,
                 ?keys,
                 ?nested_keys,
                 nested_type,
@@ -239,8 +240,10 @@ impl AirplayConnection {
             tracing::debug!(request_line, body_length = length, "received AirPlay event");
         }
         self.plain_buffer.drain(..header_end + 4 + length);
-        let mut response =
-            format!("{protocol} 200 OK\r\nContent-Length: 0\r\nAudio-Latency: 0\r\n");
+        // The reply must carry nothing beyond Server and CSeq. Adding
+        // `Audio-Latency` or `Content-Length` corrupts the receiver's realtime
+        // timeline: the session stays connected and renders silence.
+        let mut response = format!("{protocol} 200 OK\r\nServer: AirPlay/550.10\r\n");
         if let Some(cseq) = cseq {
             response.push_str(&format!("CSeq: {cseq}\r\n"));
         }

@@ -19,6 +19,18 @@ pub const SAMPLE_RATE: u32 = 44100;
 pub const CHANNELS: usize = 2;
 pub const BYTES_PER_FRAME: usize = CHANNELS * 2;
 
+/// What the receiver shows on its now-playing screen.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackMetadata {
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    /// Track length in seconds, which is what gives the seek bar its extent.
+    pub duration_seconds: Option<u64>,
+    /// Embedded cover art, with its media type.
+    pub artwork: Option<(String, Vec<u8>)>,
+}
+
 /// A decoded, resampled PCM stream ready to be packetised.
 pub struct PcmSource {
     format: Box<dyn FormatReader>,
@@ -33,6 +45,7 @@ pub struct PcmSource {
     /// Output frames at 44100 Hz, interleaved 16-bit.
     ready: Vec<u8>,
     exhausted: bool,
+    metadata: TrackMetadata,
 }
 
 impl PcmSource {
@@ -44,7 +57,7 @@ impl PcmSource {
         if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
             hint.with_extension(extension);
         }
-        let format = symphonia::default::get_probe()
+        let mut format = symphonia::default::get_probe()
             .probe(
                 &hint,
                 stream,
@@ -56,6 +69,20 @@ impl PcmSource {
             .default_track(TrackType::Audio)
             .context("the file has no audio track")?;
         let track_id = track.id;
+        let duration_seconds = track
+            .num_frames
+            .zip(
+                track
+                    .codec_params
+                    .as_ref()
+                    .and_then(|params| params.audio()),
+            )
+            .and_then(|(frames, audio)| {
+                audio
+                    .sample_rate
+                    .filter(|rate| *rate > 0)
+                    .map(|rate| frames / u64::from(rate))
+            });
         let parameters = track
             .codec_params
             .as_ref()
@@ -70,6 +97,46 @@ impl PcmSource {
                     path.display()
                 )
             })?;
+        let mut metadata = TrackMetadata {
+            duration_seconds,
+            ..TrackMetadata::default()
+        };
+        {
+            let mut tags = format.metadata();
+            if let Some(revision) = tags.skip_to_latest() {
+                if let Some(visual) = revision.media.visuals.first() {
+                    metadata.artwork = Some((
+                        visual
+                            .media_type
+                            .clone()
+                            .unwrap_or_else(|| "image/jpeg".into()),
+                        visual.data.to_vec(),
+                    ));
+                }
+                for tag in &revision.media.tags {
+                    match &tag.std {
+                        Some(symphonia::core::meta::StandardTag::TrackTitle(value)) => {
+                            metadata.title = Some(value.to_string())
+                        }
+                        Some(symphonia::core::meta::StandardTag::Artist(value)) => {
+                            metadata.artist = Some(value.to_string())
+                        }
+                        Some(symphonia::core::meta::StandardTag::Album(value)) => {
+                            metadata.album = Some(value.to_string())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        // Fall back to the filename so the receiver always shows something.
+        if metadata.title.is_none() {
+            metadata.title = path
+                .file_stem()
+                .and_then(|value| value.to_str())
+                .map(str::to_string);
+        }
+
         let source_rate = parameters.sample_rate.unwrap_or(SAMPLE_RATE);
         let source_channels = parameters
             .channels
@@ -85,7 +152,12 @@ impl PcmSource {
             position: 0.0,
             ready: Vec::new(),
             exhausted: false,
+            metadata,
         })
+    }
+
+    pub fn metadata(&self) -> &TrackMetadata {
+        &self.metadata
     }
 
     /// Read the next packet from the container and decode it into `decoded`.
@@ -135,7 +207,6 @@ impl PcmSource {
     /// Linear interpolation is enough here: the common case is a 44100 Hz source
     /// where `step` is exactly 1.0 and samples pass through untouched.
     fn resample(&mut self) {
-        let big_endian = super::raop::big_endian_samples();
         let channels = self.source_channels;
         let available = self.decoded.len() / channels;
         if available == 0 {
@@ -159,11 +230,7 @@ impl PcmSource {
                 let second = self.decoded[(index + 1) * channels + source_channel];
                 let value = first + (second - first) * fraction;
                 let scaled = (value.clamp(-1.0, 1.0) * 32767.0) as i16;
-                if big_endian {
-                    self.ready.extend_from_slice(&scaled.to_be_bytes());
-                } else {
-                    self.ready.extend_from_slice(&scaled.to_le_bytes());
-                }
+                self.ready.extend_from_slice(&scaled.to_le_bytes());
             }
             self.position += step;
         }

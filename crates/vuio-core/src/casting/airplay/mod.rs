@@ -470,6 +470,12 @@ impl AirplayProvider {
         })
         .await?;
         let timing_port = i64::from(timing_socket.local_addr()?.port());
+        // A receiver requires `GET /info` before it will accept SETUP.
+        match control.rtsp("GET", "/info", None, &[]).await {
+            Ok(info) => tracing::debug!(status = info.status, "AirPlay audio /info"),
+            Err(error) => tracing::debug!(%error, "AirPlay audio /info failed"),
+        }
+
         let setup_uuid = uuid::Uuid::new_v4().to_string().to_uppercase();
         let setup = binary_plist(setup_parameters(&device_id, &setup_uuid, timing_port))?;
         let response = control
@@ -508,6 +514,13 @@ impl AirplayProvider {
             }
         })));
 
+        // RECORD goes after the session SETUP and before the stream SETUP; the
+        // reverse order yields RECORD=500 / FLUSH=455.
+        let record = control.rtsp("RECORD", &rtsp_session, None, &[]).await?;
+        if !(200..300).contains(&record.status) {
+            tracing::warn!(status = record.status, "AirPlay audio RECORD was refused");
+        }
+
         let key = raop::stream_key(&shared_secret)?;
         if std::env::var("VUIO_AIRPLAY_PROBE_FORMATS")
             .is_ok_and(|value| matches!(value.trim(), "1" | "true" | "yes"))
@@ -529,11 +542,6 @@ impl AirplayProvider {
         let receiver_session = response.headers.get("session").cloned();
         tracing::info!(data_port, control_port, "AirPlay audio stream allocated");
 
-        let record = control.rtsp("RECORD", &rtsp_session, None, &[]).await?;
-        if !(200..300).contains(&record.status) {
-            tracing::warn!(status = record.status, "AirPlay audio RECORD was refused");
-        }
-
         let rtptime = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
         let (mut sender, control_socket, control_target) = raop::AudioSender::connect(
             address,
@@ -544,12 +552,6 @@ impl AirplayProvider {
             rtptime.clone(),
         )
         .await?;
-        let mut sync_task = AbortOnDrop(Some(raop::spawn_sync_task(
-            control_socket,
-            control_target,
-            rtptime,
-        )));
-
         // FLUSH anchors the stream: it tells the receiver which sequence number
         // and RTP timestamp the audio about to arrive starts from. Without it a
         // receiver has nothing to align against and renders noise, then keeps
@@ -565,9 +567,13 @@ impl AirplayProvider {
                 ),
             ),
         ];
-        if let Some(session) = receiver_session {
+        if let Some(session) = receiver_session.clone() {
             flush_headers.push(("Session", session));
         }
+        // FLUSH declares where the stream restarts: it tells the receiver to
+        // drop anything buffered and expect audio from this seq/rtptime. A
+        // fresh session has nothing to discard, so it is optional at start, but
+        // it is the mechanism a seek or track skip needs.
         let flush = control
             .rtsp_with("FLUSH", &rtsp_session, None, &flush_headers, &[])
             .await?;
@@ -577,13 +583,35 @@ impl AirplayProvider {
             tracing::debug!(status = flush.status, "AirPlay audio stream anchored");
         }
 
+        // Only now start announcing the clock, and seed it with the position
+        // the first packet will carry -- a zero here makes the very first sync
+        // packet claim a stream position of `0 - latency`, which wraps.
+        rtptime.store(sender.start_rtptime(), std::sync::atomic::Ordering::Relaxed);
+        let mut sync_task = AbortOnDrop(Some(raop::spawn_sync_task(
+            control_socket,
+            control_target,
+            rtptime,
+        )));
+
         let control = std::sync::Arc::new(Mutex::new(control));
         let mut feedback_task = AbortOnDrop(Some(spawn_feedback_task(control.clone())));
 
         let queue: AudioQueue = std::sync::Arc::new(Mutex::new(std::collections::VecDeque::new()));
         let stream_queue = queue.clone();
+        let stream_control = control.clone();
+        let stream_rtsp_session = rtsp_session.clone();
+        let stream_session = receiver_session.clone();
         let stream_task = tokio::spawn(async move {
-            if let Err(error) = sender.stream(source, stream_queue).await {
+            if let Err(error) = sender
+                .stream(
+                    source,
+                    stream_queue,
+                    stream_control,
+                    stream_rtsp_session,
+                    stream_session,
+                )
+                .await
+            {
                 tracing::warn!(%error, "AirPlay audio streaming stopped");
             }
         });
@@ -1091,7 +1119,7 @@ async fn probe_audio_stream(
     stream.insert("audioFormat".into(), plist::Value::Integer(0x800.into()));
     stream.insert("audioMode".into(), plist::Value::String("default".into()));
     stream.insert("controlPort".into(), plist::Value::Integer(0.into()));
-    stream.insert("ct".into(), plist::Value::Integer(1.into()));
+    stream.insert("ct".into(), plist::Value::Integer(2.into()));
     stream.insert("isMedia".into(), plist::Value::Boolean(true));
     stream.insert("latencyMax".into(), plist::Value::Integer(88200.into()));
     stream.insert("latencyMin".into(), plist::Value::Integer(11025.into()));
@@ -1126,14 +1154,16 @@ async fn probe_audio_stream(
     Ok(())
 }
 
-/// The buffered-audio stream description: `PCM/44100/16/2`, which is the one
-/// AirPlay format that needs a decoder and no encoder.
+/// The realtime audio stream description.
+///
+/// `audioFormat`/`ct` announce ALAC because that is what the receiver decodes;
+/// it hardcodes ALAC on this stream and ignores what it was offered.
 fn audio_stream_parameters(shared_key: &[u8; 32], session_id: u32) -> plist::Value {
     let mut stream = plist::Dictionary::new();
-    stream.insert("audioFormat".into(), plist::Value::Integer(0x800.into()));
+    stream.insert("audioFormat".into(), plist::Value::Integer(0x40000.into()));
     stream.insert("audioMode".into(), plist::Value::String("default".into()));
     stream.insert("controlPort".into(), plist::Value::Integer(0.into()));
-    stream.insert("ct".into(), plist::Value::Integer(1.into()));
+    stream.insert("ct".into(), plist::Value::Integer(2.into()));
     stream.insert("isMedia".into(), plist::Value::Boolean(true));
     stream.insert("latencyMax".into(), plist::Value::Integer(88200.into()));
     stream.insert("latencyMin".into(), plist::Value::Integer(11025.into()));
@@ -1238,6 +1268,120 @@ async fn probe_audio_formats(
                 return;
             }
         }
+    }
+}
+
+/// Encode one DMAP tag: a four-character code, a big-endian length, the value.
+fn dmap_tag(code: &[u8; 4], value: &[u8]) -> Vec<u8> {
+    let mut tag = Vec::with_capacity(8 + value.len());
+    tag.extend_from_slice(code);
+    tag.extend_from_slice(&(value.len() as u32).to_be_bytes());
+    tag.extend_from_slice(value);
+    tag
+}
+
+/// The now-playing payload a receiver renders: title, album, artist.
+fn dmap_metadata(metadata: &audio::TrackMetadata) -> Vec<u8> {
+    let mut payload = Vec::new();
+    if let Some(title) = &metadata.title {
+        payload.extend_from_slice(&dmap_tag(b"minm", title.as_bytes()));
+    }
+    if let Some(album) = &metadata.album {
+        payload.extend_from_slice(&dmap_tag(b"asal", album.as_bytes()));
+    }
+    if let Some(artist) = &metadata.artist {
+        payload.extend_from_slice(&dmap_tag(b"asar", artist.as_bytes()));
+    }
+    dmap_tag(b"mlit", &payload)
+}
+
+/// Announce a track to the receiver's now-playing screen.
+///
+/// `progress` carries RTP timestamps and is what gives the seek bar its extent
+/// and position; the DMAP payload supplies the text.
+#[allow(clippy::too_many_arguments)]
+async fn announce_track(
+    control: &std::sync::Arc<Mutex<SecureControl>>,
+    rtsp_session: &str,
+    receiver_session: Option<&str>,
+    sequence: u16,
+    rtptime: u32,
+    end: u32,
+    metadata: &audio::TrackMetadata,
+) {
+    let progress = format!("progress: {rtptime}/{rtptime}/{end}\r\n");
+    let mut guard = control.lock().await;
+    if let Err(error) = guard
+        .rtsp(
+            "SET_PARAMETER",
+            rtsp_session,
+            Some("text/parameters"),
+            progress.as_bytes(),
+        )
+        .await
+    {
+        tracing::debug!(%error, "AirPlay progress update failed");
+        return;
+    }
+
+    let mut headers = vec![("RTP-Info", format!("seq={sequence};rtptime={rtptime}"))];
+    if let Some(session) = receiver_session {
+        headers.push(("Session", session.to_string()));
+    }
+    match guard
+        .rtsp_with(
+            "SET_PARAMETER",
+            rtsp_session,
+            Some("application/x-dmap-tagged"),
+            &headers,
+            &dmap_metadata(metadata),
+        )
+        .await
+    {
+        Ok(response) => tracing::debug!(
+            status = response.status,
+            title = metadata.title.as_deref().unwrap_or("<none>"),
+            "AirPlay now-playing metadata sent"
+        ),
+        Err(error) => tracing::debug!(%error, "AirPlay metadata update failed"),
+    }
+
+    if let Some((media_type, artwork)) = &metadata.artwork {
+        match guard
+            .rtsp_with("SET_PARAMETER", "/", Some(media_type), &headers, artwork)
+            .await
+        {
+            Ok(response) => tracing::debug!(
+                status = response.status,
+                bytes = artwork.len(),
+                "AirPlay cover art sent"
+            ),
+            Err(error) => tracing::debug!(%error, "AirPlay cover art failed"),
+        }
+    }
+}
+
+/// Refresh only the position, leaving the text metadata in place.
+async fn update_progress(
+    control: &std::sync::Arc<Mutex<SecureControl>>,
+    rtsp_session: &str,
+    start: u32,
+    now: u32,
+    end: u32,
+) {
+    let progress = format!("progress: {start}/{now}/{end}\r\n");
+    if let Err(error) = control
+        .lock()
+        .await
+        .rtsp(
+            "SET_PARAMETER",
+            rtsp_session,
+            Some("text/parameters"),
+            progress.as_bytes(),
+        )
+        .await
+    {
+        tracing::debug!(%error, "AirPlay progress refresh failed");
     }
 }
 

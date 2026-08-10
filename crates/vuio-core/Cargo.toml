@@ -57,7 +57,7 @@ hap-tlv8 = "1.0"
 hkdf = "0.12"
 sha2 = "0.10"
 num-bigint = "0.4"
-symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis"] }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis", "alac", "id3v1", "id3v2", "ape"] }
 getrandom = "0.3"
 plist = "1.8"
 hex = "0.4"
