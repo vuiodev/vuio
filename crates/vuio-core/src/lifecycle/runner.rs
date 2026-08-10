@@ -135,6 +135,7 @@ where
         config_manager.get_config_path(),
         runtime_options.auth,
     )?);
+    #[cfg(feature = "casting")]
     let renderer_cache = crate::runtime_state::RendererCache::persistent(database.clone())
         .await
         .context("Failed to initialize AirPlay credential storage")?;
@@ -163,6 +164,7 @@ where
         active_casts: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::ActiveCastRegistry::new(),
         )),
+        #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: cancellation.clone(),
@@ -445,6 +447,7 @@ where
     // Tear renderer sessions down first: a receiver keeps rendering what it has
     // buffered unless it is told to stop, and the control connection has to
     // still be alive to tell it.
+    #[cfg(feature = "casting")]
     app_state.discovered_tvs.shutdown().await;
     shutdown.cancel();
     background_tasks.close();

@@ -84,6 +84,7 @@ pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
     change_sender: broadcast::Sender<ConfigChangeEvent>,
+    /// Held so the watcher outlives this manager; dropping it stops reloads.
     _debouncer: Option<
         notify_debouncer_full::Debouncer<
             notify::RecommendedWatcher,

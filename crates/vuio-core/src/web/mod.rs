@@ -1,12 +1,15 @@
 pub mod auth;
+#[cfg(feature = "casting")]
 pub mod casting;
 pub mod client;
 pub mod diagnostics;
 pub mod eventing;
 mod format;
+#[cfg(feature = "mcp")]
 pub mod mcp;
 pub mod soap;
 pub mod streaming;
+#[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
 
@@ -38,35 +41,59 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         )
         .layer(DefaultBodyLimit::max(SOAP_BODY_LIMIT));
 
-    let json_routes = Router::new()
-        .route("/api/cast", post(casting::api_cast::<D>))
-        .route("/api/cast/control", post(casting::api_cast_control::<D>))
-        .route("/api/cast/playlist", post(casting::api_cast_playlist::<D>))
-        .route(
-            "/api/renderers/pair/start",
-            post(casting::api_pairing_start::<D>),
-        )
-        .route(
-            "/api/renderers/pair/finish",
-            post(casting::api_pairing_finish::<D>),
-        )
-        .route(
-            "/api/renderers/pair/forget",
-            post(casting::api_pairing_forget::<D>),
-        )
-        .route("/mcp/message", post(mcp::message_handler::<D>))
-        .layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
+    // Routes are added conditionally rather than declared in one chain: a
+    // feature that is off must take its endpoints with it, so a caller gets a
+    // 404 instead of a handler that cannot work.
+    #[allow(unused_mut)]
+    let mut json_routes = Router::new();
+    #[cfg(feature = "casting")]
+    {
+        json_routes = json_routes
+            .route("/api/cast", post(casting::api_cast::<D>))
+            .route("/api/cast/control", post(casting::api_cast_control::<D>))
+            .route("/api/cast/playlist", post(casting::api_cast_playlist::<D>))
+            .route(
+                "/api/renderers/pair/start",
+                post(casting::api_pairing_start::<D>),
+            )
+            .route(
+                "/api/renderers/pair/finish",
+                post(casting::api_pairing_finish::<D>),
+            )
+            .route(
+                "/api/renderers/pair/forget",
+                post(casting::api_pairing_forget::<D>),
+            );
+    }
+    #[cfg(feature = "mcp")]
+    {
+        json_routes = json_routes.route("/mcp/message", post(mcp::message_handler::<D>));
+    }
+    let json_routes = json_routes.layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
 
-    let management_routes = Router::new()
-        .route("/", get(ui::root_handler))
-        .route("/api/server-info", get(ui::server_info_handler::<D>))
-        .route("/api/media", get(ui::media_page_handler::<D>))
+    #[allow(unused_mut)]
+    let mut management_routes = Router::new()
         .route("/metrics", get(diagnostics::get_prometheus_metrics::<D>))
         .route("/metrics/json", get(diagnostics::get_web_metrics::<D>))
         .route("/logs", get(diagnostics::get_logs_handler::<D>))
-        .route("/api/renderers", get(casting::api_list_renderers::<D>))
-        .route("/sse", get(mcp::sse_handler::<D>))
-        .route("/logout", post(auth::logout::<D>))
+        .route("/logout", post(auth::logout::<D>));
+    #[cfg(feature = "dashboard")]
+    {
+        management_routes = management_routes
+            .route("/", get(ui::root_handler))
+            .route("/api/server-info", get(ui::server_info_handler::<D>))
+            .route("/api/media", get(ui::media_page_handler::<D>));
+    }
+    #[cfg(feature = "casting")]
+    {
+        management_routes =
+            management_routes.route("/api/renderers", get(casting::api_list_renderers::<D>));
+    }
+    #[cfg(feature = "mcp")]
+    {
+        management_routes = management_routes.route("/sse", get(mcp::sse_handler::<D>));
+    }
+    let management_routes = management_routes
         .merge(json_routes)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

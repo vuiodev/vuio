@@ -1,8 +1,8 @@
-mod casting;
 mod media;
 mod playlists;
 
-pub(crate) use casting::*;
-pub use casting::{cast_file_helper, cast_playlist_helper, cast_tracks_helper};
+// Cast orchestration lives with casting; MCP is one of its two callers.
+#[cfg(feature = "casting")]
+pub(crate) use crate::web::casting::helpers::*;
 pub(crate) use media::*;
 pub(crate) use playlists::*;

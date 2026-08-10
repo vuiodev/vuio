@@ -62,11 +62,13 @@
 // It carries no stability promise whatsoever and must never be enabled by a
 // dependent crate.
 macro_rules! internal_modules {
-    ($($name:ident),* $(,)?) => {
+    ($( $(#[$gate:meta])* $name:ident ),* $(,)?) => {
         $(
+            $(#[$gate])*
             #[cfg(feature = "unstable-internals")]
             #[doc(hidden)]
             pub mod $name;
+            $(#[$gate])*
             #[cfg(not(feature = "unstable-internals"))]
             pub(crate) mod $name;
         )*
@@ -74,6 +76,7 @@ macro_rules! internal_modules {
 }
 
 internal_modules!(
+    #[cfg(feature = "casting")]
     casting,
     config,
     database,
@@ -87,6 +90,7 @@ internal_modules!(
     runtime_state,
     state,
     ssdp,
+    #[cfg(feature = "casting")]
     tv_control,
     watcher,
     web,

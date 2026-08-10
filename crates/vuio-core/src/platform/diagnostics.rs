@@ -5,6 +5,7 @@
 //! collector and performs refreshes on Tokio's blocking pool.
 
 use serde::Serialize;
+#[cfg(feature = "diagnostics")]
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,12 +56,14 @@ pub struct NetworkDiagnostics {
     pub maximum_mtu: u64,
 }
 
+#[cfg(feature = "diagnostics")]
 struct DiagnosticsCollector {
     system: sysinfo::System,
     disks: sysinfo::Disks,
     networks: sysinfo::Networks,
 }
 
+#[cfg(feature = "diagnostics")]
 impl DiagnosticsCollector {
     fn new() -> Self {
         Self {
@@ -148,18 +151,32 @@ impl DiagnosticsCollector {
     }
 }
 
+/// Samples the running system.
+///
+/// The shape of this type does not depend on the `diagnostics` feature, so
+/// `AppState` and the status endpoints are the same either way. Without the
+/// feature there is nothing behind it, and [`snapshot`](Self::snapshot) says
+/// so — callers already treat a failed sample as "no data available".
 #[derive(Clone)]
 pub struct SystemDiagnosticsSampler {
+    #[cfg(feature = "diagnostics")]
     collector: Arc<Mutex<DiagnosticsCollector>>,
 }
 
 impl SystemDiagnosticsSampler {
     pub fn new() -> Self {
         Self {
+            #[cfg(feature = "diagnostics")]
             collector: Arc::new(Mutex::new(DiagnosticsCollector::new())),
         }
     }
 
+    #[cfg(not(feature = "diagnostics"))]
+    pub async fn snapshot(&self) -> Result<RuntimeDiagnostics, String> {
+        Err("this build of vuio-core was compiled without the `diagnostics` feature".to_string())
+    }
+
+    #[cfg(feature = "diagnostics")]
     pub async fn snapshot(&self) -> Result<RuntimeDiagnostics, String> {
         let collector = Arc::clone(&self.collector);
         tokio::task::spawn_blocking(move || {
@@ -179,7 +196,7 @@ impl Default for SystemDiagnosticsSampler {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "diagnostics"))]
 mod tests {
     use super::*;
 

@@ -20,10 +20,8 @@ use uuid::Uuid;
 
 use crate::web::format::format_bytes;
 use crate::{
-    casting::{PlaybackAction, PlaybackItem, PlaybackState},
     database::{
-        DatabaseManager, DatabaseReadSession, DirectoryView, FileLocation, MediaFileQuery,
-        MediaFileView,
+        DatabaseManager, DatabaseReadSession, DirectoryView, MediaFileQuery, MediaFileView,
     },
     state::{AppState, McpClient},
 };
@@ -50,7 +48,6 @@ mod transport;
 
 use catalog::*;
 use dispatch::*;
-pub use tools::{cast_file_helper, cast_playlist_helper, cast_tracks_helper};
 // MessageQuery is exercised by the MCP integration tests.
 #[allow(unused_imports)]
 pub use transport::{message_handler, sse_handler, MessageQuery};

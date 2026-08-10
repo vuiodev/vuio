@@ -1,4 +1,16 @@
-use super::super::*;
+//! Shared cast orchestration.
+//!
+//! These were reachable only through `web::mcp` even though the HTTP casting
+//! API is their other caller, which made `casting` unbuildable without `mcp`.
+//! They live with casting now, and MCP re-exports them.
+
+use crate::casting::{PlaybackAction, PlaybackItem, PlaybackState};
+use crate::database::{
+    DatabaseManager, DatabaseReadSession, FileLocation, MediaFileQuery, MediaFileView,
+};
+use crate::state::AppState;
+use tracing::{debug, warn};
+use uuid::Uuid;
 
 pub async fn cast_file_helper<D: DatabaseManager + 'static>(
     state: &AppState<D>,

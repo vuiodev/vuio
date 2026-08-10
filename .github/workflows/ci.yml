@@ -145,6 +145,48 @@ jobs:
           fi
 
   # ===================================================================
+  # Every feature must build alone and with none of them enabled.
+  #
+  # Features that are only ever tested together drift into depending on each
+  # other, which is exactly what happened before they were introduced: the
+  # cast helpers lived inside the MCP module, so `casting` could not be built
+  # without `mcp`. This job is what keeps that from coming back.
+  # ===================================================================
+  feature_matrix:
+    name: Feature combinations
+    if: |
+      github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: features-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build with no features
+        run: cargo check -p vuio-core --no-default-features
+      - name: Build each feature alone
+        run: |
+          for feature in casting dashboard diagnostics mcp metadata; do
+            echo "::group::$feature"
+            cargo check -p vuio-core --no-default-features --features "$feature"
+            echo "::endgroup::"
+          done
+      - name: Build with everything
+        run: cargo check -p vuio-core --all-features
+
+  # ===================================================================
   # Verify the crate still builds on its declared minimum Rust version.
   # `rust-version` is a promise to integrators pinning an old toolchain,
   # and raising it is a minor release, never a patch.

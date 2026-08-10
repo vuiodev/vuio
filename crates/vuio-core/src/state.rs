@@ -81,6 +81,7 @@ pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
         >,
     >,
     pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
+    #[cfg(feature = "casting")]
     pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
     pub upnp_subscriptions:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
@@ -109,6 +110,7 @@ impl<D: DatabaseManager> Clone for AppState<D> {
             mcp_clients: self.mcp_clients.clone(),
             active_monitors: self.active_monitors.clone(),
             active_casts: self.active_casts.clone(),
+            #[cfg(feature = "casting")]
             discovered_tvs: self.discovered_tvs.clone(),
             upnp_subscriptions: self.upnp_subscriptions.clone(),
             cancellation: self.cancellation.clone(),
