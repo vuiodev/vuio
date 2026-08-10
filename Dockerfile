@@ -6,8 +6,10 @@ WORKDIR /app
 
 # ---- Planner Stage ----
 FROM chef AS planner
+# cargo-chef needs every manifest in the workspace to build a recipe, so the
+# whole crates tree is copied here. The sources are discarded with this stage.
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 RUN cargo chef prepare --recipe-path recipe.json
 
 # ---- Builder Stage ----
@@ -27,16 +29,18 @@ RUN if [ "$TARGETARCH" = "amd64" ]; then \
     rustup target add $RUST_TARGET && \
     echo $RUST_TARGET > /tmp/rust_target
 
-# Copy recipe and build dependencies (this layer will be cached unless dependencies change)
+# Build dependencies only. This layer stays cached until Cargo.lock or one of
+# the workspace manifests changes.
 COPY --from=planner /app/recipe.json recipe.json
 RUN RUST_TARGET=$(cat /tmp/rust_target) && \
     cargo chef cook --release --target $RUST_TARGET --recipe-path recipe.json
 
-# Copy source code and build application (only this layer rebuilds when source changes)
+# Copy the workspace and build the server. Only this layer rebuilds when source
+# changes. `--bin vuio` skips the generate_test_media helper binary.
 COPY Cargo.toml Cargo.lock ./
-COPY src ./src
+COPY crates ./crates
 RUN RUST_TARGET=$(cat /tmp/rust_target) && \
-    cargo build --release --target $RUST_TARGET && \
+    cargo build --release --locked --target $RUST_TARGET --package vuio --bin vuio && \
     cp target/$RUST_TARGET/release/vuio /tmp/vuio
 
 # ---- Final Stage ----

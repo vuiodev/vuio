@@ -6,7 +6,9 @@ use super::{
 };
 use async_trait::async_trait;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use oxicast::{CastApp, CastClient, IdleReason, MediaInfo, MediaMetadata, PlayerState, StreamType};
+use oxicast::{
+    CastApp, CastClient, IdleReason, MediaInfo, MediaMetadata, PlayerState, QueueItem, StreamType,
+};
 use std::{collections::HashMap, net::SocketAddr, time::Duration};
 use tokio::sync::Mutex;
 
@@ -158,40 +160,31 @@ impl CastProvider for ChromecastProvider {
         self.validate(item).map_err(anyhow::Error::msg)?;
         let client = self.client_for(device).await?;
         client.launch_app(&CastApp::DefaultMediaReceiver).await?;
-        let metadata = if item.mime_type.starts_with("audio/") {
-            MediaMetadata::MusicTrack {
-                title: Some(item.title.clone()),
-                artist: None,
-                album_name: None,
-                composer: None,
-                track_number: None,
-                disc_number: None,
-                images: Vec::new(),
-            }
-        } else if item.mime_type.starts_with("image/") {
-            MediaMetadata::Photo {
-                title: Some(item.title.clone()),
-                artist: None,
-                location: None,
-                latitude: None,
-                longitude: None,
-                width: None,
-                height: None,
-                images: Vec::new(),
-            }
-        } else {
-            MediaMetadata::Movie {
-                title: Some(item.title.clone()),
-                subtitle: None,
-                studio: None,
-                images: Vec::new(),
-            }
-        };
-        let media = MediaInfo::new(&item.url, &item.mime_type)
-            .stream_type(StreamType::Buffered)
-            .metadata(metadata);
+        let media = media_info(item);
         client.load_media(&media, true, 0.0, None).await?;
         Ok(())
+    }
+
+    /// Append the next item to the receiver's own queue.
+    ///
+    /// The Default Media Receiver advances a queue by itself, which is what
+    /// makes a series play through: the alternative, polling for "finished",
+    /// misses the transition because the media session disappears as soon as an
+    /// item ends and the status reads as stopped rather than finished.
+    async fn queue_next(
+        &self,
+        device: &RendererDevice,
+        item: &PlaybackItem,
+    ) -> anyhow::Result<bool> {
+        self.validate(item).map_err(anyhow::Error::msg)?;
+        let client = self.active_client(device).await?;
+        let queue_item = QueueItem {
+            media: media_info(item),
+            autoplay: true,
+            start_time: 0.0,
+        };
+        client.queue_insert(&[queue_item], None).await?;
+        Ok(true)
     }
 
     async fn control(&self, device: &RendererDevice, action: PlaybackAction) -> anyhow::Result<()> {
@@ -283,4 +276,40 @@ mod tests {
         assert!(provider.validate(&item("video/x-matroska")).is_err());
         assert!(provider.validate(&item("video/mpeg")).is_err());
     }
+}
+
+/// Describe one item for the Cast receiver, including the metadata it shows.
+fn media_info(item: &PlaybackItem) -> MediaInfo {
+    let metadata = if item.mime_type.starts_with("audio/") {
+        MediaMetadata::MusicTrack {
+            title: Some(item.title.clone()),
+            artist: None,
+            album_name: None,
+            composer: None,
+            track_number: None,
+            disc_number: None,
+            images: Vec::new(),
+        }
+    } else if item.mime_type.starts_with("image/") {
+        MediaMetadata::Photo {
+            title: Some(item.title.clone()),
+            artist: None,
+            location: None,
+            latitude: None,
+            longitude: None,
+            width: None,
+            height: None,
+            images: Vec::new(),
+        }
+    } else {
+        MediaMetadata::Movie {
+            title: Some(item.title.clone()),
+            subtitle: None,
+            studio: None,
+            images: Vec::new(),
+        }
+    };
+    MediaInfo::new(&item.url, &item.mime_type)
+        .stream_type(StreamType::Buffered)
+        .metadata(metadata)
 }
