@@ -254,30 +254,6 @@ fn socket_endpoint(
     Ok(address)
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn item(mime_type: &str) -> PlaybackItem {
-        PlaybackItem {
-            local_path: std::path::PathBuf::new(),
-            id: 1,
-            url: "http://192.168.1.2/media/1".to_string(),
-            title: "Test".to_string(),
-            filename: "test.bin".to_string(),
-            mime_type: mime_type.to_string(),
-        }
-    }
-
-    #[test]
-    fn direct_play_matrix_rejects_mkv_and_accepts_mp4() {
-        let provider = ChromecastProvider::new();
-        assert!(provider.validate(&item("video/mp4")).is_ok());
-        assert!(provider.validate(&item("video/x-matroska")).is_err());
-        assert!(provider.validate(&item("video/mpeg")).is_err());
-    }
-}
-
 /// Describe one item for the Cast receiver, including the metadata it shows.
 fn media_info(item: &PlaybackItem) -> MediaInfo {
     let metadata = if item.mime_type.starts_with("audio/") {
@@ -312,4 +288,28 @@ fn media_info(item: &PlaybackItem) -> MediaInfo {
     MediaInfo::new(&item.url, &item.mime_type)
         .stream_type(StreamType::Buffered)
         .metadata(metadata)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(mime_type: &str) -> PlaybackItem {
+        PlaybackItem {
+            local_path: std::path::PathBuf::new(),
+            id: 1,
+            url: "http://192.168.1.2/media/1".to_string(),
+            title: "Test".to_string(),
+            filename: "test.bin".to_string(),
+            mime_type: mime_type.to_string(),
+        }
+    }
+
+    #[test]
+    fn direct_play_matrix_rejects_mkv_and_accepts_mp4() {
+        let provider = ChromecastProvider::new();
+        assert!(provider.validate(&item("video/mp4")).is_ok());
+        assert!(provider.validate(&item("video/x-matroska")).is_err());
+        assert!(provider.validate(&item("video/mpeg")).is_err());
+    }
 }
