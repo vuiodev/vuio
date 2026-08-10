@@ -88,26 +88,8 @@ pub(super) async fn start_http_server_task<D: DatabaseManager + 'static>(
     Ok(NetworkTaskHandles { http, tv_discovery })
 }
 
-/// HTTP, SSDP, and television-discovery lifecycle operations.
-pub struct NetworkLifecycleService;
-
 pub struct NetworkTaskHandles {
     pub http: tokio::task::JoinHandle<anyhow::Result<()>>,
     pub tv_discovery: tokio::task::JoinHandle<()>,
 }
 
-impl NetworkLifecycleService {
-    pub async fn start_http<D: DatabaseManager + 'static>(
-        state: AppState<D>,
-        cancellation: CancellationToken,
-    ) -> anyhow::Result<NetworkTaskHandles> {
-        start_http_server_task(state, cancellation).await
-    }
-
-    pub async fn start_ssdp<D: DatabaseManager + 'static>(
-        state: AppState<D>,
-        cancellation: CancellationToken,
-    ) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
-        start_ssdp_service(state, cancellation).await
-    }
-}

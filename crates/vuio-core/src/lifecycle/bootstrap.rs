@@ -566,31 +566,3 @@ pub struct ApplicationContext<D: DatabaseManager = database::redb::RedbDatabase>
     pub app_state: AppState<D>,
 }
 
-/// Public bootstrap operations for embedders that manage the lifecycle themselves.
-pub struct BootstrapService;
-
-impl BootstrapService {
-    pub async fn detect_platform() -> anyhow::Result<PlatformInfo> {
-        detect_platform_with_diagnostics().await
-    }
-
-    pub async fn initialize_database(
-        config: &AppConfig,
-    ) -> anyhow::Result<database::redb::RedbDatabase> {
-        initialize_database(config).await
-    }
-
-    pub async fn initialize_watcher(config: &AppConfig) -> anyhow::Result<CrossPlatformWatcher> {
-        initialize_file_watcher(config).await
-    }
-
-    pub async fn start_platform_adaptation<D: DatabaseManager + 'static>(
-        platform_info: Arc<PlatformInfo>,
-        config_manager: Arc<ConfigManager>,
-        watcher: Arc<CrossPlatformWatcher>,
-        state: AppState<D>,
-        cancellation: CancellationToken,
-    ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        start_platform_adaptation(platform_info, config_manager, watcher, state, cancellation).await
-    }
-}

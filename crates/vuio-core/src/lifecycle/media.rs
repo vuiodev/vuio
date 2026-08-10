@@ -4,8 +4,6 @@ mod events;
 mod monitoring;
 #[path = "media/scanning.rs"]
 mod scanning;
-#[path = "media/service.rs"]
-mod service;
 
 pub use events::ApplicationStats;
 pub(in crate::lifecycle) use events::*;

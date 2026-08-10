@@ -379,14 +379,6 @@ impl Error {
         self.kind
     }
 
-    pub(crate) fn new(kind: ErrorKind, context: impl Into<String>) -> Self {
-        Self {
-            kind,
-            context: context.into(),
-            source: None,
-        }
-    }
-
     /// Attach the underlying cause. Kept crate-internal so no foreign error
     /// type ever appears in the public signature.
     pub(crate) fn with_source(
@@ -445,8 +437,12 @@ mod public_error_tests {
 
     #[test]
     fn display_stays_free_of_debug_noise() {
-        let error = Error::new(ErrorKind::Runtime, "shutdown timed out");
+        let inner = std::io::Error::other("the task did not complete");
+        let error = Error::with_source(ErrorKind::Runtime, "shutdown timed out", inner);
+        // Display is the context alone: callers that want the cause walk
+        // `source()`, and callers that log `{error}` get one clean line.
         assert_eq!(error.to_string(), "shutdown timed out");
+        assert!(!error.to_string().contains("did not complete"));
         assert!(format!("{error:?}").contains("Runtime"));
     }
 }

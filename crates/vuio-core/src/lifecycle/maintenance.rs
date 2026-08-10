@@ -53,15 +53,3 @@ pub(super) async fn start_atomic_monitoring<D: DatabaseManager + 'static>(
     Ok(handle)
 }
 
-/// Periodic application and database statistics monitoring.
-pub struct MaintenanceService;
-
-impl MaintenanceService {
-    pub async fn start<D: DatabaseManager + 'static>(
-        database: Arc<D>,
-        stats: Arc<ApplicationStats>,
-        cancellation: CancellationToken,
-    ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        start_atomic_monitoring(database, stats, cancellation).await
-    }
-}
