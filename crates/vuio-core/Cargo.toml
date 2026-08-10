@@ -62,12 +62,22 @@ diagnostics = ["dep:sysinfo"]
 mcp = []
 # Read tags (title, artist, album, cover art) from media files.
 metadata = ["dep:audiotags"]
-# A `watch` feature was planned here to let a fixed-image deployment shed
-# inotify. It is not done: `notify` is woven through six method bodies of
-# CrossPlatformWatcher, so gating it properly means splitting the watcher's
-# backend out from its behaviour, not scattering cfgs through it. Getting that
-# subtly wrong would break file monitoring, which is worse than carrying ten
-# crates, so `notify` stays required until that refactor happens.
+# A `watch` feature was planned here and is deliberately not built.
+#
+# Runtime monitoring is already switchable without recompiling:
+# `media.watch_for_changes` (env `VUIO_WATCH_CHANGES`) turns it off, so the
+# fixed-image deployment the feature was meant for is served today. All a
+# compile-time flag would add is dropping `notify`, which is 8 crates in the
+# musl graph and one of those (`mio`) arrives with tokio regardless.
+#
+# Against that: `notify` runs through six method bodies of
+# CrossPlatformWatcher, so gating it means splitting the watcher's backend
+# from its behaviour. Restructuring the mechanism that keeps the library
+# current, to save seven crates that a config flag already makes idle, is a
+# bad trade. `notify` stays required.
+#
+# Note that indexing does not depend on it either way: the startup scan runs
+# through MediaScanner and never touches the watcher.
 
 # Opens the crate's internal modules so the integration tests can drive the
 # DLNA, SSDP and database layers directly. No stability promise applies to
