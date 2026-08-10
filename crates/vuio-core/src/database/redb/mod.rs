@@ -24,8 +24,8 @@ use super::{
     DatabaseBackend, DatabaseHealth, DatabaseManager, DatabaseReadSession, DatabaseStats,
     DirectoryView, FileFingerprint, FileLocation, HealthRepository, IndexSnapshot, MediaDirectory,
     MediaFile, MediaFileQuery, MediaFileView, MediaRepository, MusicCategory, MusicCategoryType,
-    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, RootAvailability, StatsRepository,
-    VisitSummary,
+    Playlist, PlaylistRepository, PlaylistView, RemovalSummary, RootAvailability, SecretStore,
+    StatsRepository, VisitSummary,
 };
 
 include!("schema.rs");
@@ -34,6 +34,7 @@ mod health;
 mod media_repo;
 mod playlist_repo;
 mod root_repo;
+mod secret_repo;
 mod stats;
 
 /// RedbDatabase - ACID-compliant embedded database

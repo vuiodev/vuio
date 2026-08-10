@@ -41,8 +41,16 @@ pub struct ApiPairingForgetRequest {
 #[derive(serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApiCastSource {
-    File { file_id: i64 },
-    Folder { components: Vec<String> },
+    File {
+        file_id: i64,
+    },
+    Folder {
+        components: Vec<String>,
+        /// Restrict the queue to one media kind. Casting an audio folder should
+        /// not drag in the videos sitting beside it.
+        #[serde(default)]
+        media: Option<String>,
+    },
 }
 
 /// Discover supported playback devices and return their public details as JSON.
@@ -149,9 +157,12 @@ pub async fn api_cast<D: DatabaseManager + 'static>(
     let result = match payload.source {
         ApiCastSource::File { file_id } => {
             let file = match state.database.get_file_location_by_id(file_id).await {
-                Ok(Some(file)) if is_castable_video_mime(&file.mime_type) => file,
+                Ok(Some(file)) if is_castable_mime(&file.mime_type) => file,
                 Ok(Some(_)) => {
-                    return cast_error(StatusCode::BAD_REQUEST, "Only video files can be cast");
+                    return cast_error(
+                        StatusCode::BAD_REQUEST,
+                        "Only video and audio files can be cast",
+                    );
                 }
                 Ok(None) => return cast_error(StatusCode::NOT_FOUND, "Video file not found"),
                 Err(error) => {
@@ -161,13 +172,14 @@ pub async fn api_cast<D: DatabaseManager + 'static>(
             };
             crate::web::mcp::cast_file_helper(&state, file.id, &payload.renderer_id).await
         }
-        ApiCastSource::Folder { components } => {
-            let tracks = match resolve_video_folder(&state, &components).await {
+        ApiCastSource::Folder { components, media } => {
+            let tracks = match resolve_castable_folder(&state, &components, media.as_deref()).await
+            {
                 Ok(tracks) if !tracks.is_empty() => tracks,
                 Ok(_) => {
                     return cast_error(
                         StatusCode::BAD_REQUEST,
-                        "No video files found in this folder",
+                        "No castable media found in this folder",
                     );
                 }
                 Err(message) => return cast_error(StatusCode::BAD_REQUEST, &message),
@@ -186,9 +198,10 @@ fn cast_error(status: StatusCode, message: &str) -> (StatusCode, axum::Json<serd
     (status, axum::Json(serde_json::json!({ "error": message })))
 }
 
-async fn resolve_video_folder<D: DatabaseManager>(
+async fn resolve_castable_folder<D: DatabaseManager>(
     state: &AppState<D>,
     components: &[String],
+    media: Option<&str>,
 ) -> Result<Vec<FileLocation>, String> {
     if components.len() > 64
         || components.iter().any(|component| {
@@ -216,7 +229,7 @@ async fn resolve_video_folder<D: DatabaseManager>(
             .await
             .map_err(|error| format!("Database error: {error}"))?;
         for file in files {
-            if !is_castable_video_mime(file.mime_type()) {
+            if !is_castable_mime(file.mime_type()) || !matches_media_kind(file.mime_type(), media) {
                 continue;
             }
             let Some(location) = file.to_file_location() else {
@@ -237,10 +250,29 @@ async fn resolve_video_folder<D: DatabaseManager>(
     Ok(videos.into_iter().map(|(_, file)| file).collect())
 }
 
-fn is_castable_video_mime(mime: &str) -> bool {
+/// Whether a MIME type belongs to the requested media kind.
+///
+/// `None` accepts anything castable, which is what the folder API does when a
+/// caller does not care.
+fn matches_media_kind(mime: &str, media: Option<&str>) -> bool {
+    match media {
+        Some("audio") => mime.starts_with("audio/"),
+        Some("video") => !mime.starts_with("audio/"),
+        _ => true,
+    }
+}
+
+/// Media the cast API will hand to a provider.
+///
+/// Audio is included because AirPlay receivers take an RTP audio stream even
+/// when they cannot play video. Each provider still validates the item, so a
+/// renderer that cannot take audio rejects it with its own message.
+fn is_castable_mime(mime: &str) -> bool {
+    let base = mime.split(';').next().unwrap_or(mime).trim();
     mime.starts_with("video/")
+        || (base.starts_with("audio/") && base != "audio/radio")
         || matches!(
-            mime.split(';').next().unwrap_or(mime).trim(),
+            base,
             "application/vnd.apple.mpegurl" | "application/x-mpegurl"
         )
 }

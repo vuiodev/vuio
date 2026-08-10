@@ -1,17 +1,12 @@
+use crate::database::SecretStore;
 use anyhow::{Context, Result};
 use hap_crypto::{AccessoryPairing, ControllerKeypair};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::Mutex;
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-const KEYRING_SERVICE: &str = "dev.vuio.airplay";
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-const KEYRING_ACCOUNT: &str = "pairings";
+/// Key under which the whole pairing document lives in the `secrets` table.
+const SECRET_KEY: &str = "airplay.pairings";
 
 #[derive(Clone)]
 pub struct CredentialStore {
@@ -19,7 +14,9 @@ pub struct CredentialStore {
 }
 
 struct Inner {
-    path: Option<PathBuf>,
+    /// `None` keeps the store in memory, which is what tests and the
+    /// non-persistent constructor use.
+    secrets: Option<Arc<dyn SecretStore>>,
     document: Mutex<Document>,
 }
 
@@ -52,7 +49,7 @@ impl CredentialStore {
     pub fn memory() -> Self {
         Self {
             inner: Arc::new(Inner {
-                path: None,
+                secrets: None,
                 document: Mutex::new(Document {
                     version: document_version(),
                     ..Document::default()
@@ -61,14 +58,28 @@ impl CredentialStore {
         }
     }
 
-    pub async fn load(path: PathBuf) -> Result<Self> {
-        let document = match load_from_keyring().await {
-            Ok(Some(value)) => parse_document(&value).context("parsing AirPlay vault data")?,
-            Ok(None) | Err(_) => load_file(&path).await?,
+    /// Load pairings from the application database.
+    ///
+    /// Keys live in the `secrets` table rather than the OS credential vault so
+    /// that a VuIO instance is self-contained: the database file is the single
+    /// thing to back up, move between hosts, or mount into a container, and
+    /// headless and Docker deployments have no system keychain to talk to.
+    pub async fn load(secrets: Arc<dyn SecretStore>) -> Result<Self> {
+        let stored = secrets
+            .get_secret(SECRET_KEY)
+            .await
+            .context("reading AirPlay credentials")?;
+        let document = match stored {
+            Some(bytes) => parse_document(&String::from_utf8_lossy(&bytes))
+                .context("parsing stored AirPlay credentials")?,
+            None => Document {
+                version: document_version(),
+                ..Document::default()
+            },
         };
         Ok(Self {
             inner: Arc::new(Inner {
-                path: Some(path),
+                secrets: Some(secrets),
                 document: Mutex::new(document),
             }),
         })
@@ -140,24 +151,14 @@ impl CredentialStore {
     }
 
     async fn persist_locked(&self, document: &Document) -> Result<()> {
+        let Some(secrets) = &self.inner.secrets else {
+            return Ok(());
+        };
         let encoded = serde_json::to_string(document).context("encoding AirPlay credentials")?;
-        if self.inner.path.is_none() {
-            return Ok(());
-        }
-        if save_to_keyring(encoded.clone()).await.is_ok() {
-            if let Some(path) = &self.inner.path {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-            return Ok(());
-        }
-        save_file(
-            self.inner
-                .path
-                .as_ref()
-                .context("AirPlay credential path is unavailable")?,
-            encoded.as_bytes(),
-        )
-        .await
+        secrets
+            .set_secret(SECRET_KEY, encoded.as_bytes())
+            .await
+            .context("storing AirPlay credentials")
     }
 }
 
@@ -182,78 +183,6 @@ fn parse_document(value: &str) -> Result<Document> {
     Ok(document)
 }
 
-async fn load_file(path: &Path) -> Result<Document> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(value) => parse_document(&value).context("parsing AirPlay credential file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(Document {
-            version: document_version(),
-            ..Document::default()
-        }),
-        Err(error) => Err(error).context("reading AirPlay credential file"),
-    }
-}
-
-async fn save_file(path: &Path, value: &[u8]) -> Result<()> {
-    let path = path.to_path_buf();
-    let value = value.to_vec();
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        use std::io::Write as _;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let temporary = path.with_extension("json.tmp");
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).truncate(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt as _;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&temporary)?;
-        file.write_all(&value)?;
-        file.sync_all()?;
-        std::fs::rename(&temporary, &path)?;
-        Ok(())
-    })
-    .await
-    .context("joining AirPlay credential writer")??;
-    Ok(())
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-async fn load_from_keyring() -> Result<Option<String>> {
-    tokio::task::spawn_blocking(|| -> Result<Option<String>> {
-        let entry = keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?;
-        match entry.get_password() {
-            Ok(value) => Ok(Some(value)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error.into()),
-        }
-    })
-    .await
-    .context("joining AirPlay vault reader")?
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-async fn load_from_keyring() -> Result<Option<String>> {
-    Ok(None)
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-async fn save_to_keyring(value: String) -> Result<()> {
-    tokio::task::spawn_blocking(move || -> Result<()> {
-        keyring::Entry::new(KEYRING_SERVICE, KEYRING_ACCOUNT)?.set_password(&value)?;
-        Ok(())
-    })
-    .await
-    .context("joining AirPlay vault writer")?
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-async fn save_to_keyring(_value: String) -> Result<()> {
-    anyhow::bail!("system credential vault is unavailable")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,5 +201,40 @@ mod tests {
         assert_eq!(loaded, pairing);
         assert!(store.forget("airplay:test").await.unwrap());
         assert!(!store.is_paired("airplay:test").await);
+    }
+
+    #[tokio::test]
+    async fn pairings_survive_a_restart_through_the_database() {
+        use crate::database::DatabaseManager as _;
+
+        let temp = tempfile::tempdir().unwrap();
+        let database = std::sync::Arc::new(
+            crate::database::redb::RedbDatabase::new(temp.path().join("pairings.redb"))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+        let secrets: Arc<dyn SecretStore> = database.clone();
+
+        let pairing = AccessoryPairing {
+            pairing_id: "7C:58:BC:93:AE:C4".to_string(),
+            ltpk: [9; 32],
+        };
+        {
+            let store = CredentialStore::load(secrets.clone()).await.unwrap();
+            let controller = store.controller().await.unwrap();
+            store.save_pairing("airplay:sony", &pairing).await.unwrap();
+            assert!(!controller.id.is_empty());
+        }
+
+        // A fresh store over the same database is what a restart looks like.
+        let reopened = CredentialStore::load(secrets).await.unwrap();
+        assert!(reopened.is_paired("airplay:sony").await);
+        let (_, loaded) = reopened.pairing("airplay:sony").await.unwrap().unwrap();
+        assert_eq!(loaded, pairing);
+        assert!(reopened.forget("airplay:sony").await.unwrap());
+
+        let after_forget = CredentialStore::load(database).await.unwrap();
+        assert!(!after_forget.is_paired("airplay:sony").await);
     }
 }

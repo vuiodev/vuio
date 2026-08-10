@@ -1239,6 +1239,9 @@
             loadAndPlayTrack();
         }
 
+        // Speaker with waves: casting audio, as distinct from the TV glyph video uses.
+        const CAST_AUDIO_ICON = '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path><path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
+
         function playFolder(folderName) {
             const targetPath = [...currentPath, folderName];
             
@@ -1272,6 +1275,21 @@
         }
 
         function playVideoFileOnTv(file) {
+            discoverAndCast(
+                { kind: 'file', file_id: file.id },
+                file.title || file.name
+            );
+        }
+
+        function playAudioFolderOnTv(folderName) {
+            const components = [...currentPath, folderName];
+            discoverAndCast(
+                { kind: 'folder', components, media: 'audio' },
+                folderName
+            );
+        }
+
+        function playAudioFileOnTv(file) {
             discoverAndCast(
                 { kind: 'file', file_id: file.id },
                 file.title || file.name
@@ -2019,8 +2037,8 @@
 
                 // Calculate video files in this folder to see if "Play on TV" is applicable
                 const targetPath = [...currentPath, folderName];
-                const folderVideos = filesData.filter(file => {
-                    if (file.cat !== 'video') return false;
+                const folderContains = category => filesData.filter(file => {
+                    if (file.cat !== category) return false;
                     const comps = getRelativeComponents(file.path);
                     if (comps.length <= targetPath.length) return false;
                     for (let i = 0; i < targetPath.length; i++) {
@@ -2028,6 +2046,8 @@
                     }
                     return true;
                 });
+                const folderVideos = folderContains('video');
+                const folderTracks = folderContains('audio');
 
                 folderCard.innerHTML = `
                     <div class="media-info">
@@ -2056,6 +2076,19 @@
                         playFolder(folderName);
                     });
                     actions.appendChild(playButton);
+                }
+
+                if ((currentTab === 'audio' || currentTab === 'all') && folderTracks.length > 0) {
+                    const castButton = document.createElement('button');
+                    castButton.className = 'btn-action';
+                    castButton.title = 'Cast Folder to Device';
+                    castButton.style.color = 'var(--accent-color)';
+                    castButton.innerHTML = CAST_AUDIO_ICON;
+                    castButton.addEventListener('click', event => {
+                        event.stopPropagation();
+                        playAudioFolderOnTv(folderName);
+                    });
+                    actions.appendChild(castButton);
                 }
 
                 if ((currentTab === 'video' || currentTab === 'all') && folderVideos.length > 0) {
@@ -2162,6 +2195,18 @@
                     playAudioFile(file.id);
                 });
                 actionArea.prepend(playButton);
+            }
+            if (file.cat === 'audio') {
+                const castButton = document.createElement('button');
+                castButton.className = 'btn-action';
+                castButton.title = 'Cast to Device';
+                castButton.style.cssText = 'margin-right: 0.35rem; color: var(--accent-color);';
+                castButton.innerHTML = CAST_AUDIO_ICON;
+                castButton.addEventListener('click', event => {
+                    event.stopPropagation();
+                    playAudioFileOnTv(file);
+                });
+                actionArea.prepend(castButton);
             }
             if (file.cat === 'video') {
                 const tvButton = document.createElement('button');

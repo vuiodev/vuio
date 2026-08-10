@@ -285,11 +285,13 @@ impl RendererCache {
         }
     }
 
-    pub async fn persistent(credential_path: std::path::PathBuf) -> anyhow::Result<Self> {
+    pub async fn persistent(
+        secrets: std::sync::Arc<dyn crate::database::SecretStore>,
+    ) -> anyhow::Result<Self> {
         Ok(Self {
             snapshot: tokio::sync::RwLock::new(RendererSnapshot::default()),
             refresh: tokio::sync::Mutex::new(()),
-            casting: crate::casting::CastingManager::persistent(credential_path).await?,
+            casting: crate::casting::CastingManager::persistent(secrets).await?,
         })
     }
 

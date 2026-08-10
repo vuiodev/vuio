@@ -135,12 +135,7 @@ where
         config_manager.get_config_path(),
         runtime_options.auth,
     )?);
-    let airplay_credentials = config_manager
-        .get_config_path()
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("airplay-pairings.json");
-    let renderer_cache = crate::runtime_state::RendererCache::persistent(airplay_credentials)
+    let renderer_cache = crate::runtime_state::RendererCache::persistent(database.clone())
         .await
         .context("Failed to initialize AirPlay credential storage")?;
     let app_state = AppState {

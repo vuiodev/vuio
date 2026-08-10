@@ -267,6 +267,7 @@ mod tests {
 
     fn item(mime_type: &str) -> PlaybackItem {
         PlaybackItem {
+            local_path: std::path::PathBuf::new(),
             id: 1,
             url: "http://192.168.1.2/media/1".to_string(),
             title: "Test".to_string(),

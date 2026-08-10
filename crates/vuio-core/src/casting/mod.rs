@@ -80,6 +80,9 @@ impl RendererDevice {
 pub struct PlaybackItem {
     pub id: i64,
     pub url: String,
+    /// On-disk location. AirPlay audio is a push protocol, so the sender has to
+    /// decode the file itself rather than hand the receiver a URL.
+    pub local_path: std::path::PathBuf,
     pub title: String,
     pub filename: String,
     pub mime_type: String,
@@ -150,9 +153,11 @@ impl CastingManager {
         Self::with_airplay(airplay::AirplayProvider::new())
     }
 
-    pub async fn persistent(credential_path: std::path::PathBuf) -> anyhow::Result<Self> {
+    pub async fn persistent(
+        secrets: Arc<dyn crate::database::SecretStore>,
+    ) -> anyhow::Result<Self> {
         Ok(Self::with_airplay(
-            airplay::AirplayProvider::persistent(credential_path).await?,
+            airplay::AirplayProvider::persistent(secrets).await?,
         ))
     }
 

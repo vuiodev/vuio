@@ -741,10 +741,29 @@ pub trait StatsRepository: Send + Sync {
     async fn get_stats(&self) -> Result<DatabaseStats>;
 }
 
+/// Opaque secret storage, kept object-safe on purpose.
+///
+/// `DatabaseManager` has generic methods and so cannot be made into a trait
+/// object; components that only need to persist a blob (AirPlay pairing keys,
+/// for example) take `Arc<dyn SecretStore>` instead of being made generic over
+/// the whole database.
+#[async_trait]
+pub trait SecretStore: Send + Sync {
+    async fn get_secret(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn set_secret(&self, key: &str, value: &[u8]) -> Result<()>;
+    async fn delete_secret(&self, key: &str) -> Result<bool>;
+}
+
 /// Aggregate database capability used by the application.
 #[async_trait]
 pub trait DatabaseManager:
-    MediaRepository + PlaylistRepository + HealthRepository + StatsRepository + Send + Sync
+    MediaRepository
+    + PlaylistRepository
+    + HealthRepository
+    + StatsRepository
+    + SecretStore
+    + Send
+    + Sync
 {
     /// Initialize the database and create tables if needed.
     async fn initialize(&self) -> Result<()>;

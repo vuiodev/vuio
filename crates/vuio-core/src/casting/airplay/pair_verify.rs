@@ -119,6 +119,12 @@ impl PairVerifier {
 }
 
 pub fn derive_key(shared: &[u8; 32], salt: &[u8], info: &[u8]) -> Result<[u8; 32]> {
+    derive_key_from(shared, salt, info)
+}
+
+/// HKDF over a shared secret of any length. Pair Verify produces a 32-byte
+/// X25519 secret; transient pairing produces a 64-byte SRP session key.
+pub fn derive_key_from(shared: &[u8], salt: &[u8], info: &[u8]) -> Result<[u8; 32]> {
     let mut output = [0u8; 32];
     Hkdf::<Sha512>::new(Some(salt), shared)
         .expand(info, &mut output)

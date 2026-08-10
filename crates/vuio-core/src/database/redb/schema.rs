@@ -21,6 +21,7 @@ macro_rules! redb_schema {
         $callback!(multimap, SOURCE_PLAYLISTS, &str, i64, "source_playlists", derived);
         $callback!(table, METADATA_TABLE, &str, u64, "metadata", primary);
         $callback!(table, ROOT_AVAILABILITY, &str, &[u8], "root_availability", primary);
+        $callback!(table, SECRETS_TABLE, &str, &[u8], "secrets", primary);
         $callback!(multimap, ARTIST_INDEX, &str, i64, "artist_index", derived);
         $callback!(multimap, ALBUM_INDEX, &str, i64, "album_index", derived);
         $callback!(multimap, GENRE_INDEX, &str, i64, "genre_index", derived);

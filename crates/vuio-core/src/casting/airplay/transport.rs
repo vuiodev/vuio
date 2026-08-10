@@ -22,7 +22,7 @@ struct SecureState {
 
 pub struct Response {
     pub status: u16,
-    pub _headers: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
     pub body: Vec<u8>,
 }
 
@@ -81,13 +81,22 @@ impl AirplayConnection {
         self.write_request(method, path, protocol, headers, body)
             .await?;
         loop {
-            while !self.plain_buffer.windows(2).any(|window| window == b"\r\n") {
-                self.read_plain_chunk().await?;
-            }
+            // A buffered message is only ours when it opens with a status line.
+            // Anything else the receiver pushes here is an event request that has
+            // to be answered before our response can arrive.
             if self.plain_buffer.starts_with(b"HTTP/") || self.plain_buffer.starts_with(b"RTSP/") {
-                return self.read_response().await;
+                if let Some(response) = take_response(&mut self.plain_buffer)? {
+                    return Ok(response);
+                }
+            } else if complete_message(&self.plain_buffer)? {
+                self.handle_http_event_request().await?;
+                continue;
             }
-            self.handle_http_event_request().await?;
+            anyhow::ensure!(
+                self.plain_buffer.len() <= MAX_MESSAGE_BYTES,
+                "AirPlay response exceeded {MAX_MESSAGE_BYTES} bytes"
+            );
+            self.read_plain_chunk().await?;
         }
     }
 
@@ -237,43 +246,6 @@ impl AirplayConnection {
         }
         response.push_str("\r\n");
         self.write_plain(response.as_bytes()).await
-    }
-
-    pub async fn data_stream_request(&mut self, body: &[u8]) -> Result<Vec<u8>> {
-        let sequence = self.send_data_stream_request(body).await?;
-
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                let message = loop {
-                    if let Some(message) = take_data_stream_message(&mut self.plain_buffer)? {
-                        break message;
-                    }
-                    self.read_plain_chunk().await?;
-                };
-                if message.message_type.starts_with(b"sync") {
-                    let reply = data_stream_frame(b"rply", b"\0\0\0\0", message.sequence, &[])?;
-                    self.write_plain(&reply).await?;
-                    continue;
-                }
-                if message.message_type.starts_with(b"rply") && message.sequence == sequence {
-                    return Ok(message.body);
-                }
-                tracing::debug!(
-                    sequence = message.sequence,
-                    message_type = ?String::from_utf8_lossy(&message.message_type),
-                    "ignored unrelated AirPlay data-stream message"
-                );
-            }
-        })
-        .await
-        .context("AirPlay remote-control reply timed out")?
-    }
-
-    pub async fn send_data_stream_request(&mut self, body: &[u8]) -> Result<u64> {
-        let sequence = u64::from_be_bytes(uuid::Uuid::new_v4().into_bytes()[..8].try_into()?);
-        let request = data_stream_frame(b"sync", b"comm", sequence, body)?;
-        self.write_plain(&request).await?;
-        Ok(sequence)
     }
 
     async fn write_plain(&mut self, bytes: &[u8]) -> Result<()> {
@@ -429,7 +401,7 @@ fn take_response(buffer: &mut Vec<u8>) -> Result<Option<Response>> {
     buffer.drain(..total);
     Ok(Some(Response {
         status,
-        _headers: headers,
+        headers,
         body,
     }))
 }
@@ -480,12 +452,62 @@ mod tests {
         let first = take_response(&mut bytes).unwrap().unwrap();
         assert_eq!(first.status, 200);
         assert_eq!(first.body, b"one");
-        assert_eq!(
-            first._headers.get("x-test").map(String::as_str),
-            Some("yes")
-        );
+        assert_eq!(first.headers.get("x-test").map(String::as_str), Some("yes"));
         assert_eq!(take_response(&mut bytes).unwrap().unwrap().status, 204);
         assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_answers_an_event_that_arrives_before_the_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let receiver = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0u8; 1024];
+            let read = stream.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            // Push an event request ahead of the response we owe the sender.
+            stream
+                .write_all(b"POST /event RTSP/1.0\r\nCSeq: 9\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            stream
+                .write_all(b"RTSP/1.0 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+            let mut acknowledgement = vec![0u8; 1024];
+            let read = stream.read(&mut acknowledgement).await.unwrap();
+            (
+                request,
+                String::from_utf8_lossy(&acknowledgement[..read]).into_owned(),
+            )
+        });
+
+        let mut connection = AirplayConnection::connect(address).await.unwrap();
+        let response = connection
+            .request_while_serving_events(
+                "RECORD",
+                "rtsp://127.0.0.1/1",
+                "RTSP/1.0",
+                &[("CSeq", "1".to_string())],
+                &[],
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"ok");
+
+        let (request, acknowledgement) = receiver.await.unwrap();
+        assert!(
+            request.starts_with("RECORD rtsp://127.0.0.1/1 RTSP/1.0\r\n"),
+            "{request}"
+        );
+        assert!(
+            acknowledgement.starts_with("RTSP/1.0 200 OK\r\n"),
+            "{acknowledgement}"
+        );
+        assert!(acknowledgement.contains("CSeq: 9"), "{acknowledgement}");
     }
 
     #[test]

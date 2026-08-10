@@ -288,6 +288,21 @@ impl StatsRepository for RedbDatabase {
 }
 
 #[async_trait]
+impl SecretStore for RedbDatabase {
+    async fn get_secret(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        RedbDatabase::get_secret_impl(self, key).await
+    }
+
+    async fn set_secret(&self, key: &str, value: &[u8]) -> Result<()> {
+        RedbDatabase::set_secret_impl(self, key, value).await
+    }
+
+    async fn delete_secret(&self, key: &str) -> Result<bool> {
+        RedbDatabase::delete_secret_impl(self, key).await
+    }
+}
+
+#[async_trait]
 impl DatabaseManager for RedbDatabase {
     async fn initialize(&self) -> Result<()> {
         info!("RedbDatabase initialized");

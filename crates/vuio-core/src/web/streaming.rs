@@ -262,10 +262,21 @@ pub async fn serve_media<D: DatabaseManager>(
         .web_metrics
         .record_file_serve(response_time, is_actual_serve);
 
-    debug!(
-        "Served media file ID {} ({} bytes from offset {}) in {}ms",
-        file_id, len, start, response_time
-    );
+    if method == Method::GET {
+        tracing::info!(
+            file_id,
+            filename = %file_info.filename,
+            client = %client_addr.ip(),
+            start,
+            len,
+            "media GET"
+        );
+    } else {
+        debug!(
+            "Served media file ID {} ({} bytes from offset {}) in {}ms",
+            file_id, len, start, response_time
+        );
+    }
 
     Ok(response_builder.status(response_status).body(body)?)
 }

@@ -143,6 +143,7 @@ pub(crate) fn playback_item(file: &FileLocation, origin: &str) -> PlaybackItem {
     PlaybackItem {
         id: file.id,
         url: playback_url(file, origin),
+        local_path: file.path.clone(),
         title: file.title.clone().unwrap_or_else(|| file.filename.clone()),
         filename: file.filename.clone(),
         mime_type: file.mime_type.clone(),

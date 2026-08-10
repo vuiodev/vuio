@@ -307,7 +307,35 @@ fn schema_registry_has_unique_names() {
     redb_schema!(collect_schema_name);
     let unique = names.iter().copied().collect::<HashSet<_>>();
     assert_eq!(names.len(), unique.len());
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 21);
+}
+
+#[tokio::test]
+async fn secrets_round_trip_in_the_database() {
+    let temp = tempdir().unwrap();
+    let db = RedbDatabase::new(temp.path().join("secrets.redb"))
+        .await
+        .unwrap();
+    db.initialize().await.unwrap();
+
+    assert_eq!(db.get_secret("airplay.pairings").await.unwrap(), None);
+    db.set_secret("airplay.pairings", b"{\"version\":1}")
+        .await
+        .unwrap();
+    assert_eq!(
+        db.get_secret("airplay.pairings").await.unwrap().as_deref(),
+        Some(&b"{\"version\":1}"[..])
+    );
+    db.set_secret("airplay.pairings", b"replaced")
+        .await
+        .unwrap();
+    assert_eq!(
+        db.get_secret("airplay.pairings").await.unwrap().as_deref(),
+        Some(&b"replaced"[..])
+    );
+    assert!(db.delete_secret("airplay.pairings").await.unwrap());
+    assert!(!db.delete_secret("airplay.pairings").await.unwrap());
+    assert_eq!(db.get_secret("airplay.pairings").await.unwrap(), None);
 }
 
 #[tokio::test]
