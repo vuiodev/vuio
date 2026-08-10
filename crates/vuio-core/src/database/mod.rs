@@ -46,16 +46,6 @@ pub struct Playlist {
     pub updated_at: SystemTime,
 }
 
-/// Represents a playlist entry (track in a playlist)
-#[derive(Clone, Debug)]
-pub struct PlaylistEntry {
-    pub id: Option<i64>,
-    pub playlist_id: i64,
-    pub media_file_id: i64,
-    pub position: u32,
-    pub created_at: SystemTime,
-}
-
 /// Music categorization container for organizing music content
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MusicCategory {
@@ -325,16 +315,6 @@ pub trait MediaFileView {
     fn created_at_secs(&self) -> u64;
     fn updated_at_secs(&self) -> u64;
 
-    fn to_fingerprint(&self) -> Option<FileFingerprint> {
-        Some(FileFingerprint {
-            id: self.id()?,
-            path: PathBuf::from(self.path()),
-            size: self.size(),
-            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
-            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.created_at_secs()),
-        })
-    }
-
     fn to_file_location(&self) -> Option<FileLocation> {
         Some(FileLocation {
             id: self.id()?,
@@ -347,27 +327,6 @@ pub trait MediaFileView {
         })
     }
 
-    fn to_owned_media_file(&self) -> MediaFile {
-        MediaFile {
-            id: self.id(),
-            path: PathBuf::from(self.path()),
-            filename: self.filename().to_owned(),
-            size: self.size(),
-            modified: SystemTime::UNIX_EPOCH + Duration::from_secs(self.modified_secs()),
-            mime_type: self.mime_type().to_owned(),
-            duration: self.duration_secs().map(Duration::from_secs_f64),
-            title: self.title().map(str::to_owned),
-            artist: self.artist().map(str::to_owned),
-            album: self.album().map(str::to_owned),
-            genre: self.genre().map(str::to_owned),
-            track_number: self.track_number(),
-            year: self.year(),
-            album_artist: self.album_artist().map(str::to_owned),
-            subtitle_available: self.subtitle_available(),
-            created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.created_at_secs()),
-            updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(self.updated_at_secs()),
-        }
-    }
 }
 
 pub trait PlaylistView {
@@ -777,22 +736,6 @@ pub trait DatabaseManager:
         playlist_name: Option<String>,
     ) -> Result<i64> {
         playlist_formats::PlaylistFileManager::import_playlist(self, file_path, playlist_name).await
-    }
-
-    /// Export a playlist to a file
-    async fn export_playlist_file(
-        &self,
-        playlist_id: i64,
-        output_path: &Path,
-        format: playlist_formats::PlaylistFormat,
-    ) -> Result<()> {
-        playlist_formats::PlaylistFileManager::export_playlist(
-            self,
-            playlist_id,
-            output_path,
-            format,
-        )
-        .await
     }
 
     /// Scan directory for playlist files and import them

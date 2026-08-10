@@ -294,11 +294,6 @@ impl AppConfig {
         Ok(())
     }
 
-    /// Get platform-specific cache directory
-    pub fn get_platform_cache_dir() -> PathBuf {
-        let platform_config = PlatformConfig::for_current_platform();
-        platform_config.get_cache_dir().clone()
-    }
 
     /// Get platform-specific log file path
     pub fn get_platform_log_file_path() -> PathBuf {

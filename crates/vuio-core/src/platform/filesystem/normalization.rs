@@ -17,11 +17,7 @@ pub enum PathNormalizationError {
     #[error("Invalid path format: {path}")]
     InvalidFormat { path: String },
 
-    #[error("Path canonicalization failed: {path} - {error}")]
-    CanonicalizationFailed { path: String, error: String },
 
-    #[error("Unsupported path type: {path}")]
-    UnsupportedType { path: String },
 
     #[error("Path contains invalid characters: {path}")]
     InvalidCharacters { path: String },

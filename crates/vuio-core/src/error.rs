@@ -206,55 +206,6 @@ impl AppError {
         }
     }
 
-    /// Log the error with appropriate level and context
-    pub fn log_error(&self) {
-        match self {
-            AppError::Platform(platform_err) => {
-                tracing::error!("Platform error: {}", platform_err);
-                if platform_err.is_recoverable() {
-                    tracing::info!(
-                        "Recovery actions available: {:?}",
-                        platform_err.recovery_actions()
-                    );
-                }
-            }
-            AppError::Database(db_err) => {
-                tracing::error!("Database error: {}", db_err);
-                if db_err.is_recoverable() {
-                    tracing::info!("Database recovery strategy: {}", db_err.recovery_strategy());
-                }
-            }
-            AppError::Configuration(config_err) => {
-                tracing::warn!("Configuration error: {}", config_err);
-                tracing::info!("Configuration solution: {}", config_err.solution_guide());
-            }
-            AppError::MediaScan(msg) => {
-                tracing::warn!("Media scan error: {}", msg);
-                tracing::info!("Media scanning can be retried or directories can be reconfigured");
-            }
-            AppError::NetworkDiscovery(msg) => {
-                tracing::error!("Network discovery error: {}", msg);
-                tracing::info!("Check network configuration and firewall settings");
-            }
-            AppError::FileServing(msg) => {
-                tracing::warn!("File serving error: {}", msg);
-                tracing::info!("Check file permissions and disk space");
-            }
-            AppError::Watcher(err) => {
-                tracing::warn!("File watcher error: {}", err);
-                tracing::info!("File monitoring can be restarted");
-            }
-            AppError::NotFound => {
-                tracing::debug!("Resource not found - this is normal for some requests");
-            }
-            AppError::InvalidRange => {
-                tracing::debug!("Invalid range request - client issue");
-            }
-            _ => {
-                tracing::error!("Application error: {}", self);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
