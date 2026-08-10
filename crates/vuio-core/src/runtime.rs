@@ -6,8 +6,9 @@
 //! to keep.
 
 use crate::error::{Error, ErrorKind, Result};
+use std::future::Future;
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -177,6 +178,11 @@ impl RuntimeOptions {
 }
 
 /// Starts VuIO without installing command-line or process-signal behaviour.
+///
+/// A namespace rather than a value: `#[non_exhaustive]` keeps callers from
+/// writing `Runtime` as a literal, so this can gain state later without a
+/// major release.
+#[non_exhaustive]
 pub struct Runtime;
 
 impl Runtime {
@@ -190,29 +196,72 @@ impl Runtime {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let cancellation = CancellationToken::new();
         let internal = options.into_internal(cancellation.clone());
-        let task = tokio::spawn(crate::lifecycle::ApplicationRunner::run(internal));
-
-        RuntimeHandle {
-            cancellation,
-            task: Mutex::new(Some(task)),
-        }
+        spawn(crate::lifecycle::ApplicationRunner::run(internal), cancellation)
     }
+}
+
+/// Spawn a runtime future and wrap it in a handle.
+///
+/// Separate from [`Runtime::start`] so the status state machine can be tested
+/// against a future that fails or blocks on demand, without binding sockets.
+fn spawn(
+    runtime: impl Future<Output = anyhow::Result<()>> + Send + 'static,
+    cancellation: CancellationToken,
+) -> RuntimeHandle {
+    let failure: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let recorder = Arc::clone(&failure);
+
+    // The outcome is recorded from inside the task, so it is written before the
+    // handle reports finished. `status()` can then distinguish a clean stop
+    // from a crash without awaiting, which `wait()` would require.
+    let task = tokio::spawn(async move {
+        let outcome = runtime.await;
+        if let Err(error) = &outcome {
+            *lock(&recorder) = Some(format!("{error:#}"));
+        }
+        outcome
+    });
+
+    RuntimeHandle {
+        cancellation,
+        task: Mutex::new(Some(task)),
+        failure,
+    }
+}
+
+/// Take a lock, ignoring poisoning: a panicked holder leaves readable state.
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|error| error.into_inner())
 }
 
 /// Owns one in-process VuIO runtime and provides bounded lifecycle control.
 pub struct RuntimeHandle {
     cancellation: CancellationToken,
     task: Mutex<Option<JoinHandle<anyhow::Result<()>>>>,
+    failure: Arc<Mutex<Option<String>>>,
 }
 
 impl RuntimeHandle {
     /// What the runtime is doing right now.
     pub fn status(&self) -> RuntimeStatus {
-        let task = self.task.lock().unwrap_or_else(|error| error.into_inner());
-        match task.as_ref() {
-            Some(_) if self.cancellation.is_cancelled() => RuntimeStatus::Stopping,
-            Some(task) if !task.is_finished() => RuntimeStatus::Running,
-            Some(_) => RuntimeStatus::Stopped,
+        // Whether the task is still running is asked first: a runtime that was
+        // cancelled and has since finished is stopped, not stopping.
+        let still_running = lock(&self.task)
+            .as_ref()
+            .is_some_and(|task| !task.is_finished());
+
+        if still_running {
+            return if self.cancellation.is_cancelled() {
+                RuntimeStatus::Stopping
+            } else {
+                RuntimeStatus::Running
+            };
+        }
+
+        // Survives `wait()` taking the join handle, so a host that awaited a
+        // failed runtime still sees why it stopped.
+        match lock(&self.failure).clone() {
+            Some(reason) => RuntimeStatus::Failed(reason),
             None => RuntimeStatus::Stopped,
         }
     }
@@ -230,11 +279,7 @@ impl RuntimeHandle {
 
     /// Wait for the runtime to finish, however it was asked to stop.
     pub async fn wait(&self) -> Result<()> {
-        let task = self
-            .task
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .take();
+        let task = lock(&self.task).take();
         match task {
             Some(task) => match task.await {
                 Ok(Ok(())) => Ok(()),
@@ -287,5 +332,51 @@ mod tests {
         assert!(options.media_dirs.is_empty());
         assert!(options.port.is_none() && options.server_name.is_none());
         assert!(!options.debug);
+    }
+
+    #[tokio::test]
+    async fn a_live_runtime_is_running_until_shutdown_is_asked_for() {
+        let cancellation = CancellationToken::new();
+        // Never resolves, so the task is still alive after cancellation and the
+        // in-between state is observable rather than racy.
+        let handle = spawn(std::future::pending::<anyhow::Result<()>>(), cancellation);
+
+        assert_eq!(handle.status(), RuntimeStatus::Running);
+        handle.request_shutdown();
+        assert_eq!(handle.status(), RuntimeStatus::Stopping);
+    }
+
+    #[tokio::test]
+    async fn a_runtime_that_honours_shutdown_ends_stopped() {
+        let cancellation = CancellationToken::new();
+        let token = cancellation.clone();
+        let handle = spawn(
+            async move {
+                token.cancelled().await;
+                Ok(())
+            },
+            cancellation,
+        );
+
+        handle.shutdown().await.expect("a clean stop is not an error");
+        assert_eq!(handle.status(), RuntimeStatus::Stopped);
+    }
+
+    #[tokio::test]
+    async fn a_crash_is_reported_as_failed_with_the_reason() {
+        let handle = spawn(
+            async { Err(anyhow::anyhow!("address 0.0.0.0:8080 already in use")) },
+            CancellationToken::new(),
+        );
+
+        let error = handle.wait().await.expect_err("the runtime failed");
+        assert_eq!(error.kind(), ErrorKind::Runtime);
+
+        // `wait` consumed the join handle; the reason still has to be there,
+        // because a host that awaits a failed runtime then asks why.
+        match handle.status() {
+            RuntimeStatus::Failed(reason) => assert!(reason.contains("already in use")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
     }
 }

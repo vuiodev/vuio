@@ -51,6 +51,24 @@ internal_modules!(
 pub use crate::error::{Error, ErrorKind, Result};
 pub use crate::runtime::{Runtime, RuntimeHandle, RuntimeOptions, RuntimeStatus};
 
+// The promise is not only which items exist but what they can do. Losing
+// `Send`/`Sync` on the handle would stop hosts from holding it in shared state,
+// and `Error` dropping `std::error::Error` would break every `?` in a caller —
+// both are silent source changes that no signature diff would catch, so they
+// are asserted at compile time here.
+const _: () = {
+    const fn shareable<T: Send + Sync + 'static>() {}
+    const fn standard_error<T: std::error::Error + Send + Sync + 'static>() {}
+
+    shareable::<Runtime>();
+    shareable::<RuntimeHandle>();
+    shareable::<RuntimeOptions>();
+    shareable::<RuntimeStatus>();
+    shareable::<Error>();
+    shareable::<ErrorKind>();
+    standard_error::<Error>();
+};
+
 #[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
 pub type DefaultDatabase = crate::database::redb::RedbDatabase;
