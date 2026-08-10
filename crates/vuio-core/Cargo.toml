@@ -147,6 +147,12 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+# The integration tests in `tests/` drive the DLNA, SSDP and database layers
+# directly, and those modules are `pub(crate)` unless `unstable-internals` is
+# on. Depending on ourselves here turns the feature on for test targets only,
+# so plain `cargo test` works while ordinary builds stay sealed. Cargo drops a
+# path-only dev-dependency when packaging, so this does not affect publishing.
+vuio-core = { path = ".", features = ["unstable-internals"] }
 tempfile = "3.27"
 futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }
