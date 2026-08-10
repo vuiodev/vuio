@@ -120,7 +120,7 @@ impl MediaInfo {
     ///
     /// Avoids the `let mut` + `if let` dance when the duration is optional:
     /// ```
-    /// # use oxicast::MediaInfo;
+    /// # use vuio_cast::MediaInfo;
     /// let dur: Option<f64> = Some(120.0);
     /// let media = MediaInfo::new("url", "video/mp4").maybe_duration(dur);
     /// ```

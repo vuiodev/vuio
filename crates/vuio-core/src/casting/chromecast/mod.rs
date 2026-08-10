@@ -6,7 +6,7 @@ use super::{
 };
 use async_trait::async_trait;
 use mdns_sd::{ServiceDaemon, ServiceEvent};
-use oxicast::{
+use vuio_cast::{
     CastApp, CastClient, IdleReason, MediaInfo, MediaMetadata, PlayerState, QueueItem, StreamType,
 };
 use std::{collections::HashMap, net::SocketAddr, time::Duration};

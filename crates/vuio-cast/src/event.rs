@@ -9,14 +9,14 @@ use crate::types::{IdleReason, MediaStatus, ReceiverStatus};
 /// # Example
 ///
 /// ```no_run
-/// # async fn example(client: oxicast::CastClient) {
+/// # async fn example(client: vuio_cast::CastClient) {
 /// loop {
 ///     tokio::select! {
 ///         Some(event) = client.next_event() => match event {
-///             oxicast::CastEvent::MediaStatusChanged(status) => {
+///             vuio_cast::CastEvent::MediaStatusChanged(status) => {
 ///                 println!("Position: {:.1}s", status.current_time);
 ///             }
-///             oxicast::CastEvent::Disconnected(reason) => {
+///             vuio_cast::CastEvent::Disconnected(reason) => {
 ///                 println!("Lost connection: {reason:?}");
 ///                 break;
 ///             }

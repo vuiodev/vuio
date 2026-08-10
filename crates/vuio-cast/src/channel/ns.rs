@@ -102,4 +102,8 @@ pub const METADATA_AUDIOBOOK_CHAPTER: u64 = 5;
 // ── User Agent ───────────────────────────────────────────────
 
 /// User-agent string sent in CONNECT messages.
+///
+/// Deliberately unchanged by the rename to `vuio-cast`: this goes out on the
+/// wire to the receiver, and the crate name is not worth a behaviour change
+/// on a protocol that is already working.
 pub const USER_AGENT: &str = "oxicast";

@@ -77,12 +77,12 @@ impl TaskHandles {
 /// # Example
 ///
 /// ```no_run
-/// # async fn example() -> oxicast::Result<()> {
-/// let client = oxicast::CastClient::connect("192.168.1.100", 8009).await?;
+/// # async fn example() -> vuio_cast::Result<()> {
+/// let client = vuio_cast::CastClient::connect("192.168.1.100", 8009).await?;
 ///
-/// client.launch_app(&oxicast::CastApp::DefaultMediaReceiver).await?;
+/// client.launch_app(&vuio_cast::CastApp::DefaultMediaReceiver).await?;
 /// client.load_media(
-///     &oxicast::MediaInfo::new("https://example.com/video.mp4", "video/mp4"),
+///     &vuio_cast::MediaInfo::new("https://example.com/video.mp4", "video/mp4"),
 ///     true,
 ///     0.0,
 ///     None,
@@ -771,7 +771,7 @@ impl CastClient {
     /// # Example
     ///
     /// ```no_run
-    /// # async fn example(client: &oxicast::CastClient) -> oxicast::Result<()> {
+    /// # async fn example(client: &vuio_cast::CastClient) -> vuio_cast::Result<()> {
     /// let (_server, status) = client.serve_and_cast(
     ///     "/path/to/video.mp4",
     ///     "video/mp4",

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/oxicast", "crates/vuio-core", "crates/vuio-cli"]
+members = ["crates/vuio-cast", "crates/vuio-core", "crates/vuio-cli"]
 resolver = "2"
 
 [profile.release]
