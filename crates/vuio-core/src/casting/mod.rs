@@ -16,6 +16,21 @@ pub enum RendererProtocol {
     Airplay,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PairingStatus {
+    NotRequired,
+    Required,
+    Paired,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PairingChallenge {
+    pub id: String,
+    pub renderer_id: String,
+    pub expires_in_seconds: u64,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct RendererCapabilities {
     pub video: bool,
@@ -42,6 +57,7 @@ pub struct RendererDevice {
     pub location_url: String,
     pub model_name: String,
     pub protocol: RendererProtocol,
+    pub pairing: PairingStatus,
     pub capabilities: RendererCapabilities,
     #[serde(skip)]
     pub endpoint: RendererEndpoint,
@@ -64,6 +80,9 @@ impl RendererDevice {
 pub struct PlaybackItem {
     pub id: i64,
     pub url: String,
+    /// On-disk location. AirPlay audio is a push protocol, so the sender has to
+    /// decode the file itself rather than hand the receiver a URL.
+    pub local_path: std::path::PathBuf,
     pub title: String,
     pub filename: String,
     pub mime_type: String,
@@ -101,6 +120,15 @@ pub trait CastProvider: Send + Sync {
     async fn play(&self, device: &RendererDevice, item: &PlaybackItem) -> anyhow::Result<()>;
     async fn control(&self, device: &RendererDevice, action: PlaybackAction) -> anyhow::Result<()>;
     async fn status(&self, device: &RendererDevice) -> anyhow::Result<PlaybackStatus>;
+    async fn begin_pairing(&self, _device: &RendererDevice) -> anyhow::Result<PairingChallenge> {
+        anyhow::bail!("this renderer protocol does not support pairing")
+    }
+    async fn finish_pairing(&self, _challenge_id: &str, _pin: &str) -> anyhow::Result<()> {
+        anyhow::bail!("this renderer protocol does not support pairing")
+    }
+    async fn forget_pairing(&self, _device: &RendererDevice) -> anyhow::Result<bool> {
+        anyhow::bail!("this renderer protocol does not support pairing")
+    }
     async fn queue_next(
         &self,
         _device: &RendererDevice,
@@ -122,11 +150,23 @@ pub struct DiscoveryBatch {
 
 impl CastingManager {
     pub fn new() -> Self {
+        Self::with_airplay(airplay::AirplayProvider::new())
+    }
+
+    pub async fn persistent(
+        secrets: Arc<dyn crate::database::SecretStore>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self::with_airplay(
+            airplay::AirplayProvider::persistent(secrets).await?,
+        ))
+    }
+
+    fn with_airplay(airplay: airplay::AirplayProvider) -> Self {
         Self {
             providers: vec![
                 Arc::new(dlna::DlnaProvider),
                 Arc::new(chromecast::ChromecastProvider::new()),
-                Arc::new(airplay::AirplayProvider::new()),
+                Arc::new(airplay),
             ],
         }
     }
@@ -197,6 +237,25 @@ impl CastingManager {
 
     pub async fn status(&self, device: &RendererDevice) -> anyhow::Result<PlaybackStatus> {
         self.provider(device.protocol)?.status(device).await
+    }
+
+    pub async fn begin_pairing(&self, device: &RendererDevice) -> anyhow::Result<PairingChallenge> {
+        self.provider(device.protocol)?.begin_pairing(device).await
+    }
+
+    pub async fn finish_pairing(
+        &self,
+        protocol: RendererProtocol,
+        challenge_id: &str,
+        pin: &str,
+    ) -> anyhow::Result<()> {
+        self.provider(protocol)?
+            .finish_pairing(challenge_id, pin)
+            .await
+    }
+
+    pub async fn forget_pairing(&self, device: &RendererDevice) -> anyhow::Result<bool> {
+        self.provider(device.protocol)?.forget_pairing(device).await
     }
 
     pub async fn queue_next(

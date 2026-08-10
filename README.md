@@ -58,9 +58,47 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 
 ### Casting compatibility
 
-The dashboard and MCP tools discover DLNA renderers through SSDP, Chromecast and Google TV devices through `_googlecast._tcp` mDNS, and URL-video-capable AirPlay receivers through `_airplay._tcp` mDNS. Chromecast uses Google's Default Media Receiver and does not require a custom Cast application ID.
+The dashboard and MCP tools discover DLNA renderers through SSDP, Chromecast and Google TV devices through `_googlecast._tcp` mDNS, and URL-video-capable AirPlay receivers through `_airplay._tcp` mDNS. Chromecast uses Google's Default Media Receiver and does not require a custom Cast application ID. The dashboard always asks which discovered renderer to use for each new cast.
 
-Casting is direct-play only. DLNA behavior is unchanged. Chromecast accepts supported MP4, WebM, MPEG-TS, MP3, M4A, OGG, WAV, FLAC, and common image containers, subject to the codecs supported by the receiving model. AirPlay support is limited to unpaired receivers that advertise URL-video playback and to progressive MP4 video; AirPlay audio, mirroring, protected media, and AirPlay 2 pairing are not supported. Unsupported files produce an error instead of being transcoded or silently skipped.
+Casting is direct-play only. DLNA behavior is unchanged. Chromecast accepts supported MP4, WebM, MPEG-TS, MP3, M4A, OGG, WAV, FLAC, and common image containers, subject to the codecs supported by the receiving model. AirPlay is offered for receivers that advertise AirPlay video v1 (feature bit 0), which is the `POST /play` URL-video endpoint — Apple TV, macOS, and legacy receivers. VuIO performs Pair-Verify with a stored PIN pairing, or transient Pair Setup where the receiver advertises system/CoreUtils pairing (no PIN and nothing persisted), then opens an encrypted control session with an RTSP `SETUP`/`RECORD`, serves the reverse event channel and an NTP timing server, and starts playback with an HTTP `POST /play` carrying the media URL as-is; the receiver fetches the file directly from VuIO over HTTP with range support. Third-party sets that advertise only AirPlay video v2 (bit 49, e.g. Sony Android TV) expose no URL-video surface to a non-Apple sender — every HTTP video path answers 404, and the play-queue command channel cannot be bound — so they are listed for audio only (`video: false, audio: true`); cast video to those over Chromecast or DLNA. Pairing keys are stored in VuIO's database.
+
+#### AirPlay receiver compatibility
+
+AirPlay receivers fall into two groups, and the difference decides whether VuIO can cast video to them.
+
+**URL-video receivers** advertise feature bit 0 (`SupportsAirPlayVideoV1`) and implement `POST /play`, the endpoint that hands the receiver a URL to fetch. Apple TV, macOS, and legacy receivers do this, and VuIO drives them: Pair-Verify with a stored PIN pairing (or transient Pair Setup where the receiver advertises system/CoreUtils pairing, which needs no PIN and stores nothing), an encrypted control session with RTSP `SETUP`/`RECORD`, the reverse event channel, an NTP timing server, then `POST /play` with the media URL as-is.
+
+**Audio and mirroring receivers** — most third-party AirPlay 2 TVs, including Sony Android TV — advertise only bit 49 (`SupportsAirPlayVideoV2`) and expose no URL-video endpoint at all. They are listed as audio-only renderers, so music casts to them and video does not. Set `VUIO_AIRPLAY_ALLOW_V2_ONLY=1` to offer video anyway and have the cast report exactly what the receiver answered.
+
+##### Why video does not work on these sets
+
+This is not a codec, container, or file problem: a 404 is the receiver reporting that the URL path does not exist, and it is returned before the request body naming the media is ever examined. The same 404 comes back for an H.264 High / AAC LC MP4 that plays fine over Chromecast to the same TV. An iPad cannot play video to these sets either.
+
+Probing a Sony XR-75X90L (AirPlay SDK 3.6.0.72, `features=0x7F8AD0,0x18BCF46`) found:
+
+| Request | Result |
+| --- | --- |
+| `OPTIONS *` | 200 — `ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, FLUSHBUFFERED, TEARDOWN, OPTIONS, POST, GET, PUT` |
+| `/play`, `/playback-info`, `/server-info`, `/scrub`, `/playqueue`, `/rate`, `/stop` | 404, over both HTTP and RTSP |
+| `POST /command` | 400 on a malformed body — the endpoint exists |
+| `POST /command` with `{"params":{"data":…}}` | 500 for every payload, including an empty one — nothing can be bound to it |
+| `SETUP` with `isRemoteControlOnly` | 200 |
+| `SETUP` for the type-130 remote-control stream | 400 — refused |
+| `SETUP` stream types 96 / 103 / 110 | 400 (96 succeeds once a media session exists, see below) |
+| Port scan | only 7000 open for AirPlay; 8008/8009 are Chromecast, 52323 is DLNA |
+
+The `Public` method list is pure RAOP audio plus mirroring, and the type-130 stream that carries Apple's play-queue command set is refused — pyatv likewise only attempts that stream against Apple TV and HomePod. `/fp-setup` exists (400, not 404), which points at FairPlay as the gate. That is Apple-proprietary and not reproducible from public documentation, so these sets grant video to authenticated Apple senders and to nobody else. Cast video to them over Chromecast or DLNA, both of which VuIO supports and which work on the same hardware.
+
+##### Audio on these sets
+
+Audio is a different story. The same Sony grants a buffered-audio stream:
+
+```
+SETUP (type 96, sr 44100, spf 352) → 200
+{"streams":[{"type":96,"dataPort":45528,"controlPort":41402}]}
+```
+
+VuIO streams audio to these receivers. AirPlay never carries MP3 — its `audioFormat` bitmask covers only PCM, ALAC, AAC-LC, AAC-ELD and OPUS — so, exactly like an iPhone, VuIO decodes the source itself and pushes `PCM/44100/16/2` (`0x800`). MP3, M4A/AAC, FLAC, WAV, ALAC and Vorbis are decoded with Symphonia and resampled to 44.1 kHz stereo. A realtime AirPlay receiver hardcodes ALAC and ignores the `ct`/`audioFormat` it is offered, so each 352-frame packet is wrapped in an uncompressed ALAC element, encrypted with ChaCha20-Poly1305 (key: the first 32 bytes of the pairing secret, verbatim), and paced in real time against an NTP timing server with clock-sync packets on the control channel. Track title, artist, album and cover art are read from the file's tags and pushed as DMAP metadata, and a `progress` parameter drives the receiver's seek bar. Casting a folder hands the whole queue to the receiver, which plays through it gaplessly on one RTP timeline; the receiver's own remote reaches the sender as DACP command codes on the event channel, so its next/previous buttons skip tracks. Audio therefore reaches receivers that cannot play video at all, and the renderer list reports `video: false, audio: true` for them. Volume stays under the receiver's control: these sets report their own level and forward their remote's volume presses to the sender.
 
 ## Quick Start
 

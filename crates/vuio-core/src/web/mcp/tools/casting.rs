@@ -35,7 +35,7 @@ pub async fn cast_file_helper<D: DatabaseManager + 'static>(
     let origin = state
         .advertised_http_origin_for_peer(&matched_tv.location_url)
         .await;
-    let media_url = format!("{origin}/media/{}", file.id);
+    let media_url = playback_url(&file, &origin);
 
     let item = playback_item(&file, &origin);
     state.discovered_tvs.validate(matched_tv, &item)?;
@@ -142,10 +142,26 @@ pub async fn cached_renderers<D: DatabaseManager>(
 pub(crate) fn playback_item(file: &FileLocation, origin: &str) -> PlaybackItem {
     PlaybackItem {
         id: file.id,
-        url: format!("{origin}/media/{}", file.id),
+        url: playback_url(file, origin),
+        local_path: file.path.clone(),
         title: file.title.clone().unwrap_or_else(|| file.filename.clone()),
         filename: file.filename.clone(),
         mime_type: file.mime_type.clone(),
+    }
+}
+
+fn playback_url(file: &FileLocation, origin: &str) -> String {
+    let extension = std::path::Path::new(&file.filename)
+        .extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| {
+            !value.is_empty()
+                && value.len() <= 16
+                && value.bytes().all(|byte| byte.is_ascii_alphanumeric())
+        });
+    match extension {
+        Some(extension) => format!("{origin}/media/{}.{extension}", file.id),
+        None => format!("{origin}/media/{}", file.id),
     }
 }
 
@@ -208,7 +224,6 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
     }
 
     let selected_track = &tracks[track_index];
-    let file_id = selected_track.id;
 
     let renderers = cached_renderers(state).await?;
 
@@ -229,7 +244,7 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
     let origin = state
         .advertised_http_origin_for_peer(&matched_tv.location_url)
         .await;
-    let media_url = format!("{origin}/media/{file_id}");
+    let media_url = playback_url(selected_track, &origin);
 
     let playback_items = tracks
         .iter()
@@ -262,15 +277,29 @@ pub async fn cast_tracks_helper<D: DatabaseManager + 'static>(
         }
     }
 
+    // Hand the renderer as much of the queue as it will take. A renderer with a
+    // real queue (AirPlay audio) accepts the whole remainder and advances on its
+    // own; one without accepts nothing and the status monitor below drives the
+    // transitions instead.
     let mut queued_file = None;
-    if let Some(next_item) = playback_items.get(track_index + 1) {
+    let mut queued_count = 0usize;
+    for next_item in playback_items.iter().skip(track_index + 1) {
         match state.discovered_tvs.queue_next(matched_tv, next_item).await {
-            Ok(true) => queued_file = Some(next_item.filename.clone()),
-            Ok(false) => {}
+            Ok(true) => {
+                if queued_file.is_none() {
+                    queued_file = Some(next_item.filename.clone());
+                }
+                queued_count += 1;
+            }
+            Ok(false) => break,
             Err(error) => {
                 tracing::warn!(%error, "Renderer does not support native next-item queueing");
+                break;
             }
         }
+    }
+    if queued_count > 0 {
+        tracing::info!(queued_count, "Queued tracks on the renderer");
     }
 
     // Spawn new queue monitor to dynamically handle subsequent track transitions

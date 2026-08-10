@@ -285,6 +285,16 @@ impl RendererCache {
         }
     }
 
+    pub async fn persistent(
+        secrets: std::sync::Arc<dyn crate::database::SecretStore>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            snapshot: tokio::sync::RwLock::new(RendererSnapshot::default()),
+            refresh: tokio::sync::Mutex::new(()),
+            casting: crate::casting::CastingManager::persistent(secrets).await?,
+        })
+    }
+
     pub async fn snapshot(&self) -> Vec<RendererDevice> {
         self.snapshot.read().await.renderers.clone()
     }
@@ -424,6 +434,28 @@ impl RendererCache {
         self.casting.status(renderer).await
     }
 
+    pub async fn begin_pairing(
+        &self,
+        renderer: &RendererDevice,
+    ) -> anyhow::Result<crate::casting::PairingChallenge> {
+        self.casting.begin_pairing(renderer).await
+    }
+
+    pub async fn finish_pairing(
+        &self,
+        protocol: crate::casting::RendererProtocol,
+        challenge_id: &str,
+        pin: &str,
+    ) -> anyhow::Result<()> {
+        self.casting
+            .finish_pairing(protocol, challenge_id, pin)
+            .await
+    }
+
+    pub async fn forget_pairing(&self, renderer: &RendererDevice) -> anyhow::Result<bool> {
+        self.casting.forget_pairing(renderer).await
+    }
+
     pub async fn queue_next(
         &self,
         renderer: &RendererDevice,
@@ -491,6 +523,7 @@ mod tests {
             location_url: location_url.clone(),
             model_name: model.to_string(),
             protocol: crate::casting::RendererProtocol::Dlna,
+            pairing: crate::casting::PairingStatus::NotRequired,
             capabilities: crate::casting::RendererCapabilities {
                 video: true,
                 audio: true,

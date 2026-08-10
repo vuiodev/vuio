@@ -135,6 +135,9 @@ where
         config_manager.get_config_path(),
         runtime_options.auth,
     )?);
+    let renderer_cache = crate::runtime_state::RendererCache::persistent(database.clone())
+        .await
+        .context("Failed to initialize AirPlay credential storage")?;
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
@@ -160,7 +163,7 @@ where
         active_casts: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::ActiveCastRegistry::new(),
         )),
-        discovered_tvs: Arc::new(crate::runtime_state::RendererCache::new()),
+        discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: cancellation.clone(),
         background_tasks: background_tasks.clone(),
@@ -439,8 +442,11 @@ where
     }
 
     info!("Shutting down gracefully...");
-    shutdown.cancel();
+    // Tear renderer sessions down first: a receiver keeps rendering what it has
+    // buffered unless it is told to stop, and the control connection has to
+    // still be alive to tell it.
     app_state.discovered_tvs.shutdown().await;
+    shutdown.cancel();
     background_tasks.close();
     if let Err(error) = file_watcher.stop_watching().await {
         warn!("Failed to stop file watcher cleanly: {}", error);
