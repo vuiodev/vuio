@@ -5,7 +5,8 @@ use axum::{
 };
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, AppError>;
+/// Result alias for the internal HTTP/service layer.
+pub(crate) type AppResult<T> = std::result::Result<T, AppError>;
 
 #[derive(Error, Debug)]
 pub enum AppError {
@@ -330,5 +331,122 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
         assert_eq!(&body[..], b"Service Unavailable");
+    }
+}
+
+// ── Public error ───────────────────────────────────────────────────────────
+//
+// `AppError` above is an HTTP-layer type: it implements axum's `IntoResponse`
+// and wraps `notify::Error`, so it cannot be part of a stable public API.
+// Everything an embedder sees is expressed with the type below, which names no
+// foreign type at all — a source is erased to a boxed `std::error::Error`, so a
+// dependency's major release can never break this signature.
+
+/// The kind of failure an [`Error`] represents.
+///
+/// New kinds may be added in future releases, which is why this enum is
+/// `#[non_exhaustive]`: match with a `_` arm.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorKind {
+    /// Configuration could not be read, parsed, or validated.
+    Config,
+    /// The media database could not be opened, read, or written.
+    Database,
+    /// Scanning or reading media failed.
+    Media,
+    /// A socket, interface, or discovery operation failed.
+    Network,
+    /// The runtime could not start, or did not stop cleanly.
+    Runtime,
+}
+
+/// An error returned by the VuIO runtime.
+///
+/// Inspect [`Error::kind`] to react programmatically; the [`Display`] form is
+/// intended for logs and operators.
+///
+/// [`Display`]: std::fmt::Display
+pub struct Error {
+    kind: ErrorKind,
+    context: String,
+    source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+}
+
+impl Error {
+    /// The category of this failure.
+    pub fn kind(&self) -> ErrorKind {
+        self.kind
+    }
+
+    pub(crate) fn new(kind: ErrorKind, context: impl Into<String>) -> Self {
+        Self {
+            kind,
+            context: context.into(),
+            source: None,
+        }
+    }
+
+    /// Attach the underlying cause. Kept crate-internal so no foreign error
+    /// type ever appears in the public signature.
+    pub(crate) fn with_source(
+        kind: ErrorKind,
+        context: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> Self {
+        Self {
+            kind,
+            context: context.into(),
+            source: Some(source.into()),
+        }
+    }
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}", self.context)
+    }
+}
+
+impl std::fmt::Debug for Error {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut debug = formatter.debug_struct("Error");
+        debug.field("kind", &self.kind).field("context", &self.context);
+        if let Some(source) = &self.source {
+            debug.field("source", source);
+        }
+        debug.finish()
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|source| source.as_ref() as &(dyn std::error::Error + 'static))
+    }
+}
+
+/// Result alias used throughout the public API.
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod public_error_tests {
+    use super::*;
+
+    #[test]
+    fn kind_is_inspectable_and_source_chains() {
+        let inner = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied");
+        let error = Error::with_source(ErrorKind::Config, "reading config", inner);
+        assert_eq!(error.kind(), ErrorKind::Config);
+        assert_eq!(error.to_string(), "reading config");
+        assert!(std::error::Error::source(&error).is_some());
+    }
+
+    #[test]
+    fn display_stays_free_of_debug_noise() {
+        let error = Error::new(ErrorKind::Runtime, "shutdown timed out");
+        assert_eq!(error.to_string(), "shutdown timed out");
+        assert!(format!("{error:?}").contains("Runtime"));
     }
 }

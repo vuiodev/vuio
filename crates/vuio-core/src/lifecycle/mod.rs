@@ -32,13 +32,11 @@ mod runner;
 mod shutdown;
 
 use bootstrap::*;
-pub use bootstrap::{ApplicationContext, BootstrapService};
-pub use maintenance::MaintenanceService;
+pub use bootstrap::ApplicationContext;
 use maintenance::*;
 use media_service::*;
-pub use media_service::{ApplicationStats, MediaLifecycleService};
+pub use media_service::ApplicationStats;
 use network::*;
-pub use network::{NetworkLifecycleService, NetworkTaskHandles};
 pub use runner::ApplicationRunner;
 pub use shutdown::ShutdownCoordinator;
 use shutdown::*;

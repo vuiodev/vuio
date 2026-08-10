@@ -15,6 +15,13 @@ categories = ["multimedia", "network-programming"]
 name = "vuio_core"
 path = "src/lib.rs"
 
+[features]
+default = []
+# Opens the crate's internal modules so the integration tests can drive the
+# DLNA, SSDP and database layers directly. No stability promise applies to
+# anything it exposes; dependent crates must not enable it.
+unstable-internals = []
+
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "fs", "time", "sync", "macros", "io-util"] }

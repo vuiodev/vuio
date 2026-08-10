@@ -17,6 +17,8 @@ mod macos;
 mod windows;
 
 // Re-export the comprehensive error types from the error module
+// Each OS uses only its own error type; all are re-exported for parity.
+#[allow(unused_imports)]
 pub use error::{
     BsdError, ConfigurationError, DatabaseError, LinuxError, MacOSError, PlatformError,
     PlatformResult, WindowsError,

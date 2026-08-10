@@ -10,7 +10,7 @@ use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::error::Result;
+use crate::error::AppResult as Result;
 use crate::media::ScanPolicy;
 
 /// Events that can occur in the file system for media files
