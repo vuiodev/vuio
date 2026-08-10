@@ -7,7 +7,8 @@ The main idea of **VuIO** is to be the best **open-source** and **zero-ads** med
 VuIO is designed for offline and localized media sharing in environments such as:
 - Homes & vacation homes
 - Schools & universities
-- Ships & yachts
+- Cruise ships & yachts
+- Buses. plains, trains
 - Remote outposts & bunkers
 - Polar research stations
 - Future lunar & Mars bases
@@ -35,7 +36,8 @@ VuIO is designed for offline and localized media sharing in environments such as
 
 ## Short-Term Plans
 
-*(Short-term roadmap items to be defined)*
+- Stabilize the api for vuio-core
+- Publish it on crates.io
 
 ---
 
@@ -46,3 +48,5 @@ VuIO is designed for offline and localized media sharing in environments such as
 - [ ] **Android TV** app
 - [ ] **Samsung TV** app
 - [ ] **LG TV** app
+- [ ] **Apple TV** app
+- [ ] **Amazon Fire TV** app
