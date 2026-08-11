@@ -1,5 +1,5 @@
 [package]
-name = "vuio"
+name = "vuio-cli"
 version = "0.0.42"
 edition = "2021"
 authors = ["vyrti"]
