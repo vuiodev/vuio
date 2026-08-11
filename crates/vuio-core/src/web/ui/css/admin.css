@@ -1,0 +1,394 @@
+/* Admin tab: a section list beside a settings pane. */
+
+.admin-layout {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    align-items: start;
+}
+
+@media (min-width: 800px) {
+    .admin-layout {
+        grid-template-columns: 210px 1fr;
+    }
+}
+
+.admin-nav {
+    display: flex;
+    flex-direction: row;
+    overflow-x: auto;
+    gap: 0.25rem;
+    padding-bottom: 0.25rem;
+}
+
+@media (min-width: 800px) {
+    .admin-nav {
+        flex-direction: column;
+        overflow-x: visible;
+        position: sticky;
+        top: 1rem;
+    }
+}
+
+.admin-nav-item {
+    background: transparent;
+    border: none;
+    border-radius: 10px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 0.6rem 0.9rem;
+    text-align: left;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.admin-nav-item:hover:not(.active) {
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-primary);
+}
+
+.admin-nav-item.active {
+    background: var(--accent-gradient);
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+    color: #fff;
+}
+
+.admin-pane {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    min-height: 320px;
+    padding: 1.25rem;
+    /* Room for the sticky save bar, so the last setting can always be scrolled
+       clear of it rather than sitting permanently underneath. */
+    padding-bottom: 5rem;
+}
+
+.admin-loading {
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.admin-section-title {
+    font-size: 1.05rem;
+    font-weight: 700;
+}
+
+.admin-section-blurb {
+    color: var(--text-secondary);
+    font-size: 0.875rem;
+    margin: 0.25rem 0 1.25rem;
+}
+
+.admin-row {
+    border-top: 1px solid var(--card-border);
+    display: grid;
+    gap: 0.35rem 1rem;
+    grid-template-columns: 1fr;
+    padding: 0.9rem 0;
+}
+
+@media (min-width: 720px) {
+    .admin-row {
+        align-items: baseline;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+    }
+}
+
+.admin-row:first-of-type {
+    border-top: none;
+}
+
+.admin-label {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.925rem;
+    font-weight: 600;
+}
+
+.admin-help {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    grid-column: 1;
+    line-height: 1.45;
+    margin-top: 0.15rem;
+}
+
+/* Reserved for the caveats where the setting does less than its name implies. */
+.admin-note {
+    color: #fbbf24;
+    font-size: 0.8rem;
+    grid-column: 1;
+    line-height: 1.45;
+}
+
+.admin-control {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-width: 0;
+}
+
+@media (min-width: 720px) {
+    .admin-control {
+        grid-column: 2;
+        grid-row: 1 / span 3;
+        justify-self: stretch;
+    }
+}
+
+.admin-input,
+.admin-select {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    color: var(--text-primary);
+    flex: 1;
+    font-family: inherit;
+    font-size: 0.9rem;
+    min-width: 0;
+    outline: none;
+    padding: 0.55rem 0.75rem;
+    transition: all 0.2s ease;
+    width: 100%;
+}
+
+.admin-input:focus,
+.admin-select:focus {
+    border-color: var(--accent-color);
+    box-shadow: 0 0 0 3px var(--focus-ring);
+}
+
+.admin-input:disabled,
+.admin-select:disabled {
+    color: var(--text-secondary);
+    cursor: not-allowed;
+    opacity: 0.55;
+}
+
+textarea.admin-input {
+    line-height: 1.5;
+    min-height: 4.5rem;
+    resize: vertical;
+}
+
+.admin-mono {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.8rem;
+}
+
+/* The set/unset switch. Unset means the key is absent from config.toml and the
+   value shown beside it is whatever default is in force. */
+.admin-toggle {
+    align-items: center;
+    color: var(--text-secondary);
+    cursor: pointer;
+    display: inline-flex;
+    flex: none;
+    font-size: 0.75rem;
+    font-weight: 600;
+    gap: 0.35rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    user-select: none;
+    white-space: nowrap;
+}
+
+.admin-toggle input {
+    accent-color: var(--accent-color);
+    cursor: pointer;
+}
+
+.admin-pill {
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    padding: 0.15rem 0.5rem;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.admin-pill-restart {
+    background: rgba(251, 191, 36, 0.12);
+    color: #fbbf24;
+}
+
+.admin-pill-unset {
+    background: rgba(255, 255, 255, 0.06);
+    color: var(--text-secondary);
+}
+
+.admin-banner {
+    border-radius: 12px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    padding: 0.85rem 1rem;
+}
+
+.admin-banner-warn {
+    background: rgba(251, 191, 36, 0.1);
+    border: 1px solid rgba(251, 191, 36, 0.3);
+    color: #fde68a;
+}
+
+.admin-banner-info {
+    background: rgba(0, 240, 255, 0.07);
+    border: 1px solid rgba(0, 240, 255, 0.25);
+    color: var(--text-primary);
+}
+
+.admin-banner-text {
+    flex: 1;
+    min-width: 12rem;
+}
+
+.admin-footer {
+    align-items: center;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 14px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    justify-content: space-between;
+    padding: 0.85rem 1rem;
+    position: sticky;
+    bottom: 1rem;
+}
+
+.admin-footer-meta {
+    color: var(--text-secondary);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem;
+    min-width: 0;
+}
+
+.admin-footer-actions {
+    display: flex;
+    gap: 0.5rem;
+}
+
+.admin-dirty {
+    color: var(--accent-color);
+    font-size: 0.8rem;
+    font-weight: 600;
+}
+
+.admin-btn {
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid var(--card-border);
+    border-radius: 10px;
+    color: var(--text-secondary);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 0.875rem;
+    font-weight: 600;
+    padding: 0.55rem 1rem;
+    transition: all 0.2s ease;
+}
+
+.admin-btn:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.admin-btn:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
+.admin-btn-primary {
+    background: var(--accent-gradient);
+    border-color: transparent;
+    color: #fff;
+}
+
+.admin-btn-primary:hover:not(:disabled) {
+    box-shadow: 0 0 14px rgba(0, 240, 255, 0.3);
+    color: #fff;
+}
+
+.admin-btn-danger {
+    border-color: rgba(239, 68, 68, 0.4);
+    color: #fca5a5;
+}
+
+.admin-btn-danger:hover:not(:disabled) {
+    background: rgba(239, 68, 68, 0.1);
+    color: #fecaca;
+}
+
+/* Library rows: one card per monitored folder. */
+.admin-library {
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-bottom: 0.75rem;
+    padding: 0.9rem;
+}
+
+.admin-library-head {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.admin-library-grid {
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: 1fr;
+}
+
+@media (min-width: 720px) {
+    .admin-library-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+.admin-field-label {
+    color: var(--text-secondary);
+    display: block;
+    font-size: 0.75rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    margin-bottom: 0.25rem;
+    text-transform: uppercase;
+}
+
+.admin-runtime {
+    display: grid;
+    gap: 0.6rem 1rem;
+    grid-template-columns: 1fr;
+}
+
+@media (min-width: 620px) {
+    .admin-runtime {
+        grid-template-columns: max-content minmax(0, 1fr);
+    }
+}
+
+.admin-runtime dt {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+.admin-runtime dd {
+    margin: 0;
+    overflow-wrap: anywhere;
+}

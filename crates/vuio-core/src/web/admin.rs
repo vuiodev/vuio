@@ -455,8 +455,30 @@ struct AdminConfigResponse {
     /// Effective values, including those coming from a default rather than the file.
     values: Map<String, Value>,
     present: BTreeMap<&'static str, bool>,
+    /// Libraries exactly as the file writes them. Editing and sending these back
+    /// leaves keys the operator never set out of the file, rather than freezing this
+    /// version's platform defaults into it.
     directories: Value,
+    /// The same libraries with defaults filled in, so the UI can show what is actually
+    /// in force for a key the file leaves out.
+    effective_directories: Value,
     runtime: RuntimeInfo,
+}
+
+/// The `[[media.directories]]` array as written, or `None` if the file cannot be read.
+fn raw_directories(document: &DocumentMut) -> Option<Value> {
+    let array = document
+        .get("media")
+        .and_then(|media| media.get("directories"))?
+        .as_array_of_tables()?;
+    let entries = array
+        .iter()
+        .map(|table| {
+            let rendered = table.to_string();
+            toml::from_str::<Value>(&rendered).unwrap_or(Value::Object(Map::new()))
+        })
+        .collect();
+    Some(Value::Array(entries))
 }
 
 fn runtime_info<D: DatabaseManager>(state: &AppState<D>) -> RuntimeInfo {
@@ -499,31 +521,36 @@ pub async fn get_config<D: DatabaseManager>(State(state): State<AppState<D>>) ->
         values.insert(spec.key.to_string(), value);
     }
 
-    // A scratch config still renders; it is simply read-only, and reading the file
-    // back is what tells us which keys the operator actually wrote.
-    let present = match std::fs::read_to_string(&state.config_source.path) {
-        Ok(raw) => match raw.parse::<DocumentMut>() {
-            Ok(document) => present_keys(&document),
-            Err(err) => {
-                tracing::warn!("Could not parse config for presence detection: {err}");
-                BTreeMap::new()
-            }
-        },
-        Err(err) => {
-            tracing::warn!("Could not read config for presence detection: {err}");
-            BTreeMap::new()
-        }
-    };
+    let effective_directories = serialised
+        .get("media")
+        .and_then(|media| media.get("directories"))
+        .cloned()
+        .unwrap_or(Value::Array(Vec::new()));
+
+    // A scratch config still renders; it is simply read-only. Reading the file back is
+    // what tells us which keys the operator actually wrote, as opposed to which ones
+    // ended up with a value.
+    let document = std::fs::read_to_string(&state.config_source.path)
+        .map_err(|err| tracing::warn!("Could not read config for presence detection: {err}"))
+        .ok()
+        .and_then(|raw| {
+            raw.parse::<DocumentMut>()
+                .map_err(|err| tracing::warn!("Could not parse config for presence: {err}"))
+                .ok()
+        });
+
+    let present = document.as_ref().map(present_keys).unwrap_or_default();
+    let directories = document
+        .as_ref()
+        .and_then(raw_directories)
+        .unwrap_or_else(|| effective_directories.clone());
 
     Json(AdminConfigResponse {
         sections: SECTIONS,
         values,
         present,
-        directories: serialised
-            .get("media")
-            .and_then(|media| media.get("directories"))
-            .cloned()
-            .unwrap_or(Value::Array(Vec::new())),
+        directories,
+        effective_directories,
         runtime: runtime_info(&state),
     })
     .into_response()
@@ -582,10 +609,24 @@ fn apply_key(document: &mut DocumentMut, key: &str, value: &Value) -> Result<(),
             .ok_or_else(|| format!("{segment} is not a table"))?;
     }
 
-    if value.is_null() {
-        table.remove(leaf);
-    } else {
+    if !value.is_null() {
         table[*leaf] = toml_edit::Item::Value(to_toml(value)?);
+        return Ok(());
+    }
+
+    table.remove(leaf);
+    // Unsetting the last key of a section should leave the file as it was before that
+    // section existed, not with an empty `[management]` header standing over nothing.
+    // Config sections are one level deep, so the immediate parent is the only candidate.
+    if let [parent] = tables {
+        let emptied = document
+            .as_table()
+            .get(parent)
+            .and_then(|item| item.as_table())
+            .is_some_and(|section| section.is_empty());
+        if emptied {
+            document.as_table_mut().remove(parent);
+        }
     }
     Ok(())
 }
@@ -743,7 +784,12 @@ pub async fn put_config<D: DatabaseManager>(
     }
 
     // The file watcher picks this up and runs the reload, which is the same path a
-    // hand edit takes; there is no second apply mechanism to keep in step.
+    // hand edit takes -- it re-watches directories, rescans, and notifies subscribers.
+    // But it is debounced, so a read issued straight after this response would still
+    // see the old values. The bytes just written are known to parse and validate, so
+    // publish them now and let the watcher's unchanged-file check swallow the echo.
+    state.live_config.store(std::sync::Arc::new(candidate));
+
     Json(json!({
         "saved": true,
         "impact": match impact {
@@ -955,6 +1001,58 @@ name = "VuIO"
         let rendered = doc.to_string();
         assert!(rendered.contains("[management]"));
         assert!(rendered.contains("session_ttl_hours = 24"));
+    }
+
+    /// Setting a key in an absent section creates the section; unsetting the last key
+    /// should take the section with it, so a set/unset round trip leaves the file as
+    /// it was rather than with an empty `[management]` header over nothing.
+    #[test]
+    fn unsetting_the_last_key_removes_its_empty_section() {
+        let original = "[server]\nport = 8080\n";
+        let mut doc = document(original);
+
+        apply_key(&mut doc, "management.session_ttl_hours", &json!(24)).expect("applies");
+        assert!(doc.to_string().contains("[management]"));
+
+        apply_key(&mut doc, "management.session_ttl_hours", &Value::Null).expect("applies");
+        assert!(!doc.to_string().contains("[management]"));
+        assert_eq!(doc.to_string(), original);
+
+        // A section that still has other keys stays put.
+        let mut kept = document("[management]\nenabled = true\nsession_ttl_hours = 24\n");
+        apply_key(&mut kept, "management.session_ttl_hours", &Value::Null).expect("applies");
+        assert!(kept.to_string().contains("[management]"));
+        assert!(kept.to_string().contains("enabled = true"));
+    }
+
+    /// The libraries the UI edits come from the file, not the loaded config, so keys
+    /// the operator never wrote stay unwritten. Round-tripping the effective config
+    /// instead would freeze this version's platform defaults into their file.
+    #[test]
+    fn raw_directories_report_only_what_the_file_says() {
+        let doc = document(
+            r#"
+[media]
+scan_on_startup = true
+
+[[media.directories]]
+path = "/movies"
+recursive = true
+
+[[media.directories]]
+path = "/music"
+recursive = false
+extensions = ["mp3"]
+"#,
+        );
+        let directories = raw_directories(&doc).expect("directories");
+        let entries = directories.as_array().expect("array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["path"], json!("/movies"));
+        // Absent in the file, so absent here — no exclude_patterns, no validation_mode.
+        assert!(entries[0].get("exclude_patterns").is_none());
+        assert!(entries[0].get("validation_mode").is_none());
+        assert_eq!(entries[1]["extensions"], json!(["mp3"]));
     }
 
     #[test]

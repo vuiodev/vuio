@@ -15,6 +15,7 @@
     <link rel="stylesheet" href="/assets/video.css">
     <link rel="stylesheet" href="/assets/player.css">
     <link rel="stylesheet" href="/assets/cast.css">
+    <link rel="stylesheet" href="/assets/admin.css">
     <!-- Classic (non-module) scripts, deferred: they execute in document order
          after parsing, which keeps the inline onclick= handlers working against
          the shared global scope they have always used. init.js must stay last. -->
@@ -27,6 +28,7 @@
     <script defer src="/assets/cast.js"></script>
     <script defer src="/assets/browse.js"></script>
     <script defer src="/assets/stats.js"></script>
+    <script defer src="/assets/admin.js"></script>
     <script defer src="/assets/init.js"></script>
 </head>
 <body>
@@ -50,6 +52,7 @@
         <div class="main-nav">
             <button id="nav-browse" class="nav-tab active" onclick="switchNav('browse')">Browse Files</button>
             <button id="nav-stats" class="nav-tab" onclick="switchNav('stats')">System Stats</button>
+            <button id="nav-admin" class="nav-tab nav-tab-end" onclick="switchNav('admin')">Admin</button>
         </div>
 
         <!-- Browse View -->
@@ -172,6 +175,29 @@
                 </h3>
                 <div id="active-tv-casts-container" style="display: flex; flex-direction: column; gap: 0.75rem; font-size: 0.875rem;">
                     <div style="color: var(--text-secondary); font-style: italic; padding: 0.25rem 0;">No active device streams.</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin View -->
+        <div id="view-admin" style="display: none; flex-direction: column; gap: 1rem;">
+            <div id="admin-banner" class="admin-banner" style="display: none;"></div>
+            <div class="admin-layout">
+                <nav class="admin-nav" id="admin-nav"></nav>
+                <div class="admin-pane">
+                    <div id="admin-pane-body">
+                        <div class="admin-loading">Loading settings…</div>
+                    </div>
+                </div>
+            </div>
+            <div class="admin-footer" id="admin-footer" style="display: none;">
+                <div class="admin-footer-meta">
+                    <span id="admin-config-path" class="admin-mono"></span>
+                    <span id="admin-dirty" class="admin-dirty"></span>
+                </div>
+                <div class="admin-footer-actions">
+                    <button type="button" class="admin-btn" onclick="revertAdminChanges()">Revert</button>
+                    <button type="button" class="admin-btn admin-btn-primary" id="admin-save" onclick="saveAdminConfig()">Save changes</button>
                 </div>
             </div>
         </div>

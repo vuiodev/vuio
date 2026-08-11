@@ -66,6 +66,11 @@ body {
     outline: none;
 }
 
+/* Pushes a tab to the far end of the bar, away from the content tabs. */
+.nav-tab-end {
+    margin-left: auto;
+}
+
 .nav-tab.active {
     background: var(--accent-gradient);
     color: white;

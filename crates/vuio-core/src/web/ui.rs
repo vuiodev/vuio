@@ -27,6 +27,7 @@ const IMAGES_CSS: &str = include_str!("ui/css/images.css");
 const VIDEO_CSS: &str = include_str!("ui/css/video.css");
 const PLAYER_CSS: &str = include_str!("ui/css/player.css");
 const CAST_CSS: &str = include_str!("ui/css/cast.css");
+const ADMIN_CSS: &str = include_str!("ui/css/admin.css");
 
 const NAV_JS: &str = include_str!("ui/js/nav.js");
 const TOAST_JS: &str = include_str!("ui/js/toast.js");
@@ -37,6 +38,7 @@ const VIDEO_PLAYER_JS: &str = include_str!("ui/js/video-player.js");
 const CAST_JS: &str = include_str!("ui/js/cast.js");
 const BROWSE_JS: &str = include_str!("ui/js/browse.js");
 const STATS_JS: &str = include_str!("ui/js/stats.js");
+const ADMIN_JS: &str = include_str!("ui/js/admin.js");
 const INIT_JS: &str = include_str!("ui/js/init.js");
 
 // Third-party player libraries, checked in under ui/vendor/ and compiled into the
@@ -85,6 +87,7 @@ fn lookup_asset(file: &str) -> Option<(&'static [u8], &'static str, AssetCache)>
         "video.css" => (VIDEO_CSS, STYLESHEET, Revalidate),
         "player.css" => (PLAYER_CSS, STYLESHEET, Revalidate),
         "cast.css" => (CAST_CSS, STYLESHEET, Revalidate),
+        "admin.css" => (ADMIN_CSS, STYLESHEET, Revalidate),
         // Dashboard scripts.
         "nav.js" => (NAV_JS, JAVASCRIPT, Revalidate),
         "toast.js" => (TOAST_JS, JAVASCRIPT, Revalidate),
@@ -95,6 +98,7 @@ fn lookup_asset(file: &str) -> Option<(&'static [u8], &'static str, AssetCache)>
         "cast.js" => (CAST_JS, JAVASCRIPT, Revalidate),
         "browse.js" => (BROWSE_JS, JAVASCRIPT, Revalidate),
         "stats.js" => (STATS_JS, JAVASCRIPT, Revalidate),
+        "admin.js" => (ADMIN_JS, JAVASCRIPT, Revalidate),
         "init.js" => (INIT_JS, JAVASCRIPT, Revalidate),
         _ => return None,
     };
@@ -339,6 +343,7 @@ mod tests {
             CAST_JS,
             BROWSE_JS,
             STATS_JS,
+            ADMIN_JS,
             INIT_JS,
         ]
         .concat()
@@ -376,6 +381,26 @@ mod tests {
         }
     }
 
+    /// The Admin tab is three moving parts that have to agree: a nav button, a view the
+    /// switcher knows about, and the endpoints the script calls.
+    #[test]
+    fn dashboard_wires_the_admin_tab() {
+        assert!(DASHBOARD_TEMPLATE.contains("switchNav('admin')"));
+        assert!(DASHBOARD_TEMPLATE.contains("id=\"view-admin\""));
+        // Without an entry in NAV_VIEWS the button would do nothing at all.
+        assert!(NAV_JS.contains("admin:"));
+        assert!(ADMIN_JS.contains("/api/admin/config"));
+        assert!(ADMIN_JS.contains("/api/admin/restart"));
+        // Sign-out is the only caller of an endpoint that shipped with none.
+        assert!(ADMIN_JS.contains("'/logout'"));
+        for element in ["admin-nav", "admin-pane-body", "admin-banner", "admin-footer"] {
+            assert!(
+                DASHBOARD_TEMPLATE.contains(&format!("id=\"{element}\"")),
+                "{element} is scripted but missing from the shell"
+            );
+        }
+    }
+
     /// Every `/assets/…` the dashboard names has to resolve. A typo used to mean a blank
     /// player or an unstyled page discovered by hand; now it fails here.
     #[test]
@@ -401,7 +426,7 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked >= 16, "expected every split asset to be referenced");
+        assert!(checked >= 18, "expected every split asset to be referenced");
     }
 
     #[tokio::test]
