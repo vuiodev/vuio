@@ -73,9 +73,18 @@ Streams the requested media file. Supports HTTP range requests (essential for sc
   - `TransferMode.dlna.org`: `Streaming`
 
 ### Serve Subtitles
-Serves subtitle tracks if available for the given media file.
+Serves the sidecar subtitle track (`<media basename>.srt`) if one exists, in either of two
+formats. Both return `404 Not Found` when there is no sidecar file.
+
 * **Endpoint**: `GET /media/{id}/subtitle`
-* **Response**: `200 OK` (WebVTT format)
+* **Response**: `200 OK`, `Content-Type: text/srt` — the file verbatim. This is what DLNA
+  renderers consume (Samsung via the `CaptionInfo.sec` response header, LG and Panasonic via
+  `pv:subtitleFileUri`).
+
+* **Endpoint**: `GET /media/{id}/subtitle.vtt`
+* **Response**: `200 OK`, `Content-Type: text/vtt; charset=utf-8` — the same file converted to
+  WebVTT on the fly. Browsers' `<track>` element accepts WebVTT only, so this is the endpoint
+  the dashboard player uses. Non-UTF-8 sidecars are decoded lossily.
 
 ---
 

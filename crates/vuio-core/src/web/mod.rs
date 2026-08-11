@@ -9,6 +9,7 @@ mod format;
 pub mod mcp;
 pub mod soap;
 pub mod streaming;
+pub mod subtitles;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
@@ -100,6 +101,17 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
             auth::require_management::<D>,
         ));
 
+    // The vendored player libraries are deliberately left off the management middleware.
+    // They carry no user data, and `require_management` answers an unauthenticated GET on
+    // a non-/api path with a 200 login page — which a <script> tag would try to parse as
+    // JavaScript.
+    #[allow(unused_mut)]
+    let mut asset_routes = Router::new();
+    #[cfg(feature = "dashboard")]
+    {
+        asset_routes = asset_routes.route("/assets/{file}", get(ui::asset_handler));
+    }
+
     Router::new()
         .route("/login", get(auth::login_page::<D>).post(auth::login::<D>))
         .route("/description.xml", get(soap::description_handler::<D>))
@@ -119,9 +131,14 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         )
         .route("/media/{id}/cover", get(streaming::serve_cover::<D>))
         .route("/media/{id}/subtitle", get(streaming::serve_subtitle::<D>))
+        .route(
+            "/media/{id}/subtitle.vtt",
+            get(streaming::serve_subtitle_vtt::<D>),
+        )
         .route("/healthz", get(diagnostics::healthz_handler))
         .route("/readyz", get(diagnostics::readyz_handler::<D>))
         .merge(soap_routes)
+        .merge(asset_routes)
         .merge(management_routes)
         .with_state(state)
 }

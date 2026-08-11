@@ -359,10 +359,15 @@ fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), App
     }
 }
 
-pub async fn serve_subtitle<D: DatabaseManager>(
-    State(state): State<AppState<D>>,
-    Path(id): Path<String>,
-) -> Result<Response, AppError> {
+/// Largest sidecar subtitle the WebVTT converter will pull into memory. Real subtitle
+/// tracks run to a few hundred kilobytes; past this it is not a subtitle.
+const MAX_SUBTITLE_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Resolve a media id to its sidecar `.srt`, shared by the raw and WebVTT handlers.
+async fn resolve_srt_path<D: DatabaseManager>(
+    state: &AppState<D>,
+    id: &str,
+) -> Result<PathBuf, AppError> {
     let file_id = id.parse::<i64>().map_err(|_| {
         state.web_metrics.record_error();
         AppError::NotFound
@@ -383,9 +388,19 @@ pub async fn serve_subtitle<D: DatabaseManager>(
         })?;
 
     let srt_path = PathBuf::from(&file_info.path).with_extension("srt");
-    if !srt_path.exists() {
+    if !tokio::fs::try_exists(&srt_path).await.unwrap_or(false) {
         return Err(AppError::NotFound);
     }
+    Ok(srt_path)
+}
+
+/// Raw SubRip, for the TVs that ask for it — Samsung reaches this through the
+/// `CaptionInfo.sec` header, LG and Panasonic through `pv:subtitleFileUri`.
+pub async fn serve_subtitle<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let srt_path = resolve_srt_path(&state, &id).await?;
 
     let file = tokio::fs::OpenOptions::new()
         .read(true)
@@ -400,6 +415,32 @@ pub async fn serve_subtitle<D: DatabaseManager>(
     Response::builder()
         .header(header::CONTENT_TYPE, "text/srt")
         .body(body)
+        .map_err(|_| AppError::NotFound)
+}
+
+/// The same sidecar converted to WebVTT, which is the only caption format the browser
+/// `<track>` element accepts.
+pub async fn serve_subtitle_vtt<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    Path(id): Path<String>,
+) -> Result<Response, AppError> {
+    let srt_path = resolve_srt_path(&state, &id).await?;
+
+    let metadata = tokio::fs::metadata(&srt_path).await.map_err(AppError::Io)?;
+    if metadata.len() > MAX_SUBTITLE_BYTES {
+        return Err(AppError::NotFound);
+    }
+
+    let raw = tokio::fs::read(&srt_path).await.map_err(AppError::Io)?;
+    // Sidecar SRTs are routinely CP1251 or Windows-1252 rather than UTF-8. Lossy decoding
+    // keeps every timing intact and mangles at worst a handful of accented characters,
+    // which beats refusing to show subtitles at all.
+    let vtt = crate::web::subtitles::srt_to_vtt(&String::from_utf8_lossy(&raw));
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, "text/vtt; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-cache")
+        .body(Body::from(vtt))
         .map_err(|_| AppError::NotFound)
 }
 

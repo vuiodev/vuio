@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VuIO</title>
     <link rel="icon" type="image/svg+xml" href='data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"><rect width="100" height="100" rx="25" fill="url(#g)"/><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#00f0ff"/><stop offset="100%" stop-color="#7000ff"/></linearGradient><polygon points="40,30 70,50 40,70" fill="white"/></svg>'>
+    <!-- Vendored, not CDN: this server is expected to run on a LAN with no route out.
+         See src/web/ui/vendor/README.md. hls.js is loaded on demand instead of here. -->
+    <link rel="stylesheet" href="/assets/plyr.css?v=3.8.4">
+    <script defer src="/assets/plyr.min.js?v=3.8.4"></script>
     <style>
         :root {
             --bg-color: #0c0f12;
@@ -634,6 +638,109 @@
             background: rgba(255, 255, 255, 0.05);
         }
 
+        /* Video Player Modal — Plyr is themed entirely through --plyr-* properties,
+           so it inherits the dashboard palette without overriding any of its rules. */
+        #video-modal {
+            --plyr-color-main: var(--accent-color);
+            --plyr-font-family: inherit;
+            --plyr-video-background: #000;
+            --plyr-video-control-color: var(--text-primary);
+            --plyr-video-control-background-hover: var(--accent-color);
+            --plyr-video-control-color-hover: #04141a;
+            --plyr-menu-background: rgba(15, 23, 42, 0.97);
+            --plyr-menu-color: var(--text-primary);
+            --plyr-menu-border-color: var(--card-border);
+            --plyr-menu-back-border-color: var(--card-border);
+            --plyr-badge-background: var(--accent-color);
+            --plyr-badge-text-color: #04141a;
+            --plyr-captions-background: rgba(10, 14, 20, 0.75);
+            --plyr-tooltip-background: rgba(15, 23, 42, 0.97);
+            --plyr-tooltip-color: var(--text-primary);
+        }
+
+        /* Width is the only dimension we set. --video-ar is written from
+           loadedmetadata, so a portrait or 4:3 file stays inside the viewport
+           instead of running off the bottom. */
+        .video-stage {
+            width: min(1100px, 90vw, calc(78vh * var(--video-ar, 1.7778)));
+            max-width: 100%;
+        }
+
+        .video-stage .plyr {
+            border-radius: 8px;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .video-unsupported {
+            width: min(520px, 90vw);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 0.85rem;
+            padding: 2.5rem 2rem;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 16px;
+        }
+
+        .video-unsupported h3 {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .video-unsupported p {
+            font-size: 0.9rem;
+            color: var(--text-secondary);
+            line-height: 1.5;
+        }
+
+        .video-unsupported-actions {
+            display: flex;
+            gap: 0.6rem;
+            margin-top: 0.35rem;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        /* Not .btn-action — that one is a fixed 38x38 icon square. */
+        .video-action-btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.45rem;
+            padding: 0.62rem 1.15rem;
+            border-radius: 10px;
+            border: 1px solid var(--card-border);
+            background: rgba(255, 255, 255, 0.04);
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            font-weight: 600;
+            font-family: inherit;
+            text-decoration: none;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .video-action-btn:hover {
+            background: rgba(255, 255, 255, 0.08);
+            color: var(--text-primary);
+        }
+
+        .video-action-btn.is-primary {
+            color: var(--accent-color);
+            border-color: rgba(0, 240, 255, 0.25);
+        }
+
+        .video-action-btn.is-primary:hover {
+            background: var(--accent-gradient);
+            color: white;
+            border-color: transparent;
+            box-shadow: 0 0 12px rgba(0, 240, 255, 0.3);
+        }
+
         /* Floating Audio Player Bar Styles */
         .audio-player-bar {
             position: fixed;
@@ -1133,17 +1240,30 @@
         </button>
     </div>
 
-    <!-- Video Player Modal -->
+    <!-- Video Player Modal. The <video> is built fresh per open inside #video-stage; see
+         mountVideoPlayer(). -->
     <div id="video-modal" class="lightbox-modal" style="display: none;" onclick="closeVideoPlayer()">
         <span class="lightbox-close" onclick="closeVideoPlayer()">&times;</span>
-        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()" style="max-width: 90%; max-height: 90%; width: 800px;">
-            <video id="video-player-element" controls autoplay style="width: 100%; border-radius: 8px; box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6); border: 1px solid rgba(255, 255, 255, 0.05);">
-                <track id="video-subtitle-track" kind="subtitles" srclang="en" label="English">
-            </video>
+        <div class="lightbox-content-wrapper" onclick="event.stopPropagation()" style="max-width: 90%; max-height: 90%;">
+            <div id="video-stage" class="video-stage"></div>
+            <div id="video-unsupported" class="video-unsupported" style="display: none;">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect><line x1="2" y1="2" x2="22" y2="22"></line></svg>
+                <h3>Can't play this here</h3>
+                <p id="video-unsupported-detail"></p>
+                <div class="video-unsupported-actions">
+                    <a id="video-unsupported-download" class="video-action-btn" href="" download="">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        Download
+                    </a>
+                    <button id="video-unsupported-cast" class="video-action-btn is-primary">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>
+                        Play on TV
+                    </button>
+                </div>
+            </div>
             <div class="lightbox-meta" style="justify-content: space-between; padding: 0.5rem 0.25rem; display: flex; align-items: center; width: 100%;">
                 <div style="display: flex; align-items: center; gap: 1rem; min-width: 0; flex: 1;">
                     <span id="video-player-title" style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Video Name</span>
-                    <select id="video-audio-tracks" style="display: none; background: rgba(255,255,255,0.06); border: 1px solid var(--card-border); color: var(--text-primary); border-radius: 6px; padding: 0.25rem 0.5rem; font-size: 0.8rem; cursor: pointer; outline: none;"></select>
                 </div>
                 <a id="video-player-download" href="" download="" class="lightbox-download-btn" title="Download Video">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -2023,6 +2143,213 @@
             window.location.href = '/media/' + id;
         }
 
+        // ---------------------------------------------------------------------------
+        // Video player (Plyr, plus hls.js for .m3u8 sources)
+        // ---------------------------------------------------------------------------
+
+        // Containers no browser can demux, whatever codecs sit inside them — this is a
+        // container limitation, not a codec one, so an .mkv holding plain H.264 is just
+        // as unplayable as one holding HEVC. Listed explicitly so the fallback panel
+        // appears without first spending a request. Every other extension is attempted
+        // and falls back through the <video> error event.
+        const BROWSER_UNPLAYABLE_VIDEO = new Set(['mkv', 'avi', 'wmv', 'flv', 'mpg', 'mpeg']);
+
+        const PLYR_VERSION = '3.8.4';
+        const HLS_VERSION = '1.6.17';
+
+        let videoPlyr = null;
+        let videoHls = null;
+        let videoModalFile = null;
+        let hlsScriptPromise = null;
+
+        // hls.js is half a megabyte and no local file needs it, so it is fetched on
+        // first use rather than linked from <head>.
+        function loadHls() {
+            if (!hlsScriptPromise) {
+                hlsScriptPromise = new Promise((resolve, reject) => {
+                    const script = document.createElement('script');
+                    script.src = '/assets/hls.min.js?v=' + HLS_VERSION;
+                    script.onload = () => resolve(window.Hls);
+                    script.onerror = () => reject(new Error('Failed to load hls.js'));
+                    document.head.appendChild(script);
+                });
+            }
+            return hlsScriptPromise;
+        }
+
+        function openVideoPlayer(file) {
+            closeVideoPlayer();
+            videoModalFile = file;
+
+            const url = '/media/' + encodeURIComponent(file.id);
+            document.getElementById('video-player-title').textContent = file.name;
+            const download = document.getElementById('video-player-download');
+            download.href = url;
+            download.download = file.name;
+
+            document.getElementById('video-modal').style.display = 'flex';
+            document.addEventListener('keydown', handleVideoKeydown);
+
+            if (BROWSER_UNPLAYABLE_VIDEO.has((file.ext || '').toLowerCase())) {
+                showVideoUnsupported(file);
+                return;
+            }
+            mountVideoPlayer(file, url);
+        }
+
+        async function mountVideoPlayer(file, url) {
+            const stage = document.getElementById('video-stage');
+            document.getElementById('video-unsupported').style.display = 'none';
+            stage.style.display = 'block';
+            stage.style.removeProperty('--video-ar');
+
+            const video = document.createElement('video');
+            video.setAttribute('playsinline', '');
+            video.setAttribute('controls', '');
+            video.preload = 'metadata';
+            video.addEventListener('error', () => showVideoUnsupported(file), { once: true });
+
+            if (file.subs) {
+                const track = document.createElement('track');
+                track.kind = 'subtitles';
+                track.srclang = 'en';
+                track.label = 'English';
+                // Not /subtitle — that endpoint serves raw SRT for TVs, and <track>
+                // accepts WebVTT only.
+                track.src = url + '/subtitle.vtt';
+                video.appendChild(track);
+            }
+            stage.replaceChildren(video);
+
+            if (/\.m3u8(\?|$)/i.test(url)) {
+                if (!await attachHlsSource(video, url, file)) return;
+            } else {
+                video.src = url;
+            }
+
+            // The modal may have been closed while hls.js was loading.
+            if (videoModalFile !== file) return;
+
+            // A fresh instance per open, destroyed on close, rather than reusing one and
+            // assigning `player.source`.
+            videoPlyr = new Plyr(video, {
+                iconUrl: '/assets/plyr.svg?v=' + PLYR_VERSION,
+                // Both of these default to files on Plyr's CDN, which resolve to nothing
+                // on an isolated LAN. blankVideo is what destroy() parks the element on
+                // to drop the open connection.
+                blankVideo: '/assets/blank.mp4',
+                controls: ['play-large', 'play', 'progress', 'current-time', 'duration',
+                           'mute', 'volume', 'captions', 'settings', 'pip', 'airplay', 'fullscreen'],
+                settings: ['captions', 'speed'],
+                speed: { selected: 1, options: [0.5, 0.75, 1, 1.25, 1.5, 1.75, 2] },
+                keyboard: { focused: true, global: false },
+                captions: { active: Boolean(file.subs), update: true },
+                storage: { enabled: true, key: 'vuio-plyr' },
+                seekTime: 10,
+            });
+
+            videoPlyr.on('loadedmetadata', () => {
+                if (video.videoWidth && video.videoHeight) {
+                    stage.style.setProperty('--video-ar', video.videoWidth / video.videoHeight);
+                }
+            });
+
+            videoPlyr.once('ready', () => {
+                // Autoplay with sound is blocked by default in most browsers; the
+                // rejection is expected and leaves Plyr showing its play button.
+                const started = videoPlyr.play();
+                if (started && typeof started.catch === 'function') started.catch(() => {});
+            });
+        }
+
+        async function attachHlsSource(video, url, file) {
+            // Safari plays HLS natively and does not support hls.js's MSE path.
+            if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = url;
+                return true;
+            }
+            try {
+                const Hls = await loadHls();
+                if (!Hls || !Hls.isSupported()) throw new Error('Media Source Extensions unavailable');
+                videoHls = new Hls({ enableWorker: true });
+                videoHls.on(Hls.Events.ERROR, (event, data) => {
+                    if (data && data.fatal) showVideoUnsupported(file);
+                });
+                videoHls.loadSource(url);
+                videoHls.attachMedia(video);
+                return true;
+            } catch (error) {
+                console.error('HLS playback unavailable:', error);
+                showVideoUnsupported(file);
+                return false;
+            }
+        }
+
+        function showVideoUnsupported(file) {
+            if (!file) return;
+            teardownVideoPlayback();
+
+            const stage = document.getElementById('video-stage');
+            stage.replaceChildren();
+            stage.style.display = 'none';
+
+            const extension = (file.ext || '').toLowerCase();
+            document.getElementById('video-unsupported-detail').textContent = extension
+                ? 'No browser can open the .' + extension + ' container. Download the file or send it to a device on your network.'
+                : 'Your browser cannot play this file. Download it or send it to a device on your network.';
+
+            const download = document.getElementById('video-unsupported-download');
+            download.href = '/media/' + encodeURIComponent(file.id);
+            download.download = file.name;
+
+            document.getElementById('video-unsupported-cast').onclick = () => {
+                closeVideoPlayer();
+                playVideoFileOnTv(file);
+            };
+
+            document.getElementById('video-unsupported').style.display = 'flex';
+        }
+
+        // Tears down playback without touching modal visibility, so it can be reused by
+        // both the close path and the fall-back-to-unsupported path.
+        function teardownVideoPlayback() {
+            if (videoHls) {
+                videoHls.destroy();
+                videoHls = null;
+            }
+            if (videoPlyr) {
+                try {
+                    videoPlyr.destroy();
+                } catch (error) {
+                    console.warn('Plyr teardown failed:', error);
+                }
+                videoPlyr = null;
+            }
+            // destroy() restores the bare <video>; stop it holding the connection open.
+            document.getElementById('video-stage').querySelectorAll('video').forEach(video => {
+                video.pause();
+                video.removeAttribute('src');
+                video.load();
+            });
+        }
+
+        function closeVideoPlayer() {
+            document.removeEventListener('keydown', handleVideoKeydown);
+            teardownVideoPlayback();
+            document.getElementById('video-stage').replaceChildren();
+            document.getElementById('video-unsupported').style.display = 'none';
+            document.getElementById('video-modal').style.display = 'none';
+            videoModalFile = null;
+        }
+
+        function handleVideoKeydown(e) {
+            if (e.key !== 'Escape') return;
+            // In fullscreen the browser spends Escape on leaving fullscreen; closing the
+            // modal at the same time would drop the user two levels at once.
+            if (videoPlyr && videoPlyr.fullscreen && videoPlyr.fullscreen.active) return;
+            closeVideoPlayer();
+        }
+
         function getRelativeComponents(filePath) {
             let path = filePath.replace(/\\/g, '/');
             for (const dir of monitoredDirs) {
@@ -2257,6 +2584,8 @@
                 card.onclick = () => playAudioFile(file);
             } else if (file.cat === 'image') {
                 card.onclick = () => openLightbox(file.id);
+            } else if (file.cat === 'video') {
+                card.onclick = () => openVideoPlayer(file);
             } else {
                 card.onclick = () => playMedia(file.id);
             }
