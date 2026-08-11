@@ -84,6 +84,7 @@ internal_modules!(
     http_client,
     lifecycle,
     logging,
+    mdns,
     media,
     platform,
     runtime,

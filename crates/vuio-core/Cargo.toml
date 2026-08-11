@@ -42,7 +42,6 @@ default = ["casting", "dashboard", "diagnostics", "mcp", "metadata"]
 # Cast to Chromecast, AirPlay and DLNA renderers.
 casting = [
     "dep:vuio-cast",
-    "dep:mdns-sd",
     "dep:symphonia",
     "dep:hap-crypto",
     "dep:hap-transport",
@@ -122,7 +121,7 @@ quick-xml = "0.41"
 percent-encoding = "2.3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
-mdns-sd = { version = "0.20", default-features = false, features = ["async"], optional = true }
+mdns-sd = { version = "0.20", default-features = false, features = ["async"] }
 vuio-cast = { path = "../vuio-cast", version = "0.0.3", default-features = false, optional = true }
 redb = "4.1"
 jwalk = "0.9"

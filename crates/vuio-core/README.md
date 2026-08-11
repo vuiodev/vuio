@@ -81,7 +81,7 @@ firmware has less to read.
 
 | Feature | Gives up when off | Crates |
 | --- | --- | --- |
-| `casting` | Chromecast, AirPlay and DLNA renderer control | 63 |
+| `casting` | Chromecast, AirPlay and DLNA renderer control | 56 |
 | `metadata` | tags and embedded cover art (files keep filename titles) | 13 |
 | `diagnostics` | system and disk metrics on the status endpoints | 1 |
 | `dashboard` | the built-in web UI | 0 |
@@ -89,12 +89,14 @@ firmware has less to read.
 
 Counts are crates removed from the dependency graph for
 `aarch64-unknown-linux-musl`, measured with `cargo tree`. The default build
-resolves **217** crates and `--no-default-features` resolves **141**. The last
+resolves **217** crates and `--no-default-features` resolves **148**. The last
 two shed compiled code rather than dependencies.
 
 What is never gated, because it is what a media server *is*: SSDP discovery,
-UPnP ContentDirectory, HTTP range streaming, media scanning and indexing, the
-database, and configuration.
+mDNS/DNS-SD advertisement, UPnP ContentDirectory, HTTP range streaming, media
+scanning and indexing, the database, and configuration. Discovery is switchable
+at runtime rather than at compile time — `network.mdns_enabled` turns the
+Bonjour advertisement off without a rebuild.
 
 ### Versioning
 

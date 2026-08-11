@@ -76,6 +76,8 @@ pub(super) async fn start_http_server_task<D: DatabaseManager + 'static>(
         }
     });
 
+    start_mdns_advertisement(&app_state, listener.local_addr()?.port(), cancellation.clone());
+
     // Spawn the server as a background task
     let http = tokio::spawn(async move {
         axum::serve(
@@ -93,5 +95,56 @@ pub(super) async fn start_http_server_task<D: DatabaseManager + 'static>(
 pub struct NetworkTaskHandles {
     pub http: tokio::task::JoinHandle<anyhow::Result<()>>,
     pub tv_discovery: tokio::task::JoinHandle<()>,
+}
+
+/// Announce this server over mDNS alongside SSDP.
+///
+/// The advertisement is held by a background task rather than returned,
+/// because withdrawing it is what matters at shutdown: the task drops the
+/// advertiser when cancelled, which sends the goodbye packets. Without that a
+/// stopped server lingers in client caches for the record's full TTL.
+///
+/// `port` is the port actually bound, not the configured one, so a server
+/// started on port 0 still advertises where it can be reached.
+fn start_mdns_advertisement<D: DatabaseManager + 'static>(
+    app_state: &AppState<D>,
+    port: u16,
+    cancellation: CancellationToken,
+) {
+    let config = app_state.current_config();
+    if !config.network.mdns_enabled {
+        debug!("mDNS advertisement disabled by configuration");
+        return;
+    }
+
+    // The same address SSDP advertises: announcing a different one over mDNS
+    // would send clients somewhere the DLNA path does not point.
+    let advertised = app_state.get_server_ip();
+    let Ok(ip) = advertised.parse::<std::net::IpAddr>() else {
+        warn!(address = %advertised, "Skipping mDNS advertisement: not a usable address");
+        return;
+    };
+
+    let server = crate::mdns::ServerAdvertisement {
+        uuid: config.server.uuid.clone(),
+        name: config.server.name.clone(),
+        ip,
+        port,
+        requires_auth: app_state.auth.enabled(),
+    };
+
+    app_state.background_tasks.spawn(async move {
+        let advertiser = match crate::mdns::MdnsAdvertiser::start(&server) {
+            Ok(advertiser) => advertiser,
+            Err(error) => {
+                // A server that cannot advertise still serves; SSDP is
+                // unaffected and the address still works if typed in.
+                warn!(%error, "Could not advertise over mDNS");
+                return;
+            }
+        };
+        cancellation.cancelled().await;
+        drop(advertiser);
+    });
 }
 
