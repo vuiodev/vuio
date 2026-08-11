@@ -288,7 +288,7 @@ pub async fn serve_media<D: DatabaseManager>(
     Ok(response_builder.status(response_status).body(body)?)
 }
 
-fn media_id_from_path_segment(segment: &str) -> Option<i64> {
+pub(crate) fn media_id_from_path_segment(segment: &str) -> Option<i64> {
     let id = match segment.split_once('.') {
         Some((id, extension)) => {
             if extension.is_empty()

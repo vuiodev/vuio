@@ -2152,7 +2152,7 @@
         // as unplayable as one holding HEVC. Listed explicitly so the fallback panel
         // appears without first spending a request. Every other extension is attempted
         // and falls back through the <video> error event.
-        const BROWSER_UNPLAYABLE_VIDEO = new Set(['mkv', 'avi', 'wmv', 'flv', 'mpg', 'mpeg']);
+        const BROWSER_UNPLAYABLE_VIDEO = new Set(['avi', 'wmv', 'flv', 'mpg', 'mpeg']);
 
         const PLYR_VERSION = '3.8.4';
         const HLS_VERSION = '1.6.17';
@@ -2190,11 +2190,14 @@
             document.getElementById('video-modal').style.display = 'flex';
             document.addEventListener('keydown', handleVideoKeydown);
 
-            if (BROWSER_UNPLAYABLE_VIDEO.has((file.ext || '').toLowerCase())) {
+            const ext = (file.ext || '').toLowerCase();
+            if (BROWSER_UNPLAYABLE_VIDEO.has(ext)) {
                 showVideoUnsupported(file);
                 return;
             }
-            mountVideoPlayer(file, url);
+
+            const playUrl = ext === 'mkv' ? url + '/hls/master.m3u8' : url;
+            mountVideoPlayer(file, playUrl);
         }
 
         async function mountVideoPlayer(file, url) {

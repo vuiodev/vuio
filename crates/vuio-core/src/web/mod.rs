@@ -7,6 +7,8 @@ pub mod eventing;
 mod format;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(feature = "casting")]
+pub mod remux_streaming;
 pub mod soap;
 pub mod streaming;
 pub mod subtitles;
@@ -112,7 +114,7 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         asset_routes = asset_routes.route("/assets/{file}", get(ui::asset_handler));
     }
 
-    Router::new()
+    let router = Router::new()
         .route("/login", get(auth::login_page::<D>).post(auth::login::<D>))
         .route("/description.xml", get(soap::description_handler::<D>))
         .route("/ContentDirectory.xml", get(soap::content_directory_scpd))
@@ -128,7 +130,32 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         .route(
             "/media/{id}",
             get(streaming::serve_media::<D>).head(streaming::serve_media::<D>),
+        );
+
+    #[cfg(feature = "casting")]
+    let router = router
+        .route(
+            "/media/{id}/hls/master.m3u8",
+            get(remux_streaming::serve_hls_master::<D>),
         )
+        .route(
+            "/media/{id}/hls/video/index.m3u8",
+            get(remux_streaming::serve_hls_video_playlist::<D>),
+        )
+        .route(
+            "/media/{id}/hls/audio/{idx}/index.m3u8",
+            get(remux_streaming::serve_hls_audio_playlist::<D>),
+        )
+        .route(
+            "/media/{id}/hls/init.mp4",
+            get(remux_streaming::serve_hls_init_segment::<D>),
+        )
+        .route(
+            "/media/{id}/hls/segment/{seq}",
+            get(remux_streaming::serve_hls_media_segment::<D>),
+        );
+
+    router
         .route("/media/{id}/cover", get(streaming::serve_cover::<D>))
         .route("/media/{id}/subtitle", get(streaming::serve_subtitle::<D>))
         .route(
@@ -142,3 +169,4 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         .merge(management_routes)
         .with_state(state)
 }
+
