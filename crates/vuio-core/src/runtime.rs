@@ -123,58 +123,30 @@ impl RuntimeOptions {
 impl RuntimeOptions {
     /// Translate the public options into the internal lifecycle options.
     ///
-    /// The common overrides (media directories, port, name) are folded into a
-    /// config override here, which is what keeps `AppConfig` and its 36 fields
-    /// out of the public API.
+    /// The overrides travel as individual options rather than as a whole
+    /// `AppConfig`, so they can be layered onto the configuration file instead
+    /// of replacing it — and so `AppConfig` and its 36 fields stay out of the
+    /// public API.
     pub(crate) fn into_internal(
         self,
         cancellation: CancellationToken,
     ) -> crate::lifecycle::RuntimeOptions {
-        let config_override = self.build_config_override();
         crate::lifecycle::RuntimeOptions {
             debug: self.debug,
             config_path: self.config_path,
             log_file: self.log_file,
             log_level: self.log_level,
-            config_override,
+            overrides: crate::lifecycle::ConfigOverrides {
+                port: self.port,
+                server_name: self.server_name,
+                media_dirs: self.media_dirs,
+            },
             restore_backup: self.restore_backup,
             auth: self.management_auth,
             cancellation,
         }
     }
 
-    fn build_config_override(&self) -> Option<crate::config::AppConfig> {
-        if self.media_dirs.is_empty() && self.port.is_none() && self.server_name.is_none() {
-            return None;
-        }
-        let mut config = crate::config::AppConfig::default_for_platform();
-        if let Some(port) = self.port {
-            config.server.port = port;
-        }
-        if let Some(name) = &self.server_name {
-            config.server.name = name.clone();
-        }
-        if !self.media_dirs.is_empty() {
-            config.media.directories = self
-                .media_dirs
-                .iter()
-                .map(|path| {
-                    if !path.is_dir() {
-                        tracing::warn!("Media directory is not available: {}", path.display());
-                    }
-                    crate::config::MonitoredDirectoryConfig {
-                        path: path.to_string_lossy().into_owned(),
-                        recursive: true,
-                        case_sensitive: None,
-                        extensions: None,
-                        exclude_patterns: None,
-                        validation_mode: crate::config::ValidationMode::Warn,
-                    }
-                })
-                .collect();
-        }
-        Some(config)
-    }
 }
 
 /// Starts VuIO without installing command-line or process-signal behaviour.

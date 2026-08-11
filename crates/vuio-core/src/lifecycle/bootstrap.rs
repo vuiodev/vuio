@@ -196,7 +196,7 @@ pub(super) async fn detect_platform_with_diagnostics() -> anyhow::Result<Platfor
 pub(super) async fn initialize_config_manager(
     _platform_info: &PlatformInfo,
     config_file_path: Option<String>,
-    config_override: Option<AppConfig>,
+    overrides: ConfigOverrides,
     cancellation: CancellationToken,
     background_tasks: tokio_util::task::TaskTracker,
 ) -> anyhow::Result<ConfigManager> {
@@ -205,8 +205,9 @@ pub(super) async fn initialize_config_manager(
     // Check if running in Docker container
     if AppConfig::is_running_in_docker() {
         info!("Docker environment detected - using environment variables for configuration");
-        let config = AppConfig::from_env()
+        let mut config = AppConfig::from_env()
             .context("Failed to load configuration from environment variables")?;
+        overrides.apply(&mut config);
 
         info!("Configuration initialized from environment variables");
         info!(
@@ -239,48 +240,6 @@ pub(super) async fn initialize_config_manager(
     // Native platform mode - use config files with command line overrides
     info!("Native platform detected - using configuration files");
 
-    // If we have command line overrides, use them directly
-    if let Some(override_config) = config_override {
-        info!("Using configuration from command line arguments");
-
-        // Apply platform-specific defaults for any missing values
-        let mut config = override_config;
-        config
-            .apply_platform_defaults()
-            .context("Failed to apply platform-specific defaults to command line configuration")?;
-
-        // Validate the final configuration
-        config
-            .validate_for_platform()
-            .context("Command line configuration validation failed")?;
-
-        info!("Configuration validated successfully");
-        info!(
-            "Server will listen on: {}:{}",
-            config.server.interface, config.server.port
-        );
-        info!("SSDP will use hardcoded port: 1900");
-        info!(
-            "Monitoring {} director(ies) for media files",
-            config.media.directories.len()
-        );
-
-        for (i, dir) in config.media.directories.iter().enumerate() {
-            info!("  {}. {} (recursive: {})", i + 1, dir.path, dir.recursive);
-        }
-
-        // Create a temporary config file for the ConfigManager
-        let temp_config_path = std::env::temp_dir().join("vuio_cmdline_config.toml");
-        config
-            .save_to_file(&temp_config_path)
-            .context("Failed to save command line configuration to temporary file")?;
-
-        // Create ConfigManager without file watching for command line overrides
-        let config_manager = ConfigManager::new(&temp_config_path)
-            .context("Failed to create ConfigManager for command line configuration")?;
-
-        return Ok(config_manager);
-    }
 
     // Use provided config file path if available, otherwise use platform default
     let config_path = if let Some(path) = config_file_path {
@@ -347,6 +306,31 @@ pub(super) async fn initialize_config_manager(
             .await
             .context("Failed to create ConfigManager with file watching")?
     };
+
+    // Layer any host-supplied overrides on top of the file that was just
+    // loaded, rather than replacing it. Passing `--port` must not silently
+    // discard the rest of a `--config` file, which is what building a whole
+    // replacement AppConfig used to do.
+    if !overrides.is_empty() {
+        info!("Applying command line overrides on top of the loaded configuration");
+        let mut config = config_manager.get_config().await;
+        overrides.apply(&mut config);
+        config
+            .apply_platform_defaults()
+            .context("Failed to apply platform-specific defaults to the overridden configuration")?;
+        config
+            .validate_for_platform()
+            .context("Overridden configuration validation failed")?;
+
+        // Overrides live only for this run, so they go to a scratch file and
+        // the manager watches nothing: reloading would drop them.
+        let overridden_path = std::env::temp_dir().join("vuio_cmdline_config.toml");
+        config
+            .save_to_file(&overridden_path)
+            .context("Failed to save the overridden configuration")?;
+        return ConfigManager::new(&overridden_path)
+            .context("Failed to create ConfigManager for the overridden configuration");
+    }
 
     // Get the current configuration for logging
     let config = config_manager.get_config().await;

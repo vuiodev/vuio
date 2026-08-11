@@ -76,7 +76,7 @@ where
     let config_manager = match initialize_config_manager(
         &platform_info,
         runtime_options.config_path.clone(),
-        runtime_options.config_override.clone(),
+        runtime_options.overrides.clone(),
         cancellation.clone(),
         background_tasks.clone(),
     )
