@@ -668,11 +668,16 @@ pub async fn require_management<D: DatabaseManager>(
         .session_from_headers(request.headers(), peer.ip())
         .is_some();
     if !bearer && !cookie {
+        // A subresource must never be answered with the login page: a <script> or
+        // <link> would parse 200 bytes of HTML as JavaScript or CSS. Only navigations
+        // get redirected; everything a page fetches for itself gets a plain 401.
         let path = request.uri().path();
         if request.method() == Method::GET
             && (path == "/"
                 || path == "/logs"
-                || (!path.starts_with("/api") && !path.starts_with("/sse")))
+                || (!path.starts_with("/api")
+                    && !path.starts_with("/sse")
+                    && !path.starts_with("/assets")))
         {
             return axum::response::Redirect::to("/login").into_response();
         }

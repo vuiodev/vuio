@@ -1,0 +1,125 @@
+:root {
+    --bg-color: #0c0f12;
+    --card-bg: rgba(22, 28, 36, 0.6);
+    --card-border: rgba(255, 255, 255, 0.06);
+    --text-primary: #f3f4f6;
+    --text-secondary: #9ca3af;
+    --accent-color: #00f0ff;
+    --accent-gradient: linear-gradient(135deg, #00f0ff 0%, #7000ff 100%);
+    --accent-hover: #00d8e6;
+    --focus-ring: rgba(0, 240, 255, 0.2);
+    --folder-color: #ffb300;
+    --folder-bg: rgba(255, 179, 0, 0.06);
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    line-height: 1.5;
+    padding: 1rem;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+@media (min-width: 640px) {
+    body {
+        padding: 2rem;
+    }
+}
+
+.container {
+    width: 100%;
+    max-width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.main-nav {
+    display: flex;
+    gap: 0.5rem;
+    border-bottom: 1px solid var(--card-border);
+    padding-bottom: 0.75rem;
+    margin-bottom: 0.5rem;
+    width: 100%;
+}
+
+.nav-tab {
+    background: transparent;
+    border: none;
+    color: var(--text-secondary);
+    padding: 0.5rem 1.25rem;
+    cursor: pointer;
+    font-size: 0.95rem;
+    font-weight: 600;
+    transition: all 0.2s ease;
+    border-radius: 8px;
+    outline: none;
+}
+
+.nav-tab.active {
+    background: var(--accent-gradient);
+    color: white;
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.25);
+}
+
+.nav-tab:hover:not(.active) {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+header {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-radius: 16px;
+    padding: 1.25rem;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+}
+
+.brand-section {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+}
+
+.brand-logo {
+    width: 40px;
+    height: 40px;
+    background: var(--accent-gradient);
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: white;
+    font-weight: bold;
+    font-size: 1.25rem;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.25);
+}
+
+.brand-info h1 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    background: var(--accent-gradient);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.brand-info p {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}

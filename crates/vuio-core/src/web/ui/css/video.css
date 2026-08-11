@@ -1,0 +1,104 @@
+/* Width is the only dimension we set. --video-ar is written from
+   loadedmetadata, so a portrait or 4:3 file stays inside the viewport
+   instead of running off the bottom. */
+.video-stage {
+    width: min(1100px, 90vw, calc(78vh * var(--video-ar, 1.7778)));
+    max-width: 100%;
+}
+
+.video-stage .plyr {
+    border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.video-audio-track-select {
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    color: var(--text-primary);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 6px;
+    padding: 0.2rem 0.4rem;
+    max-width: 40%;
+}
+
+.video-audio-note {
+    width: 100%;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 8px;
+    padding: 0.5rem 0.75rem;
+    margin-top: 0.5rem;
+}
+
+.video-unsupported {
+    width: min(520px, 90vw);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    gap: 0.85rem;
+    padding: 2.5rem 2rem;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+}
+
+.video-unsupported h3 {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+
+.video-unsupported p {
+    font-size: 0.9rem;
+    color: var(--text-secondary);
+    line-height: 1.5;
+}
+
+.video-unsupported-actions {
+    display: flex;
+    gap: 0.6rem;
+    margin-top: 0.35rem;
+    flex-wrap: wrap;
+    justify-content: center;
+}
+
+/* Not .btn-action — that one is a fixed 38x38 icon square. */
+.video-action-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+    padding: 0.62rem 1.15rem;
+    border-radius: 10px;
+    border: 1px solid var(--card-border);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text-secondary);
+    font-size: 0.85rem;
+    font-weight: 600;
+    font-family: inherit;
+    text-decoration: none;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.video-action-btn:hover {
+    background: rgba(255, 255, 255, 0.08);
+    color: var(--text-primary);
+}
+
+.video-action-btn.is-primary {
+    color: var(--accent-color);
+    border-color: rgba(0, 240, 255, 0.25);
+}
+
+.video-action-btn.is-primary:hover {
+    background: var(--accent-gradient);
+    color: white;
+    border-color: transparent;
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.3);
+}
