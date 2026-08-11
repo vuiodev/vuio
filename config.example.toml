@@ -47,9 +47,11 @@ vacuum_on_startup = false
 backup_enabled = false
 
 [management]
-enabled = true
-# Empty creates/uses admin.token beside the config file.
-token_file = ""
+# Requires a token for the dashboard and every management endpoint.
+# --auth and VUIO_AUTH=1 turn this on too; any of the three is enough.
+enabled = false
+# Omit to create/use admin.token beside the config file.
+# token_file = ""
 session_ttl_hours = 12
 # Management is loopback-only unless CIDRs are explicitly listed.
 allowed_networks = []

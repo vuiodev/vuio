@@ -103,7 +103,10 @@ impl AuthState {
         let env_auth = std::env::var("VUIO_AUTH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
-        let enabled = cli_auth || env_auth;
+        // `management.enabled` was written to every generated config and read by
+        // nothing. Any of the three turns auth on; none of them can turn it off,
+        // so a config file cannot disable auth that the host asked for.
+        let enabled = cli_auth || env_auth || config.enabled;
 
         Ok(Self {
             enabled,
@@ -694,4 +697,46 @@ pub async fn require_management<D: DatabaseManager>(
         return StatusCode::FORBIDDEN.into_response();
     }
     next.run(request).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn load_with(enabled: bool, cli_auth: bool) -> AuthState {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config = ManagementConfig {
+            enabled,
+            ..ManagementConfig::default()
+        };
+        AuthState::load(&config, &temp_dir.path().join("config.toml"), cli_auth)
+            .expect("auth state should load")
+    }
+
+    /// `management.enabled` sat in every generated config and was read by nothing:
+    /// only --auth and VUIO_AUTH could turn auth on. Setting it in the file now works,
+    /// which is what makes the setting meaningful from the admin UI.
+    #[test]
+    fn config_can_enable_management_auth() {
+        assert!(!load_with(false, false).enabled());
+        assert!(load_with(true, false).enabled());
+    }
+
+    /// The command line still wins on its own, and a config that says `false` must not
+    /// be able to switch off auth the host explicitly asked for.
+    #[test]
+    fn the_command_line_still_enables_auth_alone() {
+        assert!(load_with(false, true).enabled());
+        assert!(load_with(true, true).enabled());
+    }
+
+    /// Both defaults have to stay off. Every config generated before this change says
+    /// `enabled = true`, and the Docker env default said true as well; leaving either
+    /// on would have started demanding a token from installs that never asked for one.
+    #[test]
+    fn management_auth_defaults_off() {
+        assert!(!ManagementConfig::default().enabled);
+        assert!(!crate::config::AppConfig::default_for_platform().management.enabled);
+    }
 }

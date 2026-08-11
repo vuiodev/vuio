@@ -21,9 +21,10 @@ announce_interval_seconds = 30
 upnp_callback_allowed_networks = []
 
 [management]
-enabled = true
-# Empty uses admin.token beside this config file. VUIO_ADMIN_TOKEN overrides the file.
-token_file = ""
+# Requires a token for the dashboard and every management endpoint.
+# --auth and VUIO_AUTH=1 turn this on too; any of the three is enough.
+enabled = false
+# Omit to use admin.token beside this config file. VUIO_ADMIN_TOKEN overrides the file.
 session_ttl_hours = 12
 # Empty permits management only from loopback. Add explicit CIDRs for LAN administration.
 allowed_networks = []
