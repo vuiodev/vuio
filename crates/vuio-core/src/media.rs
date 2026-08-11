@@ -16,6 +16,7 @@ const BATCH_SIZE: usize = 1000;
 /// startup scans, reconciliation and watcher filtering so those paths cannot
 /// disagree about what belongs in the catalog.
 mod policy;
+pub mod remux;
 mod result;
 mod scanner;
 
