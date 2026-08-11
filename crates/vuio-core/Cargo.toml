@@ -1,25 +1,19 @@
 [package]
 name = "vuio-core"
-version = "0.0.41"
+version = "0.0.42"
 edition = "2021"
-# Raising this is a minor release, never a patch. The floor is set by the
-# dependency graph rather than by anything in this crate: `sysinfo` requires
-# 1.95 and `redb` 1.89, so lowering it means dropping or gating those first.
 rust-version = "1.95"
 authors = ["vyrti"]
-description = "Embeddable VuIO media server runtime"
+description = "Embeddable VuIO DLNA/UPNP, Chromecast, and Airplay media server runtime"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 documentation = "https://docs.rs/vuio-core"
 readme = "README.md"
-keywords = ["dlna", "upnp", "server", "streaming", "ssdp"]
+keywords = ["dlna", "upnp", "server", "streaming", "ssdp", "chromecast", "airplay"]
 categories = ["multimedia", "network-programming"]
 
 [package.metadata.docs.rs]
-# docs.rs documents the published surface, so `unstable-internals` stays off:
-# the internal modules are `#[doc(hidden)]` and would bury the seven items that
-# are actually promised.
 all-features = false
 rustdoc-args = ["--cfg", "docsrs"]
 
@@ -53,34 +47,10 @@ casting = [
     "dep:hex",
     "dep:getrandom",
 ]
-# The built-in web dashboard.
 dashboard = []
-# System and disk metrics on the status endpoints.
 diagnostics = ["dep:sysinfo"]
-# The Model Context Protocol server.
 mcp = []
-# Read tags (title, artist, album, cover art) from media files.
 metadata = ["dep:audiotags"]
-# A `watch` feature was planned here and is deliberately not built.
-#
-# Runtime monitoring is already switchable without recompiling:
-# `media.watch_for_changes` (env `VUIO_WATCH_CHANGES`) turns it off, so the
-# fixed-image deployment the feature was meant for is served today. All a
-# compile-time flag would add is dropping `notify`, which is 8 crates in the
-# musl graph and one of those (`mio`) arrives with tokio regardless.
-#
-# Against that: `notify` runs through six method bodies of
-# CrossPlatformWatcher, so gating it means splitting the watcher's backend
-# from its behaviour. Restructuring the mechanism that keeps the library
-# current, to save seven crates that a config flag already makes idle, is a
-# bad trade. `notify` stays required.
-#
-# Note that indexing does not depend on it either way: the startup scan runs
-# through MediaScanner and never touches the watcher.
-
-# Opens the crate's internal modules so the integration tests can drive the
-# DLNA, SSDP and database layers directly. No stability promise applies to
-# anything it exposes; dependent crates must not enable it.
 unstable-internals = []
 
 [dependencies]
@@ -107,9 +77,6 @@ serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
 ipnet = "2.12"
-# Outbound control traffic (GENA callbacks, DLNA SOAP, AirPlay) goes straight
-# to hyper: it is already here under axum, and every one of those requests is
-# cleartext HTTP/1.1 to a numeric address on the LAN. See `http_client.rs`.
 http = "1.3"
 http-body-util = "0.1"
 hyper = { version = "1.8", features = ["client", "http1"] }
@@ -122,7 +89,7 @@ percent-encoding = "2.3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.20", default-features = false, features = ["async"] }
-vuio-cast = { path = "../vuio-cast", version = "0.0.3", default-features = false, optional = true }
+vuio-cast = { path = "../vuio-cast", version = "0.0.4", default-features = false, optional = true }
 redb = "4.1"
 jwalk = "0.9"
 tokio-stream = "0.1"
@@ -146,11 +113,6 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-# The integration tests in `tests/` drive the DLNA, SSDP and database layers
-# directly, and those modules are `pub(crate)` unless `unstable-internals` is
-# on. Depending on ourselves here turns the feature on for test targets only,
-# so plain `cargo test` works while ordinary builds stay sealed. Cargo drops a
-# path-only dev-dependency when packaging, so this does not affect publishing.
 vuio-core = { path = ".", features = ["unstable-internals"] }
 tempfile = "3.27"
 futures-util = "0.3"
