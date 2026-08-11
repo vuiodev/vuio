@@ -35,23 +35,6 @@ pub enum ConfigChangeImpact {
     RestartRequired,
 }
 
-pub fn classify_change(old: &AppConfig, new: &AppConfig) -> ConfigChangeImpact {
-    if old == new {
-        return ConfigChangeImpact::NoChange;
-    }
-    if old.server.port != new.server.port
-        || old.server.interface != new.server.interface
-        || old.server.ip != new.server.ip
-        || old.server.uuid != new.server.uuid
-        || old.network != new.network
-        || old.database != new.database
-        || old.management != new.management
-    {
-        ConfigChangeImpact::RestartRequired
-    } else {
-        ConfigChangeImpact::LiveReload
-    }
-}
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -84,6 +67,7 @@ pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
     change_sender: broadcast::Sender<ConfigChangeEvent>,
+    /// Held so the watcher outlives this manager; dropping it stops reloads.
     _debouncer: Option<
         notify_debouncer_full::Debouncer<
             notify::RecommendedWatcher,
@@ -310,10 +294,6 @@ impl ConfigManager {
         self.change_sender.subscribe()
     }
 
-    /// Get a clone of the configuration that can be used across async boundaries
-    pub async fn get_config_arc(&self) -> Arc<RwLock<AppConfig>> {
-        self.config.clone()
-    }
 }
 
 #[cfg(test)]

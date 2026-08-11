@@ -2,18 +2,86 @@
 name = "vuio-core"
 version = "0.0.41"
 edition = "2021"
+# Raising this is a minor release, never a patch. The floor is set by the
+# dependency graph rather than by anything in this crate: `sysinfo` requires
+# 1.95 and `redb` 1.89, so lowering it means dropping or gating those first.
+rust-version = "1.95"
 authors = ["vyrti"]
 description = "Embeddable VuIO media server runtime"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 documentation = "https://docs.rs/vuio-core"
+readme = "README.md"
 keywords = ["dlna", "upnp", "server", "streaming", "ssdp"]
 categories = ["multimedia", "network-programming"]
+
+[package.metadata.docs.rs]
+# docs.rs documents the published surface, so `unstable-internals` stays off:
+# the internal modules are `#[doc(hidden)]` and would bury the seven items that
+# are actually promised.
+all-features = false
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "vuio_core"
 path = "src/lib.rs"
+
+[features]
+# The full server is the product: everything is on by default, and an
+# integrator who adds vuio-core gets a complete media server. The flags below
+# exist so a constrained deployment — a vehicle, a router, a fixed-image
+# appliance — can drop what it will never use, and so a vendor auditing what
+# ships in their firmware has less to read.
+#
+# Never gated, because they are what a media server *is*: SSDP discovery, UPnP
+# ContentDirectory, HTTP range streaming, media scanning and indexing, the
+# database, and configuration.
+default = ["casting", "dashboard", "diagnostics", "mcp", "metadata"]
+
+# Cast to Chromecast, AirPlay and DLNA renderers.
+casting = [
+    "dep:vuio-cast",
+    "dep:symphonia",
+    "dep:hap-crypto",
+    "dep:hap-transport",
+    "dep:hap-tlv8",
+    "dep:hkdf",
+    "dep:sha2",
+    "dep:num-bigint",
+    "dep:plist",
+    "dep:hex",
+    "dep:getrandom",
+]
+# The built-in web dashboard.
+dashboard = []
+# System and disk metrics on the status endpoints.
+diagnostics = ["dep:sysinfo"]
+# The Model Context Protocol server.
+mcp = []
+# Read tags (title, artist, album, cover art) from media files.
+metadata = ["dep:audiotags"]
+# A `watch` feature was planned here and is deliberately not built.
+#
+# Runtime monitoring is already switchable without recompiling:
+# `media.watch_for_changes` (env `VUIO_WATCH_CHANGES`) turns it off, so the
+# fixed-image deployment the feature was meant for is served today. All a
+# compile-time flag would add is dropping `notify`, which is 8 crates in the
+# musl graph and one of those (`mio`) arrives with tokio regardless.
+#
+# Against that: `notify` runs through six method bodies of
+# CrossPlatformWatcher, so gating it means splitting the watcher's backend
+# from its behaviour. Restructuring the mechanism that keeps the library
+# current, to save seven crates that a config flag already makes idle, is a
+# bad trade. `notify` stays required.
+#
+# Note that indexing does not depend on it either way: the startup scan runs
+# through MediaScanner and never touches the watcher.
+
+# Opens the crate's internal modules so the integration tests can drive the
+# DLNA, SSDP and database layers directly. No stability promise applies to
+# anything it exposes; dependent crates must not enable it.
+unstable-internals = []
 
 [dependencies]
 axum = { version = "0.8", features = ["multipart"] }
@@ -39,28 +107,35 @@ serde_json = "1.0"
 dirs = "6.0"
 hostname = "0.4"
 ipnet = "2.12"
-reqwest = { version = "0.13", default-features = false, features = ["json", "stream", "rustls-no-provider"] }
+# Outbound control traffic (GENA callbacks, DLNA SOAP, AirPlay) goes straight
+# to hyper: it is already here under axum, and every one of those requests is
+# cleartext HTTP/1.1 to a numeric address on the LAN. See `http_client.rs`.
+http = "1.3"
+http-body-util = "0.1"
+hyper = { version = "1.8", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+bytes = "1.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-audiotags = "0.5"
+audiotags = { version = "0.5", optional = true }
 quick-xml = "0.41"
 percent-encoding = "2.3"
-sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"] }
+sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.20", default-features = false, features = ["async"] }
-oxicast = { path = "../oxicast", default-features = false }
+vuio-cast = { path = "../vuio-cast", version = "0.0.3", default-features = false, optional = true }
 redb = "4.1"
 jwalk = "0.9"
 tokio-stream = "0.1"
-hap-crypto = "1.4"
-hap-transport = "1.3"
-hap-tlv8 = "1.0"
-hkdf = "0.12"
-sha2 = "0.10"
-num-bigint = "0.4"
-symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis", "alac", "id3v1", "id3v2", "ape"] }
-getrandom = "0.3"
-plist = "1.8"
-hex = "0.4"
+hap-crypto = { version = "1.4", optional = true }
+hap-transport = { version = "1.3", optional = true }
+hap-tlv8 = { version = "1.0", optional = true }
+hkdf = { version = "0.12", optional = true }
+sha2 = { version = "0.10", optional = true }
+num-bigint = { version = "0.4", optional = true }
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis", "alac", "id3v1", "id3v2", "ape"], optional = true }
+getrandom = { version = "0.3", optional = true }
+plist = { version = "1.8", optional = true }
+hex = { version = "0.4", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [
@@ -71,6 +146,12 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+# The integration tests in `tests/` drive the DLNA, SSDP and database layers
+# directly, and those modules are `pub(crate)` unless `unstable-internals` is
+# on. Depending on ourselves here turns the feature on for test targets only,
+# so plain `cargo test` works while ordinary builds stay sealed. Cargo drops a
+# path-only dev-dependency when packaging, so this does not affect publishing.
+vuio-core = { path = ".", features = ["unstable-internals"] }
 tempfile = "3.27"
 futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }

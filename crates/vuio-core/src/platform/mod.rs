@@ -17,6 +17,8 @@ mod macos;
 mod windows;
 
 // Re-export the comprehensive error types from the error module
+// Each OS uses only its own error type; all are re-exported for parity.
+#[allow(unused_imports)]
 pub use error::{
     BsdError, ConfigurationError, DatabaseError, LinuxError, MacOSError, PlatformError,
     PlatformResult, WindowsError,
@@ -327,13 +329,6 @@ impl PlatformInfo {
             .find(|i| i.is_up && !i.is_loopback)
     }
 
-    /// Check if the platform supports a specific feature
-    pub fn supports_feature(&self, feature: &str) -> bool {
-        match feature {
-            "case_sensitive_fs" => self.capabilities.case_sensitive_fs,
-            _ => false,
-        }
-    }
 }
 
 #[cfg(test)]

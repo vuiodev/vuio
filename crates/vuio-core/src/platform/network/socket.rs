@@ -1,8 +1,5 @@
 use crate::platform::{NetworkInterface, PlatformError, PlatformResult};
-use std::{
-    net::{IpAddr, SocketAddr},
-    time::Duration,
-};
+use std::net::{IpAddr, SocketAddr};
 use tokio::net::UdpSocket;
 use tracing::{debug, info, warn};
 
@@ -113,8 +110,4 @@ impl SsdpSocket {
         })
     }
 
-    pub async fn set_read_timeout(&self, timeout: Option<Duration>) -> PlatformResult<()> {
-        debug!("Read timeout set to {timeout:?} (implemented by async callers)");
-        Ok(())
-    }
 }

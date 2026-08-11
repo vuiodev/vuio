@@ -103,8 +103,15 @@ pub async fn serve_media<D: DatabaseManager>(
     if method == Method::GET {
         let client_ip = client_addr.ip().to_string();
 
+        // A discovered renderer gives the nicest name; without casting there
+        // are no discovered renderers, so the User-Agent guess below is used.
+        #[cfg(feature = "casting")]
+        let discovered = state.discovered_tvs.name_for_ip(&client_ip).await;
+        #[cfg(not(feature = "casting"))]
+        let discovered: Option<String> = None;
+
         let device_name = {
-            if let Some(name) = state.discovered_tvs.name_for_ip(&client_ip).await {
+            if let Some(name) = discovered {
                 name
             } else if let Some(ua) = headers
                 .get(axum::http::header::USER_AGENT)
@@ -455,22 +462,27 @@ pub async fn serve_cover<D: DatabaseManager>(
         }
     }
 
-    // 2. Secondary: Extract embedded artwork from audio tags using audiotags (blocking task)
-    let path = file_info.path.clone();
-    let tag_result =
-        tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
+    // 2. Secondary: Extract embedded artwork from audio tags using audiotags
+    // (blocking task). Only the embedded path needs a tag reader — the
+    // directory search above still serves cover art without the feature.
+    #[cfg(feature = "metadata")]
+    {
+        let path = file_info.path.clone();
+        let tag_result =
+            tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
 
-    if let Ok(Ok(tag)) = tag_result {
-        if let Some(cover) = tag.album_cover() {
-            let content_type = match cover.mime_type {
-                audiotags::MimeType::Jpeg => "image/jpeg",
-                audiotags::MimeType::Png => "image/png",
-                _ => "image/jpeg",
-            };
-            return Response::builder()
-                .header(header::CONTENT_TYPE, content_type)
-                .body(Body::from(cover.data.to_vec()))
-                .map_err(|_| AppError::NotFound);
+        if let Ok(Ok(tag)) = tag_result {
+            if let Some(cover) = tag.album_cover() {
+                let content_type = match cover.mime_type {
+                    audiotags::MimeType::Jpeg => "image/jpeg",
+                    audiotags::MimeType::Png => "image/png",
+                    _ => "image/jpeg",
+                };
+                return Response::builder()
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(cover.data.to_vec()))
+                    .map_err(|_| AppError::NotFound);
+            }
         }
     }
 

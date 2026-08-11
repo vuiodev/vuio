@@ -2,14 +2,14 @@
 //!
 //! Requires the `serve` feature:
 //! ```toml
-//! oxicast = { version = "0.1", features = ["serve"] }
+//! vuio-cast = { version = "0.1", features = ["serve"] }
 //! ```
 //!
 //! # Example
 //!
 //! ```no_run
-//! # async fn example(client: &oxicast::CastClient) -> oxicast::Result<()> {
-//! use oxicast::serve::FileServer;
+//! # async fn example(client: &vuio_cast::CastClient) -> vuio_cast::Result<()> {
+//! use vuio_cast::serve::FileServer;
 //!
 //! let server = FileServer::start("0.0.0.0:0").await?;
 //! let url = server.serve_file("/path/to/video.mp4", "video/mp4")?;
@@ -17,7 +17,7 @@
 //!
 //! // Cast the URL to the Chromecast
 //! client.load_media(
-//!     &oxicast::MediaInfo::new(&url, "video/mp4"),
+//!     &vuio_cast::MediaInfo::new(&url, "video/mp4"),
 //!     true,
 //!     0.0,
 //!     None,

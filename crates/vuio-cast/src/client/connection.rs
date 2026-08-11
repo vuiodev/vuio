@@ -8,7 +8,7 @@
 //! This is the same trade-off made by pychromecast, go-chromecast,
 //! rust_cast, and node-castv2. The Cast protocol has a separate device
 //! authentication channel (`urn:x-cast:com.google.cast.tp.deviceauth`)
-//! which is not yet implemented in oxicast.
+//! which is not yet implemented here.
 //!
 //! Set `verify_tls(true)` on the builder if your device has a CA-signed
 //! certificate (uncommon).

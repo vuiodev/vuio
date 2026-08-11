@@ -55,10 +55,6 @@ impl ScanResult {
         self.new_files.len() + self.updated_files.len() + self.removed_files.len()
     }
 
-    /// Check if any changes were made
-    pub fn has_changes(&self) -> bool {
-        self.total_changes() > 0
-    }
 
     /// Get a summary string of the scan results
     pub fn summary(&self) -> String {

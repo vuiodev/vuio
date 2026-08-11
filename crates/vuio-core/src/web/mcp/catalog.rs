@@ -1,5 +1,6 @@
 pub(super) fn get_tools_list() -> serde_json::Value {
-    serde_json::json!({
+    #[allow(unused_mut)]
+    let mut tools = serde_json::json!({
         "tools": [
             {
                 "name": "search_media",
@@ -247,5 +248,27 @@ pub(super) fn get_tools_list() -> serde_json::Value {
                 }
             }
         ]
-    })
+    });
+
+    // Without a cast provider these four cannot work, so they are not
+    // advertised: an MCP client should see the tools it can actually call.
+    #[cfg(not(feature = "casting"))]
+    {
+        const CASTING_TOOLS: [&str; 4] = [
+            "list_renderers",
+            "cast_media_to_renderer",
+            "control_renderer",
+            "cast_playlist_to_renderer",
+        ];
+        if let Some(list) = tools.get_mut("tools").and_then(|value| value.as_array_mut()) {
+            list.retain(|tool| {
+                !tool
+                    .get("name")
+                    .and_then(|name| name.as_str())
+                    .is_some_and(|name| CASTING_TOOLS.contains(&name))
+            });
+        }
+    }
+
+    tools
 }

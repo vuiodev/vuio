@@ -165,6 +165,7 @@ pub(crate) async fn tool_get_server_stats<D: DatabaseManager>(
     }))
 }
 
+#[cfg(feature = "casting")]
 pub(crate) async fn tool_list_renderers<D: DatabaseManager>(
     state: &AppState<D>,
 ) -> Result<serde_json::Value, String> {
@@ -194,6 +195,7 @@ pub(crate) async fn tool_list_renderers<D: DatabaseManager>(
     }))
 }
 
+#[cfg(feature = "casting")]
 pub(crate) async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     args: &serde_json::Value,
@@ -208,7 +210,7 @@ pub(crate) async fn tool_cast_media_to_renderer<D: DatabaseManager + 'static>(
         .and_then(|v| v.as_str())
         .ok_or("Missing 'renderer_id' parameter")?;
 
-    cast_file_helper(state, file_id, renderer_id).await
+    crate::web::casting::cast_file_helper(state, file_id, renderer_id).await
 }
 
 pub(crate) fn media_file_view_to_json(f: &impl MediaFileView) -> serde_json::Value {

@@ -12,12 +12,25 @@ pub mod windows;
 
 /// Path normalization trait for consistent path handling across platforms
 mod manager;
+#[cfg(feature = "metadata")]
 mod metadata;
 mod normalization;
 
 pub use manager::*;
+#[cfg(feature = "metadata")]
 pub(crate) use metadata::*;
 pub use normalization::*;
+
+/// Without the `metadata` feature nothing reads tags, so a scanned file keeps
+/// the title derived from its filename and carries no artist, album or
+/// duration. Indexing and streaming are unaffected, which is why this is a
+/// silent no-op rather than an error.
+#[cfg(not(feature = "metadata"))]
+pub(crate) async fn extract_audio_metadata(
+    _media_file: &mut MediaFile,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(())
+}
 
 #[cfg(test)]
 mod tests;

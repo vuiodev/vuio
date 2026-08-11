@@ -402,14 +402,6 @@ impl PlatformConfig {
             .unwrap_or("/")
     }
 
-    /// Check if the platform supports UNC paths (Windows) or network mounts
-    pub fn supports_network_paths(&self) -> bool {
-        self.metadata
-            .get("supports_unc_paths")
-            .or_else(|| self.metadata.get("supports_network_mounts"))
-            .map(|v| v == "true")
-            .unwrap_or(false)
-    }
 
     /// Get platform-specific file extensions that should be excluded by default
     pub fn get_default_exclude_patterns(&self) -> Vec<String> {

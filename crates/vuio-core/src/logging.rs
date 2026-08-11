@@ -77,16 +77,7 @@ impl std::io::Write for RotatingFile {
     }
 }
 
-/// Initialize logging with platform-specific configuration.
-pub fn init_logging() -> Result<(), PlatformError> {
-    init_logging_with_options(None, None, false)
-}
 
-/// Initialize logging with debug output enabled.
-pub fn init_logging_with_debug(debug: bool) -> Result<(), PlatformError> {
-    let log_level = if debug { "debug" } else { "info" };
-    init_logging_with_options(Some(log_level), None, debug)
-}
 
 /// Initialize console and rolling application-file logging.
 pub fn init_logging_with_options(

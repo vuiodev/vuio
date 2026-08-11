@@ -26,40 +26,6 @@ impl<D: DatabaseManager> MediaScanner<D> {
         }
     }
 
-    /// Simple directory scan that returns files without database operations
-    pub async fn scan_directory_simple(&self, directory: &Path) -> Result<Vec<MediaFile>> {
-        // Use canonical path normalization for consistency
-        let canonical_dir = match self.filesystem_manager.get_canonical_path(directory) {
-            Ok(canonical) => PathBuf::from(canonical),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to get canonical path for {}: {}, using basic normalization",
-                    directory.display(),
-                    e
-                );
-                self.filesystem_manager.normalize_path(directory)
-            }
-        };
-
-        // Validate the directory path
-        self.filesystem_manager.validate_path(&canonical_dir)?;
-
-        if !self.filesystem_manager.is_accessible(&canonical_dir).await {
-            return Err(anyhow::anyhow!(
-                "Directory is not accessible: {}",
-                canonical_dir.display()
-            ));
-        }
-
-        // Scan the file system for current files
-        let fs_files = self
-            .filesystem_manager
-            .scan_media_directory(&canonical_dir)
-            .await
-            .map_err(|e| anyhow::anyhow!("File system scan failed: {}", e))?;
-
-        Ok(fs_files)
-    }
 
     /// Create a media scanner with a custom file system manager (for testing)
     pub fn with_filesystem_manager(
@@ -305,27 +271,6 @@ impl<D: DatabaseManager> MediaScanner<D> {
         time_diff.map_or(true, |difference| difference.as_secs() > 10)
     }
 
-    /// Scan multiple directories and return combined results
-    pub async fn scan_directories(&self, directories: &[PathBuf]) -> Result<ScanResult> {
-        let mut combined_result = ScanResult::new();
-
-        for directory in directories {
-            match self.scan_directory(directory).await {
-                Ok(result) => {
-                    combined_result.merge(result);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to scan directory {}: {}", directory.display(), e);
-                    combined_result.errors.push(ScanError {
-                        path: directory.clone(),
-                        error: e.to_string(),
-                    });
-                }
-            }
-        }
-
-        Ok(combined_result)
-    }
 
     /// Perform a recursive scan of a directory using parallel multi-threaded traversal (jwalk)
     ///

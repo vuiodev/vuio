@@ -1,15 +1,14 @@
 [package]
-name = "oxicast"
+name = "vuio-cast"
 version = "0.0.3"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
-description = "Modified fork of oxicast for VuIO — async Google Cast client with ring TLS (no aws-lc)"
+description = "Async Google Cast (Chromecast) client for Rust, with ring TLS. A fork of oxicast by Dennis Kribl."
 repository = "https://github.com/vuiodev/vuio"
 readme = "README.md"
 keywords = ["chromecast", "cast", "google-cast", "media", "tokio"]
 categories = ["multimedia", "network-programming", "asynchronous"]
-publish = false
 
 [features]
 default = ["discovery"]
@@ -18,7 +17,7 @@ serve = ["dep:axum"]
 testing = []
 
 [lib]
-name = "oxicast"
+name = "vuio_cast"
 path = "src/lib.rs"
 
 [dependencies]

@@ -1,8 +1,8 @@
-//! Error types for oxicast.
+//! Error types for vuio-cast.
 
 use std::time::Duration;
 
-/// All errors that can occur when using oxicast.
+/// All errors that can occur when using vuio-cast.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
@@ -84,5 +84,5 @@ pub enum Error {
     Internal(String),
 }
 
-/// Convenience type alias for `Result<T, oxicast::Error>`.
+/// Convenience type alias for `Result<T, vuio_cast::Error>`.
 pub type Result<T> = std::result::Result<T, Error>;

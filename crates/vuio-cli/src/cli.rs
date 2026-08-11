@@ -1,6 +1,5 @@
 use clap::Parser;
-use vuio_core::config::{AppConfig, MonitoredDirectoryConfig, ValidationMode};
-use vuio_core::lifecycle::RuntimeOptions;
+use vuio_core::RuntimeOptions;
 
 pub struct Command {
     pub runtime: RuntimeOptions,
@@ -10,22 +9,41 @@ pub struct Command {
 impl Command {
     pub fn parse_env() -> anyhow::Result<Self> {
         let args = Args::parse();
-        let config_override = create_config_override(&args);
+        let mut runtime = RuntimeOptions::new()
+            .debug(args.debug)
+            .management_auth(args.auth);
+        if let Some(config) = args.config {
+            runtime = runtime.config_path(config);
+        }
+        if let Some(log_file) = args.log_file {
+            runtime = runtime.log_file(log_file);
+        }
+        if let Some(log_level) = args.log_level {
+            runtime = runtime.log_level(log_level);
+        }
+        if let Some(backup) = args.restore_backup {
+            runtime = runtime.restore_backup(backup);
+        }
+        if let Some(port) = args.port {
+            runtime = runtime.port(port);
+        }
+        // The default is only a placeholder; forwarding it would override the
+        // name a user set in their config file.
+        if args.name != DEFAULT_SERVER_NAME {
+            runtime = runtime.server_name(args.name);
+        }
+        for directory in args.media_dir.iter().chain(&args.additional_media_dirs) {
+            runtime = runtime.media_dir(directory);
+        }
+
         Ok(Self {
-            runtime: RuntimeOptions {
-                debug: args.debug,
-                config_path: args.config,
-                log_file: args.log_file,
-                log_level: args.log_level,
-                config_override,
-                restore_backup: args.restore_backup,
-                auth: args.auth,
-                ..RuntimeOptions::default()
-            },
+            runtime,
             update: args.update,
         })
     }
 }
+
+const DEFAULT_SERVER_NAME: &str = "VuIO Server";
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -39,7 +57,7 @@ struct Args {
     #[arg(short, long)]
     port: Option<u16>,
     /// The friendly name for the DLNA server
-    #[arg(short, long, default_value = "VuIO Server")]
+    #[arg(short, long, default_value = DEFAULT_SERVER_NAME)]
     name: String,
     /// Enable debug logging
     #[arg(long)]
@@ -62,38 +80,4 @@ struct Args {
     /// Enable management authentication
     #[arg(long)]
     auth: bool,
-}
-
-fn create_config_override(args: &Args) -> Option<AppConfig> {
-    if args.media_dir.is_none() && args.additional_media_dirs.is_empty() {
-        return None;
-    }
-
-    let mut config = AppConfig::default_for_platform();
-    if let Some(port) = args.port {
-        config.server.port = port;
-    }
-    if args.name != "VuIO Server" {
-        config.server.name = args.name.clone();
-    }
-    config.media.directories = args
-        .media_dir
-        .iter()
-        .chain(&args.additional_media_dirs)
-        .map(|path| {
-            let path = std::path::PathBuf::from(path);
-            if !path.is_dir() {
-                tracing::warn!("Media directory is not available: {}", path.display());
-            }
-            MonitoredDirectoryConfig {
-                path: path.to_string_lossy().into_owned(),
-                recursive: true,
-                case_sensitive: None,
-                extensions: None,
-                exclude_patterns: None,
-                validation_mode: ValidationMode::Warn,
-            }
-        })
-        .collect();
-    Some(config)
 }

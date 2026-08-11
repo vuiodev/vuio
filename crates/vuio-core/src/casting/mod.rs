@@ -67,9 +67,10 @@ impl RendererDevice {
     pub fn peer_ip(&self) -> Option<std::net::IpAddr> {
         match &self.endpoint {
             RendererEndpoint::Socket(address) => Some(address.ip()),
-            RendererEndpoint::Dlna { location_url, .. } => reqwest::Url::parse(location_url)
+            RendererEndpoint::Dlna { location_url, .. } => location_url
+                .parse::<http::Uri>()
                 .ok()?
-                .host_str()?
+                .host()?
                 .parse()
                 .ok(),
         }

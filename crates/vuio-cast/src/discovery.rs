@@ -38,8 +38,8 @@ use tokio::sync::mpsc;
 /// # Example
 ///
 /// ```no_run
-/// # async fn example() -> oxicast::Result<()> {
-/// let mut stream = oxicast::discovery::discover(
+/// # async fn example() -> vuio_cast::Result<()> {
+/// let mut stream = vuio_cast::discovery::discover(
 ///     std::time::Duration::from_secs(5)
 /// )?;
 /// while let Some(device) = stream.recv().await {
@@ -130,8 +130,8 @@ fn discover_streaming(
 /// # Example
 ///
 /// ```no_run
-/// # async fn example() -> oxicast::Result<()> {
-/// let devices = oxicast::discovery::discover_devices(
+/// # async fn example() -> vuio_cast::Result<()> {
+/// let devices = vuio_cast::discovery::discover_devices(
 ///     std::time::Duration::from_secs(3)
 /// ).await?;
 /// for device in &devices {

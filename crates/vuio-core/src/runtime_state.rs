@@ -1,12 +1,16 @@
 //! Small bounded runtime registries. Media records and indexes remain owned by ReDB.
 
-use crate::{casting::RendererDevice, state::SoapCacheKey};
+#[cfg(feature = "casting")]
+use crate::casting::RendererDevice;
+use crate::state::SoapCacheKey;
 use axum::body::Bytes;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     hash::Hash,
     time::{Duration, Instant},
 };
+#[cfg(feature = "casting")]
+use std::collections::HashSet;
 
 pub const BROWSE_CACHE_MAX_ENTRIES: usize = 256;
 pub const BROWSE_CACHE_MAX_BYTES: usize = 16 * 1024 * 1024;
@@ -262,6 +266,7 @@ impl Default for ActiveCastRegistry {
     }
 }
 
+#[cfg(feature = "casting")]
 #[derive(Default)]
 struct RendererSnapshot {
     renderers: Vec<RendererDevice>,
@@ -270,12 +275,14 @@ struct RendererSnapshot {
 
 /// A single shared renderer snapshot. The refresh mutex prevents concurrent
 /// HTTP and MCP requests from launching duplicate three-second SSDP searches.
+#[cfg(feature = "casting")]
 pub struct RendererCache {
     snapshot: tokio::sync::RwLock<RendererSnapshot>,
     refresh: tokio::sync::Mutex<()>,
     casting: crate::casting::CastingManager,
 }
 
+#[cfg(feature = "casting")]
 impl RendererCache {
     pub fn new() -> Self {
         Self {
@@ -479,6 +486,7 @@ impl RendererCache {
     }
 }
 
+#[cfg(feature = "casting")]
 impl Default for RendererCache {
     fn default() -> Self {
         Self::new()

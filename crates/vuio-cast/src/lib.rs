@@ -1,7 +1,7 @@
 #![warn(missing_docs)]
 #![deny(unsafe_code)]
 
-//! # oxicast
+//! # vuio-cast
 //!
 //! Async Google Cast (Chromecast) client for Rust, built on [tokio](https://tokio.rs).
 //!
@@ -11,10 +11,10 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use oxicast::{CastClient, CastApp, MediaInfo};
+//! use vuio_cast::{CastClient, CastApp, MediaInfo};
 //! use std::time::Duration;
 //!
-//! # async fn example() -> oxicast::Result<()> {
+//! # async fn example() -> vuio_cast::Result<()> {
 //! // Connect by IP (discovery is optional)
 //! let client = CastClient::connect("192.168.1.100", 8009).await?;
 //!

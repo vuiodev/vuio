@@ -78,6 +78,155 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D clippy::all -D warnings
 
   # ===================================================================
+  # Guard the published API of vuio-core.
+  #
+  # The crate is embedded in device firmware that is updated rarely, so a
+  # break reaches those installations slowly or never. Review alone does not
+  # catch an accidental `pub`, hence two mechanical gates: a committed
+  # snapshot that must be regenerated deliberately, and semver-checks against
+  # the last release once one exists.
+  # ===================================================================
+  api_surface:
+    name: Public API surface
+    if: |
+      github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Pinned: the listing format is the snapshot's format, so an unplanned
+      # tool upgrade would read as an API change.
+      PUBLIC_API_VERSION: 0.52.0
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      # cargo-public-api reads rustdoc JSON, which is nightly-only. The
+      # toolchain installed last is the default, so stable comes second.
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo-public-api
+        id: cache-public-api
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-public-api
+          key: cargo-public-api-${{ env.PUBLIC_API_VERSION }}
+      - name: Install cargo-public-api
+        if: steps.cache-public-api.outputs.cache-hit != 'true'
+        run: cargo install cargo-public-api --locked --version ${{ env.PUBLIC_API_VERSION }}
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: Compare the public API against the committed snapshot
+        run: |
+          cargo public-api -p vuio-core --simplified \
+            --omit auto-trait-impls,blanket-impls > /tmp/api-surface.txt
+          if ! diff -u crates/vuio-core/api-surface.txt /tmp/api-surface.txt; then
+            echo "::error::The public API of vuio-core changed."
+            echo "If the change is intended, regenerate the snapshot with:"
+            echo "  cargo public-api -p vuio-core --simplified --omit auto-trait-impls,blanket-impls > crates/vuio-core/api-surface.txt"
+            echo "and say in the commit message why the promise is being changed."
+            exit 1
+          fi
+      - name: Check semver against the last published release
+        run: |
+          # vuio-core is not on crates.io until the 0.1 release; there is
+          # nothing to compare against until then, and that is not a failure.
+          published=$(curl -sS -H "User-Agent: vuio-ci" \
+            -o /dev/null -w '%{http_code}' \
+            https://crates.io/api/v1/crates/vuio-core)
+          if [ "$published" = "200" ]; then
+            cargo semver-checks check-release -p vuio-core
+          else
+            echo "vuio-core is not published yet (HTTP $published); no baseline to compare."
+          fi
+
+  # ===================================================================
+  # Every feature must build alone and with none of them enabled.
+  #
+  # Features that are only ever tested together drift into depending on each
+  # other, which is exactly what happened before they were introduced: the
+  # cast helpers lived inside the MCP module, so `casting` could not be built
+  # without `mcp`. This job is what keeps that from coming back.
+  # ===================================================================
+  feature_matrix:
+    name: Feature combinations
+    if: |
+      github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: features-${{ hashFiles('**/Cargo.lock') }}
+      - name: Build with no features
+        run: cargo check -p vuio-core --no-default-features
+      - name: Build each feature alone
+        run: |
+          for feature in casting dashboard diagnostics mcp metadata; do
+            echo "::group::$feature"
+            cargo check -p vuio-core --no-default-features --features "$feature"
+            echo "::endgroup::"
+          done
+      - name: Build with everything
+        run: cargo check -p vuio-core --all-features
+
+  # ===================================================================
+  # Verify the crate still builds on its declared minimum Rust version.
+  # `rust-version` is a promise to integrators pinning an old toolchain,
+  # and raising it is a minor release, never a patch.
+  # ===================================================================
+  msrv:
+    name: Minimum supported Rust version
+    if: |
+      github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: Read rust-version from the manifest
+        id: msrv
+        run: |
+          version=$(grep -m1 '^rust-version' crates/vuio-core/Cargo.toml | cut -d'"' -f2)
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install the declared toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+      # No --locked: Cargo.lock is deliberately gitignored in this repo, so a
+      # fresh checkout has none and --locked would fail before compiling.
+      - name: Check the crate with default features
+        run: cargo check -p vuio-core
+
+  # ===================================================================
   # Run Tests and Checks (Push, Pull Requests, or Manual 'test' run)
   # ===================================================================
   test_and_check:

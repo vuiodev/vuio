@@ -1,273 +1,130 @@
+//! The embeddable VuIO media server runtime.
+//!
+//! Start a complete DLNA/UPnP server — discovery, indexing, streaming, casting
+//! and the management API — inside a host application, with no process, no
+//! command line and no signal handling of its own.
+//!
+//! ```no_run
+//! use vuio_core::{Runtime, RuntimeOptions};
+//!
+//! # async fn example() -> vuio_core::Result<()> {
+//! let vuio = Runtime::start(
+//!     RuntimeOptions::new()
+//!         .media_dir("/srv/media")
+//!         .port(8080)
+//!         .server_name("Lounge"),
+//! );
+//!
+//! vuio.wait().await
+//! # }
+//! ```
+//!
+//! # Stability
+//!
+//! This crate targets devices whose firmware is updated rarely, so it promises
+//! a surface small enough to keep: [`Runtime`], [`RuntimeHandle`],
+//! [`RuntimeOptions`], [`RuntimeStatus`], [`Error`], [`ErrorKind`] and
+//! [`Result`], and nothing else. Within a major release these keep their
+//! names, signatures and behaviour, and stay `Send + Sync + 'static`. None of
+//! them names a type from another crate, so a dependency's major release
+//! cannot break a caller.
+//!
+//! Hosts needing to browse, search or control the server use its HTTP and MCP
+//! APIs rather than Rust types — the same surface the dashboard and
+//! `vuio-tower` drive, and one that works from any language.
+//!
+//! The `unstable-internals` feature opens the crate's internals for the
+//! integration tests. It carries no stability promise whatsoever and must
+//! never be enabled by a dependent crate. See the crate README for the full
+//! policy, including the MSRV and feature rules.
+
 #![deny(unsafe_op_in_unsafe_fn)]
+// Only the facade is documented under default features; with
+// `unstable-internals` every internal module turns public and the lint would
+// fire on code that carries no promise and no obligation to explain itself.
+#![cfg_attr(not(feature = "unstable-internals"), deny(missing_docs))]
+// Making the modules internal revealed ~110 items with no caller inside the
+// crate: they existed only as public API. They are still reachable under
+// `unstable-internals` (the tests use many of them), so the lint only fires in
+// the default build. Silencing it here is deliberate and temporary — the real
+// fix is to delete what is genuinely unused, which needs a per-item check on
+// every target platform rather than a macOS-only build.
+#![cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 #![deny(clippy::undocumented_unsafe_blocks)]
 
-pub mod casting;
-pub mod config;
-pub mod database;
-pub mod error;
-pub mod lifecycle;
-pub mod logging;
-pub mod media;
-pub mod platform;
-pub mod runtime;
-pub mod runtime_state;
-pub mod ssdp;
-pub mod tv_control;
-pub mod watcher;
-pub mod web;
-
-pub type DefaultDatabase = crate::database::redb::RedbDatabase;
-pub type DefaultAppState = crate::state::AppState<DefaultDatabase>;
-
-pub mod state {
-    use crate::{
-        config::AppConfig,
-        database::DatabaseManager,
-        platform::{filesystem::FileSystemManager, PlatformInfo},
+// Everything below is internal. `vuio-core` commits to the facade re-exported
+// after this block and nothing else: a surface small enough to keep stable for
+// the lifetime of a shipped device, which is the whole point of the crate.
+// Hosts needing richer interaction drive the server over its HTTP and MCP APIs.
+//
+// The `unstable-internals` feature opens these modules so the integration tests
+// (which exercise the DLNA, SSDP and database layers directly) can reach them.
+// It carries no stability promise whatsoever and must never be enabled by a
+// dependent crate.
+macro_rules! internal_modules {
+    ($( $(#[$gate:meta])* $name:ident ),* $(,)?) => {
+        $(
+            $(#[$gate])*
+            #[cfg(feature = "unstable-internals")]
+            #[doc(hidden)]
+            pub mod $name;
+            $(#[$gate])*
+            #[cfg(not(feature = "unstable-internals"))]
+            pub(crate) mod $name;
+        )*
     };
-    use std::sync::Arc;
-
-    pub struct LiveConfig(std::sync::RwLock<Arc<AppConfig>>);
-
-    impl LiveConfig {
-        pub fn new(config: Arc<AppConfig>) -> Self {
-            Self(std::sync::RwLock::new(config))
-        }
-
-        pub fn load(&self) -> Arc<AppConfig> {
-            self.0
-                .read()
-                .unwrap_or_else(|error| error.into_inner())
-                .clone()
-        }
-
-        pub fn store(&self, config: Arc<AppConfig>) {
-            *self.0.write().unwrap_or_else(|error| error.into_inner()) = config;
-        }
-    }
-
-    #[derive(Hash, PartialEq, Eq, Clone, Debug)]
-    pub struct SoapCacheKey {
-        pub object_id: String,
-        pub starting_index: u32,
-        pub requested_count: u32,
-        pub client_profile: crate::web::client::DlnaClientProfile,
-        pub content_update_id: u32,
-        pub browse_epoch: u64,
-    }
-
-    #[derive(Clone)]
-    pub struct UpnpSubscription {
-        pub callback_url: String,
-        pub peer: std::net::IpAddr,
-        pub generation: uuid::Uuid,
-        pub expires_at: std::time::Instant,
-        pub next_sequence: u32,
-        pub consecutive_failures: u8,
-        pub last_notification_at: std::time::Instant,
-    }
-
-    #[derive(Clone)]
-    pub struct McpClient {
-        pub sender: tokio::sync::mpsc::Sender<String>,
-        pub peer: std::net::IpAddr,
-        pub expires_at: std::time::Instant,
-    }
-
-    pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
-        pub config: Arc<AppConfig>,
-        pub live_config: Arc<LiveConfig>,
-        pub media_directories:
-            Arc<tokio::sync::RwLock<Vec<crate::config::MonitoredDirectoryConfig>>>,
-        pub unavailable_roots:
-            Arc<tokio::sync::RwLock<std::collections::HashSet<std::path::PathBuf>>>,
-        pub database: Arc<D>,
-        pub auth: Arc<crate::web::auth::AuthState>,
-        pub platform_info: Arc<PlatformInfo>,
-        pub filesystem_manager: Arc<dyn FileSystemManager>,
-        pub content_update_id: Arc<std::sync::atomic::AtomicU32>,
-        pub web_metrics: Arc<crate::web::diagnostics::WebHandlerMetrics>,
-        pub runtime_diagnostics: Arc<crate::platform::diagnostics::SystemDiagnosticsSampler>,
-        pub lifecycle_stats: Arc<crate::lifecycle::ApplicationStats>,
-        pub bookmarks: Arc<tokio::sync::Mutex<crate::runtime_state::BookmarkRegistry>>,
-        pub log_file_path: std::path::PathBuf,
-        pub browse_cache: Arc<tokio::sync::Mutex<crate::runtime_state::BrowseResponseCache>>,
-        pub mcp_clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, McpClient>>>,
-        pub active_monitors: Arc<
-            tokio::sync::Mutex<
-                std::collections::HashMap<
-                    String,
-                    (uuid::Uuid, tokio_util::sync::CancellationToken),
-                >,
-            >,
-        >,
-        pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
-        pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
-        pub upnp_subscriptions:
-            Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
-        pub cancellation: tokio_util::sync::CancellationToken,
-        pub background_tasks: tokio_util::task::TaskTracker,
-    }
-
-    impl<D: DatabaseManager> Clone for AppState<D> {
-        fn clone(&self) -> Self {
-            Self {
-                config: self.config.clone(),
-                live_config: self.live_config.clone(),
-                media_directories: self.media_directories.clone(),
-                unavailable_roots: self.unavailable_roots.clone(),
-                database: self.database.clone(),
-                auth: self.auth.clone(),
-                platform_info: self.platform_info.clone(),
-                filesystem_manager: self.filesystem_manager.clone(),
-                content_update_id: self.content_update_id.clone(),
-                web_metrics: self.web_metrics.clone(),
-                runtime_diagnostics: self.runtime_diagnostics.clone(),
-                lifecycle_stats: self.lifecycle_stats.clone(),
-                bookmarks: self.bookmarks.clone(),
-                log_file_path: self.log_file_path.clone(),
-                browse_cache: self.browse_cache.clone(),
-                mcp_clients: self.mcp_clients.clone(),
-                active_monitors: self.active_monitors.clone(),
-                active_casts: self.active_casts.clone(),
-                discovered_tvs: self.discovered_tvs.clone(),
-                upnp_subscriptions: self.upnp_subscriptions.clone(),
-                cancellation: self.cancellation.clone(),
-                background_tasks: self.background_tasks.clone(),
-            }
-        }
-    }
-
-    impl<D: DatabaseManager> AppState<D> {
-        pub fn current_config(&self) -> Arc<AppConfig> {
-            self.live_config.load()
-        }
-        /// Get the server's IP address using unified logic from platform_info
-        pub fn get_server_ip(&self) -> String {
-            // An explicit host address must win over container/interface auto-detection.
-            if let Ok(host_ip) = std::env::var("VUIO_IP") {
-                if !host_ip.is_empty() {
-                    return host_ip;
-                }
-            }
-
-            // Check if server IP is explicitly configured (important for Docker)
-            if let Some(server_ip) = &self.current_config().server.ip {
-                if !server_ip.is_empty() && server_ip != "0.0.0.0" {
-                    return server_ip.clone();
-                }
-            }
-
-            // Use the SSDP interface from config if it's a specific IP address
-            match &self.current_config().network.interface_selection {
-                crate::config::NetworkInterfaceConfig::Specific(interface) => {
-                    if interface.parse::<std::net::IpAddr>().is_ok() {
-                        return interface.clone();
-                    }
-                    if let Some(selected) = self
-                        .platform_info
-                        .network_interfaces
-                        .iter()
-                        .find(|candidate| candidate.name == *interface && candidate.is_up)
-                    {
-                        return selected.ip_address.to_string();
-                    }
-                }
-                _ => {
-                    // For Auto or All, fallback to server interface if it's not 0.0.0.0
-                    if self.current_config().server.interface != "0.0.0.0"
-                        && !self.current_config().server.interface.is_empty()
-                    {
-                        return self.current_config().server.interface.clone();
-                    }
-                }
-            }
-
-            // Use the primary interface detected at startup instead of re-detecting
-            if let Some(primary_interface) = self.platform_info.get_primary_interface() {
-                return primary_interface.ip_address.to_string();
-            }
-
-            // Last resort
-            tracing::warn!("Could not auto-detect IP, falling back to 127.0.0.1");
-            "127.0.0.1".to_string()
-        }
-
-        /// Pick the local address whose route reaches a renderer. Explicit
-        /// configuration still wins, which is required for host-networked
-        /// containers where the kernel reports an internal address.
-        pub async fn advertised_http_origin_for_peer(&self, peer_url: &str) -> String {
-            let has_explicit_address = std::env::var("VUIO_IP")
-                .is_ok_and(|value| !value.is_empty())
-                || self
-                    .current_config()
-                    .server
-                    .ip
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty() && value != "0.0.0.0")
-                || match &self.current_config().network.interface_selection {
-                    crate::config::NetworkInterfaceConfig::Specific(interface) => {
-                        interface.parse::<std::net::IpAddr>().is_ok()
-                            || self
-                                .platform_info
-                                .network_interfaces
-                                .iter()
-                                .any(|candidate| candidate.name == *interface && candidate.is_up)
-                    }
-                    _ => false,
-                }
-                || (!self.current_config().server.interface.is_empty()
-                    && self.current_config().server.interface != "0.0.0.0");
-            if has_explicit_address {
-                return self.advertised_http_origin();
-            }
-
-            let peer = reqwest::Url::parse(peer_url)
-                .ok()
-                .and_then(|url| url.host_str()?.parse::<std::net::IpAddr>().ok());
-            if let Some(peer) = peer {
-                let bind = match peer {
-                    std::net::IpAddr::V4(_) => "0.0.0.0:0",
-                    std::net::IpAddr::V6(_) => "[::]:0",
-                };
-                if let Ok(socket) = tokio::net::UdpSocket::bind(bind).await {
-                    if socket
-                        .connect(std::net::SocketAddr::new(peer, 9))
-                        .await
-                        .is_ok()
-                    {
-                        if let Ok(local) = socket.local_addr() {
-                            let host = match local.ip() {
-                                std::net::IpAddr::V4(ip) => ip.to_string(),
-                                std::net::IpAddr::V6(ip) => format!("[{ip}]"),
-                            };
-                            return format!(
-                                "http://{}:{}",
-                                host,
-                                self.current_config().server.port
-                            );
-                        }
-                    }
-                }
-            }
-            self.advertised_http_origin()
-        }
-
-        /// Absolute HTTP origin advertised to DLNA clients. Request `Host`
-        /// headers are deliberately excluded because they describe untrusted
-        /// inbound routing, not this server's public identity.
-        pub fn advertised_http_origin(&self) -> String {
-            let address = self.get_server_ip();
-            let host = address
-                .parse::<std::net::IpAddr>()
-                .map_or(address.clone(), |ip| match ip {
-                    std::net::IpAddr::V4(_) => ip.to_string(),
-                    std::net::IpAddr::V6(_) => format!("[{ip}]"),
-                });
-            format!("http://{}:{}", host, self.current_config().server.port)
-        }
-    }
 }
+
+internal_modules!(
+    #[cfg(feature = "casting")]
+    casting,
+    config,
+    database,
+    error,
+    http_client,
+    lifecycle,
+    logging,
+    mdns,
+    media,
+    platform,
+    runtime,
+    runtime_state,
+    state,
+    ssdp,
+    #[cfg(feature = "casting")]
+    tv_control,
+    watcher,
+    web,
+);
+
+// ── The stable public API ──────────────────────────────────────────────────
+pub use crate::error::{Error, ErrorKind, Result};
+pub use crate::runtime::{Runtime, RuntimeHandle, RuntimeOptions, RuntimeStatus};
+
+// The promise is not only which items exist but what they can do. Losing
+// `Send`/`Sync` on the handle would stop hosts from holding it in shared state,
+// and `Error` dropping `std::error::Error` would break every `?` in a caller —
+// both are silent source changes that no signature diff would catch, so they
+// are asserted at compile time here.
+const _: () = {
+    const fn shareable<T: Send + Sync + 'static>() {}
+    const fn standard_error<T: std::error::Error + Send + Sync + 'static>() {}
+
+    shareable::<Runtime>();
+    shareable::<RuntimeHandle>();
+    shareable::<RuntimeOptions>();
+    shareable::<RuntimeStatus>();
+    shareable::<Error>();
+    shareable::<ErrorKind>();
+    standard_error::<Error>();
+};
+
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub type DefaultDatabase = crate::database::redb::RedbDatabase;
+#[cfg(feature = "unstable-internals")]
+#[doc(hidden)]
+pub type DefaultAppState = crate::state::AppState<DefaultDatabase>;
 
 /// Natural comparison for strings containing embedded numbers.
 ///

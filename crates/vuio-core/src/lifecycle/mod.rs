@@ -32,13 +32,11 @@ mod runner;
 mod shutdown;
 
 use bootstrap::*;
-pub use bootstrap::{ApplicationContext, BootstrapService};
-pub use maintenance::MaintenanceService;
+pub use bootstrap::ApplicationContext;
 use maintenance::*;
 use media_service::*;
-pub use media_service::{ApplicationStats, MediaLifecycleService};
+pub use media_service::ApplicationStats;
 use network::*;
-pub use network::{NetworkLifecycleService, NetworkTaskHandles};
 pub use runner::ApplicationRunner;
 pub use shutdown::ShutdownCoordinator;
 use shutdown::*;
@@ -47,13 +45,62 @@ use shutdown::*;
 ///
 /// Command-line parsing deliberately lives outside `vuio-core`; desktop and
 /// service hosts construct this type directly.
+/// The handful of settings a host can override without owning the whole
+/// configuration file.
+///
+/// These are applied *on top of* the loaded configuration rather than
+/// replacing it. Carrying them as options, instead of as a whole `AppConfig`,
+/// is what makes that possible: a full struct cannot say which of its 36
+/// fields the caller actually meant to set.
+#[derive(Clone, Default)]
+pub struct ConfigOverrides {
+    pub port: Option<u16>,
+    pub server_name: Option<String>,
+    pub media_dirs: Vec<std::path::PathBuf>,
+}
+
+impl ConfigOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.port.is_none() && self.server_name.is_none() && self.media_dirs.is_empty()
+    }
+
+    /// Apply whatever was set onto an already-loaded configuration.
+    pub fn apply(&self, config: &mut AppConfig) {
+        if let Some(port) = self.port {
+            config.server.port = port;
+        }
+        if let Some(name) = &self.server_name {
+            config.server.name = name.clone();
+        }
+        if !self.media_dirs.is_empty() {
+            config.media.directories = self
+                .media_dirs
+                .iter()
+                .map(|path| {
+                    if !path.is_dir() {
+                        tracing::warn!("Media directory is not available: {}", path.display());
+                    }
+                    crate::config::MonitoredDirectoryConfig {
+                        path: path.to_string_lossy().into_owned(),
+                        recursive: true,
+                        case_sensitive: None,
+                        extensions: None,
+                        exclude_patterns: None,
+                        validation_mode: crate::config::ValidationMode::Warn,
+                    }
+                })
+                .collect();
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct RuntimeOptions {
     pub debug: bool,
     pub config_path: Option<String>,
     pub log_file: Option<String>,
     pub log_level: Option<String>,
-    pub config_override: Option<AppConfig>,
+    pub overrides: ConfigOverrides,
     pub restore_backup: Option<String>,
     pub auth: bool,
     pub cancellation: CancellationToken,
@@ -66,7 +113,7 @@ impl Default for RuntimeOptions {
             config_path: None,
             log_file: None,
             log_level: None,
-            config_override: None,
+            overrides: ConfigOverrides::default(),
             restore_backup: None,
             auth: false,
             cancellation: CancellationToken::new(),

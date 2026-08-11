@@ -1,5 +1,8 @@
 //! TV discovery and dashboard playlist-casting API handlers.
 
+pub(crate) mod helpers;
+pub use helpers::{cast_file_helper, cast_playlist_helper, cast_tracks_helper};
+
 use crate::{
     database::{DatabaseManager, FileLocation, MediaFileView},
     state::AppState,
@@ -177,7 +180,7 @@ pub async fn api_cast<D: DatabaseManager + 'static>(
                     return cast_error(StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error");
                 }
             };
-            crate::web::mcp::cast_file_helper(&state, file.id, &payload.renderer_id).await
+            cast_file_helper(&state, file.id, &payload.renderer_id).await
         }
         ApiCastSource::Folder { components, media } => {
             let tracks = match resolve_castable_folder(&state, &components, media.as_deref()).await
@@ -191,7 +194,7 @@ pub async fn api_cast<D: DatabaseManager + 'static>(
                 }
                 Err(message) => return cast_error(StatusCode::BAD_REQUEST, &message),
             };
-            crate::web::mcp::cast_tracks_helper(&state, tracks, &payload.renderer_id, 0).await
+            cast_tracks_helper(&state, tracks, &payload.renderer_id, 0).await
         }
     };
 
@@ -356,7 +359,7 @@ async fn create_and_cast_playlist<D: DatabaseManager + 'static>(
         return Err(format!("Failed to create cast playlist: {error}"));
     }
     crate::web::eventing::publish_content_change(state).await;
-    match crate::web::mcp::cast_playlist_helper(state, playlist_id, renderer_id, 0).await {
+    match cast_playlist_helper(state, playlist_id, renderer_id, 0).await {
         Ok(value) => Ok(value),
         Err(error) => {
             let _ = state.database.delete_playlist(playlist_id).await;

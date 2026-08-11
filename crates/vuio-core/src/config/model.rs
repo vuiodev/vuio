@@ -4,6 +4,10 @@ pub(super) fn default_cleanup_deleted_files() -> bool {
     true
 }
 
+pub(super) fn default_mdns_enabled() -> bool {
+    true
+}
+
 pub(super) fn default_false() -> bool {
     false
 }
@@ -81,6 +85,9 @@ pub struct NetworkConfig {
     pub announce_interval_seconds: u64,
     #[serde(default)]
     pub upnp_callback_allowed_networks: Vec<String>,
+    /// Advertise the server over mDNS/DNS-SD in addition to SSDP.
+    #[serde(default = "default_mdns_enabled")]
+    pub mdns_enabled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

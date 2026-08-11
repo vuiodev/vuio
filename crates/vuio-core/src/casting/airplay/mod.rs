@@ -15,7 +15,6 @@ use super::{
 };
 use anyhow::Context as _;
 use async_trait::async_trait;
-use futures_util::StreamExt;
 use hap_crypto::{PairSetupClient, PairSetupStep, SessionKeys};
 use mdns_sd::{ServiceDaemon, ServiceEvent};
 use quick_xml::{events::Event, Reader};
@@ -294,47 +293,37 @@ impl AirplayProvider {
     async fn request(
         &self,
         device: &RendererDevice,
-        method: reqwest::Method,
+        method: http::Method,
         path: &str,
         body: Option<String>,
         session: &str,
     ) -> anyhow::Result<String> {
         let address = socket_endpoint(device)?;
-        let url = reqwest::Url::parse(&format!("http://{address}{path}"))?;
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        let mut request = client
-            .request(method, url)
+        let uri: http::Uri = format!("http://{address}{path}").parse()?;
+        let builder = http::Request::builder()
+            .method(method)
+            .uri(uri)
             .header("User-Agent", "MediaControl/1.0")
             .header("X-Apple-Session-ID", session);
-        if let Some(body) = body {
-            request = request.header("Content-Type", "text/parameters").body(body);
-        }
-        let response = request.send().await?;
+        let request = match body {
+            Some(body) => builder
+                .header("Content-Type", "text/parameters")
+                .body(crate::http_client::body(body))?,
+            None => builder.body(crate::http_client::empty_body())?,
+        };
+
+        let client = crate::http_client::HttpClient::new(Duration::from_secs(10));
+        let response = client.send(request, MAX_RESPONSE_BYTES).await?;
         anyhow::ensure!(
-            response.status().is_success(),
+            response.status.is_success(),
             "AirPlay request failed with HTTP {}",
-            response.status()
+            response.status
         );
-        if response
-            .content_length()
-            .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
-        {
-            anyhow::bail!("AirPlay response exceeded {MAX_RESPONSE_BYTES} bytes");
-        }
-        let mut bytes = Vec::new();
-        let mut stream = response.bytes_stream();
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk?;
-            anyhow::ensure!(
-                bytes.len().saturating_add(chunk.len()) <= MAX_RESPONSE_BYTES,
-                "AirPlay response exceeded {MAX_RESPONSE_BYTES} bytes"
-            );
-            bytes.extend_from_slice(&chunk);
-        }
-        Ok(String::from_utf8_lossy(&bytes).into_owned())
+        anyhow::ensure!(
+            !response.truncated,
+            "AirPlay response exceeded {MAX_RESPONSE_BYTES} bytes"
+        );
+        Ok(response.text())
     }
 
     async fn pairing_request(
@@ -1783,7 +1772,7 @@ impl CastProvider for AirplayProvider {
         let session = self.session_for_play(device).await;
         self.request(
             device,
-            reqwest::Method::POST,
+            http::Method::POST,
             "/play",
             Some(format!(
                 "Content-Location: {}\r\nStart-Position: 0\r\n",
@@ -1871,7 +1860,7 @@ impl CastProvider for AirplayProvider {
             PlaybackAction::Pause => "/rate?value=0.000000",
             PlaybackAction::Stop => "/stop",
         };
-        self.request(device, reqwest::Method::POST, path, None, &session)
+        self.request(device, http::Method::POST, path, None, &session)
             .await?;
         if action == PlaybackAction::Stop {
             self.sessions.lock().await.remove(&device.id);
@@ -1901,7 +1890,7 @@ impl CastProvider for AirplayProvider {
         let body = self
             .request(
                 device,
-                reqwest::Method::GET,
+                http::Method::GET,
                 "/playback-info",
                 None,
                 &session,

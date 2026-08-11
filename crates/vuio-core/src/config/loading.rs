@@ -43,6 +43,9 @@ impl AppConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid VUIO_ANNOUNCE_INTERVAL")?,
+            mdns_enabled: std::env::var("VUIO_MDNS")
+                .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
+                .unwrap_or(true),
             upnp_callback_allowed_networks: std::env::var("VUIO_UPNP_CALLBACK_ALLOWED_NETWORKS")
                 .unwrap_or_default()
                 .split(',')
@@ -294,6 +297,7 @@ impl AppConfig {
                 announce_interval_seconds: Self::get_platform_default_announce_interval(
                     &platform_config,
                 ),
+                mdns_enabled: true,
                 upnp_callback_allowed_networks: Vec::new(),
             },
             media: MediaConfig {

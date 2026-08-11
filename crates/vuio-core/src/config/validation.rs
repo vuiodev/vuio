@@ -434,46 +434,6 @@ impl ConfigValidator {
         Ok(())
     }
 
-    /// Comprehensive validation including system checks
-    pub fn validate_with_system_checks(config: &AppConfig) -> Result<()> {
-        // Basic configuration validation
-        Self::validate(config)?;
-
-        // Ensure platform directories exist
-        AppConfig::ensure_platform_directories_exist()
-            .context("Failed to create platform directories")?;
-
-        // System-level validations
-        Self::validate_port_availability(config.server.port)
-            .with_context(|| "Server port validation failed")?;
-
-        // Note: We don't validate SSDP port availability as it might be in use by other DLNA servers
-        // and we have fallback mechanisms
-
-        // Validate directory permissions
-        for dir in &config.media.directories {
-            let path = Path::new(&dir.path);
-            Self::validate_directory_permissions(path).with_context(|| {
-                format!("Directory permission validation failed for: {}", dir.path)
-            })?;
-        }
-
-        // Validate database directory permissions
-        let db_path = config.get_database_path();
-        if let Some(parent) = db_path.parent() {
-            if parent.exists() {
-                Self::validate_directory_permissions(parent)
-                    .with_context(|| "Database directory permission validation failed")?;
-            }
-        }
-
-        // Platform-specific validation with system checks
-        config
-            .validate_for_platform()
-            .context("Platform-specific validation failed")?;
-
-        Ok(())
-    }
 }
 
 #[cfg(test)]

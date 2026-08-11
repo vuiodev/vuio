@@ -11,17 +11,17 @@ async fn main() -> anyhow::Result<()> {
     if command.update {
         return update::update_binary().await;
     }
-    let cancellation = command.runtime.cancellation.clone();
-    let runtime = vuio_core::lifecycle::ApplicationRunner::run(command.runtime);
-    tokio::pin!(runtime);
+    // The handle owns shutdown now, so the signal path no longer needs a
+    // cancellation token threaded in from outside.
+    let handle = vuio_core::Runtime::start(command.runtime);
     tokio::select! {
-        result = &mut runtime => result,
+        result = handle.wait() => result?,
         result = wait_for_shutdown_signal() => {
             result?;
-            cancellation.cancel();
-            runtime.await
+            handle.shutdown().await?;
         }
     }
+    Ok(())
 }
 
 async fn wait_for_shutdown_signal() -> anyhow::Result<()> {
