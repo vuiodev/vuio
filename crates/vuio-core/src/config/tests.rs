@@ -416,3 +416,46 @@ backup_enabled = false
 
     Ok(())
 }
+
+/// The shipped example is documentation people paste into place, so it has to be a
+/// config the server accepts. The previous one had drifted: it documented a
+/// `[database.redb]` table the model does not have, which loads as nothing at all.
+#[test]
+fn the_example_config_is_loadable() {
+    // Read rather than include_str!: the file lives outside the published crate.
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.example.toml");
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return; // Not a checkout — nothing to check.
+    };
+
+    let config: AppConfig = toml::from_str(&raw)
+        .unwrap_or_else(|error| panic!("config.example.toml must parse: {error}"));
+
+    // Nothing has deny_unknown_fields, so a key the model does not have deserialises
+    // to nothing at all. Round-trip the parsed config and check every path the example
+    // writes survives, which is the only way an ignored key shows up.
+    let documented: toml::Table = toml::from_str(&raw).expect("parses as a table");
+    let modelled = toml::Table::try_from(&config).expect("config serialises");
+
+    fn assert_paths_exist(documented: &toml::Table, modelled: &toml::Table, prefix: &str) {
+        for (key, value) in documented {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            let Some(counterpart) = modelled.get(key) else {
+                panic!("config.example.toml documents `{path}`, which AppConfig ignores");
+            };
+            if let (Some(child), Some(other)) = (value.as_table(), counterpart.as_table()) {
+                assert_paths_exist(child, other, &path);
+            }
+        }
+    }
+    assert_paths_exist(&documented, &modelled, "");
+
+    // The commented-out keys are the optional ones; the uncommented keys must be
+    // enough on their own.
+    ConfigValidator::validate_flexible(&config)
+        .unwrap_or_else(|error| panic!("config.example.toml must validate: {error}"));
+}

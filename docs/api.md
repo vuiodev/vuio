@@ -58,6 +58,83 @@ Creates a temporary playlist and starts casting it to the selected playback devi
   }
   ```
 
+### Read the configuration
+Returns the full settings schema, the values currently in force, and which keys the
+configuration file actually writes. Backs the dashboard's Admin tab.
+* **Endpoint**: `GET /api/admin/config`
+* **Response**: `200 OK`
+  ```jsonc
+  {
+    "sections": [
+      {
+        "id": "network",
+        "title": "Network",
+        "blurb": "Discovery and advertisement on the local network.",
+        "fields": [
+          {
+            "key": "network.mdns_enabled",
+            "label": "Advertise over mDNS",
+            "type": "bool",
+            "impact": "restart",
+            "removable": true,
+            "help": "Also announce the server over Bonjour/DNS-SD, alongside SSDP."
+          }
+        ]
+      }
+    ],
+    "values": { "network.mdns_enabled": true },
+    // False means the key is absent from config.toml and `values` is showing a default.
+    "present": { "network.mdns_enabled": false },
+    // Libraries as the file writes them; absent optional keys stay absent.
+    "directories": [{ "path": "/media", "recursive": true }],
+    // The same libraries with defaults filled in, for display only.
+    "effective_directories": [{ "path": "/media", "recursive": true, "validation_mode": "Warn" }],
+    "runtime": {
+      "config_path": "/opt/vuio/config/config.toml",
+      "writable": true,
+      "read_only_reason": null,
+      "auth_enabled": false,
+      "is_docker": false,
+      "version": "0.0.42"
+    }
+  }
+  ```
+
+Field `type` is one of `bool`, `int` (with `min`/`max`), `text`, `path`, `enum` (with
+`options` and `free_form`), or `string_list`. `impact` is `live` or `restart`.
+`removable: false` marks a key that must always carry a value, because `AppConfig`
+declares no default for it. Some fields carry a `note` describing a caveat in what the
+setting actually does.
+
+### Write the configuration
+Applies a set of changes to `config.toml`. The file is edited in place, so comments and
+unrecognised keys survive. The result is parsed and validated before anything is written,
+and the write is atomic, so a rejected change leaves the file untouched. The file watcher
+then reloads it — the same path a hand edit takes.
+* **Endpoint**: `POST /api/admin/config`
+* **Request Payload**:
+  ```jsonc
+  {
+    // Dotted key to value. `null` removes the key, restoring its default.
+    "values": { "media.autoplay_enabled": false, "server.ip": null },
+    // Optional. Replaces the whole [[media.directories]] array.
+    "directories": [{ "path": "/media", "recursive": true }]
+  }
+  ```
+* **Response**: `200 OK` — `{"saved": true, "impact": "live"}`, where `impact` is
+  `no_change`, `live`, or `restart_required`.
+* `400 Bad Request` — `{"error": "..."}` for an unknown key, a value of the wrong type, a
+  failed validation, or an attempt to unset a key that has no default.
+* `409 Conflict` — the configuration is not editable: a container configured by
+  environment variables, or a run started with command-line overrides. Both use a scratch
+  file that a restart discards.
+
+### Restart the server
+Runs the normal graceful shutdown and exits. The process only returns if something
+supervises it — Docker, systemd or launchd.
+* **Endpoint**: `POST /api/admin/restart`
+* **Response**: `202 Accepted` — `{"stopping": true, "supervised": false}`
+
 ---
 
 ## 2. Media Streaming APIs
