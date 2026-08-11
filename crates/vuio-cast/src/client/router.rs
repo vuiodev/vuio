@@ -49,42 +49,42 @@ pub(crate) async fn route(
         }
 
         x if x == ns::NS_CONNECTION => {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload_str) {
-                if json.get("type").and_then(|t| t.as_str()) == Some("CLOSE") {
-                    // CLOSE is a virtual-channel close (e.g. app stopped), NOT a full
-                    // TCP/TLS disconnection. Emit as a raw event so consumers can
-                    // decide how to handle it. Do NOT emit Disconnected here — that
-                    // should only come from actual I/O failures in the reader task.
-                    let source = &msg.source_id;
-                    let dest = &msg.destination_id;
-                    tracing::info!("received CLOSE from {source} to {dest}");
-                    let _ = event_tx.try_send(CastEvent::RawMessage {
-                        namespace: ns::NS_CONNECTION.to_string(),
-                        source: source.clone(),
-                        destination: dest.clone(),
-                        payload: payload_str.to_string(),
-                    });
-                }
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload_str)
+                && json.get("type").and_then(|t| t.as_str()) == Some("CLOSE")
+            {
+                // CLOSE is a virtual-channel close (e.g. app stopped), NOT a full
+                // TCP/TLS disconnection. Emit as a raw event so consumers can
+                // decide how to handle it. Do NOT emit Disconnected here — that
+                // should only come from actual I/O failures in the reader task.
+                let source = &msg.source_id;
+                let dest = &msg.destination_id;
+                tracing::info!("received CLOSE from {source} to {dest}");
+                let _ = event_tx.try_send(CastEvent::RawMessage {
+                    namespace: ns::NS_CONNECTION.to_string(),
+                    source: source.clone(),
+                    destination: dest.clone(),
+                    payload: payload_str.to_string(),
+                });
             }
         }
 
         x if x == ns::NS_RECEIVER => {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload_str) {
                 // Check for request-response correlation
-                if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
-                    if request_id > 0 {
-                        request_tracker
-                            .resolve(request_id as u32, json.clone())
-                            .await;
-                    }
+                if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64())
+                    && request_id > 0
+                {
+                    request_tracker
+                        .resolve(request_id as u32, json.clone())
+                        .await;
                 }
 
                 let msg_type = json.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if msg_type == ns::MSG_RECEIVER_STATUS {
-                    if let Some(status) = parse_receiver_status(&json) {
-                        let _ = state.receiver_tx.send(Some(status.clone()));
-                        let _ = event_tx.try_send(CastEvent::ReceiverStatusChanged(status));
-                    }
+                if msg_type == ns::MSG_RECEIVER_STATUS
+                    && let Some(status) = parse_receiver_status(&json)
+                {
+                    let _ = state.receiver_tx.send(Some(status.clone()));
+                    let _ = event_tx.try_send(CastEvent::ReceiverStatusChanged(status));
                 }
             }
         }
@@ -97,14 +97,13 @@ pub(crate) async fn route(
                 // Only resolve request correlation for MEDIA_STATUS.
                 // Error types (LOAD_FAILED, etc.) are resolved in their own
                 // match arms to avoid consuming the oneshot before the specific handler.
-                if matches!(classified, MediaMessageType::Status) {
-                    if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
-                        if request_id > 0 {
-                            request_tracker
-                                .resolve(request_id as u32, json.clone())
-                                .await;
-                        }
-                    }
+                if matches!(classified, MediaMessageType::Status)
+                    && let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64())
+                    && request_id > 0
+                {
+                    request_tracker
+                        .resolve(request_id as u32, json.clone())
+                        .await;
                 }
 
                 match classified {
@@ -118,13 +117,12 @@ pub(crate) async fn route(
                             // Only emit session-ended for real sessions (not session 0)
                             if status.player_state == PlayerState::Idle
                                 && status.media_session_id > 0
+                                && let Some(reason) = &status.idle_reason
                             {
-                                if let Some(reason) = &status.idle_reason {
-                                    let _ = event_tx.try_send(CastEvent::MediaSessionEnded {
-                                        media_session_id: status.media_session_id,
-                                        idle_reason: *reason,
-                                    });
-                                }
+                                let _ = event_tx.try_send(CastEvent::MediaSessionEnded {
+                                    media_session_id: status.media_session_id,
+                                    idle_reason: *reason,
+                                });
                             }
 
                             let _ = state.media_tx.send(Some(status.clone()));
@@ -138,22 +136,22 @@ pub(crate) async fn route(
                             json.get("requestId").and_then(|r| r.as_u64()).unwrap_or(0)
                         );
                         // Resolve the pending request so load_media() returns an error
-                        if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
-                            if request_id > 0 {
-                                request_tracker
-                                    .resolve(request_id as u32, json.clone())
-                                    .await;
-                            }
+                        if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64())
+                            && request_id > 0
+                        {
+                            request_tracker
+                                .resolve(request_id as u32, json.clone())
+                                .await;
                         }
                     }
                     MediaMessageType::LoadCancelled => {
                         tracing::debug!("LOAD_CANCELLED");
-                        if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
-                            if request_id > 0 {
-                                request_tracker
-                                    .resolve(request_id as u32, json.clone())
-                                    .await;
-                            }
+                        if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64())
+                            && request_id > 0
+                        {
+                            request_tracker
+                                .resolve(request_id as u32, json.clone())
+                                .await;
                         }
                     }
                     MediaMessageType::InvalidRequest => {
@@ -162,12 +160,12 @@ pub(crate) async fn route(
                             .and_then(|r| r.as_str())
                             .unwrap_or("unknown");
                         tracing::debug!("invalid request: {reason}");
-                        if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
-                            if request_id > 0 {
-                                request_tracker
-                                    .resolve(request_id as u32, json.clone())
-                                    .await;
-                            }
+                        if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64())
+                            && request_id > 0
+                        {
+                            request_tracker
+                                .resolve(request_id as u32, json.clone())
+                                .await;
                         }
                     }
                     MediaMessageType::Unknown => {}
@@ -178,13 +176,12 @@ pub(crate) async fn route(
         _ => {
             // Attempt request-response correlation for custom namespaces
             // (send_raw() injects requestId into the payload)
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload_str) {
-                if let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64()) {
-                    if request_id > 0 {
-                        request_tracker.resolve(request_id as u32, json).await;
-                        return; // resolved — don't also emit as raw event
-                    }
-                }
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload_str)
+                && let Some(request_id) = json.get("requestId").and_then(|r| r.as_u64())
+                && request_id > 0
+            {
+                request_tracker.resolve(request_id as u32, json).await;
+                return; // resolved — don't also emit as raw event
             }
 
             let _ = event_tx.try_send(CastEvent::RawMessage {

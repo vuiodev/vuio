@@ -476,18 +476,17 @@ impl CastClient {
         let target_id = app.app_id().to_string();
 
         let status = router::parse_receiver_status_from_json(&json);
-        if let Some(status) = status {
-            if let Some(app_info) = status
+        if let Some(status) = status
+            && let Some(app_info) = status
                 .applications
                 .into_iter()
                 .find(|a| a.app_id == target_id)
-            {
-                self.send(channel::connection::connect_msg(&app_info.transport_id))
-                    .await?;
-                *self.inner.transport_id.lock().await = Some(app_info.transport_id.clone());
-                *self.inner.session_id.lock().await = Some(app_info.session_id.clone());
-                return Ok(app_info);
-            }
+        {
+            self.send(channel::connection::connect_msg(&app_info.transport_id))
+                .await?;
+            *self.inner.transport_id.lock().await = Some(app_info.transport_id.clone());
+            *self.inner.session_id.lock().await = Some(app_info.session_id.clone());
+            return Ok(app_info);
         }
 
         // App not in first response — wait for a status update (custom receiver loading)
@@ -501,15 +500,15 @@ impl CastClient {
                     .flatten()
             {
                 #[allow(clippy::collapsible_match)]
-                if let CastEvent::ReceiverStatusChanged(ref rs) = event {
-                    if let Some(app_info) = rs.applications.iter().find(|a| a.app_id == target_id) {
-                        let app_info = app_info.clone();
-                        self.send(channel::connection::connect_msg(&app_info.transport_id))
-                            .await?;
-                        *self.inner.transport_id.lock().await = Some(app_info.transport_id.clone());
-                        *self.inner.session_id.lock().await = Some(app_info.session_id.clone());
-                        return Ok(app_info);
-                    }
+                if let CastEvent::ReceiverStatusChanged(ref rs) = event
+                    && let Some(app_info) = rs.applications.iter().find(|a| a.app_id == target_id)
+                {
+                    let app_info = app_info.clone();
+                    self.send(channel::connection::connect_msg(&app_info.transport_id))
+                        .await?;
+                    *self.inner.transport_id.lock().await = Some(app_info.transport_id.clone());
+                    *self.inner.session_id.lock().await = Some(app_info.session_id.clone());
+                    return Ok(app_info);
                 }
             }
         }
@@ -591,15 +590,14 @@ impl CastClient {
         Self::check_device_error(&json)?;
 
         // Extract media session ID from response
-        if let Some(entries) = json.get("status").and_then(|s| s.as_array()) {
-            if let Some(entry) = entries.first() {
-                if let Some(msid) = entry.get("mediaSessionId").and_then(|m| m.as_i64()) {
-                    self.inner
-                        .state
-                        .media_session_id
-                        .store(msid as i32, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        if let Some(entries) = json.get("status").and_then(|s| s.as_array())
+            && let Some(entry) = entries.first()
+            && let Some(msid) = entry.get("mediaSessionId").and_then(|m| m.as_i64())
+        {
+            self.inner
+                .state
+                .media_session_id
+                .store(msid as i32, std::sync::atomic::Ordering::Relaxed);
         }
 
         let status =
@@ -710,15 +708,14 @@ impl CastClient {
         .await?;
         let json = self.inner.request_tracker.wait_for(id, rx).await?;
         Self::check_device_error(&json)?;
-        if let Some(entries) = json.get("status").and_then(|s| s.as_array()) {
-            if let Some(entry) = entries.first() {
-                if let Some(msid) = entry.get("mediaSessionId").and_then(|m| m.as_i64()) {
-                    self.inner
-                        .state
-                        .media_session_id
-                        .store(msid as i32, std::sync::atomic::Ordering::Relaxed);
-                }
-            }
+        if let Some(entries) = json.get("status").and_then(|s| s.as_array())
+            && let Some(entry) = entries.first()
+            && let Some(msid) = entry.get("mediaSessionId").and_then(|m| m.as_i64())
+        {
+            self.inner
+                .state
+                .media_session_id
+                .store(msid as i32, std::sync::atomic::Ordering::Relaxed);
         }
         let status =
             router::parse_media_status_from_json(&json).ok_or_else(|| Error::LoadFailed {
