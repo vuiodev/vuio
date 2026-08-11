@@ -274,8 +274,14 @@ VuIO uses TOML configuration files on native platforms. Config location: `./conf
 
 Everything below can also be edited from the dashboard's **Admin** tab, which writes back
 to this file in place, preserving your comments. A container configured by environment
-variables, or a server started with command-line overrides, shows the tab read-only —
-those runs use a scratch config that a restart discards.
+variables shows the tab read-only, since its configuration comes from those variables and
+a file edit would be discarded.
+
+Command-line options (`--port`, `--name`, `-m`) are layered on top of the file rather than
+replacing it. They win for the run they were given in; the file stays editable, hot reload
+keeps working, and the Admin tab marks any setting the command line is currently forcing,
+so a value you save there is understood to take effect at the next start without that
+option.
 
 ### Configuration Options
 

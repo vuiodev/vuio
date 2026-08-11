@@ -144,9 +144,10 @@ where
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
         config_source: Arc::new(crate::state::ConfigSource {
             path: config_manager.get_config_path().to_path_buf(),
-            // The manager only watches a config it loaded from a durable location;
-            // env-var and command-line runs get an unwatched scratch file.
+            // The manager only watches a config it loaded from a durable location; a
+            // container's env-var configuration gets an unwatched scratch file.
             durable: config_manager.is_watched(),
+            overrides: config_manager.overrides().clone(),
         }),
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),

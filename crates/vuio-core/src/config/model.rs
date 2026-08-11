@@ -32,6 +32,77 @@ pub(super) fn default_redb_cache_mb() -> usize {
     128
 }
 
+/// Settings the host supplied on the command line, which win over the file for the
+/// lifetime of the run.
+///
+/// These are re-applied after every load rather than baked into the file: the file
+/// stays the durable configuration and remains editable, and `--port` stops meaning
+/// "silently freeze everything else too".
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ConfigOverrides {
+    pub port: Option<u16>,
+    pub server_name: Option<String>,
+    pub media_dirs: Vec<std::path::PathBuf>,
+}
+
+impl ConfigOverrides {
+    pub fn is_empty(&self) -> bool {
+        self.port.is_none() && self.server_name.is_none() && self.media_dirs.is_empty()
+    }
+
+    /// Apply whatever was set onto an already-loaded configuration.
+    pub fn apply(&self, config: &mut AppConfig) {
+        if let Some(port) = self.port {
+            config.server.port = port;
+        }
+        if let Some(name) = &self.server_name {
+            config.server.name = name.clone();
+        }
+        if !self.media_dirs.is_empty() {
+            config.media.directories = self
+                .media_dirs
+                .iter()
+                .map(|path| {
+                    if !path.is_dir() {
+                        tracing::warn!("Media directory is not available: {}", path.display());
+                    }
+                    MonitoredDirectoryConfig {
+                        path: path.to_string_lossy().into_owned(),
+                        recursive: true,
+                        case_sensitive: None,
+                        extensions: None,
+                        exclude_patterns: None,
+                        validation_mode: ValidationMode::Warn,
+                    }
+                })
+                .collect();
+        }
+    }
+
+    /// The settings this forces, as dotted config keys and the value in force, so a
+    /// settings screen can say why an edit will not take hold until the next start.
+    pub fn in_force(&self) -> Vec<(&'static str, String)> {
+        let mut forced = Vec::new();
+        if let Some(port) = self.port {
+            forced.push(("server.port", port.to_string()));
+        }
+        if let Some(name) = &self.server_name {
+            forced.push(("server.name", name.clone()));
+        }
+        if !self.media_dirs.is_empty() {
+            forced.push((
+                "media.directories",
+                self.media_dirs
+                    .iter()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
+        }
+        forced
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppConfig {
     pub server: ServerConfig,

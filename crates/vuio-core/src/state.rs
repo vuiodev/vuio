@@ -29,22 +29,17 @@ impl LiveConfig {
 ///
 /// `AppState` only ever held the parsed config, never its origin, so nothing served
 /// over HTTP could locate the file it was loaded from.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ConfigSource {
     pub path: std::path::PathBuf,
-    /// False when the file is a scratch copy that a restart discards — a container
-    /// configured by environment variables, or a run with command-line overrides.
-    /// Edits to it would silently evaporate, so the admin API refuses them.
+    /// False when the file is a scratch copy that a restart discards, which today
+    /// means only a container configured by environment variables. Edits to it would
+    /// silently evaporate, so the admin API refuses them.
     pub durable: bool,
-}
-
-impl Default for ConfigSource {
-    fn default() -> Self {
-        Self {
-            path: std::path::PathBuf::from("config.toml"),
-            durable: false,
-        }
-    }
+    /// Command-line settings layered over the file for this run. The file is still
+    /// editable; these just win until the next start, and a settings screen has to say
+    /// so rather than letting a saved value look like it took effect.
+    pub overrides: crate::config::ConfigOverrides,
 }
 
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]

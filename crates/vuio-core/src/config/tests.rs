@@ -459,3 +459,89 @@ fn the_example_config_is_loadable() {
     ConfigValidator::validate_flexible(&config)
         .unwrap_or_else(|error| panic!("config.example.toml must validate: {error}"));
 }
+
+/// Command-line overrides used to force the whole configuration into a scratch file
+/// with no watcher, which made `--port` silently disable hot reload and left the real
+/// file uneditable. They are now layered onto every load instead: the override holds
+/// for the run, the real file stays watched, and edits to it still apply.
+#[tokio::test]
+async fn overrides_hold_across_reloads_without_freezing_the_file() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let media_dir = TempDir::new()?;
+    let config_path = std::fs::canonicalize(temp_dir.path())?.join("config.toml");
+
+    let mut config = AppConfig::default();
+    config.server.port = 8080;
+    config.server.name = "From The File".to_string();
+    config.media.directories = vec![MonitoredDirectoryConfig {
+        path: media_dir.path().to_string_lossy().to_string(),
+        recursive: true,
+        case_sensitive: None,
+        extensions: None,
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Skip,
+    }];
+    config.save_to_file(&config_path)?;
+
+    let overrides = ConfigOverrides {
+        port: Some(9099),
+        ..ConfigOverrides::default()
+    };
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let tasks = tokio_util::task::TaskTracker::new();
+    let manager = ConfigManager::watching_with_overrides(
+        &config_path,
+        overrides,
+        cancellation.clone(),
+        tasks.clone(),
+    )
+    .await?;
+
+    // The override wins at startup, and the rest of the file is untouched by it.
+    let running = manager.get_config().await;
+    assert_eq!(running.server.port, 9099);
+    assert_eq!(running.server.name, "From The File");
+    // It is watched, which is what makes the file editable from the admin API.
+    assert!(manager.is_watched());
+
+    // An edit to the file applies, and the override survives the reload.
+    let mut edited = AppConfig::load_from_file(&config_path)?;
+    edited.server.name = "Renamed On Disk".to_string();
+    edited.media.autoplay_enabled = !edited.media.autoplay_enabled;
+    edited.save_to_file(&config_path)?;
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+    let reloaded = manager.get_config().await;
+    assert_eq!(reloaded.server.name, "Renamed On Disk");
+    assert_eq!(
+        reloaded.media.autoplay_enabled,
+        edited.media.autoplay_enabled
+    );
+    assert_eq!(
+        reloaded.server.port, 9099,
+        "the command-line port must survive a reload"
+    );
+
+    // And the override was never written into the file.
+    assert_eq!(AppConfig::load_from_file(&config_path)?.server.port, 8080);
+
+    cancellation.cancel();
+    tasks.close();
+    tasks.wait().await;
+    Ok(())
+}
+
+#[test]
+fn overrides_report_what_they_force() {
+    assert!(ConfigOverrides::default().in_force().is_empty());
+
+    let overrides = ConfigOverrides {
+        port: Some(9090),
+        server_name: Some("Kitchen".to_string()),
+        media_dirs: vec![std::path::PathBuf::from("/movies")],
+    };
+    let forced = overrides.in_force();
+    assert_eq!(forced[0], ("server.port", "9090".to_string()));
+    assert_eq!(forced[1], ("server.name", "Kitchen".to_string()));
+    assert_eq!(forced[2], ("media.directories", "/movies".to_string()));
+}

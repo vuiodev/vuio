@@ -82,9 +82,12 @@ configuration file actually writes. Backs the dashboard's Admin tab.
         ]
       }
     ],
+    // The file's value where the file sets one; otherwise the default in force.
     "values": { "network.mdns_enabled": true },
     // False means the key is absent from config.toml and `values` is showing a default.
     "present": { "network.mdns_enabled": false },
+    // Settings the command line forces for this run, which the file cannot change until restart.
+    "overrides": { "server.port": "9090" },
     // Libraries as the file writes them; absent optional keys stay absent.
     "directories": [{ "path": "/media", "recursive": true }],
     // The same libraries with defaults filled in, for display only.
@@ -125,9 +128,15 @@ then reloads it — the same path a hand edit takes.
   `no_change`, `live`, or `restart_required`.
 * `400 Bad Request` — `{"error": "..."}` for an unknown key, a value of the wrong type, a
   failed validation, or an attempt to unset a key that has no default.
-* `409 Conflict` — the configuration is not editable: a container configured by
-  environment variables, or a run started with command-line overrides. Both use a scratch
-  file that a restart discards.
+* `409 Conflict` — the configuration is not editable. This means a container configured by
+  environment variables, whose config is a scratch file that a restart discards.
+
+Command-line overrides (`--port`, `--name`, `-m`) do **not** make the configuration
+read-only. They are layered over the file on every load, so they hold for the run while
+the file stays editable. `overrides` in the `GET` response reports what they force, keyed
+by config key, so a value saved for one of those keys can be shown as taking effect at the
+next start rather than looking as though it failed. `values` deliberately reports the
+file's value, not the running one, so a save cannot write an override back into the file.
 
 ### Restart the server
 Runs the normal graceful shutdown and exits. The process only returns if something

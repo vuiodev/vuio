@@ -239,6 +239,19 @@ function renderAdminRow(spec) {
         row.appendChild(note);
     }
 
+    // A command-line override wins for the rest of this run, so a saved value here is
+    // correct but not yet in effect. Saying so beats letting it look like it failed.
+    const forced = (adminData.overrides || {})[spec.key];
+    if (forced !== undefined) {
+        const note = document.createElement('div');
+        note.className = 'admin-note';
+        note.textContent =
+            'Running with ' + forced + ', set on the command line. What you save here ' +
+            'goes into the file and takes effect the next time the server starts ' +
+            'without that option.';
+        row.appendChild(note);
+    }
+
     const control = document.createElement('div');
     control.className = 'admin-control';
     control.appendChild(adminControlFor(spec, disabled));
@@ -373,6 +386,18 @@ function adminControlFor(spec, disabled) {
 
 function renderAdminLibraries(body) {
     const directories = adminDirectoryList();
+
+    const forced = (adminData.overrides || {})['media.directories'];
+    if (forced !== undefined) {
+        const note = document.createElement('div');
+        note.className = 'admin-note';
+        note.style.marginBottom = '0.75rem';
+        note.textContent =
+            'Scanning ' + forced + ' for this run, set on the command line. The folders ' +
+            'below are what the file says and take effect the next time the server ' +
+            'starts without that option.';
+        body.appendChild(note);
+    }
 
     directories.forEach((directory, index) => {
         const card = document.createElement('div');

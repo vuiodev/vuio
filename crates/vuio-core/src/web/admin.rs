@@ -452,9 +452,15 @@ struct RuntimeInfo {
 #[derive(Serialize)]
 struct AdminConfigResponse {
     sections: &'static [SectionSpec],
-    /// Effective values, including those coming from a default rather than the file.
+    /// What the editor shows and round-trips: the file's value where the file sets one,
+    /// and otherwise the default currently in force. Deliberately not the running value,
+    /// which a command-line override can differ from — editing the file should not be
+    /// able to write back a value that only came from the command line.
     values: Map<String, Value>,
     present: BTreeMap<&'static str, bool>,
+    /// Settings the command line is forcing for this run, keyed by config key. A saved
+    /// change to one of these lands in the file but does not take effect until restart.
+    overrides: BTreeMap<&'static str, String>,
     /// Libraries exactly as the file writes them. Editing and sending these back
     /// leaves keys the operator never set out of the file, rather than freezing this
     /// version's platform defaults into it.
@@ -495,10 +501,7 @@ fn runtime_info<D: DatabaseManager>(state: &AppState<D>) -> RuntimeInfo {
                  recreate the container; edits made here would be discarded.",
             )
         } else {
-            Some(
-                "This server was started with command-line overrides, which live in a \
-                 scratch file. Restart without them to edit configuration here.",
-            )
+            Some("This server's configuration cannot be written from here.")
         },
         auth_enabled: state.auth.enabled(),
         is_docker,
@@ -512,14 +515,6 @@ pub async fn get_config<D: DatabaseManager>(State(state): State<AppState<D>>) ->
         Ok(value) => value,
         Err(err) => return error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
     };
-
-    let mut values = Map::new();
-    for spec in SECTIONS.iter().flat_map(|section| section.fields) {
-        let value = value_at(&serialised, spec.key)
-            .cloned()
-            .unwrap_or(Value::Null);
-        values.insert(spec.key.to_string(), value);
-    }
 
     let effective_directories = serialised
         .get("media")
@@ -540,6 +535,25 @@ pub async fn get_config<D: DatabaseManager>(State(state): State<AppState<D>>) ->
         });
 
     let present = document.as_ref().map(present_keys).unwrap_or_default();
+    let on_file = document
+        .as_ref()
+        .and_then(|document| toml::from_str::<Value>(&document.to_string()).ok());
+
+    let mut values = Map::new();
+    for spec in SECTIONS.iter().flat_map(|section| section.fields) {
+        // Where the file sets a value, that is what the editor shows, so a save writes
+        // back what was on screen. Only a key the file omits falls back to the running
+        // value, which is exactly the default the operator needs to see.
+        let value = on_file
+            .as_ref()
+            .filter(|_| present.get(spec.key).copied().unwrap_or(false))
+            .and_then(|file| value_at(file, spec.key))
+            .or_else(|| value_at(&serialised, spec.key))
+            .cloned()
+            .unwrap_or(Value::Null);
+        values.insert(spec.key.to_string(), value);
+    }
+
     let directories = document
         .as_ref()
         .and_then(raw_directories)
@@ -549,6 +563,7 @@ pub async fn get_config<D: DatabaseManager>(State(state): State<AppState<D>>) ->
         sections: SECTIONS,
         values,
         present,
+        overrides: state.config_source.overrides.in_force().into_iter().collect(),
         directories,
         effective_directories,
         runtime: runtime_info(&state),
@@ -772,7 +787,17 @@ pub async fn put_config<D: DatabaseManager>(
         return error(StatusCode::BAD_REQUEST, format!("{err:#}"));
     }
 
-    let impact = impact_of(state.current_config().as_ref(), &candidate);
+    // Impact describes the change the operator made, so it compares the file before
+    // against the file after. Comparing against the running config would misreport a
+    // run with command-line overrides: those differ from the file on every key they
+    // force, which made a one-boolean edit look like it needed a restart.
+    let mut before = match toml::from_str::<AppConfig>(&raw) {
+        Ok(config) => config,
+        // An unparseable file cannot be diffed against; the edit is a rewrite.
+        Err(_) => candidate.clone(),
+    };
+    let _ = before.apply_platform_defaults();
+    let impact = impact_of(&before, &candidate);
 
     // Nothing is written until the result has parsed and validated, so a rejected
     // edit leaves the file exactly as it was.
@@ -788,7 +813,13 @@ pub async fn put_config<D: DatabaseManager>(
     // But it is debounced, so a read issued straight after this response would still
     // see the old values. The bytes just written are known to parse and validate, so
     // publish them now and let the watcher's unchanged-file check swallow the echo.
-    state.live_config.store(std::sync::Arc::new(candidate));
+    //
+    // Command-line overrides go back on top, exactly as the reload will re-apply them.
+    // Publishing the bare file would drop them and hand the running server a port or
+    // library set the host explicitly overrode.
+    let mut running = candidate;
+    state.config_source.overrides.apply(&mut running);
+    state.live_config.store(std::sync::Arc::new(running));
 
     Json(json!({
         "saved": true,
