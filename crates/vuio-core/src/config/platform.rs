@@ -138,15 +138,7 @@ impl AppConfig {
                 })?;
         }
 
-        anyhow::ensure!(
-            self.management.session_ttl_hours > 0,
-            "management session TTL must be greater than zero"
-        );
-        for network in &self.management.allowed_networks {
-            network
-                .parse::<ipnet::IpNet>()
-                .with_context(|| format!("Invalid management allowed network: {network}"))?;
-        }
+        super::validation::ConfigValidator::validate_management(self)?;
 
         // Platform-specific validations
         match platform_config.os_type {

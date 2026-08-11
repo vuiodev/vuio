@@ -17,7 +17,28 @@ impl ConfigValidator {
         Self::validate_network_config(config)?;
         Self::validate_media_config(config)?;
         Self::validate_database_config(config)?;
+        Self::validate_management(config)?;
         Self::validate_platform_specific(config)?;
+        Ok(())
+    }
+
+    /// Validate management/authentication configuration.
+    ///
+    /// These values are only consumed once, by `AuthState::load` at startup, which
+    /// bails on a CIDR it cannot parse. Rejecting them here instead means a bad value
+    /// is refused when it is written, rather than accepted into a running server and
+    /// then preventing the next boot.
+    pub fn validate_management(config: &AppConfig) -> Result<()> {
+        if config.management.session_ttl_hours == 0 {
+            return Err(anyhow!("Management session TTL must be greater than 0 hours"));
+        }
+
+        for network in &config.management.allowed_networks {
+            network
+                .parse::<ipnet::IpNet>()
+                .with_context(|| format!("Invalid management network CIDR: {network}"))?;
+        }
+
         Ok(())
     }
 
@@ -403,6 +424,7 @@ impl ConfigValidator {
         Self::validate_network_config(config)?;
         Self::validate_media_config_flexible(config)?;
         Self::validate_database_config(config)?;
+        Self::validate_management(config)?;
         Self::validate_platform_specific(config)?;
         Ok(())
     }

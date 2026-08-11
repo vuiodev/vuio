@@ -124,6 +124,19 @@ impl ConfigManager {
         })
     }
 
+    /// Load a config the same way the manager's in-memory copy was built.
+    ///
+    /// `load_or_create` applies platform defaults; a bare `load_from_file` does not.
+    /// Reloading without them made every reload look like a change — an unset
+    /// `exclude_patterns` or `database.path` came back as `None` against an
+    /// in-memory `Some`, which reports every media root as modified and drops and
+    /// rescans it.
+    fn load_comparable(config_path: &Path) -> Result<AppConfig> {
+        let mut config = AppConfig::load_from_file(config_path)?;
+        config.apply_platform_defaults()?;
+        Ok(config)
+    }
+
     /// Set up file watcher for configuration changes using notify-debouncer-full
     async fn setup_file_watcher(
         config_path: PathBuf,
@@ -192,7 +205,7 @@ impl ConfigManager {
                         }
 
                         // Attempt to reload configuration
-                        match AppConfig::load_from_file(&config_path) {
+                        match Self::load_comparable(&config_path) {
                             Ok(new_config) => {
                                 // Validate the new configuration
                                 if let Err(e) = ConfigValidator::validate_flexible(&new_config) {
@@ -205,6 +218,17 @@ impl ConfigManager {
 
                                 let old_config = {
                                     let mut config_guard = config.write().await;
+                                    if *config_guard == new_config {
+                                        // A rewrite that changed nothing still reaches us —
+                                        // an editor saving, or the server writing the file
+                                        // back itself. Broadcasting it would bump the
+                                        // ContentDirectory update id, drop the browse cache
+                                        // and NOTIFY every UPnP subscriber for no reason.
+                                        tracing::debug!(
+                                            "Configuration file rewritten with no changes, ignoring"
+                                        );
+                                        continue;
+                                    }
                                     let old = config_guard.clone();
                                     *config_guard = new_config.clone();
                                     old
@@ -269,7 +293,7 @@ impl ConfigManager {
 
     /// Reload configuration from file
     pub async fn reload(&self) -> Result<()> {
-        let new_config = AppConfig::load_from_file(&self.config_path)?;
+        let new_config = Self::load_comparable(&self.config_path)?;
 
         let old_config = {
             let mut config_guard = self.config.write().await;

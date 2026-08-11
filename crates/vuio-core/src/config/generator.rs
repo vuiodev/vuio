@@ -55,11 +55,14 @@ impl ConfigGenerator {
         server_table["name"] = value(&config.server.name);
         server_table["uuid"] = value(&config.server.uuid);
 
-        // Handle optional IP field
+        // An omitted key is the only faithful encoding of `None`: `ip = ""` reloads as
+        // `Some("")`, so a load/save/load cycle would not reproduce the config it
+        // started from — and the reload watcher decides whether anything changed by
+        // comparing exactly that.
         if let Some(ip) = &config.server.ip {
             server_table["ip"] = value(ip);
         } else {
-            server_table["ip"] = value("");
+            server_table.remove("ip");
         }
 
         Ok(())
@@ -142,6 +145,14 @@ impl ConfigGenerator {
         dir_table["path"] = value(&escaped_path);
         dir_table["recursive"] = value(dir_config.recursive);
 
+        // Only an explicit override is written. Omitting the key is meaningful: it
+        // leaves the root to per-volume auto-detection at scan time.
+        if let Some(case_sensitive) = dir_config.case_sensitive {
+            dir_table["case_sensitive"] = value(case_sensitive);
+        } else {
+            dir_table.remove("case_sensitive");
+        }
+
         // Handle optional extensions - only set if there are actual extensions
         if let Some(extensions) = &dir_config.extensions {
             let mut ext_array = Array::new();
@@ -207,11 +218,14 @@ impl ConfigGenerator {
             let escaped_path = path.replace("\\", "\\\\");
             database_table["path"] = value(&escaped_path);
         } else {
-            database_table["path"] = value("");
+            // `path = ""` would not round-trip: it reloads as Some("") and validation
+            // rejects an empty path. Omitting the key is what `None` actually means.
+            database_table.remove("path");
         }
 
         database_table["vacuum_on_startup"] = value(config.database.vacuum_on_startup);
         database_table["backup_enabled"] = value(config.database.backup_enabled);
+        database_table["redb_cache_mb"] = value(config.database.redb_cache_mb as i64);
 
         Ok(())
     }
@@ -221,7 +235,11 @@ impl ConfigGenerator {
             .as_table_mut()
             .context("Management section not found in template")?;
         table["enabled"] = value(config.management.enabled);
-        table["token_file"] = value(config.management.token_file.as_deref().unwrap_or(""));
+        if let Some(token_file) = &config.management.token_file {
+            table["token_file"] = value(token_file);
+        } else {
+            table.remove("token_file");
+        }
         table["session_ttl_hours"] = value(config.management.session_ttl_hours as i64);
         let mut networks = Array::new();
         for network in &config.management.allowed_networks {
@@ -405,6 +423,7 @@ impl ConfigGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::validation::ConfigValidator;
     use crate::config::{
         AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
         NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
@@ -572,21 +591,63 @@ mod tests {
             .expect("Failed to generate config");
 
         // Verify empty optional fields are handled correctly
-        assert!(toml_content.contains("ip = \"\""));
+        assert!(!toml_content.contains("ip ="));
         assert!(toml_content.contains("interface_selection = \"Auto\""));
         // Extensions and exclude_patterns should not be present when None/empty
         assert!(!toml_content.contains("extensions = []"));
         assert!(!toml_content.contains("exclude_patterns = []"));
         assert!(toml_content.contains("validation_mode = \"Warn\""));
-        assert!(toml_content.contains("path = \"")); // Empty path for database
 
         // Verify the generated TOML can be parsed back
         let parsed_config: AppConfig =
             toml::from_str(&toml_content).expect("Generated TOML should be parseable");
 
-        // Verify None values are handled correctly
-        assert_eq!(parsed_config.server.ip, Some("".to_string())); // Empty string for None IP
+        // Every `None` comes back as `None`. These used to be written as `= ""`, which
+        // reloads as `Some("")` — a different config from the one that was saved, and in
+        // the database's case one that then fails validation.
+        assert_eq!(parsed_config.server.ip, None);
+        assert_eq!(parsed_config.database.path, None);
+        assert_eq!(parsed_config.management.token_file, None);
         assert_eq!(parsed_config.media.directories[0].extensions, None); // None for unspecified extensions
         assert_eq!(parsed_config.media.directories[0].exclude_patterns, None); // None for unspecified patterns
+        assert!(ConfigValidator::validate_flexible(&parsed_config).is_ok());
+    }
+
+    /// Two keys used to be dropped by every write: an explicit `case_sensitive`
+    /// override and the ReDB cache size silently reverted to their defaults each
+    /// time the file was regenerated.
+    #[test]
+    fn generated_config_round_trips_every_field() {
+        let mut config = AppConfig::default_for_platform();
+        config.database.redb_cache_mb = 512;
+        config.media.directories[0].case_sensitive = Some(true);
+
+        let toml_content = ConfigGenerator::new()
+            .expect("generator")
+            .generate_config(&config)
+            .expect("generate");
+        let reloaded: AppConfig = toml::from_str(&toml_content).expect("parse");
+
+        assert_eq!(reloaded.database.redb_cache_mb, 512);
+        assert_eq!(reloaded.media.directories[0].case_sensitive, Some(true));
+        assert_eq!(reloaded, config);
+    }
+
+    /// `case_sensitive` is absent by default and must stay absent: the key's
+    /// meaning is "override the per-volume auto-detection", so writing a guess
+    /// would pin every root to whatever the generating host happened to be.
+    #[test]
+    fn unset_case_sensitivity_is_not_written() {
+        let mut config = AppConfig::default_for_platform();
+        config.media.directories[0].case_sensitive = None;
+
+        let toml_content = ConfigGenerator::new()
+            .expect("generator")
+            .generate_config(&config)
+            .expect("generate");
+
+        assert!(!toml_content.contains("case_sensitive ="));
+        let reloaded: AppConfig = toml::from_str(&toml_content).expect("parse");
+        assert_eq!(reloaded.media.directories[0].case_sensitive, None);
     }
 }
