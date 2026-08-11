@@ -10,7 +10,7 @@ repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 documentation = "https://docs.rs/vuio-core"
 readme = "README.md"
-keywords = ["dlna", "upnp", "server", "streaming", "ssdp", "chromecast", "airplay"]
+keywords = ["dlna", "upnp", "ssdp", "chromecast", "airplay"]
 categories = ["multimedia", "network-programming"]
 
 [package.metadata.docs.rs]
