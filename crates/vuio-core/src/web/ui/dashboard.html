@@ -672,6 +672,28 @@
             border: 1px solid rgba(255, 255, 255, 0.05);
         }
 
+        .video-audio-track-select {
+            flex-shrink: 0;
+            font-size: 0.8rem;
+            color: var(--text-primary);
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 6px;
+            padding: 0.2rem 0.4rem;
+            max-width: 40%;
+        }
+
+        .video-audio-note {
+            width: 100%;
+            font-size: 0.8rem;
+            color: var(--text-secondary);
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            padding: 0.5rem 0.75rem;
+            margin-top: 0.5rem;
+        }
+
         .video-unsupported {
             width: min(520px, 90vw);
             display: flex;
@@ -1261,9 +1283,13 @@
                     </button>
                 </div>
             </div>
+            <div id="video-audio-unavailable-note" class="video-audio-note" style="display: none;">
+                Audio in this file isn't in a browser-playable format — download it or cast to a device to hear sound.
+            </div>
             <div class="lightbox-meta" style="justify-content: space-between; padding: 0.5rem 0.25rem; display: flex; align-items: center; width: 100%;">
                 <div style="display: flex; align-items: center; gap: 1rem; min-width: 0; flex: 1;">
                     <span id="video-player-title" style="font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Video Name</span>
+                    <select id="video-audio-track-select" class="video-audio-track-select" style="display: none;" title="Audio track"></select>
                 </div>
                 <a id="video-player-download" href="" download="" class="lightbox-download-btn" title="Download Video">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
@@ -2203,6 +2229,7 @@
         async function mountVideoPlayer(file, url) {
             const stage = document.getElementById('video-stage');
             document.getElementById('video-unsupported').style.display = 'none';
+            resetAudioTrackUi();
             stage.style.display = 'block';
             stage.style.removeProperty('--video-ar');
 
@@ -2266,11 +2293,13 @@
         }
 
         async function attachHlsSource(video, url, file) {
-            // Safari plays HLS natively and does not support hls.js's MSE path.
-            if (video.canPlayType('application/vnd.apple.mpegurl')) {
-                video.src = url;
-                return true;
-            }
+            // Prefer hls.js/MSE whenever it's actually usable, rather than trusting
+            // canPlayType('application/vnd.apple.mpegurl') to mean "this is Safari,
+            // use native HLS": recent Chrome also answers non-empty there (some
+            // versions report "maybe") but its native engine doesn't reliably play
+            // this server's fMP4-based HLS — the <video> just hangs at readyState 0
+            // with no error event. Native <video src> is now the true last resort,
+            // for browsers where hls.js reports no MSE support at all (older Safari).
             try {
                 const Hls = await loadHls();
                 if (!Hls || !Hls.isSupported()) throw new Error('Media Source Extensions unavailable');
@@ -2278,14 +2307,64 @@
                 videoHls.on(Hls.Events.ERROR, (event, data) => {
                     if (data && data.fatal) showVideoUnsupported(file);
                 });
+                setupAudioTrackUi(videoHls, Hls);
                 videoHls.loadSource(url);
                 videoHls.attachMedia(video);
                 return true;
             } catch (error) {
+                if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                    video.src = url;
+                    return true;
+                }
                 console.error('HLS playback unavailable:', error);
                 showVideoUnsupported(file);
                 return false;
             }
+        }
+
+        // Populates the audio-track <select> once hls.js knows the master playlist's
+        // #EXT-X-MEDIA:TYPE=AUDIO renditions (only tracks the server found browser
+        // decodable — e.g. AAC — ever appear here), and shows a note instead when the
+        // file has no such track at all (this is expected, not an error, for sources
+        // whose audio is e.g. Dolby Digital/E-AC-3 — no browser can decode that).
+        function setupAudioTrackUi(hls, Hls) {
+            const select = document.getElementById('video-audio-track-select');
+            const note = document.getElementById('video-audio-unavailable-note');
+
+            hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+                if (videoHls !== hls) return;
+                note.style.display = (data.audioTracks || []).length === 0 ? 'block' : 'none';
+            });
+
+            hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+                if (videoHls !== hls) return;
+                const tracks = data.audioTracks || [];
+                if (tracks.length < 2) {
+                    select.style.display = 'none';
+                    select.replaceChildren();
+                    return;
+                }
+                select.replaceChildren(...tracks.map((track, idx) => {
+                    const option = document.createElement('option');
+                    option.value = String(idx);
+                    option.textContent = track.name || track.lang || ('Audio Track ' + (idx + 1));
+                    option.selected = idx === hls.audioTrack;
+                    return option;
+                }));
+                select.style.display = 'inline-block';
+            });
+
+            select.onchange = () => {
+                if (videoHls === hls) hls.audioTrack = Number(select.value);
+            };
+        }
+
+        function resetAudioTrackUi() {
+            const select = document.getElementById('video-audio-track-select');
+            select.style.display = 'none';
+            select.replaceChildren();
+            select.onchange = null;
+            document.getElementById('video-audio-unavailable-note').style.display = 'none';
         }
 
         function showVideoUnsupported(file) {
@@ -2316,6 +2395,7 @@
         // Tears down playback without touching modal visibility, so it can be reused by
         // both the close path and the fall-back-to-unsupported path.
         function teardownVideoPlayback() {
+            resetAudioTrackUi();
             if (videoHls) {
                 videoHls.destroy();
                 videoHls = null;

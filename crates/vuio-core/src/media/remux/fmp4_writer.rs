@@ -1,11 +1,16 @@
 //! Pure Rust ISO BMFF / fMP4 (CMAF) box serializer.
 
-use super::mkv_demuxer::{MediaPacket, TrackInfo, TrackKind};
+use super::mkv_demuxer::{MediaPacket, TrackCodec, TrackInfo, TrackKind};
 
 pub struct SampleInfo {
     pub duration: u32,
     pub size: u32,
     pub is_keyframe: bool,
+    /// Presentation time minus decode time, in the track's output timescale. Zero for
+    /// every sample unless the source has B-frames (decode order != presentation
+    /// order) — without this, a player has no choice but to display frames in decode
+    /// order, since nothing else in a fragmented MP4 carries presentation timing.
+    pub composition_time_offset: i32,
 }
 
 pub struct Fmp4Writer;
@@ -217,57 +222,73 @@ impl Fmp4Writer {
         stsd.extend_from_slice(&[0; 4]); // version + flags
         stsd.extend_from_slice(&(1u32).to_be_bytes()); // entry count
 
-        let entry_box = if track.track_kind == TrackKind::Video {
-            let mut sample_entry = Vec::new();
-            sample_entry.extend_from_slice(b"avc1");
-            sample_entry.extend_from_slice(&[0; 6]); // reserved
-            sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
-            sample_entry.extend_from_slice(&[0; 16]); // pre_defined + reserved
-            sample_entry.extend_from_slice(&(track.width.unwrap_or(1920) as u16).to_be_bytes());
-            sample_entry.extend_from_slice(&(track.height.unwrap_or(1080) as u16).to_be_bytes());
-            sample_entry.extend_from_slice(&(0x00480000u32).to_be_bytes()); // horiz resolution 72 dpi
-            sample_entry.extend_from_slice(&(0x00480000u32).to_be_bytes()); // vert resolution 72 dpi
-            sample_entry.extend_from_slice(&[0; 4]); // reserved
-            sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // frame_count = 1
-            sample_entry.extend_from_slice(&[0; 32]); // compressorname
-            sample_entry.extend_from_slice(&(0x0018u16).to_be_bytes()); // depth = 24
-            sample_entry.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined = -1
+        let entry_box = match track.codec_kind {
+            TrackCodec::Avc | TrackCodec::Hevc => {
+                let fourcc: &[u8; 4] = if track.codec_kind == TrackCodec::Hevc {
+                    b"hvc1"
+                } else {
+                    b"avc1"
+                };
+                let mut sample_entry = Vec::new();
+                sample_entry.extend_from_slice(fourcc);
+                sample_entry.extend_from_slice(&[0; 6]); // reserved
+                sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
+                sample_entry.extend_from_slice(&[0; 16]); // pre_defined + reserved
+                sample_entry
+                    .extend_from_slice(&(track.width.unwrap_or(1920) as u16).to_be_bytes());
+                sample_entry
+                    .extend_from_slice(&(track.height.unwrap_or(1080) as u16).to_be_bytes());
+                sample_entry.extend_from_slice(&(0x00480000u32).to_be_bytes()); // horiz resolution 72 dpi
+                sample_entry.extend_from_slice(&(0x00480000u32).to_be_bytes()); // vert resolution 72 dpi
+                sample_entry.extend_from_slice(&[0; 4]); // reserved
+                sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // frame_count = 1
+                sample_entry.extend_from_slice(&[0; 32]); // compressorname
+                sample_entry.extend_from_slice(&(0x0018u16).to_be_bytes()); // depth = 24
+                sample_entry.extend_from_slice(&(-1i16).to_be_bytes()); // pre_defined = -1
 
-            if !track.extra_data.is_empty() {
-                let mut avcc = Vec::new();
-                avcc.extend_from_slice(b"avcC");
-                avcc.extend_from_slice(&track.extra_data);
-                sample_entry.extend_from_slice(&Self::wrap_box(&avcc));
+                if !track.extra_data.is_empty() {
+                    let config_box_name: &[u8; 4] = if track.codec_kind == TrackCodec::Hevc {
+                        b"hvcC"
+                    } else {
+                        b"avcC"
+                    };
+                    // Matroska's CodecPrivate for V_MPEG4/ISO/AVC and V_MPEGH/ISO/HEVC
+                    // *is* the AVC/HEVCDecoderConfigurationRecord, so the raw bytes can
+                    // be copied straight into the box body.
+                    let mut config = Vec::new();
+                    config.extend_from_slice(config_box_name);
+                    config.extend_from_slice(&track.extra_data);
+                    sample_entry.extend_from_slice(&Self::wrap_box(&config));
+                }
+                Self::wrap_box(&sample_entry)
             }
-            Self::wrap_box(&sample_entry)
-        } else {
-            let mut sample_entry = Vec::new();
-            sample_entry.extend_from_slice(b"mp4a");
-            sample_entry.extend_from_slice(&[0; 6]); // reserved
-            sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
-            sample_entry.extend_from_slice(&[0; 8]); // reserved
-            sample_entry
-                .extend_from_slice(&(track.channels.unwrap_or(2) as u16).to_be_bytes());
-            sample_entry.extend_from_slice(&(16u16).to_be_bytes()); // sample_size = 16
-            sample_entry.extend_from_slice(&[0; 4]); // pre_defined + reserved
-            sample_entry.extend_from_slice(
-                &(track.sample_rate.unwrap_or(44100) << 16).to_be_bytes(),
-            );
+            TrackCodec::Aac | TrackCodec::Unsupported => {
+                let mut sample_entry = Vec::new();
+                sample_entry.extend_from_slice(b"mp4a");
+                sample_entry.extend_from_slice(&[0; 6]); // reserved
+                sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
+                sample_entry.extend_from_slice(&[0; 8]); // reserved
+                sample_entry
+                    .extend_from_slice(&(track.channels.unwrap_or(2) as u16).to_be_bytes());
+                sample_entry.extend_from_slice(&(16u16).to_be_bytes()); // sample_size = 16
+                sample_entry.extend_from_slice(&[0; 4]); // pre_defined + reserved
+                sample_entry.extend_from_slice(
+                    &(track.sample_rate.unwrap_or(44100) << 16).to_be_bytes(),
+                );
 
-            if !track.extra_data.is_empty() {
-                let mut esds = Vec::new();
-                esds.extend_from_slice(b"esds");
-                esds.extend_from_slice(&[0; 4]); // version + flags
-                esds.extend_from_slice(&track.extra_data);
-                sample_entry.extend_from_slice(&Self::wrap_box(&esds));
+                if !track.extra_data.is_empty() {
+                    sample_entry
+                        .extend_from_slice(&Self::wrap_box(&Self::build_esds(&track.extra_data)));
+                }
+                Self::wrap_box(&sample_entry)
             }
-            Self::wrap_box(&sample_entry)
         };
         stsd.extend_from_slice(&entry_box);
         stbl_body.extend_from_slice(&Self::wrap_box(&stsd));
 
-        // Empty stts, stsc, stsz, stco for fMP4
-        for tag in &[b"stts", b"stsc", b"stsz", b"stco"] {
+        // Empty stts and stsc for fMP4 — both are version+flags(4) then a single
+        // entry_count(4) field.
+        for tag in &[b"stts", b"stsc"] {
             let mut empty_box = Vec::new();
             empty_box.extend_from_slice(*tag);
             empty_box.extend_from_slice(&[0; 4]); // version + flags
@@ -275,10 +296,73 @@ impl Fmp4Writer {
             stbl_body.extend_from_slice(&Self::wrap_box(&empty_box));
         }
 
+        // stsz has a different layout from the boxes above: version+flags(4), then
+        // sample_size(4) *and* sample_count(4) — two fields, not one. Treating it like
+        // the others silently drops sample_count, so a strict parser reads 4 bytes past
+        // the box's end into whatever follows it.
+        let mut stsz = Vec::new();
+        stsz.extend_from_slice(b"stsz");
+        stsz.extend_from_slice(&[0; 4]); // version + flags
+        stsz.extend_from_slice(&[0; 4]); // sample_size = 0 (entries are variable-size)
+        stsz.extend_from_slice(&[0; 4]); // sample_count = 0
+        stbl_body.extend_from_slice(&Self::wrap_box(&stsz));
+
+        // stco last, matching the order ffmpeg and other muxers emit.
+        let mut stco = Vec::new();
+        stco.extend_from_slice(b"stco");
+        stco.extend_from_slice(&[0; 4]); // version + flags
+        stco.extend_from_slice(&[0; 4]); // entry count = 0
+        stbl_body.extend_from_slice(&Self::wrap_box(&stco));
+
         let mut stbl = Vec::new();
         stbl.extend_from_slice(b"stbl");
         stbl.extend_from_slice(&stbl_body);
         Self::wrap_box(&stbl)
+    }
+
+    /// Build an MPEG-4 descriptor (ISO/IEC 14496-1 `Descriptor` syntax): a tag byte, a
+    /// length, then the content. Every descriptor built by `build_esds` is well under
+    /// 128 bytes, so a single, non-continued length byte always suffices.
+    fn build_descriptor(tag: u8, content: &[u8]) -> Vec<u8> {
+        debug_assert!(content.len() < 0x80, "descriptor too large for a 1-byte length");
+        let mut out = Vec::with_capacity(2 + content.len());
+        out.push(tag);
+        out.push(content.len() as u8);
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// Build a spec-correct `esds` box wrapping a raw AAC `AudioSpecificConfig` in the
+    /// ES_Descriptor/DecoderConfigDescriptor/DecoderSpecificInfo structure MSE requires
+    /// (ISO/IEC 14496-1 §7.2.6.6) — an `esds` box cannot simply contain the raw config.
+    fn build_esds(audio_specific_config: &[u8]) -> Vec<u8> {
+        let decoder_specific_info = Self::build_descriptor(0x05, audio_specific_config);
+
+        let mut decoder_config_content = Vec::with_capacity(13 + decoder_specific_info.len());
+        decoder_config_content.push(0x40); // objectTypeIndication: MPEG-4 Audio (AAC)
+        decoder_config_content.push(0x15); // streamType=5 (audio) << 2 | upStream=0 | reserved=1
+        decoder_config_content.extend_from_slice(&[0, 0, 0]); // bufferSizeDB
+        decoder_config_content.extend_from_slice(&[0, 0, 0, 0]); // maxBitrate
+        decoder_config_content.extend_from_slice(&[0, 0, 0, 0]); // avgBitrate
+        decoder_config_content.extend_from_slice(&decoder_specific_info);
+        let decoder_config_descriptor = Self::build_descriptor(0x04, &decoder_config_content);
+
+        let sl_config_descriptor = Self::build_descriptor(0x06, &[0x02]);
+
+        let mut es_descriptor_content = Vec::with_capacity(
+            3 + decoder_config_descriptor.len() + sl_config_descriptor.len(),
+        );
+        es_descriptor_content.extend_from_slice(&[0, 0]); // ES_ID
+        es_descriptor_content.push(0x00); // flags: no dependsOn/URL/OCRstream
+        es_descriptor_content.extend_from_slice(&decoder_config_descriptor);
+        es_descriptor_content.extend_from_slice(&sl_config_descriptor);
+        let es_descriptor = Self::build_descriptor(0x03, &es_descriptor_content);
+
+        let mut esds = Vec::new();
+        esds.extend_from_slice(b"esds");
+        esds.extend_from_slice(&[0; 4]); // version + flags
+        esds.extend_from_slice(&es_descriptor);
+        esds
     }
 
     fn build_mvex(track_id: u32) -> Vec<u8> {
@@ -316,9 +400,19 @@ impl Fmp4Writer {
         let mut traf_body = Vec::new();
 
         // tfhd (Track Fragment Header)
+        //
+        // flags = default-base-is-moof (0x020000) — matches trun's data-offset, which
+        // is computed relative to the start of this moof. The previous value here,
+        // 0x000020, is a *different* flag (default-sample-flags-present) that
+        // requires a default_sample_flags field this box never wrote, so every parser
+        // strict enough to honor the flags it's told (ffmpeg, and apparently Chrome's
+        // MSE demuxer) read 4 bytes past the end of the box into tfdt's header,
+        // corrupting every fragment from here on — this was silently tolerated by
+        // ffprobe's lenient metadata-only parse, which is why it wasn't caught by
+        // that alone.
         let mut tfhd = Vec::new();
         tfhd.extend_from_slice(b"tfhd");
-        tfhd.extend_from_slice(&[0, 0, 0, 0x20]); // flags = default-base-is-moof
+        tfhd.extend_from_slice(&[0, 0x02, 0, 0]);
         tfhd.extend_from_slice(&track_id.to_be_bytes());
         traf_body.extend_from_slice(&Self::wrap_box(&tfhd));
 
@@ -331,12 +425,20 @@ impl Fmp4Writer {
         traf_body.extend_from_slice(&Self::wrap_box(&tfdt));
 
         // trun (Track Run)
+        //
+        // version 1 (signed sample_composition_time_offset) so B-frame content —
+        // where decode order != presentation order — can be reordered correctly by
+        // the player. Without this field, every sample's presentation time defaults
+        // to its decode time, and frames referencing data from *earlier* in
+        // presentation order than their decode position have nothing to correct that.
         let mut trun = Vec::new();
         trun.extend_from_slice(b"trun");
         // flags: data-offset-present (0x001) | sample-duration-present (0x100)
         //      | sample-size-present (0x200) | sample-flags-present (0x400)
-        // = 0x000701 in 24-bit flags field
-        trun.extend_from_slice(&[0, 0, 0x07, 0x01]);
+        //      | sample-composition-time-offsets-present (0x800)
+        // = 0x000F01 in 24-bit flags field
+        trun.push(1); // version 1
+        trun.extend_from_slice(&[0, 0x0F, 0x01]);
         trun.extend_from_slice(&(samples.len() as u32).to_be_bytes());
         trun.extend_from_slice(&data_offset.to_be_bytes()); // data_offset
 
@@ -349,6 +451,7 @@ impl Fmp4Writer {
                 0x01010000 // non-keyframe
             };
             trun.extend_from_slice(&flags.to_be_bytes());
+            trun.extend_from_slice(&s.composition_time_offset.to_be_bytes());
         }
         traf_body.extend_from_slice(&Self::wrap_box(&trun));
 
@@ -378,36 +481,54 @@ impl Fmp4Writer {
     ///
     /// This is a convenience method that builds proper `SampleInfo` entries from
     /// the packets and calculates the correct `data_offset`.
+    ///
+    /// `packets` must be in decode order with decode timestamps already resolved (see
+    /// `mkv_demuxer::derive_decode_timestamps`): sample durations and the fragment's
+    /// base decode time are taken from `dts`, so that the decode timeline stays
+    /// monotonic, while `pts - dts` supplies each sample's composition offset.
+    /// `fallback_base_decode_time` is used only when `packets` is empty.
     pub fn build_segment(
         sequence_number: u32,
         track: &TrackInfo,
-        base_decode_time: u64,
+        fallback_base_decode_time: u64,
         packets: &[MediaPacket],
     ) -> Vec<u8> {
         let timescale = Self::timescale_for(track);
 
         let samples: Vec<SampleInfo> = packets
             .iter()
-            .map(|p| {
-                // If duration is 0 (unknown), use a sensible default:
-                // video: 1 frame at 24fps in track timescale
-                // audio: 1024 samples (common AAC frame size)
-                let duration = if p.duration > 0 {
-                    p.duration as u32
-                } else {
-                    match track.track_kind {
-                        TrackKind::Video => timescale / 24,
+            .enumerate()
+            .map(|(i, p)| {
+                // Space samples by the gap to the next decode timestamp, so the decode
+                // timeline this fragment declares matches the one the timestamps
+                // describe. The container's own per-frame duration is the fallback for
+                // the final sample (which has no successor here) and for sources that
+                // don't carry usable timestamps at all.
+                let duration = packets
+                    .get(i + 1)
+                    .map(|next| next.dts.saturating_sub(p.dts))
+                    .filter(|gap| *gap > 0)
+                    .or(Some(p.duration).filter(|d| *d > 0))
+                    .unwrap_or(match track.track_kind {
+                        // 1 frame at 24fps in the track timescale
+                        TrackKind::Video => u64::from(timescale / 24),
+                        // 1024 samples, the common AAC frame size
                         TrackKind::Audio => 1024,
                         TrackKind::Other => 1,
-                    }
-                };
+                    }) as u32;
                 SampleInfo {
                     duration,
                     size: p.data.len() as u32,
                     is_keyframe: p.is_keyframe,
+                    composition_time_offset: (p.pts as i64 - p.dts as i64) as i32,
                 }
             })
             .collect();
+
+        let base_decode_time = packets
+            .first()
+            .map(|p| p.dts)
+            .unwrap_or(fallback_base_decode_time);
 
         // Build moof first with a placeholder data_offset of 0 to measure its size.
         let moof_placeholder = Self::build_moof(sequence_number, track.id, base_decode_time, &samples, 0);
@@ -450,6 +571,7 @@ mod tests {
             id: 1,
             track_kind: TrackKind::Video,
             codec: "H264".into(),
+            codec_kind: TrackCodec::Avc,
             language: Some("eng".into()),
             name: None,
             sample_rate: None,
@@ -482,6 +604,7 @@ mod tests {
             id: 1,
             track_kind: TrackKind::Video,
             codec: "H264".into(),
+            codec_kind: TrackCodec::Avc,
             language: None,
             name: None,
             sample_rate: None,
@@ -499,6 +622,7 @@ mod tests {
             id: 2,
             track_kind: TrackKind::Audio,
             codec: "AAC".into(),
+            codec_kind: TrackCodec::Aac,
             language: None,
             name: None,
             sample_rate: Some(48000),
@@ -516,6 +640,7 @@ mod tests {
             id: 1,
             track_kind: TrackKind::Video,
             codec: "H264".into(),
+            codec_kind: TrackCodec::Avc,
             language: None,
             name: None,
             sample_rate: None,
@@ -545,6 +670,7 @@ mod tests {
             duration: 3000,
             size: 100,
             is_keyframe: true,
+            composition_time_offset: 0,
         }];
         let moof = Fmp4Writer::build_moof(1, 1, 0, &samples, 8);
         // The trun box should be inside the moof. Search for "trun" magic.
@@ -554,10 +680,170 @@ mod tests {
             .expect("trun box not found");
         // Flags are the 4 bytes after "trun": version (1 byte) + flags (3 bytes)
         let flags_bytes = &moof[trun_pos + 4..trun_pos + 8];
-        assert_eq!(flags_bytes[0], 0x00); // version 0
-        // flags = 0x000701
+        // version 1 — required for *signed* sample_composition_time_offset, so
+        // B-frame content (decode order != presentation order) reorders correctly.
+        assert_eq!(flags_bytes[0], 0x01);
+        // flags = 0x000F01 (adds composition-time-offsets-present, 0x800, to the
+        // previous 0x000701)
         assert_eq!(flags_bytes[1], 0x00);
-        assert_eq!(flags_bytes[2], 0x07);
+        assert_eq!(flags_bytes[2], 0x0F);
         assert_eq!(flags_bytes[3], 0x01);
+    }
+
+    #[test]
+    fn test_tfhd_flags_is_default_base_is_moof_with_no_extra_fields() {
+        // Regression test: this box previously declared flags = 0x000020
+        // (default-sample-flags-present) while a comment claimed
+        // default-base-is-moof (0x020000), and never wrote the default_sample_flags
+        // field that 0x000020 promises. A strict parser (ffmpeg, Chrome's MSE
+        // demuxer) reads 4 bytes past the box's declared end as a result, corrupting
+        // every fragment — invisible to ffprobe's lenient metadata-only parse, which
+        // is why this needs its own targeted check rather than relying on ffprobe.
+        let samples = vec![SampleInfo {
+            duration: 3000,
+            size: 100,
+            is_keyframe: true,
+            composition_time_offset: 0,
+        }];
+        let moof = Fmp4Writer::build_moof(1, 7, 0, &samples, 8);
+        let tfhd_pos = moof.windows(4).position(|w| w == b"tfhd").expect("tfhd box not found");
+        let box_size = u32::from_be_bytes(moof[tfhd_pos - 4..tfhd_pos].try_into().unwrap());
+        let flags_bytes = &moof[tfhd_pos + 4..tfhd_pos + 8];
+        assert_eq!(flags_bytes, &[0x00, 0x02, 0x00, 0x00], "flags must be default-base-is-moof (0x020000)");
+        // size(4) + "tfhd"(4) + version+flags(4) + track_id(4) = 16, with nothing else,
+        // since none of the optional-field flag bits are set.
+        assert_eq!(box_size, 16);
+        let track_id_bytes = &moof[tfhd_pos + 8..tfhd_pos + 12];
+        assert_eq!(track_id_bytes, &7u32.to_be_bytes());
+    }
+
+    #[test]
+    fn test_stsz_has_sample_size_and_sample_count_fields() {
+        // Regression test: stsz has a different layout from stts/stsc/stco (it has
+        // *two* 4-byte fields after version+flags, not one) — treating all four
+        // boxes identically silently dropped the sample_count field.
+        let track = TrackInfo {
+            id: 1,
+            track_kind: TrackKind::Video,
+            codec: "H264".into(),
+            codec_kind: TrackCodec::Avc,
+            language: None,
+            name: None,
+            sample_rate: None,
+            channels: None,
+            width: Some(1920),
+            height: Some(1080),
+            extra_data: vec![],
+        };
+        let moov = Fmp4Writer::build_moov(&track);
+        let stsz_pos = moov.windows(4).position(|w| w == b"stsz").expect("stsz box not found");
+        let box_size = u32::from_be_bytes(moov[stsz_pos - 4..stsz_pos].try_into().unwrap());
+        // size(4) + "stsz"(4) + version+flags(4) + sample_size(4) + sample_count(4) = 20.
+        assert_eq!(box_size, 20);
+    }
+
+    #[test]
+    fn test_avc_stsd_writes_avc1_and_avcc() {
+        let track = TrackInfo {
+            id: 1,
+            track_kind: TrackKind::Video,
+            codec: "H.264".into(),
+            codec_kind: TrackCodec::Avc,
+            language: None,
+            name: None,
+            sample_rate: None,
+            channels: None,
+            width: Some(1920),
+            height: Some(1080),
+            extra_data: vec![0x01, 0x64, 0x00, 0x28, 0xAB, 0xCD], // fake AVCDecoderConfigurationRecord
+        };
+        let moov = Fmp4Writer::build_moov(&track);
+        assert!(moov.windows(4).any(|w| w == b"avc1"));
+        assert!(moov.windows(4).any(|w| w == b"avcC"));
+        assert!(!moov.windows(4).any(|w| w == b"hvc1"));
+        // The raw CodecPrivate bytes must be copied verbatim into avcC.
+        assert!(moov.windows(track.extra_data.len()).any(|w| w == track.extra_data.as_slice()));
+    }
+
+    #[test]
+    fn test_hevc_stsd_writes_hvc1_and_hvcc() {
+        let track = TrackInfo {
+            id: 1,
+            track_kind: TrackKind::Video,
+            codec: "HEVC".into(),
+            codec_kind: TrackCodec::Hevc,
+            language: None,
+            name: None,
+            sample_rate: None,
+            channels: None,
+            width: Some(3840),
+            height: Some(2160),
+            extra_data: vec![0x01, 0x02, 0x20, 0x00, 0x00, 0x00], // fake HEVCDecoderConfigurationRecord
+        };
+        let moov = Fmp4Writer::build_moov(&track);
+        assert!(moov.windows(4).any(|w| w == b"hvc1"));
+        assert!(moov.windows(4).any(|w| w == b"hvcC"));
+        assert!(!moov.windows(4).any(|w| w == b"avc1"));
+    }
+
+    #[test]
+    fn test_avc_without_extra_data_omits_avcc_box() {
+        let track = TrackInfo {
+            id: 1,
+            track_kind: TrackKind::Video,
+            codec: "H.264".into(),
+            codec_kind: TrackCodec::Avc,
+            language: None,
+            name: None,
+            sample_rate: None,
+            channels: None,
+            width: Some(1920),
+            height: Some(1080),
+            extra_data: vec![],
+        };
+        let moov = Fmp4Writer::build_moov(&track);
+        assert!(moov.windows(4).any(|w| w == b"avc1"));
+        assert!(!moov.windows(4).any(|w| w == b"avcC"));
+    }
+
+    #[test]
+    fn test_aac_stsd_esds_wraps_audio_specific_config() {
+        let audio_specific_config = vec![0x11, 0x90]; // AAC-LC, 48kHz, stereo
+        let track = TrackInfo {
+            id: 2,
+            track_kind: TrackKind::Audio,
+            codec: "AAC".into(),
+            codec_kind: TrackCodec::Aac,
+            language: None,
+            name: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            width: None,
+            height: None,
+            extra_data: audio_specific_config.clone(),
+        };
+        let moov = Fmp4Writer::build_moov(&track);
+        assert!(moov.windows(4).any(|w| w == b"mp4a"));
+        assert!(moov.windows(4).any(|w| w == b"esds"));
+        // The esds body must be a proper ES_Descriptor tree (tag 0x03), not the raw
+        // AudioSpecificConfig dumped directly into the box.
+        let esds_pos = moov.windows(4).position(|w| w == b"esds").unwrap();
+        assert_eq!(moov[esds_pos + 8], 0x03, "esds body must start with an ES_Descriptor tag");
+        // The raw AudioSpecificConfig must still be present, nested inside DecoderSpecificInfo.
+        assert!(moov
+            .windows(audio_specific_config.len())
+            .any(|w| w == audio_specific_config.as_slice()));
+    }
+
+    #[test]
+    fn test_esds_descriptor_tags_and_lengths() {
+        let esds = Fmp4Writer::build_esds(&[0x11, 0x90]);
+        assert_eq!(&esds[0..4], b"esds");
+        assert_eq!(esds[8], 0x03, "ES_Descriptor tag");
+        let es_descriptor_len = esds[9] as usize;
+        assert_eq!(esds.len(), 10 + es_descriptor_len);
+        // DecoderConfigDescriptor (tag 0x04) follows the 3-byte ES_ID+flags header.
+        assert_eq!(esds[13], 0x04, "DecoderConfigDescriptor tag");
+        assert_eq!(esds[15], 0x40, "objectTypeIndication must be MPEG-4 Audio (AAC)");
     }
 }

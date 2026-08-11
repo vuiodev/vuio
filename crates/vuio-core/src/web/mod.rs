@@ -147,12 +147,20 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
             get(remux_streaming::serve_hls_audio_playlist::<D>),
         )
         .route(
-            "/media/{id}/hls/init.mp4",
-            get(remux_streaming::serve_hls_init_segment::<D>),
+            "/media/{id}/hls/video/init.mp4",
+            get(remux_streaming::serve_hls_video_init_segment::<D>),
         )
         .route(
-            "/media/{id}/hls/segment/{seq}",
-            get(remux_streaming::serve_hls_media_segment::<D>),
+            "/media/{id}/hls/video/segment/{seq}",
+            get(remux_streaming::serve_hls_video_segment::<D>),
+        )
+        .route(
+            "/media/{id}/hls/audio/{idx}/init.mp4",
+            get(remux_streaming::serve_hls_audio_init_segment::<D>),
+        )
+        .route(
+            "/media/{id}/hls/audio/{idx}/segment/{seq}",
+            get(remux_streaming::serve_hls_audio_segment::<D>),
         );
 
     router
