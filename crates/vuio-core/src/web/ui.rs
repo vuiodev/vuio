@@ -176,6 +176,9 @@ pub async fn asset_handler(
 pub struct ServerInfo {
     server_name: String,
     monitored_directories: Vec<String>,
+    /// Whether a token was required to get here, so the dashboard knows whether to
+    /// offer a sign-out. Nothing previously exposed this and the page could not tell.
+    auth_enabled: bool,
 }
 
 pub async fn server_info_handler<D: DatabaseManager>(
@@ -191,6 +194,7 @@ pub async fn server_info_handler<D: DatabaseManager>(
     Json(ServerInfo {
         server_name: state.current_config().server.name.clone(),
         monitored_directories,
+        auth_enabled: state.auth.enabled(),
     })
 }
 

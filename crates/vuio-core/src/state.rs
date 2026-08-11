@@ -25,6 +25,28 @@ impl LiveConfig {
     }
 }
 
+/// Where this run's configuration came from, for handlers that want to change it.
+///
+/// `AppState` only ever held the parsed config, never its origin, so nothing served
+/// over HTTP could locate the file it was loaded from.
+#[derive(Clone, Debug)]
+pub struct ConfigSource {
+    pub path: std::path::PathBuf,
+    /// False when the file is a scratch copy that a restart discards — a container
+    /// configured by environment variables, or a run with command-line overrides.
+    /// Edits to it would silently evaporate, so the admin API refuses them.
+    pub durable: bool,
+}
+
+impl Default for ConfigSource {
+    fn default() -> Self {
+        Self {
+            path: std::path::PathBuf::from("config.toml"),
+            durable: false,
+        }
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Clone, Debug)]
 pub struct SoapCacheKey {
     pub object_id: String,
@@ -56,6 +78,7 @@ pub struct McpClient {
 pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
     pub config: Arc<AppConfig>,
     pub live_config: Arc<LiveConfig>,
+    pub config_source: Arc<ConfigSource>,
     pub media_directories:
         Arc<tokio::sync::RwLock<Vec<crate::config::MonitoredDirectoryConfig>>>,
     pub unavailable_roots:
@@ -94,6 +117,7 @@ impl<D: DatabaseManager> Clone for AppState<D> {
         Self {
             config: self.config.clone(),
             live_config: self.live_config.clone(),
+            config_source: self.config_source.clone(),
             media_directories: self.media_directories.clone(),
             unavailable_roots: self.unavailable_roots.clone(),
             database: self.database.clone(),

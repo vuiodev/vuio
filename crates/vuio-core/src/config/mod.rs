@@ -68,7 +68,7 @@ pub struct ConfigManager {
     config_path: PathBuf,
     change_sender: broadcast::Sender<ConfigChangeEvent>,
     /// Held so the watcher outlives this manager; dropping it stops reloads.
-    _debouncer: Option<
+    debouncer: Option<
         notify_debouncer_full::Debouncer<
             notify::RecommendedWatcher,
             notify_debouncer_full::FileIdMap,
@@ -87,7 +87,7 @@ impl ConfigManager {
             config: Arc::new(RwLock::new(config)),
             config_path,
             change_sender,
-            _debouncer: None,
+            debouncer: None,
         })
     }
 
@@ -120,7 +120,7 @@ impl ConfigManager {
             config: config_arc,
             config_path,
             change_sender,
-            _debouncer: Some(debouncer),
+            debouncer: Some(debouncer),
         })
     }
 
@@ -311,6 +311,17 @@ impl ConfigManager {
     /// Get the configuration file path
     pub fn get_config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// Whether the config file is a durable one this manager watches.
+    ///
+    /// It is not in two cases: a container, whose configuration comes from
+    /// environment variables and is dumped to a scratch file, and a run with
+    /// command-line overrides, which are written to a scratch file so a reload
+    /// cannot drop them. Writing to either would be discarded on restart, so the
+    /// admin API refuses to.
+    pub fn is_watched(&self) -> bool {
+        self.debouncer.is_some()
     }
 
     /// Subscribe to configuration change events

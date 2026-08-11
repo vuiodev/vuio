@@ -1,3 +1,5 @@
+#[cfg(feature = "dashboard")]
+pub mod admin;
 pub mod auth;
 #[cfg(feature = "casting")]
 pub mod casting;
@@ -72,6 +74,12 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
     {
         json_routes = json_routes.route("/mcp/message", post(mcp::message_handler::<D>));
     }
+    #[cfg(feature = "dashboard")]
+    {
+        json_routes = json_routes
+            .route("/api/admin/config", post(admin::put_config::<D>))
+            .route("/api/admin/restart", post(admin::restart::<D>));
+    }
     let json_routes = json_routes.layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
 
     #[allow(unused_mut)]
@@ -85,7 +93,8 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         management_routes = management_routes
             .route("/", get(ui::root_handler))
             .route("/api/server-info", get(ui::server_info_handler::<D>))
-            .route("/api/media", get(ui::media_page_handler::<D>));
+            .route("/api/media", get(ui::media_page_handler::<D>))
+            .route("/api/admin/config", get(admin::get_config::<D>));
     }
     #[cfg(feature = "casting")]
     {

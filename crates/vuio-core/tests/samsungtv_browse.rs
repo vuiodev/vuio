@@ -147,6 +147,7 @@ async fn samsungtv_state_with_video(temp: &tempfile::TempDir) -> AppState {
     let config = Arc::new(config);
     AppState {
         config: config.clone(),
+        config_source: std::sync::Arc::new(vuio_core::state::ConfigSource::default()),
         live_config: Arc::new(vuio_core::state::LiveConfig::new(config.clone())),
         media_directories: Arc::new(tokio::sync::RwLock::new(vec![monitored_directory])),
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
