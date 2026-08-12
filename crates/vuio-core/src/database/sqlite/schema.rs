@@ -422,7 +422,7 @@ pub(super) fn validate_database_file(path: &std::path::Path) -> Result<()> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("Failed to read the schema version")?;
-    if version < 1 || version > SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         anyhow::bail!(
             "{} has schema version {version}; expected 1..={SCHEMA_VERSION}",
             path.display()

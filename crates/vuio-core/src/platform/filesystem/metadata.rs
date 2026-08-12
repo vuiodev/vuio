@@ -265,13 +265,16 @@ fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) {
         StandardTag::Album(value) => probed.album = Some(value.to_string()),
         StandardTag::Genre(value) => probed.genre = Some(value.to_string()),
         StandardTag::AlbumArtist(value) => probed.album_artist = Some(value.to_string()),
-        StandardTag::TrackNumber(value) => probed.track_number = u32::try_from(*value).ok(),
-        StandardTag::TrackTotal(value) => probed.tags.track_total = u32::try_from(*value).ok(),
-        StandardTag::DiscNumber(value) => probed.tags.disc_number = u32::try_from(*value).ok(),
-        StandardTag::DiscTotal(value) => probed.tags.disc_total = u32::try_from(*value).ok(),
+        // A value too large to be a real track or disc number is a malformed
+        // tag. Leaving the field alone keeps whatever an earlier revision of
+        // the metadata got right, rather than clearing it.
+        StandardTag::TrackNumber(value) => set_number(&mut probed.track_number, *value),
+        StandardTag::TrackTotal(value) => set_number(&mut probed.tags.track_total, *value),
+        StandardTag::DiscNumber(value) => set_number(&mut probed.tags.disc_number, *value),
+        StandardTag::DiscTotal(value) => set_number(&mut probed.tags.disc_total, *value),
         StandardTag::Composer(value) => probed.tags.composer = Some(value.to_string()),
         StandardTag::Comment(value) => probed.tags.comment = Some(value.to_string()),
-        StandardTag::Bpm(value) => probed.tags.bpm = u32::try_from(*value).ok(),
+        StandardTag::Bpm(value) => set_number(&mut probed.tags.bpm, *value),
         StandardTag::CompilationFlag(value) => probed.tags.compilation = Some(*value),
         StandardTag::SortTrackTitle(value) => probed.tags.sort_title = Some(value.to_string()),
         StandardTag::SortArtist(value) => probed.tags.sort_artist = Some(value.to_string()),
@@ -300,6 +303,13 @@ fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) {
             probed.year.get_or_insert(u32::from(*value));
         }
         _ => {}
+    }
+}
+
+/// Store a count, ignoring one that cannot be a real one.
+fn set_number(field: &mut Option<u32>, value: u64) {
+    if let Ok(value) = u32::try_from(value) {
+        *field = Some(value);
     }
 }
 

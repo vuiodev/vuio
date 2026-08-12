@@ -464,13 +464,13 @@ pub async fn content_directory_control<D: DatabaseManager + 'static>(
                 // Every music container is one MusicNode. A path that names no
                 // node is browsed as a plain folder, which keeps object ids
                 // minted by older versions working.
-                return match parse_music_path(audio_path) {
+                match parse_music_path(audio_path) {
                     Some(MusicNode::Folders(folder_path)) => {
-                        ContentDirectoryHandler::handle_music_browse(&params, &state, &folder_path).await
+                        return ContentDirectoryHandler::handle_music_browse(&params, &state, &folder_path).await
                     }
-                    Some(node) => handle_music_node_browse(&params, &state, node).await,
-                    None => ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await,
-                };
+                    Some(node) => return handle_music_node_browse(&params, &state, node).await,
+                    None => return ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await,
+                }
             } else if params.object_id.starts_with("image") {
                 let path_prefix_str = params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/');
                 return ContentDirectoryHandler::handle_image_browse(&params, &state, path_prefix_str).await;

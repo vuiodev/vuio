@@ -15,9 +15,7 @@ use tower::ServiceExt;
 
 use vuio_core::config::AppConfig;
 use vuio_core::database::sqlite::SqliteDatabase;
-use vuio_core::database::{
-    DatabaseManager, MediaFile, MediaRepository, PlaylistRepository,
-};
+use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository, PlaylistRepository};
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
 use vuio_core::state::AppState;
@@ -94,8 +92,20 @@ fn track(path: &str, artist: &str, album: &str, genre: &str, track_number: u32) 
 /// the path separator.
 async fn seed(state: &AppState) {
     let records = vec![
-        track("/music/m/rtl1.mp3", "Metallica", "Ride the Lightning", "Metal", 1),
-        track("/music/m/rtl2.mp3", "Metallica", "Ride the Lightning", "Metal", 2),
+        track(
+            "/music/m/rtl1.mp3",
+            "Metallica",
+            "Ride the Lightning",
+            "Metal",
+            1,
+        ),
+        track(
+            "/music/m/rtl2.mp3",
+            "Metallica",
+            "Ride the Lightning",
+            "Metal",
+            2,
+        ),
         track("/music/m/load1.mp3", "Metallica", "Load", "Rock", 1),
         // A slash inside a tag value is the case that nesting breaks without
         // encoded object ids.
@@ -384,7 +394,10 @@ async fn playlists_are_browsable_and_play_in_stored_order() {
         .unwrap();
 
     let list = browse(&state, "audio/playlists").await;
-    assert_eq!(container_ids(&list), [format!("audio/playlists/{playlist}")]);
+    assert_eq!(
+        container_ids(&list),
+        [format!("audio/playlists/{playlist}")]
+    );
     assert_eq!(container_titles(&list), ["Roadtrip"]);
     assert!(
         list.contains("object.container.playlistContainer"),
