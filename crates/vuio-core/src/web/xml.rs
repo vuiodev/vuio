@@ -17,7 +17,8 @@ mod rendering;
 pub use browse::*;
 pub use descriptions::*;
 pub use rendering::{
-    generate_indexed_browse_response, generate_indexed_items_response, BrowseRenderContext,
+    container_class, generate_indexed_browse_response, generate_indexed_items_response,
+    BrowseRenderContext, ContainerSpec,
 };
 
 #[cfg(test)]

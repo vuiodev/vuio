@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::Stream;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
@@ -856,6 +856,12 @@ pub trait PlaylistRepository: Send + Sync {
 
     /// Get all tracks in a playlist
     async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>>;
+
+    /// Track counts for every playlist, keyed by playlist id.
+    ///
+    /// Browsing the playlist list needs one child count per container, which
+    /// would otherwise be a query per row.
+    async fn count_playlist_entries(&self) -> Result<HashMap<i64, usize>>;
 
     /// Reorder tracks in a playlist
     async fn reorder_playlist(

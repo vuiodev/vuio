@@ -7,6 +7,7 @@
 
 use anyhow::{anyhow, Result};
 use rusqlite::{OptionalExtension, Transaction};
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -96,6 +97,25 @@ impl SqliteDatabase {
                 .query_map([], schema::playlist_from_row)?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(playlists)
+        })
+        .await
+    }
+
+    /// How many tracks each playlist holds, in one pass.
+    ///
+    /// Browsing the playlist list needs a child count per container, and asking
+    /// per playlist would be one query per row.
+    pub(super) async fn count_playlist_entries_impl(&self) -> Result<HashMap<i64, usize>> {
+        self.execute_read(move |connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT playlist_id, COUNT(*) FROM playlist_entries GROUP BY playlist_id",
+            )?;
+            let counts = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?.max(0) as usize))
+                })?
+                .collect::<rusqlite::Result<HashMap<_, _>>>()?;
+            Ok(counts)
         })
         .await
     }

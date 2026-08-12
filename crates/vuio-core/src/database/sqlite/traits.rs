@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::database::{MusicCategoryFilter, MusicCategoryType};
+use std::collections::HashMap;
 
 #[async_trait]
 impl MediaRepository for SqliteDatabase {
@@ -212,6 +213,10 @@ impl PlaylistRepository for SqliteDatabase {
 
     async fn get_playlists(&self) -> Result<Vec<Playlist>> {
         SqliteDatabase::get_playlists_impl(self).await
+    }
+
+    async fn count_playlist_entries(&self) -> Result<HashMap<i64, usize>> {
+        SqliteDatabase::count_playlist_entries_impl(self).await
     }
 
     async fn get_playlist(&self, playlist_id: i64) -> Result<Option<Playlist>> {

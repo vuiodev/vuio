@@ -459,30 +459,18 @@ pub async fn content_directory_control<D: DatabaseManager + 'static>(
                 let path_prefix_str = params.object_id.strip_prefix("video").unwrap_or("").trim_start_matches('/');
                 return ContentDirectoryHandler::handle_video_browse(&params, &state, path_prefix_str).await;
             } else if params.object_id.starts_with("audio") {
-                // Handle music categorization within audio section
                 let audio_path = params.object_id.strip_prefix("audio").unwrap_or("").trim_start_matches('/');
 
-                // Check for music categorization paths
-                if audio_path.is_empty() {
-                    // Root audio container - return categorization containers
-                    return handle_audio_root_browse(&params, &state).await;
-                } else if audio_path.starts_with("artists") {
-                    return ContentDirectoryHandler::handle_artist_browse(&params, &state, audio_path).await;
-                } else if audio_path.starts_with("albums") {
-                    return ContentDirectoryHandler::handle_album_browse(&params, &state, audio_path).await;
-                } else if audio_path.starts_with("genres") {
-                    return handle_genres_browse(&params, &state, audio_path).await;
-                } else if audio_path.starts_with("years") {
-                    return handle_years_browse(&params, &state, audio_path).await;
-                } else if audio_path.starts_with("playlists") {
-                    return handle_playlists_browse(&params, &state, audio_path).await;
-                } else if audio_path.starts_with("folders") {
-                    let folder_path = audio_path.strip_prefix("folders").unwrap_or("").trim_start_matches('/');
-                    return ContentDirectoryHandler::handle_music_browse(&params, &state, folder_path).await;
-                } else {
-                    // Traditional folder browsing within audio
-                    return ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await;
-                }
+                // Every music container is one MusicNode. A path that names no
+                // node is browsed as a plain folder, which keeps object ids
+                // minted by older versions working.
+                return match parse_music_path(audio_path) {
+                    Some(MusicNode::Folders(folder_path)) => {
+                        ContentDirectoryHandler::handle_music_browse(&params, &state, &folder_path).await
+                    }
+                    Some(node) => handle_music_node_browse(&params, &state, node).await,
+                    None => ContentDirectoryHandler::handle_music_browse(&params, &state, audio_path).await,
+                };
             } else if params.object_id.starts_with("image") {
                 let path_prefix_str = params.object_id.strip_prefix("image").unwrap_or("").trim_start_matches('/');
                 return ContentDirectoryHandler::handle_image_browse(&params, &state, path_prefix_str).await;
