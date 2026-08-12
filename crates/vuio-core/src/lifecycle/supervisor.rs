@@ -463,6 +463,96 @@ pub(super) async fn run_advertisement_supervisor<D: DatabaseManager + 'static>(
     }
 }
 
+/// Starts and stops file-system monitoring as `media.watch_for_changes` changes.
+///
+/// The flag was read once, immediately before the monitoring task was spawned, and
+/// never again — so toggling it did nothing in either direction until a restart, while
+/// the settings screen claimed it applied live.
+///
+/// What toggles is the OS watch registration, not the task. The event channel and its
+/// sole receiver are created once for the life of the `CrossPlatformWatcher` and cannot
+/// be taken twice, so a supervisor that stopped and restarted the consuming task could
+/// never start it again. Keeping the consumer and swapping the registration underneath
+/// it is the pattern the watcher is already built for.
+pub(super) async fn run_monitoring_supervisor<D: DatabaseManager + 'static>(
+    watcher: Arc<CrossPlatformWatcher>,
+    state: AppState<D>,
+    global: CancellationToken,
+) -> anyhow::Result<()> {
+    let mut changes = state.live_config.subscribe();
+    let mut watching = true;
+
+    // Started unconditionally: it registers the watches and takes the receiver, and if
+    // monitoring is off the registrations are released immediately below.
+    let consumer = match start_file_monitoring(watcher.clone(), state.clone(), global.clone()).await
+    {
+        Ok(Some(handle)) => Some(handle),
+        Ok(None) => None,
+        Err(error) => {
+            warn!("Could not start file monitoring: {error:#}");
+            warn!("Continuing without real-time file monitoring");
+            None
+        }
+    };
+
+    async fn apply<D: DatabaseManager + 'static>(
+        watcher: &Arc<CrossPlatformWatcher>,
+        state: &AppState<D>,
+        watching: &mut bool,
+        wanted: bool,
+    ) {
+        if wanted == *watching {
+            return;
+        }
+        *watching = wanted;
+        if wanted {
+            let directories = state
+                .media_directories
+                .read()
+                .await
+                .iter()
+                .map(|root| PathBuf::from(&root.path))
+                .filter(|path| path.is_dir())
+                .collect::<Vec<_>>();
+            match watcher.start_watching(&directories).await {
+                Ok(()) => info!("File monitoring enabled by configuration"),
+                Err(error) => warn!("Could not resume file monitoring: {error:#}"),
+            }
+        } else {
+            match watcher.stop_watching().await {
+                Ok(()) => info!("File monitoring disabled by configuration"),
+                Err(error) => warn!("Could not stop file monitoring: {error:#}"),
+            }
+        }
+    };
+
+    apply(
+        &watcher,
+        &state,
+        &mut watching,
+        state.current_config().media.watch_for_changes,
+    )
+    .await;
+
+    loop {
+        tokio::select! {
+            _ = global.cancelled() => {
+                if let Some(consumer) = consumer {
+                    let _ = tokio::time::timeout(Duration::from_secs(5), consumer).await;
+                }
+                return Ok(());
+            }
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                let wanted = changes.borrow_and_update().media.watch_for_changes;
+                apply(&watcher, &state, &mut watching, wanted).await;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -254,28 +254,22 @@ where
         )
     });
 
-    // Start file system monitoring
-    match start_file_monitoring(
-        file_watcher.clone(),
-        app_state.clone(),
-        cancellation.clone(),
-    )
-    .await
-    {
-        Ok(Some(handle)) => {
-            services.spawn(async move {
-                (
-                    "media monitoring",
-                    handle.await.map_err(anyhow::Error::from),
-                )
-            });
-        }
-        Ok(None) => {}
-        Err(e) => {
-            warn!("Failed to start file system monitoring: {}", e);
-            warn!("Continuing without real-time file monitoring");
-        }
-    }
+    // Supervised rather than started once, so watch_for_changes can be toggled without
+    // a restart.
+    let monitoring_watcher = file_watcher.clone();
+    let monitoring_state = app_state.clone();
+    let monitoring_cancellation = cancellation.clone();
+    services.spawn(async move {
+        (
+            "media monitoring",
+            supervisor::run_monitoring_supervisor(
+                monitoring_watcher,
+                monitoring_state,
+                monitoring_cancellation,
+            )
+            .await,
+        )
+    });
 
     // Scan only after the watcher is active. This closes the startup blind
     // window: a download that lands while the scan is running is either found

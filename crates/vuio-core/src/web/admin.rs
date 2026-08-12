@@ -239,7 +239,7 @@ const MEDIA_FIELDS: &[FieldSpec] = &[
         "media.watch_for_changes",
         "Watch for changes",
         FieldKind::Bool,
-        Impact::Restart,
+        Impact::Live,
         "Index new and deleted files as they appear, rather than only at startup.",
     ),
     optional(
