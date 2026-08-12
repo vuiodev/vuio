@@ -1,6 +1,6 @@
 use super::*;
 
-/// Perform graceful shutdown with ReDB atomic state persistence
+/// Perform graceful shutdown with atomic state persistence
 pub(super) async fn perform_graceful_shutdown<D: DatabaseManager>(
     database: &Arc<D>,
     stats: &ApplicationStats,
@@ -18,8 +18,8 @@ pub(super) async fn perform_graceful_shutdown<D: DatabaseManager>(
     info!("  - Errors encountered: {}", errors_encountered);
     info!("  - Last activity: {:?}", last_activity);
 
-    // Ensure ReDB database persists all pending operations
-    info!("Persisting ReDB database state...");
+    // Ensure database persists all pending operations
+    info!("Persisting database state...");
 
     // Get database statistics before shutdown
     match database.get_stats().await {

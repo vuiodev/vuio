@@ -121,7 +121,7 @@ const _: () = {
 
 #[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
-pub type DefaultDatabase = crate::database::redb::RedbDatabase;
+pub type DefaultDatabase = crate::database::ActiveDatabase;
 #[cfg(feature = "unstable-internals")]
 #[doc(hidden)]
 pub type DefaultAppState = crate::state::AppState<DefaultDatabase>;

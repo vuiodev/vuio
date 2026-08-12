@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use vuio_core::{
     config::{AppConfig, MonitoredDirectoryConfig, ValidationMode},
-    database::{redb::RedbDatabase, DatabaseManager, MediaFile, MediaRepository},
+    database::{sqlite::SqliteDatabase, DatabaseManager, MediaFile, MediaRepository},
     lifecycle::ApplicationStats,
     platform::{
         diagnostics::SystemDiagnosticsSampler, filesystem::create_platform_filesystem_manager,
@@ -119,7 +119,7 @@ async fn samsungtv_state_with_video(temp: &tempfile::TempDir) -> AppState {
         .expect("write video");
 
     let database = Arc::new(
-        RedbDatabase::new(temp.path().join("media.redb"))
+        SqliteDatabase::new(temp.path().join("media.db"))
             .await
             .expect("create database"),
     );

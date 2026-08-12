@@ -131,10 +131,10 @@ impl AppConfig {
             backup_enabled: std::env::var("VUIO_DB_BACKUP")
                 .map(|v| v.to_lowercase() == "true")
                 .unwrap_or(false),
-            redb_cache_mb: std::env::var("VUIO_REDB_CACHE_MB")
+            cache_mb: std::env::var("VUIO_DB_CACHE_MB")
                 .ok()
                 .and_then(|value| value.parse().ok())
-                .unwrap_or_else(default_redb_cache_mb),
+                .unwrap_or_else(default_cache_mb),
         };
 
         Ok(AppConfig {
@@ -322,7 +322,7 @@ impl AppConfig {
                 ),
                 vacuum_on_startup: false,
                 backup_enabled: false,
-                redb_cache_mb: default_redb_cache_mb(),
+                cache_mb: default_cache_mb(),
             },
             management: ManagementConfig::default(),
         }

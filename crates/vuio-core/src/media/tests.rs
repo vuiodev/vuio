@@ -1,5 +1,5 @@
 use super::*;
-use crate::database::redb::RedbDatabase;
+use crate::database::sqlite::SqliteDatabase;
 use crate::database::MediaRepository;
 use crate::platform::filesystem::BaseFileSystemManager;
 #[cfg(target_os = "windows")]
@@ -11,10 +11,10 @@ use tempfile::tempdir;
 #[tokio::test]
 async fn test_media_scanner_basic_functionality() {
     let temp_dir = tempdir().unwrap();
-    let db_path = temp_dir.path().join("test.redb");
+    let db_path = temp_dir.path().join("test.db");
 
-    // Create Redb database
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    // Create database
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     // Create scanner with base filesystem manager
@@ -34,7 +34,7 @@ async fn test_media_scanner_path_normalization() {
     let temp_path = temp_dir.path().to_path_buf();
 
     // Use synchronous std::fs to ensure file is created before any async ops
-    let db_path = temp_path.join("test.redb");
+    let db_path = temp_path.join("test.db");
     let test_file_path = temp_path.join("test.mp4");
 
     // Create test file synchronously to avoid race conditions
@@ -44,8 +44,8 @@ async fn test_media_scanner_path_normalization() {
     assert!(temp_path.exists(), "Temp directory should exist");
     assert!(test_file_path.exists(), "Test file should exist");
 
-    // Create Redb database
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    // Create database
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     // Create scanner with platform-appropriate path normalizer
@@ -153,10 +153,10 @@ async fn test_scan_result_operations() {
 #[tokio::test]
 async fn test_recursive_scan_optimization() {
     let temp_dir = tempdir().unwrap();
-    let db_path = temp_dir.path().join("test.redb");
+    let db_path = temp_dir.path().join("test.db");
 
-    // Create Redb database
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    // Create database
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     // Create scanner with base filesystem manager
@@ -225,7 +225,7 @@ async fn direct_scan_resolves_only_symlinked_media_entries() {
     symlink(&target, &link).unwrap();
 
     let database = Arc::new(
-        RedbDatabase::new(temp.path().join("symlink.redb"))
+        SqliteDatabase::new(temp.path().join("symlink.db"))
             .await
             .unwrap(),
     );

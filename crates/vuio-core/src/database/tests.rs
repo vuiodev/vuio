@@ -7,6 +7,6 @@ where
 }
 
 #[test]
-fn redb_implements_every_repository_capability() {
-    assert_composed_manager::<redb::RedbDatabase>();
+fn the_active_backend_implements_every_repository_capability() {
+    assert_composed_manager::<sqlite::SqliteDatabase>();
 }

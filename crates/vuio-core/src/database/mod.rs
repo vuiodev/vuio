@@ -7,10 +7,17 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
-use crate::platform::DatabaseError;
-
+#[cfg(test)]
+pub mod conformance;
 pub mod playlist_formats;
-pub mod redb;
+pub mod sqlite;
+
+/// The storage backend the server runs on.
+///
+/// Backend selection is a compile-time decision made here and nowhere else.
+/// Every consumer is generic over `D: DatabaseManager`, so this alias is the
+/// only edit needed to swap the engine underneath the whole application.
+pub type ActiveDatabase = sqlite::SqliteDatabase;
 
 /// Represents a subdirectory in the media library.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -337,7 +344,7 @@ pub trait PlaylistView {
     fn updated_at_secs(&self) -> u64;
 }
 
-/// Borrowed directory record. ReDB implements this directly over its table value.
+/// Borrowed directory record. A backend may implement it directly over a result row.
 pub trait DirectoryView {
     fn id(&self) -> u64;
     fn path(&self) -> &str;
@@ -376,7 +383,7 @@ pub enum MediaFileQuery {
     Year(u32),
     AlbumArtist(String),
     Playlist(i64),
-    /// Cursor-paged library scan. Filtering is performed against borrowed Rkyv
+    /// Cursor-paged library scan. Filtering is performed against borrowed
     /// views inside the database read transaction, so rejected rows are never
     /// materialized as `MediaFile` values.
     Filtered {
@@ -441,7 +448,7 @@ pub trait MediaRepository: Send + Sync {
     type ReadSession: DatabaseReadSession + Send + 'static;
 
     /// Execute a complete scoped read operation. Implementations choose their
-    /// scheduling strategy; ReDB runs this closure on Tokio's blocking pool.
+    /// scheduling strategy; SQLite runs this closure on Tokio's blocking pool.
     async fn read<R, F>(self: std::sync::Arc<Self>, operation: F) -> Result<R>
     where
         Self: Sized + 'static,
@@ -474,9 +481,7 @@ pub trait MediaRepository: Send + Sync {
     ///     }
     /// }
     /// ```
-    fn stream_all_media_files(
-        &self,
-    ) -> Pin<Box<dyn Stream<Item = Result<MediaFile, DatabaseError>> + Send + '_>>;
+    fn stream_all_media_files(&self) -> Pin<Box<dyn Stream<Item = Result<MediaFile>> + Send + '_>>;
 
     /// Collect all media files from the stream (helper for tests)
     ///
@@ -750,12 +755,53 @@ pub trait DatabaseManager:
     }
 }
 
+/// Backend-neutral open parameters.
+///
+/// New tuning knobs land here rather than in `DatabaseBackend::open`, so adding
+/// one does not churn every backend's signature.
+#[derive(Clone, Debug)]
+pub struct DatabaseSettings {
+    /// Full path to the database file, extension included.
+    pub path: PathBuf,
+    /// Page-cache budget in mebibytes.
+    pub cache_mb: usize,
+}
+
+impl DatabaseSettings {
+    pub fn new(path: PathBuf, cache_mb: usize) -> Self {
+        Self { path, cache_mb }
+    }
+}
+
 /// Construction boundary for statically dispatched database backends.
 /// Backend selection happens once at startup; record loops remain monomorphized.
 #[async_trait]
 pub trait DatabaseBackend: DatabaseManager + Sized + 'static {
-    async fn open(path: PathBuf, cache_size_mb: usize) -> Result<Self>;
+    async fn open(settings: &DatabaseSettings) -> Result<Self>;
+
     fn backend_name() -> &'static str;
+
+    /// Canonical on-disk extension, without a leading dot.
+    ///
+    /// Drives the database path, backup filenames, and backup retention, so a
+    /// backend never has its file naming decided by a call site.
+    fn file_extension() -> &'static str;
+
+    /// Extensions of sidecar files that must travel with the main file whenever
+    /// it is moved, quarantined, or replaced.
+    ///
+    /// Leaving a stale write-ahead log next to a replaced database silently
+    /// resurrects records, so this is part of the backend contract rather than
+    /// something each call site is expected to remember.
+    fn sidecar_extensions() -> &'static [&'static str] {
+        &[]
+    }
+
+    /// Validate a backup file and install it at `destination`.
+    ///
+    /// Runs before the database is opened. Implementations must validate first
+    /// and leave `destination` untouched when the backup is unusable.
+    async fn restore_backup_file(backup: &Path, destination: &Path) -> Result<()>;
 }
 
 #[derive(Debug)]

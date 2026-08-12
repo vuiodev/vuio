@@ -356,7 +356,14 @@ pub(super) async fn initialize_config_manager(
     Ok(config_manager)
 }
 
-pub(super) fn preserve_failed_database(
+/// Full path of the active database file for a backend.
+pub(crate) fn database_path_for<B: DatabaseBackend>(config: &AppConfig) -> PathBuf {
+    config
+        .get_database_path()
+        .with_extension(B::file_extension())
+}
+
+pub(super) fn preserve_failed_database<B: DatabaseBackend>(
     db_path: &std::path::Path,
 ) -> anyhow::Result<Option<PathBuf>> {
     if !db_path.exists() {
@@ -364,7 +371,9 @@ pub(super) fn preserve_failed_database(
     }
     let timestamp = chrono::Utc::now().format("%Y%m%dT%H%M%S%.fZ");
     let quarantine_id = uuid::Uuid::new_v4();
-    let backup_path = db_path.with_extension(format!("failed-{timestamp}-{quarantine_id}.redb"));
+    let extension = B::file_extension();
+    let backup_path =
+        db_path.with_extension(format!("failed-{timestamp}-{quarantine_id}.{extension}"));
     if backup_path.try_exists()? {
         anyhow::bail!(
             "Refusing to overwrite existing database quarantine file {}",
@@ -377,43 +386,54 @@ pub(super) fn preserve_failed_database(
             backup_path.display()
         )
     })?;
+    // Sidecars must follow the file they belong to. A write-ahead log left
+    // beside a replacement database describes rows the replacement never had.
+    for sidecar in B::sidecar_extensions() {
+        let source = db_path.with_extension(sidecar);
+        if source.exists() {
+            let destination = backup_path.with_extension(sidecar);
+            std::fs::rename(&source, &destination).with_context(|| {
+                format!(
+                    "Failed to preserve database sidecar {}",
+                    source.display()
+                )
+            })?;
+        }
+    }
     warn!("Preserved unusable database at {}", backup_path.display());
     Ok(Some(backup_path))
 }
 
 /// Initialize database manager with health checks and recovery
-pub(super) async fn initialize_database(
+pub(super) async fn initialize_database<B: DatabaseBackend>(
     config: &AppConfig,
-) -> anyhow::Result<database::redb::RedbDatabase> {
-    info!("Initializing Redb database...");
+) -> anyhow::Result<B> {
+    let backend = B::backend_name();
+    info!("Initializing {backend} database...");
 
-    let db_path = config.get_database_path();
-    // Change extension from .db to .redb
-    let db_path = db_path.with_extension("redb");
-    let cache_size_mb = config.database.redb_cache_mb;
+    let db_path = database_path_for::<B>(config);
+    let settings = database::DatabaseSettings::new(db_path.clone(), config.database.cache_mb);
     info!("Database path: {}", db_path.display());
 
-    // Create Redb database manager
-    let mut database =
-        match database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb).await {
-            Ok(database) => database,
-            Err(error) => {
-                error!("Failed to open ReDB database: {}", error);
-                preserve_failed_database(&db_path)?;
-                database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
-                    .await
-                    .context("Failed to create replacement ReDB database")?
-            }
-        };
+    let mut database = match B::open(&settings).await {
+        Ok(database) => database,
+        Err(error) => {
+            error!("Failed to open {backend} database: {}", error);
+            preserve_failed_database::<B>(&db_path)?;
+            B::open(&settings)
+                .await
+                .with_context(|| format!("Failed to create replacement {backend} database"))?
+        }
+    };
 
     // Initialize database schema
     if let Err(error) = database.initialize().await {
-        error!("Failed to initialize ReDB schema: {}", error);
+        error!("Failed to initialize {backend} schema: {}", error);
         drop(database);
-        preserve_failed_database(&db_path)?;
-        database = database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
+        preserve_failed_database::<B>(&db_path)?;
+        database = B::open(&settings)
             .await
-            .context("Failed to create replacement ReDB database")?;
+            .with_context(|| format!("Failed to create replacement {backend} database"))?;
         database
             .initialize()
             .await
@@ -428,9 +448,10 @@ pub(super) async fn initialize_database(
             .unwrap_or_else(|| Path::new("."))
             .join("backups");
         let pre_repair = backup_dir.join(format!(
-            "pre-repair-{}-{}.redb",
+            "pre-repair-{}-{}.{}",
             chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
-            uuid::Uuid::new_v4().simple()
+            uuid::Uuid::new_v4().simple(),
+            B::file_extension()
         ));
         database.create_backup(&pre_repair).await.with_context(|| {
             format!(
@@ -444,15 +465,17 @@ pub(super) async fn initialize_database(
         Err(repair_error) => {
             error!("Database index rebuild failed: {}", repair_error);
             drop(database);
-            preserve_failed_database(&db_path)?;
-            database = database::redb::RedbDatabase::new_with_cache(db_path.clone(), cache_size_mb)
+            preserve_failed_database::<B>(&db_path)?;
+            database = B::open(&settings)
                 .await
-                .context("Failed to create replacement ReDB database")?;
+                .with_context(|| format!("Failed to create replacement {backend} database"))?;
             database.initialize().await?;
             database
                 .check_and_repair()
                 .await
-                .context("Replacement ReDB database failed initial index construction")?
+                .with_context(|| {
+                    format!("Replacement {backend} database failed initial index construction")
+                })?
         }
     };
 
@@ -544,7 +567,7 @@ pub(super) async fn initialize_file_watcher(
 
 /// Fully initialized resources shared by lifecycle services.
 #[derive(Clone)]
-pub struct ApplicationContext<D: DatabaseManager = database::redb::RedbDatabase> {
+pub struct ApplicationContext<D: DatabaseManager = database::ActiveDatabase> {
     pub config: Arc<AppConfig>,
     pub config_manager: Arc<ConfigManager>,
     pub database: Arc<D>,

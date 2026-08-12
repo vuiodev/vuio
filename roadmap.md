@@ -36,8 +36,8 @@ VuIO is designed for offline and localized media sharing in environments such as
 
 ## Short-Term Plans
 
-- Stabilize the api for vuio-core
-- Publish it on crates.io
+- [x] Stabilize the api for vuio-core
+- [x] Publish it on crates.io
 
 ---
 

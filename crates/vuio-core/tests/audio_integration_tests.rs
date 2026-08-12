@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 use vuio_core::database::playlist_formats::PlaylistFileManager;
-use vuio_core::database::redb::RedbDatabase;
+use vuio_core::database::sqlite::SqliteDatabase;
 use vuio_core::database::{DatabaseManager, MediaRepository, PlaylistRepository};
 use vuio_core::media::MediaScanner;
 
@@ -42,8 +42,8 @@ async fn test_audio_implementation_and_features() {
     fs::create_dir_all(&raw_media_dir).unwrap();
     let media_dir = fs::canonicalize(raw_media_dir).unwrap();
 
-    let db_path = temp_dir.path().join("test_media.redb");
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    let db_path = temp_dir.path().join("test_media.db");
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     // 2. Generate minimal valid silent MP3 file
@@ -261,7 +261,7 @@ async fn test_cover_art_retrieval_and_xml() {
     use std::sync::Arc;
     use tempfile::tempdir;
     use vuio_core::config::AppConfig;
-    use vuio_core::database::redb::RedbDatabase;
+    use vuio_core::database::sqlite::SqliteDatabase;
     use vuio_core::database::DatabaseManager;
     use vuio_core::media::MediaScanner;
     use vuio_core::platform::filesystem::create_platform_filesystem_manager;
@@ -276,8 +276,8 @@ async fn test_cover_art_retrieval_and_xml() {
     fs::create_dir_all(&raw_media_dir).unwrap();
     let media_dir = fs::canonicalize(raw_media_dir).unwrap();
 
-    let db_path = temp_dir.path().join("test_cover.redb");
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    let db_path = temp_dir.path().join("test_cover.db");
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     // 2. Generate minimal valid silent MP3 file
@@ -403,7 +403,7 @@ async fn test_radio_playlist_import() {
     use tempfile::tempdir;
     use vuio_core::config::AppConfig;
     use vuio_core::database::playlist_formats::PlaylistFileManager;
-    use vuio_core::database::redb::RedbDatabase;
+    use vuio_core::database::sqlite::SqliteDatabase;
     use vuio_core::database::DatabaseManager;
     use vuio_core::platform::filesystem::create_platform_filesystem_manager;
     use vuio_core::platform::PlatformInfo;
@@ -414,7 +414,7 @@ async fn test_radio_playlist_import() {
     // 1. Setup temporary directory for media and database
     let temp_dir = tempdir().unwrap();
     let media_dir = temp_dir.path().join("media");
-    let db_path = temp_dir.path().join("test_radio.redb");
+    let db_path = temp_dir.path().join("test_radio.db");
 
     fs::create_dir_all(&media_dir).unwrap();
 
@@ -430,8 +430,8 @@ https://cast1.asurahosting.com/proxy/julien/stream
     let m3u_path = radio_dir.join("chill.m3u");
     fs::write(&m3u_path, m3u_content).unwrap();
 
-    // 2. Initialize RedbDatabase
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    // 2. Initialize SqliteDatabase
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     // 3. Scan and import playlist files recursively

@@ -179,7 +179,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                 }
                 info!("Directory created: {}", path.display());
 
-                // Scan the new directory for media files using ReDB bulk operations
+                // Scan the new directory for media files using bulk operations
                 let scanner = media::MediaScanner::with_database(database.clone());
                 match scanner
                     .scan_directory_recursive_with_policy(&policy.for_subtree(&path))
@@ -198,7 +198,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                         stats.record_directory_scanned();
                         stats.record_files_processed(scan_result.new_files.len() as u64);
 
-                        info!("Added {} media files from new directory using ReDB bulk operations: {}",
+                        info!("Added {} media files from new directory using bulk operations: {}",
                               scan_result.new_files.len(), path.display());
 
                         // Increment update ID to notify DLNA clients
@@ -229,7 +229,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                 // Record atomic statistics
                 stats.record_files_processed(1);
 
-                info!("Added new media file to ReDB database: {}", path.display());
+                info!("Added new media file to database: {}", path.display());
 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state).await;
@@ -267,13 +267,13 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                     metadata.modified().unwrap_or(std::time::SystemTime::now());
                 existing_file.updated_at = std::time::SystemTime::now();
 
-                // Use ReDB bulk update operation (single-item batch for atomic consistency)
+                // Use bulk update operation (single-item batch for atomic consistency)
                 database.bulk_update_media_files(&[existing_file]).await?;
 
                 // Record atomic statistics
                 stats.record_files_processed(1);
 
-                info!("Updated media file in ReDB database: {}", path.display());
+                info!("Updated media file in database: {}", path.display());
 
                 // Increment update ID to notify DLNA clients
                 increment_content_update_id(app_state).await;
@@ -341,7 +341,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                 if !policy.recursive || to == policy.root {
                     return Ok(());
                 }
-                // Handle directory rename using ReDB bulk operations
+                // Handle directory rename using bulk operations
                 info!("Directory renamed: {} -> {}", from.display(), to.display());
 
                 // Use efficient path prefix query to find files in the old directory path
@@ -353,7 +353,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
 
                 if !files_in_old_path.is_empty() {
                     info!(
-                        "Updating {} media files for renamed directory using ReDB bulk operations",
+                        "Updating {} media files for renamed directory using bulk operations",
                         files_in_old_path.len()
                     );
 
@@ -361,14 +361,14 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                     let old_paths: Vec<PathBuf> =
                         files_in_old_path.iter().map(|f| f.path.clone()).collect();
 
-                    // Remove old files from database using ReDB bulk operation
+                    // Remove old files from database using bulk operation
                     let removed_count = database.bulk_remove_media_files(&old_paths).await?;
                     info!(
-                        "ReDB bulk removal: {} files removed for renamed directory",
+                        "bulk removal: {} files removed for renamed directory",
                         removed_count
                     );
 
-                    // Scan the new directory location using ReDB bulk operations
+                    // Scan the new directory location using bulk operations
                     let scanner = media::MediaScanner::with_database(database.clone());
                     match scanner
                         .scan_directory_recursive_with_policy(&policy.for_subtree(&to))
@@ -381,7 +381,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                                 scan_result.summary()
                             );
 
-                            // Files are already stored in database by the scanner using ReDB bulk operations
+                            // Files are already stored in database by the scanner using bulk operations
 
                             // Increment update ID to notify DLNA clients
                             increment_content_update_id(app_state).await;

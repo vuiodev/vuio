@@ -213,7 +213,7 @@ impl ContentDirectoryHandler {
                 match tokio::time::timeout(std::time::Duration::from_secs(30), query).await {
                     Ok(Ok(response)) => response,
                     Ok(Err(error)) => {
-                        error!("ReDB browse failed for {}: {}", params.object_id, error);
+                        error!("Browse failed for {}: {}", params.object_id, error);
                         state.web_metrics.record_error();
                         return (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error")
                             .into_response();
@@ -251,7 +251,7 @@ impl ContentDirectoryHandler {
         };
 
         debug!(
-            "ReDB browse request for '{}' (filter: '{}') returned {} subdirs, {} files",
+            "Browse request for '{}' (filter: '{}') returned {} subdirs, {} files",
             browse_path.display(),
             media_type_filter,
             subdirectories.len(),
@@ -267,7 +267,7 @@ impl ContentDirectoryHandler {
         let paginated_subdirs = &subdirectories[page];
 
         debug!(
-            "ReDB returning paginated results: {} subdirs, {} files (index {}-{} of {})",
+            "Returning paginated results: {} subdirs, {} files (index {}-{} of {})",
             paginated_subdirs.len(),
             0,
             starting_index,

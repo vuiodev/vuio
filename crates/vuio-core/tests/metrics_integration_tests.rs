@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 
 use vuio_core::config::{AppConfig, MonitoredDirectoryConfig, ValidationMode};
-use vuio_core::database::redb::RedbDatabase;
+use vuio_core::database::sqlite::SqliteDatabase;
 use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository, PlaylistRepository};
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
@@ -20,10 +20,10 @@ use vuio_core::web::diagnostics::{get_prometheus_metrics, get_web_metrics, WebHa
 )]
 async fn test_metrics_endpoints_data() {
     let temp_dir = tempdir().unwrap();
-    let db_path = temp_dir.path().join("test_metrics.redb");
+    let db_path = temp_dir.path().join("test_metrics.db");
 
     // 1. Initialize DB and insert files of different types
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     let video_file = MediaFile::new(

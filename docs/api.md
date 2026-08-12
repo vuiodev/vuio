@@ -110,7 +110,7 @@ configuration file actually writes. Backs the dashboard's Admin tab.
 Field `type` is one of `bool`, `int` (with `min`/`max`), `text`, `path`, `enum` (with
 `options` and `free_form`), or `string_list`. `impact` is `live`, `next_start` — the setting
 only describes startup, so there is nothing to apply now — or `restart`, meaning the running
-server is still using the old value. Only `database.path` and `database.redb_cache_mb` are
+server is still using the old value. Only `database.path` and `database.cache_mb` are
 `restart`.
 `removable: false` marks a key that must always carry a value, because `AppConfig`
 declares no default for it. Some fields carry a `note` describing a caveat in what the

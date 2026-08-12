@@ -1,7 +1,7 @@
 use super::*;
 
 impl ContentDirectoryHandler {
-    /// Handle artist browse requests with atomic performance tracking and ReDB operations
+    /// Handle artist browse requests with atomic performance tracking and database operations
     pub(super) async fn handle_artist_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
         state: &AppState<D>,
@@ -22,7 +22,7 @@ impl ContentDirectoryHandler {
         .await
     }
 
-    /// Handle album browse requests with atomic performance tracking and ReDB operations
+    /// Handle album browse requests with atomic performance tracking and database operations
     pub(super) async fn handle_album_browse<D: DatabaseManager + 'static>(
         params: &BrowseParams,
         state: &AppState<D>,
@@ -44,7 +44,7 @@ impl ContentDirectoryHandler {
     }
 }
 
-/// Handle browsing genres with atomic performance tracking and ReDB operations
+/// Handle browsing genres with atomic performance tracking and database operations
 pub(super) async fn handle_genres_browse<D: DatabaseManager + 'static>(
     params: &BrowseParams,
     state: &AppState<D>,
@@ -65,7 +65,7 @@ pub(super) async fn handle_genres_browse<D: DatabaseManager + 'static>(
     .await
 }
 
-/// Handle browsing years with atomic performance tracking and ReDB operations
+/// Handle browsing years with atomic performance tracking and database operations
 pub(super) async fn handle_years_browse<D: DatabaseManager + 'static>(
     params: &BrowseParams,
     state: &AppState<D>,
@@ -86,7 +86,7 @@ pub(super) async fn handle_years_browse<D: DatabaseManager + 'static>(
     .await
 }
 
-/// Handle browsing playlists with atomic performance tracking and ReDB operations
+/// Handle browsing playlists with atomic performance tracking and database operations
 pub(super) async fn handle_playlists_browse<D: DatabaseManager + 'static>(
     params: &BrowseParams,
     state: &AppState<D>,
@@ -194,7 +194,7 @@ where
                     .record_browse_request(response_time, has_data);
 
                 debug!(
-                    "ReDB retrieved {} {} in {}ms",
+                    "Retrieved {} {} in {}ms",
                     subdirectories.len(),
                     category_name,
                     response_time
@@ -234,7 +234,7 @@ where
                     .into_response()
             }
             Err(e) => {
-                error!("ReDB error getting {}: {}", category_name, e);
+                error!("Database error getting {}: {}", category_name, e);
 
                 let response_time = start_time.elapsed().as_micros() as u64;
                 state.web_metrics.record_error();
@@ -307,7 +307,7 @@ where
                 state.web_metrics.record_browse_request(response_time, true);
 
                 debug!(
-                    "ReDB retrieved {} tracks for {} '{}' in {}ms",
+                    "Retrieved {} tracks for {} '{}' in {}ms",
                     "zero-copy", category_name, key_str, response_time
                 );
 
@@ -335,7 +335,7 @@ where
             }
             Err(e) => {
                 error!(
-                    "ReDB error getting music by {} {}: {}",
+                    "Database error getting music by {} {}: {}",
                     category_name, key_str, e
                 );
 

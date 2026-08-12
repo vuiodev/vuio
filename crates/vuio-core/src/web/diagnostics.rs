@@ -182,7 +182,12 @@ pub async fn get_web_metrics<D: DatabaseManager>(
             "errors": stats.errors,
             "average_response_time_ms": stats.average_response_time_ms,
             "gigabytes_transferred": stats.gigabytes_transferred,
-            "redb_database": "active"
+            // Handlers are generic over the database only as far as
+            // `DatabaseManager`, which cannot name its own engine. The server
+            // is built on the active backend, and that alias is the one place
+            // the choice is made, so reading it here stays correct.
+            "database_backend":
+                <crate::database::ActiveDatabase as crate::database::DatabaseBackend>::backend_name()
         },
         "database_stats": {
             "total_files": db_stats.total_files,

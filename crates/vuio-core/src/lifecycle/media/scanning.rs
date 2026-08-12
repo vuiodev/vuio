@@ -472,15 +472,16 @@ pub(in crate::lifecycle) async fn perform_initial_playlist_scan<D: DatabaseManag
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::{redb::RedbDatabase, MediaFile, MediaRepository};
+    use crate::database::{sqlite::SqliteDatabase, DatabaseManager, MediaFile, MediaRepository};
 
-    async fn database_with(files: &[PathBuf]) -> (Arc<RedbDatabase>, tempfile::TempDir) {
+    async fn database_with(files: &[PathBuf]) -> (Arc<SqliteDatabase>, tempfile::TempDir) {
         let temp = tempfile::TempDir::new().expect("temp dir");
         let database = Arc::new(
-            RedbDatabase::new(temp.path().join("test.redb"))
+            SqliteDatabase::new(temp.path().join("test.db"))
                 .await
                 .expect("database"),
         );
+        database.initialize().await.expect("schema");
         for path in files {
             database
                 .store_media_file(&MediaFile::new(path.clone(), 1024, "video/mp4".to_string()))
@@ -490,7 +491,7 @@ mod tests {
         (database, temp)
     }
 
-    async fn indexed_paths(database: &Arc<RedbDatabase>) -> Vec<PathBuf> {
+    async fn indexed_paths(database: &Arc<SqliteDatabase>) -> Vec<PathBuf> {
         let mut paths = database
             .load_file_fingerprints()
             .await

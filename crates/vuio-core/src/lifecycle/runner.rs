@@ -1,17 +1,18 @@
 use super::*;
 
-pub(super) async fn create_lifecycle_backup<D: DatabaseManager>(
-    database: &Arc<D>,
+pub(super) async fn create_lifecycle_backup<B: DatabaseBackend>(
+    database: &Arc<B>,
     config: &AppConfig,
 ) -> anyhow::Result<PathBuf> {
-    let database_path = config.get_database_path().with_extension("redb");
+    let extension = B::file_extension();
+    let database_path = database_path_for::<B>(config);
     let backup_dir = database_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join("backups");
     tokio::fs::create_dir_all(&backup_dir).await?;
     let filename = format!(
-        "vuio-{}-{}.redb",
+        "vuio-{}-{}.{extension}",
         chrono::Utc::now().format("%Y%m%dT%H%M%SZ"),
         uuid::Uuid::new_v4().simple()
     );
@@ -22,7 +23,7 @@ pub(super) async fn create_lifecycle_backup<D: DatabaseManager>(
     let mut backups = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) == Some("redb") {
+        if path.extension().and_then(|value| value.to_str()) == Some(extension) {
             backups.push(path);
         }
     }
@@ -40,7 +41,7 @@ pub(super) async fn run_with_database<D, Initialize, InitializeFuture, Restore, 
     restore_backend: Restore,
 ) -> anyhow::Result<()>
 where
-    D: DatabaseManager + 'static,
+    D: DatabaseBackend,
     Initialize: FnOnce(Arc<AppConfig>) -> InitializeFuture,
     InitializeFuture: std::future::Future<Output = anyhow::Result<D>>,
     Restore: FnOnce(Arc<AppConfig>, PathBuf) -> RestoreFuture,
@@ -367,7 +368,7 @@ where
         // The bound port, not the configured one: a banner naming a port nothing answers
         // on is worse than no banner.
         let web_url = format!("http://{}:{}", display_ip, app_state.http_binding.port());
-        let db_path = config.get_database_path().with_extension("redb");
+        let db_path = database_path_for::<D>(&config);
 
         fn tail_with_ellipsis(value: &str, max_chars: usize) -> String {
             let count = value.chars().count();
@@ -496,12 +497,21 @@ where
 }
 
 pub(super) async fn run_application(runtime_options: RuntimeOptions) -> anyhow::Result<()> {
-    run_with_database::<database::redb::RedbDatabase, _, _, _, _>(
+    run_application_with::<database::ActiveDatabase>(runtime_options).await
+}
+
+/// The startup path, written once against the backend seam.
+///
+/// Nothing here names a storage engine: the backend arrives as `B`, and every
+/// path, extension and restore rule comes from `DatabaseBackend`.
+async fn run_application_with<B: DatabaseBackend>(
+    runtime_options: RuntimeOptions,
+) -> anyhow::Result<()> {
+    run_with_database::<B, _, _, _, _>(
         runtime_options,
-        |config| async move { initialize_database(&config).await },
+        |config| async move { initialize_database::<B>(&config).await },
         |config, backup| async move {
-            let database_path = config.get_database_path().with_extension("redb");
-            database::redb::RedbDatabase::restore_backup_file(backup, database_path).await
+            B::restore_backup_file(&backup, &database_path_for::<B>(&config)).await
         },
     )
     .await

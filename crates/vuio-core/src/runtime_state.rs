@@ -1,4 +1,4 @@
-//! Small bounded runtime registries. Media records and indexes remain owned by ReDB.
+//! Small bounded runtime registries. Media records and indexes remain owned by the database.
 
 #[cfg(feature = "casting")]
 use crate::casting::RendererDevice;

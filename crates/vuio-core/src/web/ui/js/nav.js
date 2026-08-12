@@ -4,7 +4,13 @@ let metricsTimer = null;
 // Each view names how it lays out and what it needs doing on the way in and out.
 // The switcher used to hardcode two ids and an if/else, which a third tab broke.
 const NAV_VIEWS = {
-    browse: { display: 'block' },
+    // Browsing re-checks the library on the way in and keeps watching while it
+    // is visible, so content added from the Admin view appears without a reload.
+    browse: {
+        display: 'block',
+        enter: () => startLibraryWatch(),
+        leave: () => stopLibraryWatch(),
+    },
     stats: {
         display: 'flex',
         enter: () => {

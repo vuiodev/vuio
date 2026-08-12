@@ -512,7 +512,12 @@ function renderAdminLibraries(body) {
         // A key the file omits shows the value actually in force as a placeholder, and
         // stays out of the file unless it is edited — so saving a library does not
         // freeze this version's platform defaults into the config.
-        const effective = (adminData.effective_directories || [])[index] || {};
+        // A library that is not saved yet has no effective entry, so fall back to
+        // what the server says it would apply — otherwise a new folder claims it
+        // excludes nothing while the running config excludes the usual noise.
+        const effective = (adminData.effective_directories || [])[index]
+            || adminData.library_defaults
+            || {};
         grid.appendChild(
             libraryField(
                 'Extensions',

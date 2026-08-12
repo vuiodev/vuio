@@ -66,7 +66,7 @@ ingress:
 
 resources: {}
   # We usually recommend at least 128Mi of memory for small libraries,
-  # but larger libraries will require more memory for ReDB caches and scanning.
+  # but larger libraries will require more memory for SQLite caches and scanning.
   # limits:
   #   cpu: 1000m
   #   memory: 1Gi

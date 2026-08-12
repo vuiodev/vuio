@@ -418,8 +418,8 @@ backup_enabled = false
 }
 
 /// The shipped example is documentation people paste into place, so it has to be a
-/// config the server accepts. The previous one had drifted: it documented a
-/// `[database.redb]` table the model does not have, which loads as nothing at all.
+/// config the server accepts. It has drifted before, documenting a table the model
+/// never had — which loads as nothing at all rather than failing.
 #[test]
 fn the_example_config_is_loadable() {
     // Read rather than include_str!: the file lives outside the published crate.

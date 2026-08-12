@@ -6,7 +6,7 @@ use std::time::SystemTime;
 use tracing::{debug, info, warn};
 
 use crate::config::{AppConfig, MonitoredDirectoryConfig};
-use crate::database::{redb::RedbDatabase, DatabaseManager, FileFingerprint, MediaFile};
+use crate::database::{ActiveDatabase, DatabaseManager, FileFingerprint, MediaFile};
 use crate::platform::filesystem::{create_platform_filesystem_manager, FileSystemManager};
 
 /// Batch size for database operations during parallel scanning

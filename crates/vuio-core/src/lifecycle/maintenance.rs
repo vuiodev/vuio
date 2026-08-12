@@ -26,7 +26,7 @@ pub(super) async fn start_atomic_monitoring<D: DatabaseManager + 'static>(
 
                     // Get database statistics
                     if let Ok(db_stats) = database.get_stats().await {
-                        debug!("ReDB database statistics:");
+                        debug!("database statistics:");
                         debug!("  - Total media files: {}", db_stats.total_files);
                         debug!("  - Total media size: {} bytes", db_stats.total_size);
                         debug!("  - Database file size: {} bytes", db_stats.database_size);

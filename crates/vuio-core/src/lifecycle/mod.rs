@@ -1,6 +1,6 @@
 use crate::{
     config::{AppConfig, ConfigChangeEvent, ConfigManager},
-    database::{self, DatabaseManager, HealthRepository, StatsRepository},
+    database::{self, DatabaseBackend, DatabaseManager},
     logging, media,
     platform::{
         self,
@@ -112,8 +112,8 @@ mod tests {
             ("cover.webp", "image/webp"),
         ];
 
-        let database_path = temp.path().join("media.redb");
-        let database = database::redb::RedbDatabase::new(database_path.clone())
+        let database_path = temp.path().join("media.db");
+        let database = database::sqlite::SqliteDatabase::new(database_path.clone())
             .await
             .unwrap();
         database.initialize().await.unwrap();
@@ -124,7 +124,7 @@ mod tests {
         }
         drop(database);
 
-        let reopened = database::redb::RedbDatabase::new(database_path)
+        let reopened = database::sqlite::SqliteDatabase::new(database_path)
             .await
             .unwrap();
         reopened.initialize().await.unwrap();
@@ -143,17 +143,38 @@ mod tests {
 
     #[test]
     fn failed_database_is_quarantined_without_changing_its_contents() {
+        type Backend = database::ActiveDatabase;
+        let extension = Backend::file_extension();
+
         let temp = tempdir().unwrap();
-        let path = temp.path().join("media.redb");
+        let path = temp.path().join(format!("media.{extension}"));
         let original = b"unreadable database data";
         std::fs::write(&path, original).unwrap();
 
-        let quarantine = preserve_failed_database(&path).unwrap().unwrap();
+        // Sidecars must be quarantined with the file they describe, not left
+        // behind to be adopted by the replacement database.
+        let sidecars = Backend::sidecar_extensions()
+            .iter()
+            .map(|sidecar| path.with_extension(sidecar))
+            .collect::<Vec<_>>();
+        for sidecar in &sidecars {
+            std::fs::write(sidecar, b"sidecar").unwrap();
+        }
+
+        let quarantine = preserve_failed_database::<Backend>(&path).unwrap().unwrap();
 
         assert!(!path.exists());
         assert_eq!(std::fs::read(&quarantine).unwrap(), original);
         let name = quarantine.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("media.failed-"));
-        assert!(name.ends_with(".redb"));
+        assert!(name.ends_with(&format!(".{extension}")));
+        for (sidecar, moved) in sidecars.iter().zip(
+            Backend::sidecar_extensions()
+                .iter()
+                .map(|extension| quarantine.with_extension(extension)),
+        ) {
+            assert!(!sidecar.exists(), "{} was left behind", sidecar.display());
+            assert_eq!(std::fs::read(&moved).unwrap(), b"sidecar");
+        }
     }
 }

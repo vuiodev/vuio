@@ -309,7 +309,7 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
         "Applies from the next daily tick; the startup and shutdown backups need a restart.",
     ),
     optional(
-        "database.redb_cache_mb",
+        "database.cache_mb",
         "Index cache",
         FieldKind::Int { min: 1, max: 4_096 },
         Impact::Restart,
@@ -482,7 +482,28 @@ struct AdminConfigResponse {
     /// The same libraries with defaults filled in, so the UI can show what is actually
     /// in force for a key the file leaves out.
     effective_directories: Value,
+    /// What a library added from here will end up with for keys left unset.
+    ///
+    /// `effective_directories` only describes libraries that already exist, so a
+    /// newly added card has no entry to read and its exclusions would show as
+    /// "None" — while the server would in fact apply the platform defaults on the
+    /// next load. This is that answer, available before the library is saved.
+    library_defaults: LibraryDefaults,
     runtime: RuntimeInfo,
+}
+
+#[derive(Serialize)]
+struct LibraryDefaults {
+    exclude_patterns: Vec<String>,
+}
+
+impl LibraryDefaults {
+    fn for_current_platform() -> Self {
+        Self {
+            exclude_patterns: crate::platform::config::PlatformConfig::for_current_platform()
+                .get_default_exclude_patterns(),
+        }
+    }
 }
 
 /// The `[[media.directories]]` array as written, or `None` if the file cannot be read.
@@ -584,6 +605,7 @@ pub async fn get_config<D: DatabaseManager>(State(state): State<AppState<D>>) ->
         overrides: state.config_source.overrides.in_force().into_iter().collect(),
         directories,
         effective_directories,
+        library_defaults: LibraryDefaults::for_current_platform(),
         runtime: runtime_info(&state),
     })
     .into_response()
@@ -1222,7 +1244,7 @@ recursive = true
         // The index cannot be reopened under a live server, so this is one of the two
         // settings that genuinely still needs one.
         let mut restart = base.clone();
-        restart.database.redb_cache_mb += 1;
+        restart.database.cache_mb += 1;
         assert_eq!(impact_of(&base, &restart), ConfigChangeImpact::RestartRequired);
 
         // A change the schema does not cover still has to be reported honestly.
@@ -1253,7 +1275,7 @@ recursive = true
 
         // But a genuine restart-required change outranks both.
         let mut restart = mixed;
-        restart.database.redb_cache_mb += 1;
+        restart.database.cache_mb += 1;
         assert_eq!(
             impact_of(&base, &restart),
             ConfigChangeImpact::RestartRequired

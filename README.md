@@ -3,7 +3,7 @@
 A cross-platform media server written in Rust. Streams video, audio, and images to DLNA, Chromecast/Google TV, and compatible AirPlay video receivers.
 Less than 8Mb of RAM needed
 
-Built with Tokio, Axum, and Redb for high performance and reliability.
+Built with Tokio, Axum, and SQLite for high performance and reliability.
 
 **Supported platforms:** Windows, Linux, macOS, Docker (x64 and ARM64)
 
@@ -21,7 +21,7 @@ Built with Tokio, Axum, and Redb for high performance and reliability.
 - **Playlist Support** - Auto-imports M3U/PLS playlists from media directories
 - **Real-time Monitoring** - Detects file changes and updates database automatically
 - **Cross-platform** - Native integration for Windows, macOS, Linux
-- **Redb Database** - Embedded ACID-compliant database with crash recovery
+- **SQLite Database** - Embedded ACID-compliant database with crash recovery
 
 ## Homebrew (macOS & Linux)
 
@@ -153,7 +153,7 @@ docker run -d \
   -e VUIO_IP=192.168.1.100 \
   -e VUIO_PORT=8080 \
   -e VUIO_MEDIA_DIRS=/media \
-  -e VUIO_DB_PATH=/data/vuio.redb \
+  -e VUIO_DB_PATH=/data/vuio.db \
   vuio:latest
 ```
 
@@ -171,7 +171,7 @@ docker run -d \
 | `VUIO_WATCH_CHANGES` | true | Monitor for file changes |
 | `VUIO_CLEANUP_DELETED` | true | Remove deleted files from DB |
 | `VUIO_SCAN_PLAYLISTS` | true | Import M3U/PLS playlists |
-| `VUIO_DB_PATH` | /data/vuio.redb | Database file path |
+| `VUIO_DB_PATH` | /data/vuio.db | Database file path |
 | `VUIO_MULTICAST_TTL` | 4 | Multicast TTL |
 | `VUIO_ANNOUNCE_INTERVAL` | 30 | SSDP announce interval (seconds) |
 | `VUIO_AUTH` | false | Enable administrative/management authentication |
@@ -185,7 +185,7 @@ docker run -d \
 | `VUIO_UNAVAILABLE_ROOT_GRACE_HOURS` | 168 | How long an offline library keeps its content |
 | `VUIO_DB_VACUUM` | false | Compact the index at startup |
 | `VUIO_DB_BACKUP` | false | Back up the index at startup, daily, and at shutdown |
-| `VUIO_REDB_CACHE_MB` | 128 | Megabytes of the index kept cached |
+| `VUIO_DB_CACHE_MB` | 128 | Megabytes of the index kept cached |
 | `VUIO_UPNP_CALLBACK_ALLOWED_NETWORKS` | - | Extra CIDRs allowed as UPnP event callbacks |
 
 A container is configured entirely by these variables, so the dashboard's Admin tab is
@@ -293,7 +293,7 @@ Two describe what happens at startup and so have nothing to apply now — `scan_
 and `vacuum_on_startup`. They are marked **next start** rather than "restart required",
 because restarting on their account achieves nothing.
 
-Two genuinely need a restart: `database.path` and `database.redb_cache_mb`, since the index
+Two genuinely need a restart: `database.path` and `database.cache_mb`, since the index
 cannot be reopened underneath a running server. The Admin tab marks those and offers a
 restart button.
 
@@ -342,7 +342,7 @@ period and then dropped, because the address they are using has gone.
 - `vacuum_on_startup` - Compact database on startup
 - `backup_enabled` - Enable automatic backups. Only starts the daily backup task if it
   was already on at boot
-- `redb_cache_mb` - Megabytes of the index kept cached (default: 128)
+- `cache_mb` - Megabytes of the index kept cached (default: 128)
 
 **Management (`[management]`):**
 - `enabled` - Require the admin token for the dashboard and every management endpoint
@@ -394,16 +394,16 @@ Recommended directory structure:
 
 ## Database
 
-VuIO uses Redb, an embedded ACID-compliant database.
+VuIO uses SQLite, an embedded ACID-compliant database.
 
 ### Database Location
 
 | Platform | Default Path |
 |----------|--------------|
-| **Windows** | `[exe dir]\config\database\media.redb` |
-| **Linux** | `~/.local/share/vuio/media.redb` |
-| **macOS** | `~/Library/Application Support/vuio/media.redb` |
-| **Docker** | `/data/vuio.redb` (or `VUIO_DB_PATH`) |
+| **Windows** | `[exe dir]\config\database\media.db` |
+| **Linux** | `~/.local/share/vuio/media.db` |
+| **macOS** | `~/Library/Application Support/vuio/media.db` |
+| **Docker** | `/data/vuio.db` (or `VUIO_DB_PATH`) |
 
 ## Architecture
 
@@ -419,7 +419,7 @@ VuIO uses Redb, an embedded ACID-compliant database.
          │              Application Core               │
          │  ┌─────────┐  ┌─────────┐  ┌─────────────┐  │
          │  │ Config  │  │ Database│  │  Platform   │  │
-         │  │ Manager │  │ (Redb)  │  │ Abstraction │  │
+         │  │ Manager │  │ (SQLite)│  │ Abstraction │  │
          │  └─────────┘  └─────────┘  └─────────────┘  │
          └──────────────────────┬──────────────────────┘
                                 │
@@ -505,7 +505,7 @@ To monitor the server health, cache efficiency, and indexing status, you can que
         "cache_hit_rate_percent": 75.0,
         "average_response_time_ms": 12,
         "gigabytes_transferred": 0.25,
-        "redb_database": "active"
+        "database_backend": "sqlite"
       }
     }
     ```

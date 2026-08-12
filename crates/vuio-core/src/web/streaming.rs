@@ -76,18 +76,18 @@ pub async fn serve_media<D: DatabaseManager>(
         AppError::NotFound
     })?;
 
-    // Use ReDB database with atomic cache lookup
+    // Use the database with atomic cache lookup
     let file_info = state
         .database
         .get_file_location_by_id(file_id)
         .await
         .map_err(|e| {
-            error!("ReDB database error getting file by ID {}: {}", file_id, e);
+            error!("Database error getting file by ID {}: {}", file_id, e);
             state.web_metrics.record_error();
             AppError::NotFound
         })?
         .ok_or_else(|| {
-            debug!("ReDB database: file ID {} not found", file_id);
+            debug!("Database: file ID {} not found", file_id);
             state.web_metrics.record_error();
             AppError::NotFound
         })?;

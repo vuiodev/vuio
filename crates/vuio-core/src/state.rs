@@ -202,7 +202,7 @@ pub struct McpClient {
     pub expires_at: std::time::Instant,
 }
 
-pub struct AppState<D: DatabaseManager = crate::database::redb::RedbDatabase> {
+pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
     pub config: Arc<AppConfig>,
     pub live_config: Arc<LiveConfig>,
     pub config_source: Arc<ConfigSource>,

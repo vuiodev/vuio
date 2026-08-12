@@ -7,7 +7,7 @@ use std::sync::Arc;
 use tempfile::tempdir;
 use vuio_core::{
     config::{AppConfig, MonitoredDirectoryConfig, ValidationMode},
-    database::{redb::RedbDatabase, DatabaseManager, MediaFile, MediaRepository},
+    database::{sqlite::SqliteDatabase, DatabaseManager, MediaFile, MediaRepository},
     lifecycle::ApplicationStats,
     platform::{
         diagnostics::SystemDiagnosticsSampler, filesystem::create_platform_filesystem_manager,
@@ -89,7 +89,7 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
         .expect("write second video");
 
     let database = Arc::new(
-        RedbDatabase::new(temp.path().join("media.redb"))
+        SqliteDatabase::new(temp.path().join("media.db"))
             .await
             .expect("create database"),
     );
@@ -193,7 +193,7 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
     ];
 
     let database = Arc::new(
-        RedbDatabase::new(temp.path().join("media.redb"))
+        SqliteDatabase::new(temp.path().join("media.db"))
             .await
             .expect("create database"),
     );

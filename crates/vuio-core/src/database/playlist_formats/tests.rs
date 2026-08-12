@@ -78,7 +78,7 @@ fn test_stream_entries_are_not_resolved_as_filesystem_paths() {
 
 #[tokio::test]
 async fn test_generic_playlist_import_materializes_http_stream() {
-    use crate::database::redb::RedbDatabase;
+    use crate::database::sqlite::SqliteDatabase;
     use crate::database::DatabaseManager;
     use tempfile::tempdir;
 
@@ -87,7 +87,7 @@ async fn test_generic_playlist_import_materializes_http_stream() {
     let url = "https://cast1.asurahosting.com/proxy/julien/stream";
     fs::write(&playlist_path, format!("#EXTM3U\n{url}\n")).unwrap();
 
-    let database = RedbDatabase::new(temp.path().join("playlist.redb"))
+    let database = SqliteDatabase::new(temp.path().join("playlist.db"))
         .await
         .unwrap();
     database.initialize().await.unwrap();
@@ -110,7 +110,7 @@ async fn test_generic_playlist_import_materializes_http_stream() {
 
 #[tokio::test]
 async fn test_non_recursive_radio_root_uses_radio_importer() {
-    use crate::database::redb::RedbDatabase;
+    use crate::database::sqlite::SqliteDatabase;
     use crate::database::DatabaseManager;
     use tempfile::tempdir;
 
@@ -125,7 +125,7 @@ async fn test_non_recursive_radio_root_uses_radio_importer() {
     )
     .unwrap();
 
-    let database = RedbDatabase::new(temp.path().join("radio.redb"))
+    let database = SqliteDatabase::new(temp.path().join("radio.db"))
         .await
         .unwrap();
     database.initialize().await.unwrap();

@@ -12,7 +12,7 @@ use tempfile::{tempdir, TempDir};
 use tower::ServiceExt;
 
 use vuio_core::config::AppConfig;
-use vuio_core::database::redb::RedbDatabase;
+use vuio_core::database::sqlite::SqliteDatabase;
 use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository};
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
@@ -54,7 +54,7 @@ async fn send_mcp_message(
 async fn make_test_state() -> (TempDir, AppState) {
     let temp = tempdir().unwrap();
     let database = Arc::new(
-        RedbDatabase::new(temp.path().join("security-tests.redb"))
+        SqliteDatabase::new(temp.path().join("security-tests.db"))
             .await
             .unwrap(),
     );
@@ -146,10 +146,10 @@ async fn content_publication_and_cache_only_invalidation_have_distinct_revisions
 )]
 async fn test_mcp_initialize_and_tools_list() {
     let temp_dir = tempdir().unwrap();
-    let db_path = temp_dir.path().join("test_mcp.redb");
+    let db_path = temp_dir.path().join("test_mcp.db");
 
     // 1. Initialize DB and insert some sample files
-    let db = Arc::new(RedbDatabase::new(db_path).await.unwrap());
+    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
     db.initialize().await.unwrap();
 
     let audio_file = MediaFile {

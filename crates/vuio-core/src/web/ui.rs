@@ -183,6 +183,12 @@ pub struct ServerInfo {
     /// Whether a token was required to get here, so the dashboard knows whether to
     /// offer a sign-out. Nothing previously exposed this and the page could not tell.
     auth_enabled: bool,
+    /// The ContentDirectory revision, bumped whenever the library changes.
+    ///
+    /// UPnP renderers learn about a change by subscription; the dashboard has no
+    /// such channel, so it compares this against the revision it last rendered to
+    /// know when its view has gone stale.
+    library_revision: u32,
 }
 
 pub async fn server_info_handler<D: DatabaseManager>(
@@ -199,6 +205,9 @@ pub async fn server_info_handler<D: DatabaseManager>(
         server_name: state.current_config().server.name.clone(),
         monitored_directories,
         auth_enabled: state.auth.enabled(),
+        library_revision: state
+            .content_update_id
+            .load(std::sync::atomic::Ordering::SeqCst),
     })
 }
 

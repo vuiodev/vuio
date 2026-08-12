@@ -61,7 +61,7 @@ vacuum_on_startup = false
 backup_enabled = false
 # Omit to use the platform-appropriate default location.
 path = "./config/media.db"
-# redb_cache_mb = 128                   # Megabytes of index kept cached
+# cache_mb = 128                        # Megabytes of index kept cached
 
 [management]
 # Requires a token for the dashboard and every management endpoint.

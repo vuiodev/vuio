@@ -62,7 +62,7 @@ language.
   dependent crate must never enable it. Anything it exposes can change or vanish
   in a patch release.
 - **On-the-wire and on-disk formats** are versioned by their own protocols
-  (SSDP, UPnP, the redb schema), not by this crate's version.
+  (SSDP, UPnP, the SQLite schema), not by this crate's version.
 - **Log output** — message text and structure are for operators, not parsers.
 
 ### Rust version

@@ -28,7 +28,7 @@ pub(super) fn default_unavailable_root_grace_hours() -> u64 {
     168
 }
 
-pub(super) fn default_redb_cache_mb() -> usize {
+pub(super) fn default_cache_mb() -> usize {
     128
 }
 
@@ -213,6 +213,7 @@ pub struct DatabaseConfig {
     pub path: Option<String>,
     pub vacuum_on_startup: bool,
     pub backup_enabled: bool,
-    #[serde(default = "default_redb_cache_mb")]
-    pub redb_cache_mb: usize,
+    /// Page-cache budget in MiB.
+    #[serde(default = "default_cache_mb")]
+    pub cache_mb: usize,
 }

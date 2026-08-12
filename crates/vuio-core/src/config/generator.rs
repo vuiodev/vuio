@@ -225,7 +225,7 @@ impl ConfigGenerator {
 
         database_table["vacuum_on_startup"] = value(config.database.vacuum_on_startup);
         database_table["backup_enabled"] = value(config.database.backup_enabled);
-        database_table["redb_cache_mb"] = value(config.database.redb_cache_mb as i64);
+        database_table["cache_mb"] = value(config.database.cache_mb as i64);
 
         Ok(())
     }
@@ -468,10 +468,10 @@ mod tests {
                 supported_extensions: vec!["mp4".to_string(), "avi".to_string()],
             },
             database: DatabaseConfig {
-                path: Some("/test/vuio.redb".to_string()),
+                path: Some("/test/vuio.db".to_string()),
                 vacuum_on_startup: true,
                 backup_enabled: false,
-                redb_cache_mb: 128,
+                cache_mb: 128,
             },
             management: ManagementConfig::default(),
         };
@@ -497,7 +497,7 @@ mod tests {
         assert!(toml_content.contains("path = \"/test/media\""));
         assert!(toml_content.contains("recursive = true"));
         assert!(toml_content.contains("validation_mode = \"Strict\""));
-        assert!(toml_content.contains("path = \"/test/vuio.redb\""));
+        assert!(toml_content.contains("path = \"/test/vuio.db\""));
         assert!(toml_content.contains("vacuum_on_startup = true"));
         assert!(toml_content.contains("backup_enabled = false"));
 
@@ -533,7 +533,7 @@ mod tests {
         );
         assert_eq!(
             parsed_config.database.path,
-            Some("/test/vuio.redb".to_string())
+            Some("/test/vuio.db".to_string())
         );
         assert!(parsed_config.database.vacuum_on_startup);
         assert!(!parsed_config.database.backup_enabled);
@@ -580,7 +580,7 @@ mod tests {
                 path: None, // Test None case
                 vacuum_on_startup: false,
                 backup_enabled: true,
-                redb_cache_mb: 128,
+                cache_mb: 128,
             },
             management: ManagementConfig::default(),
         };
@@ -614,12 +614,12 @@ mod tests {
     }
 
     /// Two keys used to be dropped by every write: an explicit `case_sensitive`
-    /// override and the ReDB cache size silently reverted to their defaults each
+    /// override and the database cache size silently reverted to their defaults each
     /// time the file was regenerated.
     #[test]
     fn generated_config_round_trips_every_field() {
         let mut config = AppConfig::default_for_platform();
-        config.database.redb_cache_mb = 512;
+        config.database.cache_mb = 512;
         config.media.directories[0].case_sensitive = Some(true);
 
         let toml_content = ConfigGenerator::new()
@@ -628,7 +628,7 @@ mod tests {
             .expect("generate");
         let reloaded: AppConfig = toml::from_str(&toml_content).expect("parse");
 
-        assert_eq!(reloaded.database.redb_cache_mb, 512);
+        assert_eq!(reloaded.database.cache_mb, 512);
         assert_eq!(reloaded.media.directories[0].case_sensitive, Some(true));
         assert_eq!(reloaded, config);
     }

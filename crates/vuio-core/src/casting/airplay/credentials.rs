@@ -209,7 +209,7 @@ mod tests {
 
         let temp = tempfile::tempdir().unwrap();
         let database = std::sync::Arc::new(
-            crate::database::redb::RedbDatabase::new(temp.path().join("pairings.redb"))
+            crate::database::sqlite::SqliteDatabase::new(temp.path().join("pairings.db"))
                 .await
                 .unwrap(),
         );

@@ -2,7 +2,7 @@ use super::policy::TraversalReport;
 use super::*;
 
 /// Media scanner that uses the file system manager and database for efficient scanning.
-pub struct MediaScanner<D: DatabaseManager = RedbDatabase> {
+pub struct MediaScanner<D: DatabaseManager = ActiveDatabase> {
     filesystem_manager: Box<dyn FileSystemManager>,
     database_manager: Arc<D>,
 }
@@ -87,7 +87,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
     }
 
     /// Perform an incremental update by comparing database state with file system state
-    /// **OPTIMIZED FOR REDB DATABASE WITH BULK OPERATIONS**
+    /// **OPTIMIZED FOR DATABASE WITH BULK OPERATIONS**
     async fn perform_incremental_update(
         &self,
         _directory: &Path,
@@ -107,7 +107,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         let current_paths: HashSet<PathBuf> = current_normalized.keys().cloned().collect();
 
-        // **REDB BULK OPERATIONS - Collect files for batch processing**
+        // **BULK OPERATIONS - Collect files for batch processing**
         let mut files_to_insert = Vec::new();
         let mut files_to_update = Vec::new();
         let mut files_to_remove = Vec::new();
@@ -159,12 +159,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
             }
         }
 
-        // **EXECUTE BULK OPERATIONS WITH REDB DATABASE**
+        // **EXECUTE BULK OPERATIONS**
 
         // Bulk insert new files
         if !files_to_insert.is_empty() {
             tracing::info!(
-                "Bulk inserting {} new files using ReDB database",
+                "Bulk inserting {} new files using database",
                 files_to_insert.len()
             );
             for file in &files_to_insert {
@@ -192,7 +192,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // Bulk update changed files
         if !files_to_update.is_empty() {
             tracing::info!(
-                "Bulk updating {} changed files using ReDB database",
+                "Bulk updating {} changed files using database",
                 files_to_update.len()
             );
             self.database_manager
@@ -204,7 +204,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // Bulk remove deleted files
         if !files_to_remove.is_empty() {
             tracing::info!(
-                "Bulk removing {} deleted files using ReDB database",
+                "Bulk removing {} deleted files using database",
                 files_to_remove.len()
             );
             let removed_count = self
@@ -222,7 +222,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         // Log bulk operation summary
         tracing::info!(
-            "ReDB bulk operations completed: {} inserted, {} updated, {} removed, {} unchanged",
+            "bulk operations completed: {} inserted, {} updated, {} removed, {} unchanged",
             result.new_files.len(),
             result.updated_files.len(),
             result.removed_files.len(),

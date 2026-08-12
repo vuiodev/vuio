@@ -71,7 +71,7 @@ struct Args {
     /// Set log level
     #[arg(long = "log-level")]
     log_level: Option<String>,
-    /// Restore a validated Redb backup before opening the database
+    /// Restore a validated database backup before opening the database
     #[arg(long = "restore-backup")]
     restore_backup: Option<String>,
     /// Update the binary to the latest version from GitHub
