@@ -679,6 +679,163 @@ pub async fn album_tracks_order_by_track_number<B: DatabaseBackend>() {
     assert_eq!(names, ["a.mp3", "b.mp3", "c.mp3"]);
 }
 
+/// A multi-disc album plays in the order it was pressed.
+///
+/// Disc 2 track 1 belongs after disc 1 track 12, not before it, which is what
+/// ordering on the track number alone would give.
+pub async fn album_tracks_order_by_disc_then_track<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "disc-order").await;
+
+    let mut records = Vec::new();
+    for (disc, track, name) in [
+        (Some(2), Some(1), "d2t1.mp3"),
+        (Some(1), Some(12), "d1t12.mp3"),
+        (Some(1), Some(2), "d1t2.mp3"),
+        // No disc tag at all belongs with disc one, which is how a
+        // single-disc release is tagged.
+        (None, Some(1), "d0t1.mp3"),
+    ] {
+        let mut file = audio(&format!("/music/box/{name}"), 1);
+        file.album = Some("Boxed".to_string());
+        file.tags.disc_number = disc;
+        file.track_number = track;
+        records.push(file);
+    }
+    // An untagged record sorts last, as it does everywhere else.
+    let mut untagged = audio("/music/box/zz.mp3", 1);
+    untagged.album = Some("Boxed".to_string());
+    records.push(untagged);
+
+    database.bulk_store_media_files(&records).await.unwrap();
+
+    let query = MediaFileQuery::Album {
+        album: "Boxed".to_string(),
+        artist: None,
+    };
+    let names = database
+        .clone()
+        .read(move |session| {
+            let mut names = Vec::new();
+            session.visit_files(&query, 0, 10, |file| {
+                names.push(file.filename().to_owned());
+                Ok(())
+            })?;
+            Ok(names)
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        names,
+        ["d0t1.mp3", "d1t2.mp3", "d1t12.mp3", "zz.mp3", "d2t1.mp3"]
+    );
+}
+
+/// One query serves both a flat category listing and a nested one.
+pub async fn music_categories_narrow_to_their_filter<B: DatabaseBackend>() {
+    use crate::database::{MusicCategoryFilter, MusicCategoryType};
+
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "nested-categories").await;
+
+    let mut records = Vec::new();
+    for (index, (artist, album, genre)) in [
+        ("Metallica", "Ride the Lightning", "Metal"),
+        ("Metallica", "Load", "Rock"),
+        ("Portishead", "Dummy", "Trip Hop"),
+        // Two different artists with an identically named album: the reason a
+        // nested album listing has to be scoped to its artist.
+        ("Artist A", "Greatest Hits", "Rock"),
+        ("Artist B", "Greatest Hits", "Rock"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut file = audio(&format!("/music/t{index}.mp3"), 1);
+        file.artist = Some(artist.to_string());
+        file.album = Some(album.to_string());
+        file.genre = Some(genre.to_string());
+        records.push(file);
+    }
+    database.bulk_store_media_files(&records).await.unwrap();
+
+    let albums_of = |artist: &str| {
+        let filter = MusicCategoryFilter::artist(artist);
+        let database = database.clone();
+        async move {
+            database
+                .get_music_categories(MusicCategoryType::Album, &filter)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|category| category.name)
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(albums_of("Metallica").await, ["Load", "Ride the Lightning"]);
+    assert_eq!(albums_of("Portishead").await, ["Dummy"]);
+
+    // Same title, two artists: one album container each, not one shared.
+    assert_eq!(albums_of("Artist A").await, ["Greatest Hits"]);
+    assert_eq!(albums_of("Artist B").await, ["Greatest Hits"]);
+
+    // A genre lists the artists within it, which is the level minidlna puts
+    // between a genre and its albums.
+    let rock_artists = database
+        .get_music_categories(
+            MusicCategoryType::Artist,
+            &MusicCategoryFilter::genre("Rock"),
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|category| category.name)
+        .collect::<Vec<_>>();
+    assert_eq!(rock_artists, ["Artist A", "Artist B", "Metallica"]);
+
+    // And a genre-and-artist pair narrows to that artist's albums in it.
+    let scoped = database
+        .get_music_categories(
+            MusicCategoryType::Album,
+            &MusicCategoryFilter::genre("Rock").with_artist("Metallica"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].name, "Load");
+    assert!(
+        scoped[0].sample_id.is_some(),
+        "a category must name a record whose cover art can represent it"
+    );
+}
+
+/// Browsing the playlist list needs one child count per playlist.
+pub async fn playlist_entry_counts_are_returned_together<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "playlist-counts").await;
+
+    let ids = database
+        .bulk_store_media_files(&[
+            audio("/music/one.mp3", 1),
+            audio("/music/two.mp3", 1),
+            audio("/music/three.mp3", 1),
+        ])
+        .await
+        .unwrap();
+
+    let full = database.create_playlist("Full", None).await.unwrap();
+    let empty = database.create_playlist("Empty", None).await.unwrap();
+    database
+        .batch_add_to_playlist(full, &[(ids[0], 0), (ids[1], 1), (ids[2], 2)])
+        .await
+        .unwrap();
+
+    let counts = database.count_playlist_entries().await.unwrap();
+    assert_eq!(counts.get(&full), Some(&3));
+    // A playlist with no entries has no row to group, so it is simply absent.
+    assert_eq!(counts.get(&empty), None);
+}
+
 pub async fn filtered_query_searches_text_and_pages_by_cursor<B: DatabaseBackend>() {
     let temp = tempfile::tempdir().unwrap();
     let database = open::<B>(&temp, "filtered").await;
@@ -1331,6 +1488,9 @@ macro_rules! backend_conformance_tests {
         conformance_case!(directory_visitor_orders_and_pages);
         conformance_case!(file_visitor_pages_a_directory_in_natural_order);
         conformance_case!(album_tracks_order_by_track_number);
+        conformance_case!(album_tracks_order_by_disc_then_track);
+        conformance_case!(music_categories_narrow_to_their_filter);
+        conformance_case!(playlist_entry_counts_are_returned_together);
         conformance_case!(filtered_query_searches_text_and_pages_by_cursor);
         conformance_case!(read_session_finds_records_by_id_and_path);
         conformance_case!(playlist_lifecycle);

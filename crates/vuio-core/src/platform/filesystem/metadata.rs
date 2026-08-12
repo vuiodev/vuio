@@ -1,14 +1,22 @@
 //! Reading tags, stream properties and cover art with symphonia.
 //!
 //! One reader covers every container symphonia can demux, so a library of OGG,
-//! Opus, WAV or AIFF files categorizes the same way an MP3 library does. APEv1
-//! and APEv2 tags come along for free: symphonia registers its APE reader as a
-//! probeable metadata source and scans for trailing metadata before it looks
-//! for a container, which is exactly where APE tags live.
+//! Opus, FLAC, AIFF or MP4 files categorizes the same way an MP3 library does.
+//! APEv1 and APEv2 tags come along for free: symphonia registers its APE reader
+//! as a probeable metadata source and scans for trailing metadata before it
+//! looks for a container, which is exactly where APE tags live.
 //!
-//! Two gaps are worth knowing about. `.wma` has no ASF reader, and a bare
-//! Monkey's Audio `.ape` file has no demuxer — the APE *tag* reader cannot
-//! rescue a container that never probes. Both fall back to filename parsing.
+//! Three gaps are worth knowing about, all of them upstream:
+//!
+//! - `.wma` has no ASF reader at all.
+//! - A bare Monkey's Audio `.ape` file has no demuxer. The APE *tag* reader
+//!   cannot rescue a container that never probes.
+//! - `.wav` reads no tags. symphonia 0.6.0's WAV reader parses the RIFF INFO
+//!   list into a metadata log and then overwrites that log with the empty one
+//!   from its options before returning, so the tags it collected are dropped.
+//!   AIFF, which shares the same crate, does this correctly.
+//!
+//! All three fall back to parsing the filename.
 
 use super::*;
 use crate::database::{AudioTags, MediaFile, StreamInfo};
@@ -279,12 +287,16 @@ fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) {
         }
         // Release date first, then the recording and original dates as
         // fallbacks, so a reissue still reports the year the browse tree groups
-        // it under.
+        // it under. Every dialect spells this differently: Vorbis comments use
+        // DATE, ID3v2.4 uses TDRC, ID3v2.3 uses TYER, and RIFF uses ICRD.
         StandardTag::ReleaseDate(value) => set_date(probed, value, true),
         StandardTag::RecordingDate(value) | StandardTag::OriginalReleaseDate(value) => {
             set_date(probed, value, false)
         }
-        StandardTag::OriginalReleaseYear(value) | StandardTag::OriginalRecordingYear(value) => {
+        StandardTag::ReleaseYear(value) => probed.year = Some(u32::from(*value)),
+        StandardTag::RecordingYear(value)
+        | StandardTag::OriginalReleaseYear(value)
+        | StandardTag::OriginalRecordingYear(value) => {
             probed.year.get_or_insert(u32::from(*value));
         }
         _ => {}

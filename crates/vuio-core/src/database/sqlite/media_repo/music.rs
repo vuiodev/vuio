@@ -167,6 +167,23 @@ impl SqliteDatabase {
         self.query_media(MediaFileQuery::Year(year)).await
     }
 
+    pub(in crate::database::sqlite) async fn get_media_tags_impl(
+        &self,
+        media_file_id: i64,
+    ) -> Result<Vec<(String, String)>> {
+        self.execute_read(move |connection| {
+            let mut statement = connection.prepare_cached(
+                "SELECT key, value FROM media_tags WHERE media_file_id = ? \
+                 ORDER BY key, value",
+            )?;
+            let tags = statement
+                .query_map([media_file_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(tags)
+        })
+        .await
+    }
+
     pub(in crate::database::sqlite) async fn get_music_by_album_artist_impl(
         &self,
         album_artist: &str,

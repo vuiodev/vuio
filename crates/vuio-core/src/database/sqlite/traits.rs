@@ -137,6 +137,10 @@ impl MediaRepository for SqliteDatabase {
         SqliteDatabase::get_music_by_album_artist_impl(self, album_artist).await
     }
 
+    async fn get_media_tags(&self, media_file_id: i64) -> Result<Vec<(String, String)>> {
+        SqliteDatabase::get_media_tags_impl(self, media_file_id).await
+    }
+
     async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
         SqliteDatabase::get_files_by_paths_impl(self, paths).await
     }

@@ -746,6 +746,12 @@ pub trait MediaRepository: Send + Sync {
     /// Get music files by album artist
     async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>>;
 
+    /// Every tag stored for one record that has no column of its own.
+    ///
+    /// Returned as (normalized key, value) pairs, sorted by key. A tag with
+    /// several values — two artists, three genres — appears once per value.
+    async fn get_media_tags(&self, media_file_id: i64) -> Result<Vec<(String, String)>>;
+
     /// Get multiple files by their paths in a single query.
     async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
 
