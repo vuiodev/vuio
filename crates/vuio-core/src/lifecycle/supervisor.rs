@@ -524,7 +524,7 @@ pub(super) async fn run_monitoring_supervisor<D: DatabaseManager + 'static>(
                 Err(error) => warn!("Could not stop file monitoring: {error:#}"),
             }
         }
-    };
+    }
 
     apply(
         &watcher,

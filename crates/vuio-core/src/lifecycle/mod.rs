@@ -41,11 +41,6 @@ pub use runner::ApplicationRunner;
 pub use shutdown::ShutdownCoordinator;
 use shutdown::*;
 
-/// Host-provided options for starting the VuIO runtime.
-///
-/// Command-line parsing deliberately lives outside `vuio-core`; desktop and
-/// service hosts construct this type directly.
-
 /// The handful of settings a host can override without owning the whole
 /// configuration file.
 ///
@@ -56,6 +51,10 @@ use shutdown::*;
 /// here because that is where callers expect it.
 pub use crate::config::ConfigOverrides;
 
+/// Host-provided options for starting the VuIO runtime.
+///
+/// Command-line parsing deliberately lives outside `vuio-core`; desktop and
+/// service hosts construct this type directly.
 #[derive(Clone)]
 pub struct RuntimeOptions {
     pub debug: bool,

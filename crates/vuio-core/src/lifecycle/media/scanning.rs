@@ -571,7 +571,7 @@ mod tests {
         let root = tempfile::TempDir::new().expect("root");
         let file = root.path().join("on-the-nas.mp4");
         std::fs::write(&file, b"x").expect("write");
-        let (database, _temp) = database_with(&[file.clone()]).await;
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
 
         // The library is still configured, but the path is gone — an unmounted volume.
         let offline = root.path().to_path_buf();
@@ -613,7 +613,7 @@ mod tests {
         let file = root.path().join("keep.mp4");
         std::fs::write(&file, b"x").expect("write");
 
-        let (database, _temp) = database_with(&[file.clone()]).await;
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
         let removed = validate_and_cleanup_deleted_files(database.clone(), &[], true)
             .await
             .expect("cleanup");
@@ -639,9 +639,9 @@ mod tests {
         let file = link.join("through-the-link.mp4");
         std::fs::write(&file, b"x").expect("write");
 
-        let (database, _temp) = database_with(&[file.clone()]).await;
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
         // Configured by the symlinked path, stored under the resolved one.
-        let removed = validate_and_cleanup_deleted_files(database.clone(), &[link.clone()], true)
+        let removed = validate_and_cleanup_deleted_files(database.clone(), std::slice::from_ref(&link), true)
             .await
             .expect("cleanup");
 

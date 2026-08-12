@@ -1092,10 +1092,10 @@ mdns_enabled = true
 "#,
         );
         let present = present_keys(&document);
-        assert_eq!(present["server.port"], true);
-        assert_eq!(present["network.mdns_enabled"], true);
-        assert_eq!(present["network.multicast_ttl"], false);
-        assert_eq!(present["media.autoplay_enabled"], false);
+        assert!(present["server.port"]);
+        assert!(present["network.mdns_enabled"]);
+        assert!(!present["network.multicast_ttl"]);
+        assert!(!present["media.autoplay_enabled"]);
     }
 
     #[test]
