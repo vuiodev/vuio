@@ -32,6 +32,9 @@ mod platform;
 pub enum ConfigChangeImpact {
     NoChange,
     LiveReload,
+    /// Nothing to apply: the setting only describes what happens at startup. Distinct
+    /// from `RestartRequired`, where the running server is still using the old value.
+    NextStart,
     RestartRequired,
 }
 

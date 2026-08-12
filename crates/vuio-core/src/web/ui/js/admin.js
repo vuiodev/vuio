@@ -213,10 +213,20 @@ function renderAdminRow(spec) {
     const name = document.createElement('span');
     name.textContent = spec.label;
     label.appendChild(name);
-    if (spec.impact === 'restart') {
+    // "restart" means the running server is still using the old value; "next start"
+    // means the setting only describes what happens at startup and there is nothing
+    // to apply now. Collapsing the two is what made the old labels untrustworthy.
+    const IMPACT_PILLS = {
+        restart: ['admin-pill-restart', 'restart', 'The running server keeps the old value until it is restarted.'],
+        next_start: ['admin-pill-next', 'next start', 'Describes what happens at startup, so there is nothing to apply now.'],
+    };
+    const pillSpec = IMPACT_PILLS[spec.impact];
+    if (pillSpec) {
+        const [className, text, title] = pillSpec;
         const pill = document.createElement('span');
-        pill.className = 'admin-pill admin-pill-restart';
-        pill.textContent = 'restart';
+        pill.className = 'admin-pill ' + className;
+        pill.textContent = text;
+        pill.title = title;
         label.appendChild(pill);
     }
     if (!isSet) {
@@ -599,6 +609,8 @@ async function saveAdminConfig() {
         if (result.impact === 'restart_required') {
             showAdminRestartBanner();
             showToast('Settings saved. A restart is needed for some of them.', 'info');
+        } else if (result.impact === 'next_start') {
+            showToast('Settings saved. They apply the next time the server starts.', 'info');
         } else if (result.impact === 'no_change') {
             showToast('No changes to save.', 'info');
         } else {

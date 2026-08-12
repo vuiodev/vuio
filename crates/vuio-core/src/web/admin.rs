@@ -44,12 +44,18 @@ enum FieldKind {
     StringList,
 }
 
-/// Whether a change takes hold in the running server or waits for the next start.
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
+/// When a change takes hold.
+///
+/// `Restart` and `NextStart` are not the same thing, and conflating them is what made the
+/// old labels untrustworthy: one means the running server is still using the old value,
+/// the other means the setting only ever describes what happens at startup and there is
+/// nothing to apply now.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 enum Impact {
     Live,
     Restart,
+    NextStart,
 }
 
 #[derive(Clone, Copy, Serialize)]
@@ -192,7 +198,8 @@ const NETWORK_FIELDS: &[FieldSpec] = &[
             Impact::Restart,
             "Hop limit for SSDP discovery packets.",
         ),
-        "Not applied: the SSDP socket TTL is currently fixed at 4.",
+        "Raise this only to reach a subnet across a router; most networks need no more \
+         than the default.",
     ),
     field(
         "network.announce_interval_seconds",
@@ -215,7 +222,7 @@ const NETWORK_FIELDS: &[FieldSpec] = &[
         "network.upnp_callback_allowed_networks",
         "UPnP callback networks",
         FieldKind::StringList,
-        Impact::Restart,
+        Impact::Live,
         "Extra CIDRs accepted as UPnP event callback destinations, beyond the subscriber itself.",
     ),
 ];
@@ -225,22 +232,23 @@ const MEDIA_FIELDS: &[FieldSpec] = &[
         "media.scan_on_startup",
         "Scan at startup",
         FieldKind::Bool,
-        Impact::Restart,
+        Impact::NextStart,
         "Walk every library at boot to pick up changes made while the server was down.",
     ),
     field(
         "media.watch_for_changes",
         "Watch for changes",
         FieldKind::Bool,
-        Impact::Live,
-        "Index new and deleted files as they appear, without waiting for a restart.",
+        Impact::Restart,
+        "Index new and deleted files as they appear, rather than only at startup.",
     ),
     optional(
         "media.cleanup_deleted_files",
         "Remove deleted files",
         FieldKind::Bool,
-        Impact::Restart,
-        "Drop files from the index when the startup scan finds them gone.",
+        Impact::Live,
+        "Drop files from the index once they are gone from disk, or once their library is \
+         no longer configured. Turn it off and nothing is removed automatically.",
     ),
     optional(
         "media.autoplay_enabled",
@@ -287,7 +295,7 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
         "database.vacuum_on_startup",
         "Compact at startup",
         FieldKind::Bool,
-        Impact::Restart,
+        Impact::NextStart,
         "Reclaim space in the index file at boot. Slows startup on a large library.",
     ),
     noted(
@@ -683,14 +691,21 @@ fn impact_of(old: &AppConfig, new: &AppConfig) -> ConfigChangeImpact {
         return ConfigChangeImpact::RestartRequired;
     };
 
-    let restart = SECTIONS
-        .iter()
-        .flat_map(|section| section.fields)
-        .filter(|spec| spec.impact == Impact::Restart)
-        .any(|spec| value_at(&old_value, spec.key) != value_at(&new_value, spec.key));
+    let changed = |impact: Impact| {
+        SECTIONS
+            .iter()
+            .flat_map(|section| section.fields)
+            .filter(|spec| spec.impact == impact)
+            .any(|spec| value_at(&old_value, spec.key) != value_at(&new_value, spec.key))
+    };
 
-    if restart {
+    // Reported worst-first. A save that touches both a live setting and a next-start one
+    // reports the caveat, because the live half already took effect and the half that did
+    // not is the part worth saying out loud.
+    if changed(Impact::Restart) {
         ConfigChangeImpact::RestartRequired
+    } else if changed(Impact::NextStart) {
+        ConfigChangeImpact::NextStart
     } else {
         ConfigChangeImpact::LiveReload
     }
@@ -826,6 +841,7 @@ pub async fn put_config<D: DatabaseManager>(
         "impact": match impact {
             ConfigChangeImpact::NoChange => "no_change",
             ConfigChangeImpact::LiveReload => "live",
+            ConfigChangeImpact::NextStart => "next_start",
             ConfigChangeImpact::RestartRequired => "restart_required",
         },
     }))
@@ -1136,6 +1152,50 @@ recursive = true
             impact_of(&base, &directories),
             ConfigChangeImpact::LiveReload
         );
+    }
+
+    /// A setting that only describes startup is not the same as one the running server
+    /// is still ignoring, and reporting the first as "restart required" is what taught
+    /// operators to distrust the labels.
+    #[test]
+    fn a_startup_only_change_is_not_reported_as_restart_required() {
+        let base = AppConfig::default_for_platform();
+
+        let mut next_start = base.clone();
+        next_start.media.scan_on_startup = !next_start.media.scan_on_startup;
+        assert_eq!(impact_of(&base, &next_start), ConfigChangeImpact::NextStart);
+
+        // Paired with a live change, the caveat still wins: the live half already
+        // applied, and the half that did not is the part worth saying.
+        let mut mixed = next_start.clone();
+        mixed.media.autoplay_enabled = !mixed.media.autoplay_enabled;
+        assert_eq!(impact_of(&base, &mixed), ConfigChangeImpact::NextStart);
+
+        // But a genuine restart-required change outranks both.
+        let mut restart = mixed;
+        restart.server.port += 1;
+        assert_eq!(
+            impact_of(&base, &restart),
+            ConfigChangeImpact::RestartRequired
+        );
+    }
+
+    /// Every field the UI can show has to carry a pill the UI knows how to render, and
+    /// every impact has to be reachable — an unreferenced variant means a setting was
+    /// silently reclassified into a state nothing displays.
+    #[test]
+    fn every_impact_variant_is_used() {
+        let impacts: Vec<Impact> = SECTIONS
+            .iter()
+            .flat_map(|section| section.fields)
+            .map(|spec| spec.impact)
+            .collect();
+        for expected in [Impact::Live, Impact::Restart, Impact::NextStart] {
+            assert!(
+                impacts.contains(&expected),
+                "no setting is classified {expected:?}"
+            );
+        }
     }
 
     #[test]

@@ -218,6 +218,13 @@ textarea.admin-input {
     color: #fbbf24;
 }
 
+/* Cooler than the restart pill: nothing is stale, the setting simply describes
+   startup and there is nothing to apply now. */
+.admin-pill-next {
+    background: rgba(148, 163, 184, 0.14);
+    color: #94a3b8;
+}
+
 .admin-pill-unset {
     background: rgba(255, 255, 255, 0.06);
     color: var(--text-secondary);
