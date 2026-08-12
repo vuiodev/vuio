@@ -16,13 +16,24 @@ fn canonical_root(path: &Path) -> PathBuf {
 /// files deleted from disk, and files left behind by a library that is no longer
 /// configured.
 ///
+/// `enabled` is `media.cleanup_deleted_files`, and it is taken as an argument rather than
+/// checked by each caller so that "do not remove anything from the index automatically"
+/// means exactly that. It used to be honoured by the startup scan and ignored by the
+/// periodic pass, which removed the same files five minutes later.
+///
 /// Uses two-phase approach to avoid RwLock deadlock:
 /// 1. Stream all files and collect paths to delete (read lock)
 /// 2. Drop stream, then bulk delete (write lock)
 pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
     database: Arc<D>,
     monitored_roots: &[PathBuf],
+    enabled: bool,
 ) -> anyhow::Result<usize> {
+    if !enabled {
+        debug!("Skipping index cleanup: cleanup_deleted_files is off");
+        return Ok(0);
+    }
+
     info!("Validating cached media files...");
 
     // Phase 1: Collect paths to delete (holds read lock)
@@ -356,30 +367,36 @@ pub(in crate::lifecycle) async fn perform_initial_media_scan<D: DatabaseManager 
         );
 
         // Validate files to catch any that were deleted while app was offline
-        if config.media.cleanup_deleted_files {
-            let roots: Vec<_> = config
-                .media
-                .directories
-                .iter()
-                .map(|d| PathBuf::from(&d.path))
-                .collect();
-            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
-        }
+        let roots: Vec<_> = config
+            .media
+            .directories
+            .iter()
+            .map(|d| PathBuf::from(&d.path))
+            .collect();
+        validate_and_cleanup_deleted_files(
+            database.clone(),
+            &roots,
+            config.media.cleanup_deleted_files,
+        )
+        .await?;
 
         Ok(())
     } else {
         info!("Skipping full scan (scan on startup disabled)");
 
         // Validate that cached files still exist on disk and remove any that don't (if enabled)
-        if config.media.cleanup_deleted_files {
-            let roots: Vec<_> = config
-                .media
-                .directories
-                .iter()
-                .map(|d| PathBuf::from(&d.path))
-                .collect();
-            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
-        }
+        let roots: Vec<_> = config
+            .media
+            .directories
+            .iter()
+            .map(|d| PathBuf::from(&d.path))
+            .collect();
+        validate_and_cleanup_deleted_files(
+            database.clone(),
+            &roots,
+            config.media.cleanup_deleted_files,
+        )
+        .await?;
 
         Ok(())
     }
@@ -496,16 +513,55 @@ mod tests {
         std::fs::write(&orphan, b"x").expect("write");
 
         let (database, _temp) = database_with(&[kept_file.clone(), orphan.clone()]).await;
-        let removed = validate_and_cleanup_deleted_files(
-            database.clone(),
-            &[kept_root.path().to_path_buf()],
-        )
-        .await
-        .expect("cleanup");
+        let removed =
+            validate_and_cleanup_deleted_files(database.clone(), &[kept_root.path().to_path_buf()], true)
+                .await
+                .expect("cleanup");
 
         assert_eq!(removed, 1);
         // The index stores canonical paths, which on macOS resolves /var to /private/var.
         assert_eq!(indexed_paths(&database).await, vec![canonical_root(&kept_file)]);
+    }
+
+    /// `cleanup_deleted_files = false` has to mean nothing is removed from the index
+    /// automatically. The startup scan honoured it and the 300-second reconciliation tick
+    /// did not, so switching it off delayed deletions by five minutes rather than
+    /// preventing them — and once the orphan prune started running through the same
+    /// ungated call, it removed whole libraries too.
+    #[tokio::test]
+    async fn cleanup_disabled_removes_nothing() {
+        let root = tempfile::TempDir::new().expect("root");
+        let gone_root = tempfile::TempDir::new().expect("gone");
+        let present = root.path().join("here.mp4");
+        let deleted = root.path().join("gone.mp4");
+        let orphan = gone_root.path().join("orphan.mp4");
+        std::fs::write(&present, b"x").expect("write");
+        std::fs::write(&orphan, b"x").expect("write");
+
+        let (database, _temp) =
+            database_with(&[present.clone(), deleted.clone(), orphan.clone()]).await;
+        let removed = validate_and_cleanup_deleted_files(
+            database.clone(),
+            &[root.path().to_path_buf()],
+            false,
+        )
+        .await
+        .expect("cleanup");
+
+        assert_eq!(removed, 0);
+        // Both the file missing from disk and the orphaned library survive.
+        assert_eq!(indexed_paths(&database).await.len(), 3);
+
+        // And with it on, the same call removes both.
+        let removed = validate_and_cleanup_deleted_files(
+            database.clone(),
+            &[root.path().to_path_buf()],
+            true,
+        )
+        .await
+        .expect("cleanup");
+        assert_eq!(removed, 2);
+        assert_eq!(indexed_paths(&database).await, vec![canonical_root(&present)]);
     }
 
     /// A configured library that is offline is not the same as one that was removed:
@@ -522,7 +578,7 @@ mod tests {
         let stored = canonical_root(&file);
         drop(root);
 
-        let removed = validate_and_cleanup_deleted_files(database.clone(), &[offline])
+        let removed = validate_and_cleanup_deleted_files(database.clone(), &[offline], true)
             .await
             .expect("cleanup");
 
@@ -541,7 +597,7 @@ mod tests {
 
         let (database, _temp) = database_with(&[present.clone(), deleted]).await;
         let removed =
-            validate_and_cleanup_deleted_files(database.clone(), &[root.path().to_path_buf()])
+            validate_and_cleanup_deleted_files(database.clone(), &[root.path().to_path_buf()], true)
                 .await
                 .expect("cleanup");
 
@@ -558,7 +614,7 @@ mod tests {
         std::fs::write(&file, b"x").expect("write");
 
         let (database, _temp) = database_with(&[file.clone()]).await;
-        let removed = validate_and_cleanup_deleted_files(database.clone(), &[])
+        let removed = validate_and_cleanup_deleted_files(database.clone(), &[], true)
             .await
             .expect("cleanup");
 
@@ -585,7 +641,7 @@ mod tests {
 
         let (database, _temp) = database_with(&[file.clone()]).await;
         // Configured by the symlinked path, stored under the resolved one.
-        let removed = validate_and_cleanup_deleted_files(database.clone(), &[link.clone()])
+        let removed = validate_and_cleanup_deleted_files(database.clone(), &[link.clone()], true)
             .await
             .expect("cleanup");
 
