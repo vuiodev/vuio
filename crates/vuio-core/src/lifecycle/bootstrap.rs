@@ -31,11 +31,22 @@ pub(super) async fn start_platform_adaptation<D: DatabaseManager + 'static>(
                                         || old_config.server.uuid != new_config.server.uuid
                                         || old_config.network != new_config.network
                                         || old_config.database != new_config.database
-                                        || old_config.management != new_config.management
                                     {
                                         warn!(
-                                            "Configuration reloaded; server identity/bind, network, database, or management changes require restart"
+                                            "Configuration reloaded; server identity/bind, network or database changes require restart"
                                         );
+                                    }
+                                    if old_config.management != new_config.management {
+                                        if let Err(error) = app_state
+                                            .auth
+                                            .apply(&new_config.management, &app_state.config_source.path)
+                                        {
+                                            error!(
+                                                "Keeping the previous management settings: {error:#}"
+                                            );
+                                        } else {
+                                            info!("Applied new management settings");
+                                        }
                                     }
                                     *app_state.media_directories.write().await =
                                         new_config.media.directories.clone();

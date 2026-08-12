@@ -323,17 +323,18 @@ const MANAGEMENT_FIELDS: &[FieldSpec] = &[
             "management.enabled",
             "Require a token",
             FieldKind::Bool,
-            Impact::Restart,
+            Impact::Live,
             "Protect the dashboard and every management endpoint behind the admin token.",
         ),
-        "The --auth flag and VUIO_AUTH=1 also turn this on; neither this nor the file can \
-         switch off auth the host asked for.",
+        "The --auth flag and VUIO_AUTH=1 also turn this on, and neither the file nor this \
+         switch can undo that. Turning it on signs out nobody, but everyone will need the \
+         token on their next visit.",
     ),
     optional(
         "management.token_file",
         "Token file",
         FieldKind::Path,
-        Impact::Restart,
+        Impact::Live,
         "Where the admin token is read from. Leave unset for admin.token beside this config.",
     ),
     optional(
@@ -343,7 +344,7 @@ const MANAGEMENT_FIELDS: &[FieldSpec] = &[
             min: 1,
             max: 8_760,
         },
-        Impact::Restart,
+        Impact::Live,
         "Hours a browser stays signed in after entering the token.",
     ),
     noted(
@@ -351,7 +352,7 @@ const MANAGEMENT_FIELDS: &[FieldSpec] = &[
             "management.allowed_networks",
             "Allowed networks",
             FieldKind::StringList,
-            Impact::Restart,
+            Impact::Live,
             "CIDRs permitted to reach management endpoints, in addition to loopback.",
         ),
         "Leave empty to allow loopback and private/link-local addresses only.",
@@ -834,6 +835,14 @@ pub async fn put_config<D: DatabaseManager>(
     // library set the host explicitly overrode.
     let mut running = candidate;
     state.config_source.overrides.apply(&mut running);
+    // Auth settings are held by AuthState rather than read from the config per request,
+    // so they need applying explicitly. Doing it here as well as in the watcher's reload
+    // handler means a save takes effect immediately rather than after the debounce.
+    if state.current_config().management != running.management {
+        if let Err(error) = state.auth.apply(&running.management, &path) {
+            tracing::error!("Keeping the previous management settings: {error:#}");
+        }
+    }
     state.live_config.store(std::sync::Arc::new(running));
 
     Json(json!({

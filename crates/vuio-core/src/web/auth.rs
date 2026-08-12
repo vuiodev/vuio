@@ -33,118 +33,210 @@ struct Session {
     expires_at: Instant,
 }
 
-pub struct AuthState {
-    enabled: bool,
+/// The parts of `[management]` that can change while the server runs.
+///
+/// Held behind one lock rather than three so a reload swaps them together: a request
+/// must never be checked against the new allowlist and the old token.
+#[derive(Debug)]
+struct ManagementSettings {
     admin_token: String,
+    session_ttl: Duration,
+    allowed_networks: Vec<IpNet>,
+    token_path: PathBuf,
+}
+
+pub struct AuthState {
+    /// `true` once anything has switched auth on. Whether that was the command line,
+    /// the environment or the config file is remembered separately, because neither of
+    /// the first two may be undone by a later config reload.
+    enabled: std::sync::atomic::AtomicBool,
+    /// Auth was demanded by `--auth` or `VUIO_AUTH`, so a config file saying
+    /// `enabled = false` cannot switch it off.
+    forced_on: bool,
+    settings: std::sync::RwLock<ManagementSettings>,
     sessions: Mutex<HashMap<String, Session>>,
     login_attempts: Mutex<HashMap<IpAddr, (Instant, u8)>>,
     management_requests: Mutex<HashMap<IpAddr, (Instant, u16)>>,
     concurrency: Arc<tokio::sync::Semaphore>,
-    session_ttl: Duration,
-    allowed_networks: Vec<IpNet>,
-    token_path: PathBuf,
 }
 
 impl std::fmt::Debug for AuthState {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("AuthState")
-            .field("enabled", &self.enabled)
-            .field("session_ttl", &self.session_ttl)
-            .field("allowed_networks", &self.allowed_networks)
+            .field("enabled", &self.enabled())
+            .field("settings", &self.settings_read())
             .finish_non_exhaustive()
     }
 }
 
+/// Where the admin token is read from: the configured file, else `admin.token` beside
+/// the configuration.
+fn resolve_token_path(config: &ManagementConfig, config_path: &Path) -> PathBuf {
+    config
+        .token_file
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("admin.token")
+        })
+}
+
+/// Read the admin token, generating and persisting one if the file does not exist yet.
+fn load_admin_token(token_path: &Path) -> Result<String> {
+    if let Ok(token) = std::env::var("VUIO_ADMIN_TOKEN") {
+        validate_token(token.trim())?;
+        return Ok(token.trim().to_owned());
+    }
+    if token_path.exists() {
+        verify_private_token(token_path)?;
+        let token = std::fs::read_to_string(token_path)
+            .with_context(|| format!("failed to read {}", token_path.display()))?;
+        validate_token(token.trim())?;
+        return Ok(token.trim().to_owned());
+    }
+    let token = random_token();
+    if let Some(parent) = token_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    write_private_token(token_path, &token)?;
+    tracing::warn!(
+        "Generated management token at {}. Keep this file private.",
+        token_path.display()
+    );
+    Ok(token)
+}
+
+fn parse_networks(config: &ManagementConfig) -> Result<Vec<IpNet>> {
+    config
+        .allowed_networks
+        .iter()
+        .map(|network| {
+            network
+                .parse::<IpNet>()
+                .with_context(|| format!("invalid management network {network}"))
+        })
+        .collect()
+}
+
+/// Clamped at an hour: a zero TTL would expire every session the instant it was issued.
+/// Validation rejects it too; this is the second line of defence.
+fn session_ttl(config: &ManagementConfig) -> Duration {
+    Duration::from_secs(config.session_ttl_hours.max(1).saturating_mul(3600))
+}
+
 impl AuthState {
     pub fn load(config: &ManagementConfig, config_path: &Path, cli_auth: bool) -> Result<Self> {
-        let token_path = config
-            .token_file
-            .as_deref()
-            .filter(|value| !value.trim().is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                config_path
-                    .parent()
-                    .unwrap_or_else(|| Path::new("."))
-                    .join("admin.token")
-            });
-        let admin_token = if let Ok(token) = std::env::var("VUIO_ADMIN_TOKEN") {
-            validate_token(token.trim())?;
-            token.trim().to_owned()
-        } else if token_path.exists() {
-            verify_private_token(&token_path)?;
-            let token = std::fs::read_to_string(&token_path)
-                .with_context(|| format!("failed to read {}", token_path.display()))?;
-            validate_token(token.trim())?;
-            token.trim().to_owned()
-        } else {
-            let token = random_token();
-            if let Some(parent) = token_path.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            write_private_token(&token_path, &token)?;
-            tracing::warn!(
-                "Generated management token at {}. Keep this file private.",
-                token_path.display()
-            );
-            token
-        };
-        let allowed_networks = config
-            .allowed_networks
-            .iter()
-            .map(|network| {
-                network
-                    .parse::<IpNet>()
-                    .with_context(|| format!("invalid management network {network}"))
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let token_path = resolve_token_path(config, config_path);
+        let admin_token = load_admin_token(&token_path)?;
+        let allowed_networks = parse_networks(config)?;
 
         let env_auth = std::env::var("VUIO_AUTH")
             .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
             .unwrap_or(false);
         // `management.enabled` was written to every generated config and read by
-        // nothing. Any of the three turns auth on; none of them can turn it off,
-        // so a config file cannot disable auth that the host asked for.
-        let enabled = cli_auth || env_auth || config.enabled;
+        // nothing. Any of the three turns auth on; the host's two cannot be undone
+        // by a later config reload, which is what `forced_on` records.
+        let forced_on = cli_auth || env_auth;
 
         Ok(Self {
-            enabled,
-            admin_token,
+            enabled: std::sync::atomic::AtomicBool::new(forced_on || config.enabled),
+            forced_on,
+            settings: std::sync::RwLock::new(ManagementSettings {
+                admin_token,
+                session_ttl: session_ttl(config),
+                allowed_networks,
+                token_path,
+            }),
             sessions: Mutex::new(HashMap::new()),
             login_attempts: Mutex::new(HashMap::new()),
             management_requests: Mutex::new(HashMap::new()),
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_MANAGEMENT_CONCURRENCY)),
-            session_ttl: Duration::from_secs(config.session_ttl_hours.max(1).saturating_mul(3600)),
-            allowed_networks,
-            token_path,
         })
+    }
+
+    /// Re-apply `[management]` to a running server.
+    ///
+    /// Everything here used to be frozen at startup. The values are cheap per-request
+    /// reads with no derived state behind them, so the only real work is re-reading the
+    /// token file when its path changes.
+    ///
+    /// A failure leaves the previous settings in place: half-applying an allowlist while
+    /// keeping the old token would be worse than not applying it at all.
+    pub fn apply(&self, config: &ManagementConfig, config_path: &Path) -> Result<()> {
+        let token_path = resolve_token_path(config, config_path);
+        let allowed_networks = parse_networks(config)?;
+        let admin_token = if token_path == self.settings_read().token_path {
+            // Same file: keep the token in memory rather than re-reading, so a file that
+            // has become unreadable cannot lock out a server that is running fine.
+            self.settings_read().admin_token.clone()
+        } else {
+            load_admin_token(&token_path)?
+        };
+
+        let mut settings = self
+            .settings
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        settings.admin_token = admin_token;
+        settings.session_ttl = session_ttl(config);
+        settings.allowed_networks = allowed_networks;
+        settings.token_path = token_path;
+        drop(settings);
+
+        // `forced_on` wins: a config file must not be able to switch off auth that
+        // --auth or VUIO_AUTH asked for.
+        let enabled = self.forced_on || config.enabled;
+        let previous = self
+            .enabled
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed);
+        if previous != enabled {
+            tracing::warn!(
+                "Management authentication is now {}",
+                if enabled { "required" } else { "not required" }
+            );
+        }
+        Ok(())
+    }
+
+    fn settings_read(&self) -> std::sync::RwLockReadGuard<'_, ManagementSettings> {
+        self.settings
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
     }
 
     pub fn testing() -> Self {
         Self {
-            enabled: true,
-            admin_token: "test-management-token-which-is-long-enough".to_owned(),
+            enabled: std::sync::atomic::AtomicBool::new(true),
+            forced_on: true,
+            settings: std::sync::RwLock::new(ManagementSettings {
+                admin_token: "test-management-token-which-is-long-enough".to_owned(),
+                session_ttl: Duration::from_secs(3600),
+                allowed_networks: Vec::new(),
+                token_path: PathBuf::from("admin.token"),
+            }),
             sessions: Mutex::new(HashMap::new()),
             login_attempts: Mutex::new(HashMap::new()),
             management_requests: Mutex::new(HashMap::new()),
             concurrency: Arc::new(tokio::sync::Semaphore::new(MAX_MANAGEMENT_CONCURRENCY)),
-            session_ttl: Duration::from_secs(3600),
-            allowed_networks: Vec::new(),
-            token_path: PathBuf::from("admin.token"),
         }
     }
 
     pub fn enabled(&self) -> bool {
-        self.enabled
+        self.enabled.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub fn token_path(&self) -> &Path {
-        &self.token_path
+    pub fn token_path(&self) -> PathBuf {
+        self.settings_read().token_path.clone()
     }
 
     fn network_allowed(&self, address: IpAddr) -> bool {
-        if self.allowed_networks.is_empty() {
+        let settings = self.settings_read();
+        if settings.allowed_networks.is_empty() {
             match address {
                 IpAddr::V4(ip) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
                 IpAddr::V6(ip) => {
@@ -155,11 +247,19 @@ impl AuthState {
             }
         } else {
             address.is_loopback()
-                || self
+                || settings
                     .allowed_networks
                     .iter()
                     .any(|network| network.contains(&address))
         }
+    }
+
+    /// Constant-time comparison against the current admin token.
+    fn token_matches(&self, candidate: &str) -> bool {
+        constant_time_eq(
+            candidate.as_bytes(),
+            self.settings_read().admin_token.as_bytes(),
+        )
     }
 
     fn bearer_valid(&self, headers: &HeaderMap) -> bool {
@@ -167,7 +267,7 @@ impl AuthState {
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|token| constant_time_eq(token.as_bytes(), self.admin_token.as_bytes()))
+            .is_some_and(|token| self.token_matches(token))
     }
 
     fn session_from_headers(&self, headers: &HeaderMap, peer: IpAddr) -> Option<String> {
@@ -232,7 +332,7 @@ impl AuthState {
             token.clone(),
             Session {
                 peer,
-                expires_at: now + self.session_ttl,
+                expires_at: now + self.settings_read().session_ttl,
             },
         );
         Some(token)
@@ -609,7 +709,7 @@ pub async fn login<D: DatabaseManager>(
     if !state.auth.rate_limit_login(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    if !constant_time_eq(request.token.as_bytes(), state.auth.admin_token.as_bytes()) {
+    if !state.auth.token_matches(&request.token) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let Some(session) = state.auth.create_session(peer.ip()) else {
@@ -729,6 +829,95 @@ mod tests {
     fn the_command_line_still_enables_auth_alone() {
         assert!(load_with(false, true).enabled());
         assert!(load_with(true, true).enabled());
+    }
+
+    /// The allowlist is one plain read per management request, so it can be swapped
+    /// without a restart. Sessions carry an absolute expiry, so changing the TTL applies
+    /// to new logins and leaves signed-in browsers alone.
+    #[test]
+    fn management_settings_apply_without_a_restart() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let auth = AuthState::load(&ManagementConfig::default(), &config_path, true)
+            .expect("auth state");
+
+        // TEST-NET-3, deliberately not private: an empty allowlist already permits
+        // loopback and every private range, so a 10.x address would prove nothing.
+        let peer: IpAddr = "203.0.113.5".parse().unwrap();
+        assert!(!auth.network_allowed(peer), "a public address is not allowed by default");
+
+        auth.apply(
+            &ManagementConfig {
+                allowed_networks: vec!["203.0.113.0/24".to_string()],
+                session_ttl_hours: 48,
+                ..ManagementConfig::default()
+            },
+            &config_path,
+        )
+        .expect("apply");
+        assert!(auth.network_allowed(peer), "the new allowlist applies immediately");
+        assert_eq!(
+            auth.settings_read().session_ttl,
+            Duration::from_secs(48 * 3600)
+        );
+
+        // And narrowing it again takes effect just as immediately.
+        auth.apply(&ManagementConfig::default(), &config_path)
+            .expect("apply");
+        assert!(!auth.network_allowed(peer));
+    }
+
+    /// A rejected reload must leave the previous settings whole. Applying the allowlist
+    /// while keeping the old token would be worse than applying nothing.
+    #[test]
+    fn a_rejected_reload_changes_nothing() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let auth = AuthState::load(&ManagementConfig::default(), &config_path, true)
+            .expect("auth state");
+        let token_before = auth.settings_read().admin_token.clone();
+
+        let error = auth
+            .apply(
+                &ManagementConfig {
+                    allowed_networks: vec!["10.0.0.0/64".to_string()],
+                    ..ManagementConfig::default()
+                },
+                &config_path,
+            )
+            .expect_err("an invalid CIDR must be refused");
+        assert!(error.to_string().contains("invalid management network"));
+        assert_eq!(auth.settings_read().admin_token, token_before);
+        assert!(auth.settings_read().allowed_networks.is_empty());
+    }
+
+    /// The command line and the environment outrank the file. A config that says
+    /// `enabled = false` must not be able to switch off auth the host demanded.
+    #[test]
+    fn a_config_reload_cannot_switch_off_forced_auth() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+
+        let forced = AuthState::load(&ManagementConfig::default(), &config_path, true)
+            .expect("auth state");
+        assert!(forced.enabled());
+        forced
+            .apply(&ManagementConfig { enabled: false, ..ManagementConfig::default() }, &config_path)
+            .expect("apply");
+        assert!(forced.enabled(), "--auth must survive a config reload");
+
+        // Without the flag, the file is in charge in both directions.
+        let from_file = AuthState::load(&ManagementConfig::default(), &config_path, false)
+            .expect("auth state");
+        assert!(!from_file.enabled());
+        from_file
+            .apply(&ManagementConfig { enabled: true, ..ManagementConfig::default() }, &config_path)
+            .expect("apply");
+        assert!(from_file.enabled());
+        from_file
+            .apply(&ManagementConfig::default(), &config_path)
+            .expect("apply");
+        assert!(!from_file.enabled());
     }
 
     /// Both defaults have to stay off. Every config generated before this change says
