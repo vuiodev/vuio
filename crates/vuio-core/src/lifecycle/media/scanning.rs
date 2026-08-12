@@ -12,6 +12,22 @@ fn canonical_root(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
+/// The configured library a stored path belongs to, or `None` if it belongs to none.
+///
+/// Matched against the root both as the config writes it and in the form the index
+/// stores paths in, because those routinely differ: a library reached through a symlink
+/// is stored resolved on Unix (`/tmp/media` becomes `/private/tmp/media` on macOS), and
+/// on Windows the canonical form is lower-cased. Comparing only the raw form would read
+/// every file in such a library as belonging to no library at all — and for a deletion
+/// pass, that means discarding the entire library's index. Matching either form can only
+/// keep files, never remove more.
+fn owning_root(path: &Path, raw: &[PathBuf], canonical: &[PathBuf]) -> Option<PathBuf> {
+    raw.iter()
+        .chain(canonical.iter())
+        .find(|root| path.starts_with(root))
+        .cloned()
+}
+
 /// Validate cached files and remove the ones that no longer belong in the index:
 /// files deleted from disk, and files left behind by a library that is no longer
 /// configured.
@@ -60,28 +76,17 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
         warn!("No media libraries are configured; leaving the existing index alone");
     }
 
-    // Paths enter the index canonicalised — symlinks resolved on Unix, lower-cased on
-    // Windows — so a root as written in the config often will not prefix-match them.
-    // A library at /tmp/media is stored under /private/tmp/media on macOS. Matching
-    // against both forms keeps that from reading as "belongs to no library", which for
-    // a deletion pass would mean discarding the entire library's index.
     let canonical_roots = monitored_roots
         .iter()
         .map(|root| canonical_root(root))
         .collect::<Vec<_>>();
-    let owning_root = |path: &Path| {
-        monitored_roots
-            .iter()
-            .chain(canonical_roots.iter())
-            .find(|root| path.starts_with(root))
-            .cloned()
-    };
 
     {
         for media_file in database.load_file_fingerprints().await? {
             total_checked += 1;
 
-            let Some(configured_root) = owning_root(&media_file.path) else {
+            let Some(configured_root) = owning_root(&media_file.path, monitored_roots, &canonical_roots)
+            else {
                 if prune_orphans {
                     orphaned_count += 1;
                     paths_to_delete.push(media_file.path.clone());
@@ -622,28 +627,67 @@ mod tests {
         assert_eq!(indexed_paths(&database).await, vec![canonical_root(&file)]);
     }
 
-    /// The index stores canonical paths, so a library reached through a symlink — or
-    /// spelled with different case on Windows — does not prefix-match the root as the
-    /// config writes it. Matching only the raw form would have read every one of its
-    /// files as belonging to no library and deleted the entire index for it.
+    /// The hazard that makes this pass safe to run at all, tested on the matching itself
+    /// so it holds on every platform rather than only the one running the suite.
+    ///
+    /// Stored paths are canonical and the configured root usually is not: on Unix a
+    /// symlinked library is stored resolved, on Windows the canonical form is
+    /// lower-cased. Matching only the root as written would read every file in such a
+    /// library as belonging to none, and this pass deletes those.
+    #[test]
+    fn a_root_matches_in_both_its_written_and_canonical_forms() {
+        let written = PathBuf::from("/Media/Films");
+        // Whatever the platform's normaliser does to it — resolve a link, lower-case
+        // the drive — the stored path is keyed off the canonical form.
+        let canonical = PathBuf::from("/private/media/films");
+        let raw = vec![written.clone()];
+        let canonicalised = vec![canonical.clone()];
+
+        // Stored under the canonical form: matched via the canonical root.
+        assert_eq!(
+            owning_root(&canonical.join("a.mkv"), &raw, &canonicalised),
+            Some(canonical.clone())
+        );
+        // Stored under the written form, as an older index would be: still matched.
+        assert_eq!(
+            owning_root(&written.join("a.mkv"), &raw, &canonicalised),
+            Some(written)
+        );
+        // A file under neither is an orphan, which is the only case that deletes.
+        assert_eq!(
+            owning_root(Path::new("/elsewhere/a.mkv"), &raw, &canonicalised),
+            None
+        );
+        // Prefix matching is by component, so a sibling with a shared prefix is not a
+        // child: /media/films-old must not be swept up by the /media/films root.
+        assert_eq!(
+            owning_root(Path::new("/private/media/films-old/a.mkv"), &raw, &canonicalised),
+            None
+        );
+    }
+
+    /// The Unix half of the above, end to end through a real symlink.
+    ///
+    /// Gated rather than early-returning on other platforms: an early return leaves the
+    /// rest of the body unreachable, which is a hard error under `-D warnings` and broke
+    /// the Windows CI job.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_symlinked_library_is_not_mistaken_for_an_orphan() {
         let real = tempfile::TempDir::new().expect("real");
         let link_parent = tempfile::TempDir::new().expect("link parent");
         let link = link_parent.path().join("library");
-        #[cfg(unix)]
         std::os::unix::fs::symlink(real.path(), &link).expect("symlink");
-        #[cfg(not(unix))]
-        return;
 
         let file = link.join("through-the-link.mp4");
         std::fs::write(&file, b"x").expect("write");
 
         let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
         // Configured by the symlinked path, stored under the resolved one.
-        let removed = validate_and_cleanup_deleted_files(database.clone(), std::slice::from_ref(&link), true)
-            .await
-            .expect("cleanup");
+        let removed =
+            validate_and_cleanup_deleted_files(database.clone(), std::slice::from_ref(&link), true)
+                .await
+                .expect("cleanup");
 
         assert_eq!(removed, 0, "a symlinked library must keep its index");
         assert_eq!(indexed_paths(&database).await.len(), 1);
