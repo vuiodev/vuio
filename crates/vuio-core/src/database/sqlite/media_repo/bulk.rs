@@ -18,18 +18,30 @@ pub(in crate::database::sqlite) const INSERT_MEDIA: &str = "\
 INSERT INTO media_files (
     id, path, parent_path, filename, size, modified_secs, mime_type, mime_family,
     duration_secs, title, artist, album, genre, track_number, year, album_artist,
-    subtitle_available, created_at_secs, updated_at_secs
-) VALUES (?19, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)";
+    subtitle_available, created_at_secs, updated_at_secs,
+    disc_number, disc_total, track_total, composer, comment, bpm, compilation,
+    sort_title, sort_artist, sort_album, release_date,
+    musicbrainz_track_id, musicbrainz_album_id, musicbrainz_artist_id,
+    codec, sample_rate, channels, bits_per_sample, bit_rate, tags_version
+) VALUES (?39, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+          ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35,
+          ?36, ?37, ?38)";
 
 pub(in crate::database::sqlite) const UPDATE_MEDIA: &str = "\
 UPDATE media_files SET
     path = ?1, parent_path = ?2, filename = ?3, size = ?4, modified_secs = ?5,
     mime_type = ?6, mime_family = ?7, duration_secs = ?8, title = ?9, artist = ?10,
     album = ?11, genre = ?12, track_number = ?13, year = ?14, album_artist = ?15,
-    subtitle_available = ?16, created_at_secs = ?17, updated_at_secs = ?18
-WHERE id = ?19";
+    subtitle_available = ?16, created_at_secs = ?17, updated_at_secs = ?18,
+    disc_number = ?19, disc_total = ?20, track_total = ?21, composer = ?22,
+    comment = ?23, bpm = ?24, compilation = ?25, sort_title = ?26,
+    sort_artist = ?27, sort_album = ?28, release_date = ?29,
+    musicbrainz_track_id = ?30, musicbrainz_album_id = ?31, musicbrainz_artist_id = ?32,
+    codec = ?33, sample_rate = ?34, channels = ?35, bits_per_sample = ?36,
+    bit_rate = ?37, tags_version = ?38
+WHERE id = ?39";
 
-/// The eighteen stored fields, in the order both statements bind them.
+/// The thirty-eight stored fields, in the order both statements bind them.
 pub(in crate::database::sqlite) fn bind_media_file(file: &MediaFile) -> Vec<Value> {
     let path = file.path.to_string_lossy().into_owned();
     let parent = SqliteDatabase::parent_directory(&path).unwrap_or_default();
@@ -57,7 +69,62 @@ pub(in crate::database::sqlite) fn bind_media_file(file: &MediaFile) -> Vec<Valu
         Value::Integer(i64::from(file.subtitle_available)),
         Value::Integer(time_to_seconds(file.created_at)),
         Value::Integer(time_to_seconds(file.updated_at)),
+        optional_integer(file.tags.disc_number),
+        optional_integer(file.tags.disc_total),
+        optional_integer(file.tags.track_total),
+        optional_text(&file.tags.composer),
+        optional_text(&file.tags.comment),
+        optional_integer(file.tags.bpm),
+        match file.tags.compilation {
+            Some(flag) => Value::Integer(i64::from(flag)),
+            None => Value::Null,
+        },
+        optional_text(&file.tags.sort_title),
+        optional_text(&file.tags.sort_artist),
+        optional_text(&file.tags.sort_album),
+        optional_text(&file.tags.release_date),
+        optional_text(&file.tags.musicbrainz_track_id),
+        optional_text(&file.tags.musicbrainz_album_id),
+        optional_text(&file.tags.musicbrainz_artist_id),
+        optional_text(&file.stream.codec),
+        optional_integer(file.stream.sample_rate),
+        optional_integer(file.stream.channels.map(u32::from)),
+        optional_integer(file.stream.bits_per_sample.map(u32::from)),
+        optional_integer(file.stream.bit_rate),
+        Value::Integer(i64::from(file.tags_version)),
     ]
+}
+
+/// Replace the long tail of tags for one record.
+///
+/// Only a record a tag reader actually produced is authoritative, which is what
+/// `tags_version` marks. A build without the `metadata` feature, or a synthetic
+/// record assembled by a caller, leaves whatever is already stored alone rather
+/// than silently emptying it.
+fn write_extra_tags(
+    transaction: &Transaction<'_>,
+    media_file_id: i64,
+    file: &MediaFile,
+) -> Result<()> {
+    if file.tags_version == 0 {
+        return Ok(());
+    }
+
+    transaction.execute(
+        "DELETE FROM media_tags WHERE media_file_id = ?",
+        [media_file_id],
+    )?;
+    if file.extra_tags.is_empty() {
+        return Ok(());
+    }
+
+    let mut insert = transaction.prepare_cached(
+        "INSERT OR IGNORE INTO media_tags (media_file_id, key, value) VALUES (?, ?, ?)",
+    )?;
+    for (key, value) in &file.extra_tags {
+        insert.execute(rusqlite::params![media_file_id, key, value])?;
+    }
+    Ok(())
 }
 
 fn optional_text(value: &Option<String>) -> Value {
@@ -126,6 +193,7 @@ pub(in crate::database::sqlite) fn upsert_media_file(
             transaction
                 .prepare_cached(UPDATE_MEDIA)?
                 .execute(rusqlite::params_from_iter(params.iter()))?;
+            write_extra_tags(transaction, id, file)?;
             Ok(id)
         }
         None => {
@@ -137,7 +205,9 @@ pub(in crate::database::sqlite) fn upsert_media_file(
             transaction
                 .prepare_cached(INSERT_MEDIA)?
                 .execute(rusqlite::params_from_iter(params.iter()))?;
-            Ok(transaction.last_insert_rowid())
+            let id = transaction.last_insert_rowid();
+            write_extra_tags(transaction, id, file)?;
+            Ok(id)
         }
     }
 }

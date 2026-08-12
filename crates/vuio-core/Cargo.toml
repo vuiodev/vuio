@@ -34,9 +34,18 @@ path = "src/lib.rs"
 default = ["casting", "dashboard", "diagnostics", "mcp", "metadata"]
 
 # Cast to Chromecast, AirPlay and DLNA renderers.
+#
+# `symphonia/opt-simd` lives here rather than on `metadata` because all it does
+# is swap symphonia's own FFT for rustfft's SIMD one, and the FFT is only
+# reached by the transform-based decoders. Casting is the only thing that
+# decodes audio: remux demuxes without decoding, and reading tags never decodes
+# at all. Scoping it this way keeps the rustfft tree out of a metadata-only
+# build while still giving SSE/AVX and NEON to the AirPlay path, where
+# real-time decode on a small box is tight.
 casting = [
     "dep:vuio-cast",
     "dep:symphonia",
+    "symphonia/opt-simd",
     "dep:hap-crypto",
     "dep:hap-transport",
     "dep:hap-tlv8",
@@ -50,7 +59,7 @@ casting = [
 dashboard = []
 diagnostics = ["dep:sysinfo"]
 mcp = []
-metadata = ["dep:audiotags"]
+metadata = ["dep:symphonia"]
 unstable-internals = []
 
 [dependencies]
@@ -82,7 +91,6 @@ hyper = { version = "1.8", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 bytes = "1.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-audiotags = { version = "0.5", optional = true }
 quick-xml = "0.41"
 percent-encoding = "2.3"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"], optional = true }
@@ -97,7 +105,11 @@ hap-tlv8 = { version = "1.0", optional = true }
 hkdf = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
 num-bigint = { version = "0.4", optional = true }
-symphonia = { version = "0.6", default-features = false, features = ["mkv", "mp3", "aac", "isomp4", "flac", "wav", "pcm", "ogg", "vorbis", "alac", "id3v1", "id3v2", "ape"], optional = true }
+# `all` is `all-codecs` + `all-formats` + `all-meta`: every container symphonia
+# can demux and every tag dialect it can read, including APEv1/APEv2. Listed
+# rather than inherited from upstream's `default` so what ships stays auditable
+# and cannot drift when that default changes. SIMD is added by `casting` above.
+symphonia = { version = "0.6", default-features = false, features = ["all"], optional = true }
 getrandom = { version = "0.3", optional = true }
 plist = { version = "1.8", optional = true }
 hex = { version = "0.4", optional = true }
@@ -113,6 +125,9 @@ windows = { version = "0.62", features = [
 
 [dev-dependencies]
 vuio-core = { path = ".", features = ["unstable-internals"] }
+# Symphonia reads tags but cannot write them, and the audio tests build their
+# fixtures by tagging generated files. Test-only, so it ships with nothing.
+audiotags = "0.5"
 tempfile = "3.27"
 futures-util = "0.3"
 tower = { version = "0.5", features = ["util"] }

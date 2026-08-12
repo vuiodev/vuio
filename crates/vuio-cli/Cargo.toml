@@ -16,10 +16,18 @@ path = "src/main.rs"
 [[bin]]
 name = "generate_test_media"
 path = "src/bin/generate_test_media.rs"
+required-features = ["testdata"]
+
+[features]
+default = []
+# The test-media generator needs a tag *writer*, which is the only thing
+# audiotags is still here for. Gated so the shipped `vuio` binary does not link
+# it.
+testdata = ["dep:audiotags"]
 
 [dependencies]
 anyhow = "1.0"
-audiotags = "0.5"
+audiotags = { version = "0.5", optional = true }
 clap = { version = "4.6", features = ["derive"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }

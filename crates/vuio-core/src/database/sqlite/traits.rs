@@ -4,6 +4,7 @@
 //! forwards to, so the trait surface reads as an index of the module.
 
 use super::*;
+use crate::database::{MusicCategoryFilter, MusicCategoryType};
 
 #[async_trait]
 impl MediaRepository for SqliteDatabase {
@@ -101,6 +102,14 @@ impl MediaRepository for SqliteDatabase {
 
     async fn get_album_artists(&self) -> Result<Vec<MusicCategory>> {
         SqliteDatabase::get_album_artists_impl(self).await
+    }
+
+    async fn get_music_categories(
+        &self,
+        kind: MusicCategoryType,
+        filter: &MusicCategoryFilter,
+    ) -> Result<Vec<MusicCategory>> {
+        SqliteDatabase::get_music_categories_impl(self, kind, filter).await
     }
 
     async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>> {

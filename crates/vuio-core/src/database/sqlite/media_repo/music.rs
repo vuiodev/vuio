@@ -7,30 +7,68 @@
 use anyhow::Result;
 
 use crate::database::sqlite::SqliteDatabase;
-use crate::database::{MediaFile, MediaFileQuery, MusicCategory, MusicCategoryType};
+use crate::database::{
+    MediaFile, MediaFileQuery, MusicCategory, MusicCategoryFilter, MusicCategoryType,
+};
+
+/// The column each category groups on.
+fn category_column(kind: &MusicCategoryType) -> &'static str {
+    match kind {
+        MusicCategoryType::Artist => "artist",
+        MusicCategoryType::Album => "album",
+        MusicCategoryType::Genre => "genre",
+        MusicCategoryType::AlbumArtist => "album_artist",
+        MusicCategoryType::Year => "year",
+        // Playlists live in their own table and never reach this query.
+        MusicCategoryType::Playlist => "album",
+    }
+}
 
 impl SqliteDatabase {
     /// Distinct values of one tag column, with the number of records carrying each.
     async fn categories(
         &self,
-        column: &'static str,
-        category_type: MusicCategoryType,
-        filter: Option<(&'static str, String)>,
+        kind: MusicCategoryType,
+        filter: MusicCategoryFilter,
     ) -> Result<Vec<MusicCategory>> {
+        let column = category_column(&kind);
+
         self.execute_read(move |connection| {
             let mut params: Vec<rusqlite::types::Value> = Vec::new();
-            let extra = match &filter {
-                Some((filter_column, value)) => {
-                    params.push(rusqlite::types::Value::Text(value.clone()));
-                    format!(" AND {filter_column} = ?")
-                }
-                None => String::new(),
+            let mut extra = String::new();
+
+            let mut restrict = |filter_column: &str, value: rusqlite::types::Value| {
+                params.push(value);
+                extra.push_str(&format!(" AND {filter_column} = ?"));
             };
+            if let Some(artist) = &filter.artist {
+                restrict("artist", rusqlite::types::Value::Text(artist.clone()));
+            }
+            if let Some(album_artist) = &filter.album_artist {
+                restrict(
+                    "album_artist",
+                    rusqlite::types::Value::Text(album_artist.clone()),
+                );
+            }
+            if let Some(album) = &filter.album {
+                restrict("album", rusqlite::types::Value::Text(album.clone()));
+            }
+            if let Some(genre) = &filter.genre {
+                restrict("genre", rusqlite::types::Value::Text(genre.clone()));
+            }
+            if let Some(year) = filter.year {
+                restrict("year", rusqlite::types::Value::Integer(i64::from(year)));
+            }
 
             // An empty tag is as absent as a missing one; neither should
             // produce a browsable container.
+            //
+            // `MIN(id)` picks a stable representative for the container's cover
+            // art. It costs nothing extra: the grouping has already visited
+            // every row.
             let sql = format!(
-                "SELECT {column} AS label, COUNT(*) AS total FROM media_files \
+                "SELECT {column} AS label, COUNT(*) AS total, MIN(media_files.id) AS sample \
+                 FROM media_files \
                  WHERE {column} IS NOT NULL AND {column} <> ''{extra} \
                  GROUP BY label ORDER BY label COLLATE natural_order"
             );
@@ -42,8 +80,9 @@ impl SqliteDatabase {
                     Ok(MusicCategory {
                         id: name.clone(),
                         name,
-                        category_type: category_type.clone(),
+                        category_type: kind.clone(),
                         count: count.max(0) as usize,
+                        sample_id: row.get(2)?,
                     })
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -52,8 +91,16 @@ impl SqliteDatabase {
         .await
     }
 
+    pub(in crate::database::sqlite) async fn get_music_categories_impl(
+        &self,
+        kind: MusicCategoryType,
+        filter: &MusicCategoryFilter,
+    ) -> Result<Vec<MusicCategory>> {
+        self.categories(kind, filter.clone()).await
+    }
+
     pub(in crate::database::sqlite) async fn get_artists_impl(&self) -> Result<Vec<MusicCategory>> {
-        self.categories("artist", MusicCategoryType::Artist, None)
+        self.categories(MusicCategoryType::Artist, MusicCategoryFilter::default())
             .await
     }
 
@@ -61,27 +108,27 @@ impl SqliteDatabase {
         &self,
         artist_filter: Option<&str>,
     ) -> Result<Vec<MusicCategory>> {
-        self.categories(
-            "album",
-            MusicCategoryType::Album,
-            artist_filter.map(|artist| ("artist", artist.to_owned())),
-        )
-        .await
+        let filter = match artist_filter {
+            Some(artist) => MusicCategoryFilter::artist(artist),
+            None => MusicCategoryFilter::default(),
+        };
+        self.categories(MusicCategoryType::Album, filter).await
     }
 
     pub(in crate::database::sqlite) async fn get_genres_impl(&self) -> Result<Vec<MusicCategory>> {
-        self.categories("genre", MusicCategoryType::Genre, None)
+        self.categories(MusicCategoryType::Genre, MusicCategoryFilter::default())
             .await
     }
 
     pub(in crate::database::sqlite) async fn get_years_impl(&self) -> Result<Vec<MusicCategory>> {
-        self.categories("year", MusicCategoryType::Year, None).await
+        self.categories(MusicCategoryType::Year, MusicCategoryFilter::default())
+            .await
     }
 
     pub(in crate::database::sqlite) async fn get_album_artists_impl(
         &self,
     ) -> Result<Vec<MusicCategory>> {
-        self.categories("album_artist", MusicCategoryType::AlbumArtist, None)
+        self.categories(MusicCategoryType::AlbumArtist, MusicCategoryFilter::default())
             .await
     }
 

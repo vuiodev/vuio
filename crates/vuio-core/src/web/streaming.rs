@@ -503,27 +503,22 @@ pub async fn serve_cover<D: DatabaseManager>(
         }
     }
 
-    // 2. Secondary: Extract embedded artwork from audio tags using audiotags
+    // 2. Secondary: Extract embedded artwork from the file's own metadata
     // (blocking task). Only the embedded path needs a tag reader — the
     // directory search above still serves cover art without the feature.
     #[cfg(feature = "metadata")]
     {
         let path = file_info.path.clone();
-        let tag_result =
-            tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
+        let cover = tokio::task::spawn_blocking(move || {
+            crate::platform::filesystem::extract_embedded_cover(&path)
+        })
+        .await;
 
-        if let Ok(Ok(tag)) = tag_result {
-            if let Some(cover) = tag.album_cover() {
-                let content_type = match cover.mime_type {
-                    audiotags::MimeType::Jpeg => "image/jpeg",
-                    audiotags::MimeType::Png => "image/png",
-                    _ => "image/jpeg",
-                };
-                return Response::builder()
-                    .header(header::CONTENT_TYPE, content_type)
-                    .body(Body::from(cover.data.to_vec()))
-                    .map_err(|_| AppError::NotFound);
-            }
+        if let Ok(Some((content_type, data))) = cover {
+            return Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(data))
+                .map_err(|_| AppError::NotFound);
         }
     }
 

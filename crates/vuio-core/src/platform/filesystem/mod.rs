@@ -32,5 +32,10 @@ pub(crate) async fn extract_audio_metadata(
     Ok(())
 }
 
+/// Records written without a tag reader carry version 0, so enabling the
+/// feature later re-reads them on the next scan.
+#[cfg(not(feature = "metadata"))]
+pub(crate) const TAGS_VERSION: u32 = 0;
+
 #[cfg(test)]
 mod tests;

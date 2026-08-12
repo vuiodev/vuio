@@ -1,72 +1,62 @@
-use super::*;
+//! Reading tags, stream properties and cover art with symphonia.
+//!
+//! One reader covers every container symphonia can demux, so a library of OGG,
+//! Opus, WAV or AIFF files categorizes the same way an MP3 library does. APEv1
+//! and APEv2 tags come along for free: symphonia registers its APE reader as a
+//! probeable metadata source and scans for trailing metadata before it looks
+//! for a container, which is exactly where APE tags live.
+//!
+//! Two gaps are worth knowing about. `.wma` has no ASF reader, and a bare
+//! Monkey's Audio `.ape` file has no demuxer — the APE *tag* reader cannot
+//! rescue a container that never probes. Both fall back to filename parsing.
 
-/// Extract audio metadata using audiotags library
+use super::*;
+use crate::database::{AudioTags, MediaFile, StreamInfo};
+use std::time::Duration;
+use symphonia::core::formats::probe::Hint;
+use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::meta::{MetadataOptions, MetadataRevision, RawValue, StandardTag};
+
+/// Bumped whenever this module learns to extract something it used to miss.
+///
+/// Records carry the version that wrote them, so a scan re-reads anything
+/// written by an older extractor even though the file itself has not changed.
+/// The file is opened and parsed on every scan regardless, so a bump costs one
+/// database write per record and no extra I/O.
+pub(crate) const TAGS_VERSION: u32 = 1;
+
+/// Longest tag value kept in `media_tags`.
+///
+/// Lyrics sheets and acoustic fingerprints run to kilobytes and are indexed
+/// alongside everything else, so they are dropped rather than allowed to
+/// dominate the table.
+const MAX_TAG_VALUE_LEN: usize = 4096;
+
+/// Tags whose values are large enough to be worth storing nowhere.
+const OVERSIZED_TAGS: &[&str] = &["Lyrics", "AcoustIdFingerprint", "CdToc"];
+
 pub(crate) async fn extract_audio_metadata(
     media_file: &mut MediaFile,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::time::Duration;
-
-    // Clone the path for the blocking operation
     let path = media_file.path.clone();
 
-    // Wrap the synchronous I/O operation in spawn_blocking to prevent blocking the async runtime
-    let metadata_result =
-        tokio::task::spawn_blocking(move || audiotags::Tag::new().read_from_path(&path)).await;
-
-    // Handle the result from spawn_blocking
-    match metadata_result {
-        Ok(Ok(tag)) => {
-            // Extract basic metadata
-            if let Some(title) = tag.title() {
-                media_file.title = Some(title.to_string());
-            }
-
-            if let Some(artist) = tag.artist() {
-                media_file.artist = Some(artist.to_string());
-            }
-
-            if let Some(album) = tag.album_title() {
-                media_file.album = Some(album.to_string());
-            }
-
-            if let Some(genre) = tag.genre() {
-                media_file.genre = Some(genre.to_string());
-            }
-
-            // Extract track number
-            if let Some(track_num) = tag.track_number() {
-                media_file.track_number = Some(track_num as u32);
-            }
-
-            // Extract year
-            if let Some(year) = tag.year() {
-                media_file.year = Some(year as u32);
-            }
-
-            // Extract album artist
-            if let Some(album_artist) = tag.album_artist() {
-                media_file.album_artist = Some(album_artist.to_string());
-            }
-
-            // Extract duration if available
-            if let Some(duration) = tag.duration() {
-                media_file.duration = Some(Duration::from_secs(duration as u64));
-            }
-        }
-        Ok(Err(e)) => {
-            // Failed to parse tags, but we still apply fallback filename parsing
+    // Probing is synchronous file I/O and parsing, so it stays off the async
+    // runtime the same way the previous reader did.
+    match tokio::task::spawn_blocking(move || probe_metadata(&path)).await {
+        Ok(Ok(probed)) => probed.apply(media_file),
+        Ok(Err(error)) => {
             debug!(
                 "Failed to extract metadata for {}: {}",
                 media_file.path.display(),
-                e
+                error
             );
         }
-        Err(e) => {
-            // spawn_blocking failed
+        Err(error) => {
             debug!(
                 "Failed to execute blocking metadata extraction for {}: {}",
                 media_file.path.display(),
-                e
+                error
             );
         }
     }
@@ -75,6 +65,280 @@ pub(crate) async fn extract_audio_metadata(
     fallback_parse_filename(media_file);
 
     Ok(())
+}
+
+/// Read the first embedded picture from a file, if it has one.
+///
+/// Used to serve cover art for tracks with no image file beside them.
+pub(crate) fn extract_embedded_cover(path: &Path) -> Option<(String, Vec<u8>)> {
+    let mut format = open_format(path).ok()?;
+    let mut log = format.metadata();
+    let mut cover = None;
+
+    // The newest revision wins, so keep overwriting as the log is drained from
+    // oldest to newest.
+    let mut absorb = |revision: &MetadataRevision| {
+        if let Some(visual) = revision.media.visuals.first() {
+            cover = Some((
+                visual
+                    .media_type
+                    .clone()
+                    .unwrap_or_else(|| "image/jpeg".to_owned()),
+                visual.data.to_vec(),
+            ));
+        }
+    };
+    while let Some(revision) = log.pop() {
+        absorb(&revision);
+    }
+    if let Some(revision) = log.current() {
+        absorb(revision);
+    }
+    cover
+}
+
+/// Everything one probe of a file yields.
+#[derive(Default)]
+struct ProbedMetadata {
+    title: Option<String>,
+    artist: Option<String>,
+    album: Option<String>,
+    genre: Option<String>,
+    track_number: Option<u32>,
+    year: Option<u32>,
+    album_artist: Option<String>,
+    duration: Option<Duration>,
+    tags: AudioTags,
+    stream: StreamInfo,
+    extra_tags: Vec<(String, String)>,
+}
+
+impl ProbedMetadata {
+    fn apply(self, media_file: &mut MediaFile) {
+        // A probe that found nothing must not clear what a caller already set,
+        // so every field is only written when the probe produced one.
+        if self.title.is_some() {
+            media_file.title = self.title;
+        }
+        if self.artist.is_some() {
+            media_file.artist = self.artist;
+        }
+        if self.album.is_some() {
+            media_file.album = self.album;
+        }
+        if self.genre.is_some() {
+            media_file.genre = self.genre;
+        }
+        if self.track_number.is_some() {
+            media_file.track_number = self.track_number;
+        }
+        if self.year.is_some() {
+            media_file.year = self.year;
+        }
+        if self.album_artist.is_some() {
+            media_file.album_artist = self.album_artist;
+        }
+        if self.duration.is_some() {
+            media_file.duration = self.duration;
+        }
+
+        media_file.tags = self.tags;
+        media_file.stream = self.stream;
+        media_file.extra_tags = self.extra_tags;
+
+        // Average bit rate over the whole file. No container reports this
+        // directly and DLNA wants an average anyway, so derive it from the two
+        // numbers that are always available.
+        if media_file.stream.bit_rate.is_none() {
+            if let Some(seconds) = media_file
+                .duration
+                .map(|duration| duration.as_secs_f64())
+                .filter(|seconds| *seconds > 0.0)
+            {
+                let bits_per_second = (media_file.size as f64 * 8.0) / seconds;
+                if bits_per_second.is_finite() && bits_per_second > 0.0 {
+                    media_file.stream.bit_rate = Some(bits_per_second as u32);
+                }
+            }
+        }
+
+        media_file.tags_version = TAGS_VERSION;
+    }
+}
+
+fn open_format(
+    path: &Path,
+) -> anyhow::Result<Box<dyn symphonia::core::formats::FormatReader + 'static>> {
+    let file = std::fs::File::open(path)?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|value| value.to_str()) {
+        hint.with_extension(extension);
+    }
+    let format = symphonia::default::get_probe().probe(
+        &hint,
+        stream,
+        FormatOptions::default(),
+        MetadataOptions::default(),
+    )?;
+    Ok(format)
+}
+
+fn probe_metadata(path: &Path) -> anyhow::Result<ProbedMetadata> {
+    let mut format = open_format(path)?;
+    let mut probed = ProbedMetadata::default();
+
+    // Stream properties come off the default audio track. A container with no
+    // audio track still has usable tags, so this is not an error.
+    if let Some(track) = format.default_track(TrackType::Audio) {
+        let num_frames = track.num_frames;
+        if let Some(audio) = track.codec_params.as_ref().and_then(|params| params.audio()) {
+            probed.stream.codec = symphonia::default::get_codecs()
+                .get_audio_decoder(audio.codec)
+                .map(|registered| registered.codec.info.short_name.to_owned());
+            probed.stream.sample_rate = audio.sample_rate;
+            probed.stream.channels = audio
+                .channels
+                .as_ref()
+                .map(|channels| channels.count() as u16);
+            probed.stream.bits_per_sample = audio
+                .bits_per_sample
+                .or(audio.bits_per_coded_sample)
+                .map(|bits| bits as u16);
+
+            if let (Some(frames), Some(rate)) = (num_frames, audio.sample_rate.filter(|r| *r > 0)) {
+                probed.duration = Some(Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+            }
+        }
+    }
+
+    // A file can carry more than one revision — ID3v2 at the head and APEv2 at
+    // the tail, say. Draining the log oldest-first and letting later writes win
+    // keeps every tag while still preferring the newest revision.
+    let mut log = format.metadata();
+    while let Some(revision) = log.pop() {
+        absorb_revision(&revision, &mut probed);
+    }
+    if let Some(revision) = log.current() {
+        absorb_revision(revision, &mut probed);
+    }
+
+    Ok(probed)
+}
+
+fn absorb_revision(revision: &MetadataRevision, probed: &mut ProbedMetadata) {
+    for tag in &revision.media.tags {
+        let key = match &tag.std {
+            Some(standard) => {
+                apply_standard_tag(standard, probed);
+                standard_tag_name(standard)
+            }
+            None => tag.raw.key.clone(),
+        };
+
+        if OVERSIZED_TAGS.contains(&key.as_str()) {
+            continue;
+        }
+        let Some(value) = raw_value_to_string(&tag.raw.value) else {
+            continue;
+        };
+        if value.is_empty() || value.len() > MAX_TAG_VALUE_LEN {
+            continue;
+        }
+        probed.extra_tags.push((key, value));
+    }
+}
+
+/// Fill the promoted fields from a tag symphonia recognised.
+fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) {
+    match tag {
+        StandardTag::TrackTitle(value) => probed.title = Some(value.to_string()),
+        StandardTag::Artist(value) => probed.artist = Some(value.to_string()),
+        StandardTag::Album(value) => probed.album = Some(value.to_string()),
+        StandardTag::Genre(value) => probed.genre = Some(value.to_string()),
+        StandardTag::AlbumArtist(value) => probed.album_artist = Some(value.to_string()),
+        StandardTag::TrackNumber(value) => probed.track_number = u32::try_from(*value).ok(),
+        StandardTag::TrackTotal(value) => probed.tags.track_total = u32::try_from(*value).ok(),
+        StandardTag::DiscNumber(value) => probed.tags.disc_number = u32::try_from(*value).ok(),
+        StandardTag::DiscTotal(value) => probed.tags.disc_total = u32::try_from(*value).ok(),
+        StandardTag::Composer(value) => probed.tags.composer = Some(value.to_string()),
+        StandardTag::Comment(value) => probed.tags.comment = Some(value.to_string()),
+        StandardTag::Bpm(value) => probed.tags.bpm = u32::try_from(*value).ok(),
+        StandardTag::CompilationFlag(value) => probed.tags.compilation = Some(*value),
+        StandardTag::SortTrackTitle(value) => probed.tags.sort_title = Some(value.to_string()),
+        StandardTag::SortArtist(value) => probed.tags.sort_artist = Some(value.to_string()),
+        StandardTag::SortAlbum(value) => probed.tags.sort_album = Some(value.to_string()),
+        StandardTag::MusicBrainzTrackId(value) => {
+            probed.tags.musicbrainz_track_id = Some(value.to_string())
+        }
+        StandardTag::MusicBrainzAlbumId(value) => {
+            probed.tags.musicbrainz_album_id = Some(value.to_string())
+        }
+        StandardTag::MusicBrainzArtistId(value) => {
+            probed.tags.musicbrainz_artist_id = Some(value.to_string())
+        }
+        // Release date first, then the recording and original dates as
+        // fallbacks, so a reissue still reports the year the browse tree groups
+        // it under.
+        StandardTag::ReleaseDate(value) => set_date(probed, value, true),
+        StandardTag::RecordingDate(value) | StandardTag::OriginalReleaseDate(value) => {
+            set_date(probed, value, false)
+        }
+        StandardTag::OriginalReleaseYear(value) | StandardTag::OriginalRecordingYear(value) => {
+            probed.year.get_or_insert(u32::from(*value));
+        }
+        _ => {}
+    }
+}
+
+/// Record a date string, taking its leading year for the Years category.
+fn set_date(probed: &mut ProbedMetadata, value: &str, authoritative: bool) {
+    if authoritative || probed.tags.release_date.is_none() {
+        probed.tags.release_date = Some(value.to_owned());
+    }
+    let year = value
+        .trim()
+        .get(..4)
+        .filter(|prefix| prefix.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|prefix| prefix.parse::<u32>().ok());
+    if let Some(year) = year {
+        if authoritative {
+            probed.year = Some(year);
+        } else {
+            probed.year.get_or_insert(year);
+        }
+    }
+}
+
+/// The variant name of a standard tag, used as its normalized key.
+///
+/// `StandardTag` is `#[non_exhaustive]` with around two hundred variants and no
+/// accessor for its own name, so the name is taken from the `Debug` rendering,
+/// which is `Variant(payload)`. Deriving it this way means new symphonia
+/// variants get a sensible key without a match arm each.
+fn standard_tag_name(tag: &StandardTag) -> String {
+    let rendered = format!("{tag:?}");
+    match rendered.find('(') {
+        Some(index) => rendered[..index].to_owned(),
+        None => rendered,
+    }
+}
+
+fn raw_value_to_string(value: &RawValue) -> Option<String> {
+    match value {
+        RawValue::String(text) => Some(text.as_str().trim().to_owned()),
+        RawValue::StringList(items) => Some(items.join("; ")),
+        RawValue::UnsignedInt(number) => Some(number.to_string()),
+        RawValue::SignedInt(number) => Some(number.to_string()),
+        RawValue::Float(number) => Some(number.to_string()),
+        RawValue::Boolean(flag) => Some(flag.to_string()),
+        RawValue::Flag => Some("1".to_owned()),
+        // Binary payloads are pictures and fingerprints, which belong nowhere
+        // near a text index. `RawValue` is non-exhaustive, so anything symphonia
+        // adds later is skipped until it is handled explicitly.
+        RawValue::Binary(_) => None,
+        _ => None,
+    }
 }
 
 /// Parse metadata fields from a file path when tags are missing
