@@ -281,7 +281,7 @@ where
         let context = crate::web::xml::BrowseRenderContext {
             client,
             server_ip: state.get_server_ip(),
-            server_port: state.current_config().server.port,
+            server_port: state.http_binding.port(),
             autoplay_enabled: state.current_config().media.autoplay_enabled,
             update_id: current_update_id,
             bookmarks,

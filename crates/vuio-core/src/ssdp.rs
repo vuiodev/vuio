@@ -47,6 +47,9 @@ pub struct UnifiedSsdpService {
     network_manager: Arc<dyn NetworkManager>,
     platform_adapter: Box<dyn SsdpPlatformAdapter>,
     config: Arc<AppConfig>,
+    /// Read live rather than snapshotted: LOCATION must name the port the HTTP server
+    /// is actually accepting on, which a rebind can move under a running SSDP service.
+    http_binding: Arc<crate::state::HttpBinding>,
     server_ip: String,
     primary_interface: Option<NetworkInterface>,
 }
@@ -72,6 +75,7 @@ impl UnifiedSsdpService {
             network_manager,
             platform_adapter,
             config: state.current_config(),
+            http_binding: state.http_binding.clone(),
             server_ip: state.get_server_ip(),
             primary_interface: state.platform_info.get_primary_interface().cloned(),
         }
@@ -131,6 +135,7 @@ impl UnifiedSsdpService {
 
         // Start M-SEARCH responder task
         let responder_config = self.config.clone();
+        let responder_binding = self.http_binding.clone();
         let responder_ip = self.server_ip.clone();
         let responder_manager = self.network_manager.clone();
         let responder_ssdp_config = ssdp_config.clone();
@@ -139,6 +144,7 @@ impl UnifiedSsdpService {
         let responder = tokio::spawn(async move {
             Self::search_responder_task(
                 responder_config,
+                responder_binding,
                 responder_ip,
                 responder_manager,
                 responder_ssdp_config,
@@ -150,12 +156,14 @@ impl UnifiedSsdpService {
 
         // Start announcement task
         let announcer_config = self.config.clone();
+        let announcer_binding = self.http_binding.clone();
         let announcer_ip = self.server_ip.clone();
         let announcer_manager = self.network_manager.clone();
         let announcer_socket = socket.clone();
         let announcer = tokio::spawn(async move {
             Self::announcer_task(
                 announcer_config,
+                announcer_binding,
                 announcer_ip,
                 announcer_manager,
                 announcer_socket,
@@ -191,6 +199,7 @@ impl UnifiedSsdpService {
     /// Task for handling M-SEARCH requests
     async fn search_responder_task(
         config: Arc<AppConfig>,
+        http_binding: Arc<crate::state::HttpBinding>,
         server_ip: String,
         network_manager: Arc<dyn NetworkManager>,
         ssdp_config: SsdpConfig,
@@ -255,7 +264,15 @@ impl UnifiedSsdpService {
 
             if request.contains("M-SEARCH") {
                 debug!("Received M-SEARCH from {}", addr);
-                Self::handle_msearch_request(&config, &server_ip, &socket, &request, addr).await;
+                Self::handle_msearch_request(
+                    &config,
+                    &http_binding,
+                    &server_ip,
+                    &socket,
+                    &request,
+                    addr,
+                )
+                .await;
             }
         }
     }
@@ -263,6 +280,7 @@ impl UnifiedSsdpService {
     /// Handle M-SEARCH request and send appropriate responses
     async fn handle_msearch_request(
         config: &AppConfig,
+        http_binding: &crate::state::HttpBinding,
         server_ip: &str,
         socket: &SharedSsdpSocket,
         request: &str,
@@ -272,7 +290,8 @@ impl UnifiedSsdpService {
 
         let response_count = response_types.len();
         for response_type in response_types {
-            let response = Self::create_ssdp_response(config, server_ip, response_type);
+            let response =
+                Self::create_ssdp_response(config, http_binding, server_ip, response_type);
             let active_socket = load_ssdp_socket(socket);
 
             for retry in 0..3 {
@@ -325,6 +344,7 @@ impl UnifiedSsdpService {
     /// Task for periodic SSDP announcements
     async fn announcer_task(
         config: Arc<AppConfig>,
+        http_binding: Arc<crate::state::HttpBinding>,
         server_ip: String,
         network_manager: Arc<dyn NetworkManager>,
         socket: SharedSsdpSocket,
@@ -339,13 +359,26 @@ impl UnifiedSsdpService {
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
-                    Self::send_ssdp_byebye(&config, &server_ip, &network_manager, &socket).await?;
+                    Self::send_ssdp_byebye(
+                        &config,
+                        &http_binding,
+                        &server_ip,
+                        &network_manager,
+                        &socket,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 _ = interval.tick() => {}
             }
 
-            match Self::send_ssdp_announcements(&config, &server_ip, &network_manager, &socket)
+            match Self::send_ssdp_announcements(
+                &config,
+                &http_binding,
+                &server_ip,
+                &network_manager,
+                &socket,
+            )
                 .await
             {
                 Ok(()) => {
@@ -371,6 +404,7 @@ impl UnifiedSsdpService {
     /// Send SSDP NOTIFY announcements
     async fn send_ssdp_announcements(
         config: &AppConfig,
+        http_binding: &crate::state::HttpBinding,
         server_ip: &str,
         network_manager: &Arc<dyn NetworkManager>,
         socket: &SharedSsdpSocket,
@@ -386,7 +420,8 @@ impl UnifiedSsdpService {
         let multicast_addr = SocketAddr::new(SSDP_MULTICAST_IP, SSDP_PORT);
 
         for service_type in &service_types {
-            let message = Self::create_notify_message(config, server_ip, service_type);
+            let message =
+                Self::create_notify_message(config, http_binding, server_ip, service_type);
             let active_socket = load_ssdp_socket(socket);
 
             match network_manager
@@ -426,6 +461,7 @@ impl UnifiedSsdpService {
 
     async fn send_ssdp_byebye(
         config: &AppConfig,
+        http_binding: &crate::state::HttpBinding,
         server_ip: &str,
         network_manager: &Arc<dyn NetworkManager>,
         socket: &SharedSsdpSocket,
@@ -436,7 +472,7 @@ impl UnifiedSsdpService {
             "urn:schemas-upnp-org:device:MediaServer:1",
             "urn:schemas-upnp-org:service:ContentDirectory:1",
         ] {
-            let message = Self::create_notify_message(config, server_ip, service_type)
+            let message = Self::create_notify_message(config, http_binding, server_ip, service_type)
                 .replace("NTS: ssdp:alive", "NTS: ssdp:byebye");
             let active_socket = load_ssdp_socket(socket);
             network_manager
@@ -448,7 +484,12 @@ impl UnifiedSsdpService {
     }
 
     /// Create SSDP response message
-    fn create_ssdp_response(config: &AppConfig, server_ip: &str, service_type: &str) -> String {
+    fn create_ssdp_response(
+        config: &AppConfig,
+        http_binding: &crate::state::HttpBinding,
+        server_ip: &str,
+        service_type: &str,
+    ) -> String {
         let (st, usn) = match service_type {
             "upnp:rootdevice" => (
                 "upnp:rootdevice".to_string(),
@@ -486,12 +527,17 @@ impl UnifiedSsdpService {
             ST: {}\r\n\
             USN: {}\r\n\
             \r\n",
-            server_ip, config.server.port, st, usn
+            server_ip, http_binding.port(), st, usn
         )
     }
 
     /// Create SSDP NOTIFY message
-    fn create_notify_message(config: &AppConfig, server_ip: &str, service_type: &str) -> String {
+    fn create_notify_message(
+        config: &AppConfig,
+        http_binding: &crate::state::HttpBinding,
+        server_ip: &str,
+        service_type: &str,
+    ) -> String {
         let (nt, usn) = match service_type {
             "upnp:rootdevice" => (
                 "upnp:rootdevice".to_string(),
@@ -524,7 +570,7 @@ impl UnifiedSsdpService {
             SERVER: VuIO/1.0 UPnP/1.0\r\n\
             USN: {}\r\n\
             \r\n",
-            SSDP_MULTICAST_IP, SSDP_PORT, server_ip, config.server.port, nt, usn
+            SSDP_MULTICAST_IP, SSDP_PORT, server_ip, http_binding.port(), nt, usn
         )
     }
 }

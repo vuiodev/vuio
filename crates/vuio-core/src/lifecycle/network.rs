@@ -76,7 +76,10 @@ pub(super) async fn start_http_server_task<D: DatabaseManager + 'static>(
         }
     });
 
-    start_mdns_advertisement(&app_state, listener.local_addr()?.port(), cancellation.clone());
+    // One source of truth for "where we actually answer": everything that hands out a
+    // URL reads this, so mDNS must not compute its own answer beside it.
+    app_state.http_binding.publish_serving(listener.local_addr()?);
+    start_mdns_advertisement(&app_state, app_state.http_binding.port(), cancellation.clone());
 
     // Spawn the server as a background task
     let http = tokio::spawn(async move {

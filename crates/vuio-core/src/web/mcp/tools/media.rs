@@ -149,7 +149,7 @@ pub(crate) async fn tool_get_server_stats<D: DatabaseManager>(
         .map_err(|e| format!("Database error: {}", e))?;
 
     let server_ip = state.get_server_ip();
-    let port = state.current_config().server.port;
+    let port = state.http_binding.port();
 
     Ok(serde_json::json!({
         "server_name": state.current_config().server.name,

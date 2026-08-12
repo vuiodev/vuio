@@ -81,6 +81,7 @@ async fn test_metrics_endpoints_data() {
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         config: config.clone(),
         config_source: std::sync::Arc::new(vuio_core::state::ConfigSource::default()),
+        http_binding: std::sync::Arc::new(vuio_core::state::HttpBinding::new(8080)),
         live_config: Arc::new(vuio_core::state::LiveConfig::new(config.clone())),
         database: db,
         auth: Arc::new(vuio_core::web::auth::AuthState::testing()),

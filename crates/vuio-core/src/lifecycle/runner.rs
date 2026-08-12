@@ -142,6 +142,9 @@ where
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
+        // Seeded from the configured port so nothing reads a zero before the first
+        // bind; overwritten with the address actually taken once the listener is up.
+        http_binding: Arc::new(crate::state::HttpBinding::new(config.server.port)),
         config_source: Arc::new(crate::state::ConfigSource {
             path: config_manager.get_config_path().to_path_buf(),
             // The manager only watches a config it loaded from a durable location; a
@@ -372,7 +375,9 @@ where
             } else {
                 config.server.interface.clone()
             };
-        let web_url = format!("http://{}:{}", display_ip, config.server.port);
+        // The bound port, not the configured one: a banner naming a port nothing answers
+        // on is worse than no banner.
+        let web_url = format!("http://{}:{}", display_ip, app_state.http_binding.port());
         let db_path = config.get_database_path().with_extension("redb");
 
         fn tail_with_ellipsis(value: &str, max_chars: usize) -> String {
