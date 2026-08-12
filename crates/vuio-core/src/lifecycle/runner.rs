@@ -199,7 +199,10 @@ where
 
     let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
 
-    if config.database.backup_enabled {
+    // Always spawned, gated per tick. Spawning only when backups were on at boot made
+    // the setting one-way: turning it off worked, turning it on did nothing until a
+    // restart, because there was no task left to notice.
+    {
         let backup_database = database.clone();
         let backup_state = app_state.clone();
         let backup_cancellation = cancellation.clone();
@@ -319,41 +322,33 @@ where
         )
     });
 
-    // Start SSDP discovery service with platform abstraction
-    let ssdp_handle = start_ssdp_service(app_state.clone(), cancellation.clone()).await?;
-    services.spawn(async move {
-        let result = ssdp_handle
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result);
-        ("SSDP", result)
-    });
-
-    // Start the HTTP server as a background task
-    let network_handles =
-        match start_http_server_task(app_state.clone(), cancellation.clone()).await {
-            Ok(handles) => handles,
-            Err(e) => {
-                error!("Failed to start HTTP server: {}", e);
-                return Err(e);
-            }
-        };
-    services.spawn(async move {
-        let result = network_handles
-            .http
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result);
-        ("HTTP", result)
-    });
+    // The listener and the discovery advertisement are supervised rather than started,
+    // so a port, identity or discovery change can be applied by rebuilding them instead
+    // of by restarting the process. Both tasks run until shutdown; see `supervisor`.
+    let http_state = app_state.clone();
+    let http_cancellation = cancellation.clone();
+    let http_started = supervisor::bind_first_listener(&http_state).await?;
     services.spawn(async move {
         (
-            "TV discovery",
-            network_handles
-                .tv_discovery
-                .await
-                .map_err(anyhow::Error::from),
+            "HTTP",
+            supervisor::run_http_supervisor(http_state, http_cancellation, http_started).await,
         )
+    });
+
+    let discovery_state = app_state.clone();
+    let discovery_cancellation = cancellation.clone();
+    services.spawn(async move {
+        (
+            "discovery",
+            supervisor::run_advertisement_supervisor(discovery_state, discovery_cancellation).await,
+        )
+    });
+
+    // Renderer discovery has nothing to do with the listener; it used to be started
+    // beside it and would otherwise be cycled by every rebind.
+    let tv_discovery = start_tv_discovery(app_state.clone(), cancellation.clone());
+    services.spawn(async move {
+        ("TV discovery", tv_discovery.await.map_err(anyhow::Error::from))
     });
 
     // Determine if console logging is verbose

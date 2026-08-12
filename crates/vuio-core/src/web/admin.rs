@@ -136,21 +136,21 @@ const SERVER_FIELDS: &[FieldSpec] = &[
         "server.port",
         "HTTP port",
         FieldKind::Int { min: 1, max: 65535 },
-        Impact::Restart,
+        Impact::Live,
         "Port for the dashboard, media streaming and UPnP control.",
     ),
     field(
         "server.interface",
         "Bind address",
         FieldKind::Text,
-        Impact::Restart,
+        Impact::Live,
         "Address the HTTP server binds. 0.0.0.0 accepts connections on every interface.",
     ),
     field(
         "server.name",
         "Friendly name",
         FieldKind::Text,
-        Impact::Restart,
+        Impact::Live,
         "The name TVs and players show for this server.",
     ),
     noted(
@@ -158,7 +158,7 @@ const SERVER_FIELDS: &[FieldSpec] = &[
             "server.uuid",
             "Device UUID",
             FieldKind::Text,
-            Impact::Restart,
+            Impact::Live,
             "Stable identity advertised over UPnP.",
         ),
         "Changing this makes every client treat the server as a brand new device.",
@@ -168,7 +168,7 @@ const SERVER_FIELDS: &[FieldSpec] = &[
             "server.ip",
             "Advertised address",
             FieldKind::Text,
-            Impact::Restart,
+            Impact::Live,
             "Address written into the media URLs handed to clients. Leave unset to detect it.",
         ),
         "Usually only needed in Docker, where the container cannot see its host address.",
@@ -184,7 +184,7 @@ const NETWORK_FIELDS: &[FieldSpec] = &[
                 options: &["Auto", "All"],
                 free_form: true,
             },
-            Impact::Restart,
+            Impact::Live,
             "Auto, All, or a specific interface name or address.",
         ),
         "Only affects the address advertised in media URLs. It does not choose which \
@@ -195,7 +195,7 @@ const NETWORK_FIELDS: &[FieldSpec] = &[
             "network.multicast_ttl",
             "Multicast TTL",
             FieldKind::Int { min: 1, max: 255 },
-            Impact::Restart,
+            Impact::Live,
             "Hop limit for SSDP discovery packets.",
         ),
         "Raise this only to reach a subnet across a router; most networks need no more \
@@ -208,14 +208,14 @@ const NETWORK_FIELDS: &[FieldSpec] = &[
             min: 1,
             max: 86_400,
         },
-        Impact::Restart,
+        Impact::Live,
         "Seconds between SSDP presence announcements.",
     ),
     optional(
         "network.mdns_enabled",
         "Advertise over mDNS",
         FieldKind::Bool,
-        Impact::Restart,
+        Impact::Live,
         "Also announce the server over Bonjour/DNS-SD, alongside SSDP.",
     ),
     optional(
@@ -303,10 +303,10 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
             "database.backup_enabled",
             "Automatic backups",
             FieldKind::Bool,
-            Impact::Restart,
+            Impact::Live,
             "Back up the index at startup, once a day, and at shutdown.",
         ),
-        "The daily backup task is only started if this was already on at boot.",
+        "Applies from the next daily tick; the startup and shutdown backups need a restart.",
     ),
     optional(
         "database.redb_cache_mb",
@@ -456,6 +456,11 @@ struct RuntimeInfo {
     auth_enabled: bool,
     is_docker: bool,
     version: &'static str,
+    /// Where the server is actually accepting. Differs from `server.port` when a bind
+    /// failed, and the settings screen has to keep saying so after a page reload.
+    bound_addr: Option<String>,
+    desired_addr: Option<String>,
+    bind_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -498,6 +503,7 @@ fn raw_directories(document: &DocumentMut) -> Option<Value> {
 
 fn runtime_info<D: DatabaseManager>(state: &AppState<D>) -> RuntimeInfo {
     let is_docker = AppConfig::is_running_in_docker();
+    let binding = state.http_binding.detail();
     let writable = state.config_source.durable;
     RuntimeInfo {
         config_path: state.config_source.path.display().to_string(),
@@ -515,6 +521,9 @@ fn runtime_info<D: DatabaseManager>(state: &AppState<D>) -> RuntimeInfo {
         auth_enabled: state.auth.enabled(),
         is_docker,
         version: env!("CARGO_PKG_VERSION"),
+        bound_addr: binding.addr.map(|addr| addr.to_string()),
+        desired_addr: binding.desired,
+        bind_error: binding.last_error,
     }
 }
 
@@ -726,6 +735,52 @@ fn write_atomically(path: &std::path::Path, contents: &str) -> std::io::Result<(
     std::fs::rename(&temporary, path)
 }
 
+/// Wait for the listener supervisor to act on a bind change, and report what it did.
+///
+/// Bounded: the supervisor may be busy draining, and a settings save must not hang. A
+/// timeout reports `pending` rather than guessing, and the standing state is readable
+/// from `runtime_info` on the next page load either way.
+async fn await_relocation<D: DatabaseManager>(state: &AppState<D>, before: u64) -> Value {
+    let mut moves = state.http_binding.subscribe();
+    let settled = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if *moves.borrow_and_update() != before {
+                return;
+            }
+            // A failed bind never bumps the generation, so also stop once the failure
+            // has been recorded.
+            if state.http_binding.detail().last_error.is_some() {
+                return;
+            }
+            if moves.changed().await.is_err() {
+                return;
+            }
+        }
+    })
+    .await;
+
+    let detail = state.http_binding.detail();
+    let addr = detail.addr.map(|addr| addr.to_string());
+    if let Some(error) = detail.last_error {
+        return json!({
+            "state": "failed",
+            "serving": addr,
+            "desired": detail.desired,
+            "error": error,
+        });
+    }
+    if settled.is_err() {
+        return json!({ "state": "pending", "serving": addr });
+    }
+    json!({
+        "state": "moved",
+        "serving": addr,
+        // The browser builds the URL to follow from its own hostname; a wildcard bind
+        // says nothing about which address the operator can actually reach.
+        "port": state.http_binding.port(),
+    })
+}
+
 pub async fn put_config<D: DatabaseManager>(
     State(state): State<AppState<D>>,
     Json(update): Json<ConfigUpdate>,
@@ -843,10 +898,24 @@ pub async fn put_config<D: DatabaseManager>(
             tracing::error!("Keeping the previous management settings: {error:#}");
         }
     }
+    let wants_move = before.server.port != running.server.port
+        || before.server.interface != running.server.interface;
+    let generation_before = *state.http_binding.subscribe().borrow();
     state.live_config.store(std::sync::Arc::new(running));
+
+    // A move disconnects the browser that asked for it, so the response has to say
+    // where the server went rather than leaving a dead page. Waiting for the supervisor
+    // to actually rebind is what makes this a report instead of a prediction; the reply
+    // still arrives, because the old listener drains in-flight requests before closing.
+    let relocation = if wants_move {
+        Some(await_relocation(&state, generation_before).await)
+    } else {
+        None
+    };
 
     Json(json!({
         "saved": true,
+        "moved": relocation,
         "impact": match impact {
             ConfigChangeImpact::NoChange => "no_change",
             ConfigChangeImpact::LiveReload => "live",
@@ -1150,8 +1219,10 @@ recursive = true
         live.media.autoplay_enabled = !live.media.autoplay_enabled;
         assert_eq!(impact_of(&base, &live), ConfigChangeImpact::LiveReload);
 
+        // The index cannot be reopened under a live server, so this is one of the two
+        // settings that genuinely still needs one.
         let mut restart = base.clone();
-        restart.server.port += 1;
+        restart.database.redb_cache_mb += 1;
         assert_eq!(impact_of(&base, &restart), ConfigChangeImpact::RestartRequired);
 
         // A change the schema does not cover still has to be reported honestly.
@@ -1182,7 +1253,7 @@ recursive = true
 
         // But a genuine restart-required change outranks both.
         let mut restart = mixed;
-        restart.server.port += 1;
+        restart.database.redb_cache_mb += 1;
         assert_eq!(
             impact_of(&base, &restart),
             ConfigChangeImpact::RestartRequired

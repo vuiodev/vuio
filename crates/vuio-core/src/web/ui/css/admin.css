@@ -399,3 +399,42 @@ textarea.admin-input {
     margin: 0;
     overflow-wrap: anywhere;
 }
+
+/* Shown when the server has moved out from under this page. */
+.admin-modal-overlay {
+    align-items: center;
+    background: rgba(0, 0, 0, 0.72);
+    display: flex;
+    inset: 0;
+    justify-content: center;
+    padding: 1.5rem;
+    position: fixed;
+    z-index: 10000;
+}
+
+.admin-modal {
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+    max-width: 32rem;
+    padding: 1.5rem;
+}
+
+.admin-modal h2 {
+    font-size: 1.15rem;
+    font-weight: 700;
+}
+
+.admin-modal p {
+    color: var(--text-secondary);
+    font-size: 0.9rem;
+    line-height: 1.55;
+}
+
+.admin-modal-note {
+    color: var(--accent-color) !important;
+    font-weight: 600;
+}

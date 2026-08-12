@@ -6,22 +6,57 @@ use crate::{
 };
 use std::sync::Arc;
 
-pub struct LiveConfig(std::sync::RwLock<Arc<AppConfig>>);
+pub struct LiveConfig {
+    config: std::sync::RwLock<Arc<AppConfig>>,
+    /// Notifies subsystems that hold resources built from the configuration — the
+    /// listener, the SSDP service — that they may need to rebuild.
+    ///
+    /// Published by `store` itself rather than by its callers. There are two writers,
+    /// the admin API's eager save and the file watcher's echo of the same bytes, and
+    /// only one of them goes through `ConfigManager`'s events; hanging the signal off
+    /// the write makes both correct in either order with no coordination. A `watch` is
+    /// level-triggered, so a subscriber asks "what should I be running" rather than
+    /// "what happened", and cannot miss the final state by being slow.
+    changes: tokio::sync::watch::Sender<Arc<AppConfig>>,
+}
 
 impl LiveConfig {
     pub fn new(config: Arc<AppConfig>) -> Self {
-        Self(std::sync::RwLock::new(config))
+        let (changes, _) = tokio::sync::watch::channel(config.clone());
+        Self {
+            config: std::sync::RwLock::new(config),
+            changes,
+        }
     }
 
     pub fn load(&self) -> Arc<AppConfig> {
-        self.0
+        self.config
             .read()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
     }
 
     pub fn store(&self, config: Arc<AppConfig>) {
-        *self.0.write().unwrap_or_else(|error| error.into_inner()) = config;
+        // The value first: a subscriber woken by the notification reads through
+        // `current_config()`, and must not see the config it is being told to leave.
+        *self
+            .config
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = config.clone();
+        // Equal configs raise nothing, which is what dedupes the eager save against
+        // the watcher echo of the same bytes.
+        self.changes.send_if_modified(|current| {
+            if **current == *config {
+                false
+            } else {
+                *current = config;
+                true
+            }
+        });
+    }
+
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<Arc<AppConfig>> {
+        self.changes.subscribe()
     }
 }
 
@@ -38,6 +73,13 @@ pub struct HttpBinding {
     /// Read on every URL that goes out. Cheaper than the config read it replaces.
     port: std::sync::atomic::AtomicU16,
     detail: std::sync::RwLock<BindingDetail>,
+    /// Bumped every time the listener moves.
+    ///
+    /// Discovery subscribes to this rather than to the configuration, which makes the
+    /// ordering structural: the advertisement can only be rebuilt after the address it
+    /// will announce is real. Watching the config instead raced the rebind, and the
+    /// loser announced the address the server had just left.
+    generation: tokio::sync::watch::Sender<u64>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -53,10 +95,17 @@ pub struct BindingDetail {
 impl HttpBinding {
     /// Seeded from the configured port before the first bind, so nothing reads a zero.
     pub fn new(configured_port: u16) -> Self {
+        let (generation, _) = tokio::sync::watch::channel(0);
         Self {
             port: std::sync::atomic::AtomicU16::new(configured_port),
             detail: std::sync::RwLock::new(BindingDetail::default()),
+            generation,
         }
+    }
+
+    /// Notifies on every move of the listener.
+    pub fn subscribe(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.generation.subscribe()
     }
 
     pub fn port(&self) -> u16 {
@@ -78,9 +127,16 @@ impl HttpBinding {
             .detail
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        let moved = detail.addr != Some(addr);
         detail.addr = Some(addr);
         detail.desired = None;
         detail.last_error = None;
+        drop(detail);
+        if moved {
+            // Sent last: it is the edge subscribers observe, so everything they will
+            // read must already be in place.
+            self.generation.send_modify(|generation| *generation += 1);
+        }
     }
 
     /// Record that the configured address could not be taken. The published port is

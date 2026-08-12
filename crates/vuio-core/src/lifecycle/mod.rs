@@ -16,7 +16,6 @@ use anyhow::Context;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use std::{
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -30,6 +29,7 @@ mod media_service;
 mod network;
 mod runner;
 mod shutdown;
+mod supervisor;
 
 use bootstrap::*;
 pub use bootstrap::ApplicationContext;

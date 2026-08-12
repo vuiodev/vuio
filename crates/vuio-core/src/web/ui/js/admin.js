@@ -70,7 +70,22 @@ function renderAdmin() {
 function renderAdminBanner() {
     const banner = document.getElementById('admin-banner');
     banner.replaceChildren();
-    const reason = adminData.runtime.read_only_reason;
+    // A bind the server could not take outlives the save that caused it, so it is a
+    // standing banner driven by the runtime state rather than a toast.
+    const runtime = adminData.runtime;
+    if (runtime.bind_error && runtime.desired_addr) {
+        banner.className = 'admin-banner admin-banner-warn';
+        banner.style.display = 'flex';
+        const text = document.createElement('div');
+        text.className = 'admin-banner-text';
+        text.textContent =
+            'Configured for ' + runtime.desired_addr + ' but still serving on ' +
+            (runtime.bound_addr || 'the previous address') + ': ' + runtime.bind_error;
+        banner.appendChild(text);
+        return;
+    }
+
+    const reason = runtime.read_only_reason;
     if (!reason) {
         banner.style.display = 'none';
         return;
@@ -101,6 +116,44 @@ function showAdminRestartBanner() {
     button.textContent = 'Restart server';
     button.onclick = restartServer;
     banner.appendChild(button);
+}
+
+
+/** The server moved and this page is talking to an address that is about to close. */
+function showServerMovedModal(moved) {
+    // Built from this browser's own hostname, not from what the server thinks its
+    // address is: the operator may have reached the dashboard over localhost, a LAN
+    // address or a proxy, and only they know which one works.
+    const target = window.location.protocol + '//' + window.location.hostname + ':' + moved.port;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'admin-modal-overlay';
+    const dialog = document.createElement('div');
+    dialog.className = 'admin-modal';
+
+    const heading = document.createElement('h2');
+    heading.textContent = 'This server moved';
+    const body = document.createElement('p');
+    body.textContent =
+        'It is now at ' + target + '. This page is still connected to the old address ' +
+        'and will stop responding shortly; anything streaming from it will be interrupted.';
+    const note = document.createElement('p');
+    note.className = 'admin-modal-note';
+    note.textContent = 'Taking you there in a moment…';
+
+    const actions = document.createElement('div');
+    actions.className = 'admin-footer-actions';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.className = 'admin-btn admin-btn-primary';
+    go.textContent = 'Go to the new address';
+    go.onclick = () => window.location.replace(target + window.location.pathname);
+    actions.appendChild(go);
+
+    dialog.append(heading, body, note, actions);
+    overlay.appendChild(dialog);
+    document.body.appendChild(overlay);
+    setTimeout(() => window.location.replace(target + window.location.pathname), 4000);
 }
 
 function renderAdminNav() {
@@ -162,6 +215,7 @@ function renderAdminRuntime() {
 
     const rows = [
         ['Config file', runtime.config_path, true],
+        ['Serving on', runtime.bound_addr || 'not bound', true],
         ['Editable here', runtime.writable ? 'Yes' : 'No', false],
         ['Authentication', runtime.auth_enabled ? 'Required' : 'Not required', false],
         ['Container', runtime.is_docker ? 'Yes' : 'No', false],
@@ -606,6 +660,24 @@ async function saveAdminConfig() {
         // presence has changed for every key just set or unset.
         await loadAdminConfig();
 
+        // A move disconnects this page, so it gets a modal rather than a toast: a toast
+        // on a page that is about to stop responding is the worst possible affordance.
+        if (result.moved && result.moved.state === 'moved') {
+            showServerMovedModal(result.moved);
+            return;
+        }
+        if (result.moved && result.moved.state === 'failed') {
+            showToast(
+                'Saved, but the server could not move to ' + result.moved.desired + ': ' +
+                result.moved.error + '. Still serving on ' + result.moved.serving + '.',
+                'error'
+            );
+            return;
+        }
+        if (result.moved && result.moved.state === 'pending') {
+            showToast('Saved. The server is still moving to the new address.', 'info');
+            return;
+        }
         if (result.impact === 'restart_required') {
             showAdminRestartBanner();
             showToast('Settings saved. A restart is needed for some of them.', 'info');
