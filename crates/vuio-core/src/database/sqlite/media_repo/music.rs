@@ -30,8 +30,10 @@ impl SqliteDatabase {
         &self,
         kind: MusicCategoryType,
         filter: MusicCategoryFilter,
+        child_of: Option<MusicCategoryType>,
     ) -> Result<Vec<MusicCategory>> {
         let column = category_column(&kind);
+        let child_column = child_of.as_ref().map(category_column);
 
         self.execute_read(move |connection| {
             let mut params: Vec<rusqlite::types::Value> = Vec::new();
@@ -64,12 +66,20 @@ impl SqliteDatabase {
             // produce a browsable container.
             //
             // `MIN(id)` picks a stable representative for the container's cover
-            // art. It costs nothing extra: the grouping has already visited
+            // art, and the optional `COUNT(DISTINCT …)` counts the containers
+            // one level down. Both are free: the grouping has already visited
             // every row.
+            let child_total = match child_column {
+                Some(child) => format!(", COUNT(DISTINCT {child}) AS children"),
+                None => String::new(),
+            };
             let sql = format!(
-                "SELECT {column} AS label, COUNT(*) AS total, MIN(media_files.id) AS sample \
+                "SELECT {column} AS label, COUNT(*) AS total, MIN(media_files.id) AS sample\
+                 {child_total} \
                  FROM media_files \
                  WHERE {column} IS NOT NULL AND {column} <> ''{extra} \
+                 AND media_files.mime_family = 'audio' \
+                 AND media_files.mime_type <> 'audio/radio' \
                  GROUP BY label ORDER BY label COLLATE natural_order"
             );
             let mut statement = connection.prepare_cached(&sql)?;
@@ -82,6 +92,10 @@ impl SqliteDatabase {
                         name,
                         category_type: kind.clone(),
                         count: count.max(0) as usize,
+                        child_count: match child_column {
+                            Some(_) => Some(row.get::<_, i64>(3)?.max(0) as usize),
+                            None => None,
+                        },
                         sample_id: row.get(2)?,
                     })
                 })?
@@ -95,12 +109,13 @@ impl SqliteDatabase {
         &self,
         kind: MusicCategoryType,
         filter: &MusicCategoryFilter,
+        child_of: Option<MusicCategoryType>,
     ) -> Result<Vec<MusicCategory>> {
-        self.categories(kind, filter.clone()).await
+        self.categories(kind, filter.clone(), child_of).await
     }
 
     pub(in crate::database::sqlite) async fn get_artists_impl(&self) -> Result<Vec<MusicCategory>> {
-        self.categories(MusicCategoryType::Artist, MusicCategoryFilter::default())
+        self.categories(MusicCategoryType::Artist, MusicCategoryFilter::default(), None)
             .await
     }
 
@@ -112,23 +127,23 @@ impl SqliteDatabase {
             Some(artist) => MusicCategoryFilter::artist(artist),
             None => MusicCategoryFilter::default(),
         };
-        self.categories(MusicCategoryType::Album, filter).await
+        self.categories(MusicCategoryType::Album, filter, None).await
     }
 
     pub(in crate::database::sqlite) async fn get_genres_impl(&self) -> Result<Vec<MusicCategory>> {
-        self.categories(MusicCategoryType::Genre, MusicCategoryFilter::default())
+        self.categories(MusicCategoryType::Genre, MusicCategoryFilter::default(), None)
             .await
     }
 
     pub(in crate::database::sqlite) async fn get_years_impl(&self) -> Result<Vec<MusicCategory>> {
-        self.categories(MusicCategoryType::Year, MusicCategoryFilter::default())
+        self.categories(MusicCategoryType::Year, MusicCategoryFilter::default(), None)
             .await
     }
 
     pub(in crate::database::sqlite) async fn get_album_artists_impl(
         &self,
     ) -> Result<Vec<MusicCategory>> {
-        self.categories(MusicCategoryType::AlbumArtist, MusicCategoryFilter::default())
+        self.categories(MusicCategoryType::AlbumArtist, MusicCategoryFilter::default(), None)
             .await
     }
 

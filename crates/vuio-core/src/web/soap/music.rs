@@ -305,6 +305,9 @@ impl MusicNode {
             Self::GenreArtist(_, artist) => artist.clone(),
 
             Self::Year(year) => year.to_string(),
+            // A playlist's name lives in the database, not in its object id.
+            // `display_title` resolves it; this is only the fallback for a
+            // playlist that has since been deleted.
             Self::Playlist(id) => format!("Playlist {id}"),
 
             Self::Folders(path) if path.is_empty() => "Folders".to_owned(),
@@ -406,9 +409,13 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
             .collect(),
 
         MusicNode::ArtistList => {
-            category_specs(state, Kind::Artist, MusicCategoryFilter::default(), &|name| {
-                MusicNode::Artist(name)
-            })
+            category_specs(
+                state,
+                Kind::Artist,
+                MusicCategoryFilter::default(),
+                Some(Kind::Album),
+                &MusicNode::Artist,
+            )
             .await?
         }
 
@@ -417,6 +424,7 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
                 state,
                 Kind::AlbumArtist,
                 MusicCategoryFilter::default(),
+                Some(Kind::Album),
                 &MusicNode::AlbumArtist,
             )
             .await?
@@ -427,6 +435,7 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
                 state,
                 Kind::Album,
                 MusicCategoryFilter::default(),
+                None,
                 &MusicNode::Album,
             )
             .await?
@@ -437,6 +446,7 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
                 state,
                 Kind::Genre,
                 MusicCategoryFilter::default(),
+                Some(Kind::Artist),
                 &MusicNode::Genre,
             )
             .await?
@@ -447,7 +457,7 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
         MusicNode::YearList => {
             let database = state.database.clone();
             database
-                .get_music_categories(Kind::Year, &MusicCategoryFilter::default())
+                .get_music_categories(Kind::Year, &MusicCategoryFilter::default(), None)
                 .await?
                 .into_iter()
                 .filter_map(|category| {
@@ -486,13 +496,13 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
         // shape, with All Songs at the top.
         MusicNode::Genre(genre) => {
             let filter = MusicCategoryFilter::genre(genre);
-            let database = state.database.clone();
-            let found = database.get_music_categories(Kind::Artist, &filter).await?;
             let mut specs = vec![spec_for(&MusicNode::GenreAll(genre.clone()), 1, None)];
-            specs.extend(found.into_iter().map(|category| {
-                let child = MusicNode::GenreArtist(genre.clone(), category.name.clone());
-                spec_for(&child, category.count, category.sample_id)
-            }));
+            specs.extend(
+                category_specs(state, Kind::Artist, filter, Some(Kind::Album), &|artist| {
+                    MusicNode::GenreArtist(genre.clone(), artist)
+                })
+                .await?,
+            );
             specs
         }
 
@@ -532,19 +542,30 @@ pub(super) async fn child_containers<D: DatabaseManager + 'static>(
 }
 
 /// One container per distinct value of a tag, carrying its real child count.
+///
+/// `child_of` names the tag one level down. Given it, each container counts its
+/// sub-containers — plus the All Songs node the tree inserts — rather than the
+/// tracks underneath, which is a different and much larger number.
 async fn category_specs<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     kind: MusicCategoryType,
     filter: MusicCategoryFilter,
+    child_of: Option<MusicCategoryType>,
     to_node: &(dyn Fn(String) -> MusicNode + Sync),
 ) -> anyhow::Result<Vec<ContainerSpec>> {
     let database = state.database.clone();
-    let found = database.get_music_categories(kind, &filter).await?;
+    let found = database
+        .get_music_categories(kind, &filter, child_of)
+        .await?;
     Ok(found
         .into_iter()
         .map(|category| {
             let child = to_node(category.name.clone());
-            spec_for(&child, category.count, category.sample_id)
+            let children = match category.child_count {
+                Some(count) => count + 1, // the All Songs node
+                None => category.count,
+            };
+            spec_for(&child, children, category.sample_id)
         })
         .collect())
 }
@@ -558,7 +579,7 @@ async fn album_children<D: DatabaseManager + 'static>(
 ) -> anyhow::Result<Vec<ContainerSpec>> {
     let database = state.database.clone();
     let found = database
-        .get_music_categories(MusicCategoryType::Album, &filter)
+        .get_music_categories(MusicCategoryType::Album, &filter, None)
         .await?;
     let mut specs = vec![spec_for(&all_node, 1, None)];
     specs.extend(found.into_iter().map(|category| {
@@ -566,6 +587,23 @@ async fn album_children<D: DatabaseManager + 'static>(
         spec_for(&child, category.count, category.sample_id)
     }));
     Ok(specs)
+}
+
+/// The title to show for a node, resolving the ones the object id cannot carry.
+///
+/// A control point that probes a container with `BrowseMetadata` must be told
+/// the same name its parent's listing used, or the two disagree about one
+/// object.
+pub(super) async fn display_title<D: DatabaseManager + 'static>(
+    node: &MusicNode,
+    state: &AppState<D>,
+) -> String {
+    if let MusicNode::Playlist(id) = node {
+        if let Ok(Some(playlist)) = state.database.get_playlist(*id).await {
+            return playlist.name;
+        }
+    }
+    node.title()
 }
 
 fn spec_for(node: &MusicNode, child_count: usize, album_art_id: Option<i64>) -> ContainerSpec {

@@ -761,6 +761,7 @@ async fn tags_from_a_container_the_old_reader_could_not_open() {
             db.get_music_categories(
                 MusicCategoryType::Album,
                 &MusicCategoryFilter::artist("Aphex Twin"),
+                None,
             )
             .await
             .unwrap()
@@ -822,7 +823,8 @@ async fn apev2_tags_are_read_alongside_id3() {
     assert_eq!(file.track_number, Some(4));
 
     // The ID3 frame the encoder wrote lives in a different revision of the
-    // metadata log than the APE items, and both survive.
+    // metadata log than the APE items, and both survive: the APE values reached
+    // the columns asserted above, and the ID3 one reached the side table.
     let stored = db.get_media_tags(file.id.unwrap()).await.unwrap();
     assert!(
         stored
@@ -830,10 +832,10 @@ async fn apev2_tags_are_read_alongside_id3() {
             .any(|(key, value)| key == "Encoder" && value.starts_with("Lavf")),
         "the ID3 revision must not be dropped in favour of the APE one: {stored:?}"
     );
+
+    // A tag with a column of its own is not repeated in the side table.
     assert!(
-        stored
-            .iter()
-            .any(|(key, value)| key == "Artist" && value == "Boards of Canada"),
-        "expected normalized tag names to be stored, got {stored:?}"
+        !stored.iter().any(|(key, _)| key == "Artist"),
+        "promoted tags belong in their column, not both places: {stored:?}"
     );
 }

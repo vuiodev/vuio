@@ -528,3 +528,116 @@ async fn paging_reports_the_full_total_at_every_offset() {
     assert_eq!(item_count(&tracks), 2);
     assert_eq!(field(&tracks, "TotalMatches"), 4);
 }
+
+/// A container announcing more children than it returns sends a control point
+/// looking for items that are not there.
+///
+/// The count of an artist is its albums, not its tracks — those are different
+/// numbers, and the tracks number is the larger and wrong one.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (integration harness)"
+)]
+async fn child_counts_match_the_children_actually_returned() {
+    let (_temp, state) = make_test_state().await;
+    seed(&state).await;
+    // Push Metallica to four tracks across two albums, so the track count and
+    // the child count are different numbers and the assertion can tell them
+    // apart.
+    state
+        .database
+        .bulk_store_media_files(&[track(
+            "/music/m/rtl3.mp3",
+            "Metallica",
+            "Ride the Lightning",
+            "Metal",
+            3,
+        )])
+        .await
+        .unwrap();
+
+    let child_count = |response: &str, container_id: &str| -> usize {
+        // Each container renders as `id="…" parentID="…" … childCount="N"`.
+        let anchor = format!("id=&quot;{container_id}&quot;");
+        let start = response
+            .find(&anchor)
+            .unwrap_or_else(|| panic!("{container_id} not in response"));
+        response[start..]
+            .split("childCount=&quot;")
+            .nth(1)
+            .and_then(|rest| rest.split("&quot;").next())
+            .and_then(|value| value.parse().ok())
+            .expect("no childCount")
+    };
+
+    // Metallica: 4 tracks but 2 albums, so 3 children (All Songs + 2 albums).
+    let artists = browse(&state, "audio/artists").await;
+    let announced = child_count(&artists, "audio/artists/Metallica");
+    let actual = container_ids(&browse(&state, "audio/artists/Metallica").await).len();
+    assert_eq!(
+        announced, actual,
+        "artist announced {announced} children but returned {actual}"
+    );
+    assert_eq!(actual, 3);
+
+    // Rock: 2 artists, so 3 children (All Songs + 2 artists).
+    let genres = browse(&state, "audio/genres").await;
+    let announced = child_count(&genres, "audio/genres/Rock");
+    let actual = container_ids(&browse(&state, "audio/genres/Rock").await).len();
+    assert_eq!(
+        announced, actual,
+        "genre announced {announced} children but returned {actual}"
+    );
+
+    // An album's children really are tracks, so there the record count is right.
+    let metallica = browse(&state, "audio/artists/Metallica").await;
+    let announced = child_count(&metallica, "audio/artists/Metallica/Ride the Lightning");
+    let actual = item_count(&browse(&state, "audio/artists/Metallica/Ride the Lightning").await);
+    assert_eq!(announced, actual);
+    assert_eq!(actual, 3);
+
+    // BrowseMetadata must agree with the parent listing about the same object.
+    let probed = browse_with_flag(&state, "audio/artists/Metallica", "BrowseMetadata").await;
+    assert_eq!(child_count(&probed, "audio/artists/Metallica"), 3);
+}
+
+/// A playlist is named the same whether it is listed or probed.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (integration harness)"
+)]
+async fn browse_metadata_names_a_playlist_the_way_its_listing_did() {
+    let (_temp, state) = make_test_state().await;
+    let ids = state
+        .database
+        .bulk_store_media_files(&[track("/music/p/one.mp3", "Artist", "Album", "Pop", 1)])
+        .await
+        .unwrap();
+    let playlist = state
+        .database
+        .create_playlist("Roadtrip", None)
+        .await
+        .unwrap();
+    state
+        .database
+        .batch_add_to_playlist(playlist, &[(ids[0], 0)])
+        .await
+        .unwrap();
+
+    let listed = browse(&state, "audio/playlists").await;
+    assert_eq!(container_titles(&listed), ["Roadtrip"]);
+
+    let probed = browse_with_flag(
+        &state,
+        &format!("audio/playlists/{playlist}"),
+        "BrowseMetadata",
+    )
+    .await;
+    assert_eq!(
+        container_titles(&probed),
+        ["Roadtrip"],
+        "a probe must not rename the container its listing already named"
+    );
+}

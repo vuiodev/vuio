@@ -86,9 +86,27 @@ pub(super) async fn resolve_container_metadata<D: DatabaseManager + 'static>(
             }
             Some(node) => {
                 let count = music_child_count(&node, state).await;
-                return (node.parent_id(), node.title(), node.class(), count);
+                let title = display_title(&node, state).await;
+                return (node.parent_id(), title, node.class(), count);
             }
-            None => {}
+            // An id that names no node is a folder path minted before the
+            // tree grew its `folders/` segment. It still browses as one, so it
+            // is still counted as one — with the audio filter, which the
+            // generic branch below has no way to apply.
+            None => {
+                let count = count_media_folder_children(state, "audio/", audio_path).await;
+                let parent = object_id
+                    .rsplit_once('/')
+                    .map(|(parent, _)| parent.to_string())
+                    .unwrap_or_else(|| "audio".to_string());
+                let title = audio_path
+                    .rsplit('/')
+                    .next()
+                    .filter(|part| !part.is_empty())
+                    .unwrap_or("Music")
+                    .to_string();
+                return (parent, title, STORAGE_FOLDER, count.max(1));
+            }
         }
     }
 

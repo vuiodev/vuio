@@ -245,6 +245,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
             return true;
         }
 
+        // A record written by an older tag reader is stale even though its file
+        // is not. Non-recursive roots come through here rather than through
+        // `fingerprint_needs_update`, and without this they would never pick up
+        // an improved extractor.
+        if existing.tags_version < current.tags_version {
+            return true;
+        }
+
         // Compare modification times with tolerance for Windows timestamp precision issues
         // Windows can have different precision depending on filesystem and access method
         let time_diff = if existing.modified > current.modified {

@@ -97,19 +97,19 @@ pub(in crate::database::sqlite) fn bind_media_file(file: &MediaFile) -> Vec<Valu
 
 /// Replace the long tail of tags for one record.
 ///
-/// Only a record a tag reader actually produced is authoritative, which is what
-/// `tags_version` marks. A build without the `metadata` feature, or a synthetic
-/// record assembled by a caller, leaves whatever is already stored alone rather
-/// than silently emptying it.
+/// Unconditional, so that a record's tag state is always internally consistent:
+/// the same write that clears the promoted columns clears the side table with
+/// them. Guarding this on `tags_version` would leave a file whose tags became
+/// unreadable — a truncated download, a corrupted re-encode — with empty
+/// columns but its old `media_tags` rows still answering `get_media_tags`.
+///
+/// This costs nothing for records that did not change, because the scanner only
+/// reaches a write when the fingerprint says the file itself moved on.
 fn write_extra_tags(
     transaction: &Transaction<'_>,
     media_file_id: i64,
     file: &MediaFile,
 ) -> Result<()> {
-    if file.tags_version == 0 {
-        return Ok(());
-    }
-
     transaction.execute(
         "DELETE FROM media_tags WHERE media_file_id = ?",
         [media_file_id],

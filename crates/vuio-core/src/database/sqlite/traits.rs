@@ -109,8 +109,9 @@ impl MediaRepository for SqliteDatabase {
         &self,
         kind: MusicCategoryType,
         filter: &MusicCategoryFilter,
+        child_of: Option<MusicCategoryType>,
     ) -> Result<Vec<MusicCategory>> {
-        SqliteDatabase::get_music_categories_impl(self, kind, filter).await
+        SqliteDatabase::get_music_categories_impl(self, kind, filter, child_of).await
     }
 
     async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>> {

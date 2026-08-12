@@ -764,7 +764,7 @@ pub async fn music_categories_narrow_to_their_filter<B: DatabaseBackend>() {
         let database = database.clone();
         async move {
             database
-                .get_music_categories(MusicCategoryType::Album, &filter)
+                .get_music_categories(MusicCategoryType::Album, &filter, None)
                 .await
                 .unwrap()
                 .into_iter()
@@ -781,23 +781,49 @@ pub async fn music_categories_narrow_to_their_filter<B: DatabaseBackend>() {
 
     // A genre lists the artists within it, which is the level minidlna puts
     // between a genre and its albums.
-    let rock_artists = database
+    let rock = database
         .get_music_categories(
             MusicCategoryType::Artist,
             &MusicCategoryFilter::genre("Rock"),
+            Some(MusicCategoryType::Album),
+        )
+        .await
+        .unwrap();
+    let rock_artists = rock
+        .iter()
+        .map(|category| category.name.clone())
+        .collect::<Vec<_>>();
+    assert_eq!(rock_artists, ["Artist A", "Artist B", "Metallica"]);
+
+    // A container whose children are containers must count the containers.
+    // Metallica has two Rock tracks but only one Rock album, and announcing
+    // two would promise a child the browse never returns.
+    let metallica = rock
+        .iter()
+        .find(|category| category.name == "Metallica")
+        .unwrap();
+    assert_eq!(metallica.count, 1, "one Metallica track is tagged Rock");
+    assert_eq!(metallica.child_count, Some(1), "in one album");
+
+    // Without a child tag there is nothing to count, and the caller falls back
+    // to the record count.
+    assert!(database
+        .get_music_categories(
+            MusicCategoryType::Artist,
+            &MusicCategoryFilter::default(),
+            None,
         )
         .await
         .unwrap()
-        .into_iter()
-        .map(|category| category.name)
-        .collect::<Vec<_>>();
-    assert_eq!(rock_artists, ["Artist A", "Artist B", "Metallica"]);
+        .iter()
+        .all(|category| category.child_count.is_none()));
 
     // And a genre-and-artist pair narrows to that artist's albums in it.
     let scoped = database
         .get_music_categories(
             MusicCategoryType::Album,
             &MusicCategoryFilter::genre("Rock").with_artist("Metallica"),
+            None,
         )
         .await
         .unwrap();
@@ -806,6 +832,46 @@ pub async fn music_categories_narrow_to_their_filter<B: DatabaseBackend>() {
     assert!(
         scoped[0].sample_id.is_some(),
         "a category must name a record whose cover art can represent it"
+    );
+}
+
+/// Internet radio is audio but not part of a music library.
+///
+/// A radio station is stored with its source playlist path as the album, so a
+/// category listing that does not exclude it grows a container named after a
+/// file path — one that lists nothing when opened, because every track query
+/// the browse tree builds does exclude radio.
+pub async fn radio_records_do_not_become_music_categories<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "radio-categories").await;
+
+    let mut station = MediaFile::new(
+        PathBuf::from("https://radio.example/stream"),
+        0,
+        "audio/radio".to_string(),
+    );
+    station.album = Some("/media/radio/stations.m3u".to_string());
+    station.artist = Some("Example Radio".to_string());
+
+    let mut track = audio("/music/real.mp3", 1);
+    track.album = Some("A Real Album".to_string());
+    track.artist = Some("A Real Artist".to_string());
+
+    database
+        .bulk_store_media_files(&[station, track])
+        .await
+        .unwrap();
+
+    let names = |categories: Vec<crate::database::MusicCategory>| {
+        categories
+            .into_iter()
+            .map(|category| category.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(database.get_albums(None).await.unwrap()), ["A Real Album"]);
+    assert_eq!(
+        names(database.get_artists().await.unwrap()),
+        ["A Real Artist"]
     );
 }
 
@@ -1490,6 +1556,7 @@ macro_rules! backend_conformance_tests {
         conformance_case!(album_tracks_order_by_track_number);
         conformance_case!(album_tracks_order_by_disc_then_track);
         conformance_case!(music_categories_narrow_to_their_filter);
+        conformance_case!(radio_records_do_not_become_music_categories);
         conformance_case!(playlist_entry_counts_are_returned_together);
         conformance_case!(filtered_query_searches_text_and_pages_by_cursor);
         conformance_case!(read_session_finds_records_by_id_and_path);

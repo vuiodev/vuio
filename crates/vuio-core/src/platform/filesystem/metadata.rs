@@ -238,7 +238,11 @@ fn absorb_revision(revision: &MetadataRevision, probed: &mut ProbedMetadata) {
     for tag in &revision.media.tags {
         let key = match &tag.std {
             Some(standard) => {
-                apply_standard_tag(standard, probed);
+                // A tag with a column of its own is stored there, not repeated
+                // in the side table.
+                if apply_standard_tag(standard, probed) {
+                    continue;
+                }
                 standard_tag_name(standard)
             }
             None => tag.raw.key.clone(),
@@ -258,7 +262,10 @@ fn absorb_revision(revision: &MetadataRevision, probed: &mut ProbedMetadata) {
 }
 
 /// Fill the promoted fields from a tag symphonia recognised.
-fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) {
+///
+/// Returns whether the tag has a column of its own, in which case it does not
+/// also belong in the side table.
+fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) -> bool {
     match tag {
         StandardTag::TrackTitle(value) => probed.title = Some(value.to_string()),
         StandardTag::Artist(value) => probed.artist = Some(value.to_string()),
@@ -302,8 +309,10 @@ fn apply_standard_tag(tag: &StandardTag, probed: &mut ProbedMetadata) {
         | StandardTag::OriginalRecordingYear(value) => {
             probed.year.get_or_insert(u32::from(*value));
         }
-        _ => {}
+        // Everything else keeps its place in the side table.
+        _ => return false,
     }
+    true
 }
 
 /// Store a count, ignoring one that cannot be a real one.

@@ -59,7 +59,14 @@ pub struct MusicCategory {
     pub id: String,
     pub name: String,
     pub category_type: MusicCategoryType,
+    /// How many records carry this value.
     pub count: usize,
+    /// How many distinct sub-categories it contains, when one was asked for.
+    ///
+    /// A container whose children are containers cannot report `count` as its
+    /// `childCount` — an artist with forty tracks across three albums has three
+    /// children, not forty.
+    pub child_count: Option<usize>,
     /// One record belonging to this category, used to point a container's
     /// `upnp:albumArtURI` at cover art without a second query.
     pub sample_id: Option<i64>,
@@ -724,10 +731,16 @@ pub trait MediaRepository: Send + Sync {
     ///
     /// The flat listings above are this with an empty filter; a nested browse
     /// tree is this with the ancestors it descended through.
+    ///
+    /// `child_of` names the tag one level further down. When given, each result
+    /// also reports how many distinct values of *that* tag it contains, which
+    /// is what a container whose children are containers must announce as its
+    /// `childCount`.
     async fn get_music_categories(
         &self,
         kind: MusicCategoryType,
         filter: &MusicCategoryFilter,
+        child_of: Option<MusicCategoryType>,
     ) -> Result<Vec<MusicCategory>>;
 
     /// Get music files by artist
