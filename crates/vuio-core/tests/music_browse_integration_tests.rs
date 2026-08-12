@@ -119,10 +119,20 @@ async fn seed(state: &AppState) {
 }
 
 async fn browse(state: &AppState, object_id: &str) -> String {
-    browse_with_flag(state, object_id, "BrowseDirectChildren").await
+    browse_page(state, object_id, "BrowseDirectChildren", 0, 0).await
 }
 
 async fn browse_with_flag(state: &AppState, object_id: &str, flag: &str) -> String {
+    browse_page(state, object_id, flag, 0, 0).await
+}
+
+async fn browse_page(
+    state: &AppState,
+    object_id: &str,
+    flag: &str,
+    starting_index: u32,
+    requested_count: u32,
+) -> String {
     let body = format!(
         r#"<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
@@ -131,8 +141,8 @@ async fn browse_with_flag(state: &AppState, object_id: &str, flag: &str) -> Stri
       <ObjectID>{object_id}</ObjectID>
       <BrowseFlag>{flag}</BrowseFlag>
       <Filter>*</Filter>
-      <StartingIndex>0</StartingIndex>
-      <RequestedCount>0</RequestedCount>
+      <StartingIndex>{starting_index}</StartingIndex>
+      <RequestedCount>{requested_count}</RequestedCount>
       <SortCriteria></SortCriteria>
     </u:Browse>
   </s:Body>
@@ -466,4 +476,55 @@ async fn browse_metadata_describes_music_containers() {
         !artist.contains("childCount=&quot;0&quot;"),
         "a container that holds albums must never report itself empty"
     );
+}
+
+/// A control point that pages must still learn how much there is to page
+/// through, or it stops after the first response.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (integration harness)"
+)]
+async fn paging_reports_the_full_total_at_every_offset() {
+    let (_temp, state) = make_test_state().await;
+    state
+        .database
+        .bulk_store_media_files(&[
+            track("/music/p/a.mp3", "Artist A", "Album", "Pop", 1),
+            track("/music/p/b.mp3", "Artist B", "Album", "Pop", 1),
+            track("/music/p/c.mp3", "Artist C", "Album", "Pop", 1),
+            track("/music/p/d.mp3", "Artist D", "Album", "Pop", 1),
+        ])
+        .await
+        .unwrap();
+
+    let field = |response: &str, name: &str| -> usize {
+        response
+            .split(&format!("<{name}>"))
+            .nth(1)
+            .and_then(|rest| rest.split(&format!("</{name}>")).next())
+            .and_then(|value| value.parse().ok())
+            .unwrap_or_else(|| panic!("no <{name}> in response"))
+    };
+
+    // Containers: four artists, taken two at a time.
+    let first = browse_page(&state, "audio/artists", "BrowseDirectChildren", 0, 2).await;
+    assert_eq!(container_ids(&first).len(), 2);
+    assert_eq!(field(&first, "NumberReturned"), 2);
+    assert_eq!(field(&first, "TotalMatches"), 4);
+
+    let second = browse_page(&state, "audio/artists", "BrowseDirectChildren", 2, 2).await;
+    assert_eq!(container_titles(&second), ["Artist C", "Artist D"]);
+    assert_eq!(field(&second, "TotalMatches"), 4);
+
+    // Past the end is an empty page, not an error or a wrapped one.
+    let past_end = browse_page(&state, "audio/artists", "BrowseDirectChildren", 10, 2).await;
+    assert_eq!(container_ids(&past_end).len(), 0);
+    assert_eq!(field(&past_end, "NumberReturned"), 0);
+    assert_eq!(field(&past_end, "TotalMatches"), 4);
+
+    // Items page the same way, through the read session rather than a slice.
+    let tracks = browse_page(&state, "audio/albums/Album", "BrowseDirectChildren", 1, 2).await;
+    assert_eq!(item_count(&tracks), 2);
+    assert_eq!(field(&tracks, "TotalMatches"), 4);
 }
