@@ -75,7 +75,7 @@ configuration file actually writes. Backs the dashboard's Admin tab.
             "key": "network.mdns_enabled",
             "label": "Advertise over mDNS",
             "type": "bool",
-            "impact": "restart",
+            "impact": "live",
             "removable": true,
             "help": "Also announce the server over Bonjour/DNS-SD, alongside SSDP."
           }
@@ -98,13 +98,20 @@ configuration file actually writes. Backs the dashboard's Admin tab.
       "read_only_reason": null,
       "auth_enabled": false,
       "is_docker": false,
-      "version": "0.0.42"
+      "version": "0.0.42",
+      // Where the server is actually accepting, which is what every advertised URL uses.
+      "bound_addr": "0.0.0.0:8080",
+      "desired_addr": null,
+      "bind_error": null
     }
   }
   ```
 
 Field `type` is one of `bool`, `int` (with `min`/`max`), `text`, `path`, `enum` (with
-`options` and `free_form`), or `string_list`. `impact` is `live` or `restart`.
+`options` and `free_form`), or `string_list`. `impact` is `live`, `next_start` — the setting
+only describes startup, so there is nothing to apply now — or `restart`, meaning the running
+server is still using the old value. Only `database.path` and `database.redb_cache_mb` are
+`restart`.
 `removable: false` marks a key that must always carry a value, because `AppConfig`
 declares no default for it. Some fields carry a `note` describing a caveat in what the
 setting actually does.
@@ -125,7 +132,18 @@ then reloads it — the same path a hand edit takes.
   }
   ```
 * **Response**: `200 OK` — `{"saved": true, "impact": "live"}`, where `impact` is
-  `no_change`, `live`, or `restart_required`.
+  `no_change`, `live`, `next_start`, or `restart_required`.
+* A save that changes `server.port` or `server.interface` also carries `moved`, reporting
+  what the listener actually did rather than predicting it:
+  ```jsonc
+  { "state": "moved",  "serving": "0.0.0.0:9090", "port": 9090 }
+  { "state": "failed", "serving": "0.0.0.0:8080", "desired": "0.0.0.0:80",
+    "error": "Failed to bind to 0.0.0.0:80: Permission denied (os error 13)" }
+  { "state": "pending", "serving": "0.0.0.0:8080" }
+  ```
+  On `failed` the server keeps serving on the old address and every advertised URL keeps
+  naming it; `runtime.bound_addr`, `runtime.desired_addr` and `runtime.bind_error` report
+  the same disagreement on subsequent `GET`s, so it survives a page reload.
 * `400 Bad Request` — `{"error": "..."}` for an unknown key, a value of the wrong type, a
   failed validation, or an attempt to unset a key that has no default.
 * `409 Conflict` — the configuration is not editable. This means a container configured by

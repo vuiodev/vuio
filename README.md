@@ -47,9 +47,9 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 - **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
 - **Admin Tab**: Every setting `config.toml` accepts, editable in the browser and written
   back to the file. Options you have not configured are still listed, showing the default
-  in force, so nothing is hidden behind a key you would have to know to type. Library
-  folders and most media settings apply immediately; the rest are marked as needing a
-  restart, which the tab can trigger. It requires a token only if authentication is on.
+  in force, so nothing is hidden behind a key you would have to know to type. Almost
+  everything applies without a restart — including the HTTP port, which the server moves
+  to while running. It requires a token only if authentication is on.
 
 ## Quick Start
 
@@ -282,6 +282,26 @@ replacing it. They win for the run they were given in; the file stays editable, 
 keeps working, and the Admin tab marks any setting the command line is currently forcing,
 so a value you save there is understood to take effect at the next start without that
 option.
+
+### What needs a restart
+
+Almost nothing. Of the 25 settings, 21 apply to the running server: editing the file, or
+saving from the Admin tab, moves the HTTP listener, re-announces the server over SSDP and
+mDNS, swaps the authentication settings, and starts or stops file monitoring, all in place.
+
+Two describe what happens at startup and so have nothing to apply now — `scan_on_startup`
+and `vacuum_on_startup`. They are marked **next start** rather than "restart required",
+because restarting on their account achieves nothing.
+
+Two genuinely need a restart: `database.path` and `database.redb_cache_mb`, since the index
+cannot be reopened underneath a running server. The Admin tab marks those and offers a
+restart button.
+
+Changing `server.port` or `server.interface` moves the listener while the server runs. The
+new address is bound before the old one is released, so a port that is already in use
+leaves the server exactly where it was with an error rather than taking it offline.
+Connections open at the time — a stream in progress to a TV — are given a short grace
+period and then dropped, because the address they are using has gone.
 
 ### Configuration Options
 
