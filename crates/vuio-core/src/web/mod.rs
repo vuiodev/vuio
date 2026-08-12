@@ -1,3 +1,5 @@
+#[cfg(feature = "dashboard")]
+pub mod admin;
 pub mod auth;
 #[cfg(feature = "casting")]
 pub mod casting;
@@ -72,6 +74,12 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
     {
         json_routes = json_routes.route("/mcp/message", post(mcp::message_handler::<D>));
     }
+    #[cfg(feature = "dashboard")]
+    {
+        json_routes = json_routes
+            .route("/api/admin/config", post(admin::put_config::<D>))
+            .route("/api/admin/restart", post(admin::restart::<D>));
+    }
     let json_routes = json_routes.layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
 
     #[allow(unused_mut)]
@@ -85,7 +93,8 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         management_routes = management_routes
             .route("/", get(ui::root_handler))
             .route("/api/server-info", get(ui::server_info_handler::<D>))
-            .route("/api/media", get(ui::media_page_handler::<D>));
+            .route("/api/media", get(ui::media_page_handler::<D>))
+            .route("/api/admin/config", get(admin::get_config::<D>));
     }
     #[cfg(feature = "casting")]
     {
@@ -96,23 +105,20 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
     {
         management_routes = management_routes.route("/sse", get(mcp::sse_handler::<D>));
     }
+    // The dashboard's own stylesheets and scripts are part of the management surface,
+    // so they sit behind the same middleware as the page that loads them. That is only
+    // safe because `require_management` excludes /assets from its login-page redirect:
+    // a 200 login page returned for a <script> tag would be parsed as JavaScript.
+    #[cfg(feature = "dashboard")]
+    {
+        management_routes = management_routes.route("/assets/{file}", get(ui::asset_handler));
+    }
     let management_routes = management_routes
         .merge(json_routes)
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             auth::require_management::<D>,
         ));
-
-    // The vendored player libraries are deliberately left off the management middleware.
-    // They carry no user data, and `require_management` answers an unauthenticated GET on
-    // a non-/api path with a 200 login page — which a <script> tag would try to parse as
-    // JavaScript.
-    #[allow(unused_mut)]
-    let mut asset_routes = Router::new();
-    #[cfg(feature = "dashboard")]
-    {
-        asset_routes = asset_routes.route("/assets/{file}", get(ui::asset_handler));
-    }
 
     let router = Router::new()
         .route("/login", get(auth::login_page::<D>).post(auth::login::<D>))
@@ -173,7 +179,6 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         .route("/healthz", get(diagnostics::healthz_handler))
         .route("/readyz", get(diagnostics::readyz_handler::<D>))
         .merge(soap_routes)
-        .merge(asset_routes)
         .merge(management_routes)
         .with_state(state)
 }

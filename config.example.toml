@@ -4,29 +4,42 @@
 # Platform-specific config locations:
 # - Native apps: ./config/config.toml
 # - Docker: /config/config.toml (mounted volume)
+#
+# Every setting below can also be viewed and changed from the dashboard's Admin tab,
+# which writes back to this file. A commented-out key is optional: leave it out and
+# the default shown beside it applies. The keys that are not commented out are
+# required, and the server will not start without them.
 
 [server]
 port = 8080
 interface = "0.0.0.0"
 name = "VuIO"
+# Regenerate this for each server. A changed UUID makes clients treat it as new hardware.
 uuid = "129c3ee9-4fd2-45ea-9f11-7a15e6d831ef"
-ip = "192.168.1.126"
+# Address written into the media URLs handed to clients. Detected when omitted;
+# usually only needed in Docker, where the container cannot see its host address.
+# ip = "192.168.1.126"
 
 [network]
-multicast_ttl = 4
+interface_selection = "Auto"  # "Auto", "All", or a specific interface name
+multicast_ttl = 4             # Currently not applied: the SSDP socket TTL is fixed at 4
 announce_interval_seconds = 300
-interface_selection = "Auto"  # Options: "Auto", "All", or specific interface name
+# mdns_enabled = true                     # Also advertise over Bonjour/DNS-SD
+# upnp_callback_allowed_networks = []     # Extra CIDRs allowed as UPnP event callbacks
 # Note: SSDP port is hardcoded to 1900 (DLNA standard) and cannot be changed
 
 [media]
 scan_on_startup = true
 watch_for_changes = true
-cleanup_deleted_files = true
 supported_extensions = [
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ogv",
     "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "ape",
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "svg", "heif", "heic", "avif"
 ]
+# cleanup_deleted_files = true          # Drop files the startup scan finds gone
+# autoplay_enabled = true               # Let renderers continue to the next item
+# scan_playlists = true                 # Index .m3u and .pls files
+# unavailable_root_grace_hours = 168    # How long an offline library keeps its content
 
 # Add one or more media directories to monitor
 [[media.directories]]
@@ -34,6 +47,8 @@ path = "/Users/alex/Movies"  # Change this to your actual media directory
 recursive = true
 # extensions = ["mp4", "mkv", "avi"]  # Optional: Override global extensions for this directory
 # exclude_patterns = ["*.tmp", ".*"]  # Optional: Files/patterns to exclude
+# case_sensitive = true               # Optional: omit to auto-detect per volume
+# validation_mode = "Warn"            # "Warn", "Strict", or "Skip" when the path is missing
 
 # Example: Additional media directory
 # [[media.directories]]
@@ -42,27 +57,18 @@ recursive = true
 # extensions = ["mp3", "flac", "wav"]
 
 [database]
-path = "./config/media.db"  # Will use platform-appropriate default if not specified
 vacuum_on_startup = false
 backup_enabled = false
+# Omit to use the platform-appropriate default location.
+path = "./config/media.db"
+# redb_cache_mb = 128                   # Megabytes of index kept cached
 
 [management]
-enabled = true
-# Empty creates/uses admin.token beside the config file.
-token_file = ""
-session_ttl_hours = 12
+# Requires a token for the dashboard and every management endpoint.
+# --auth and VUIO_AUTH=1 turn this on too; any of the three is enough.
+# enabled = false
+# Omit to create/use admin.token beside the config file. VUIO_ADMIN_TOKEN overrides it.
+# token_file = ""
+# session_ttl_hours = 12
 # Management is loopback-only unless CIDRs are explicitly listed.
-allowed_networks = []
-
-# ReDB Database Configuration (optional - uses minimal defaults if not set)
-# All values are optional and will use minimal defaults if not specified
-[database.redb]
-# cache_mb = 2                          # Memory cache size in MB (1-1024, default: 1)
-# index_size = 5000                     # Index cache entries (100-10M, default: 1000)
-# batch_size = 500                      # Batch processing size (10-1M, default: 100)
-# initial_file_size_mb = 2              # Initial DB file size in MB (1-1024, default: 1)
-# max_file_size_gb = 2                  # Max DB file size in GB (1-100, default: 1)
-# sync_frequency_secs = 120             # Sync frequency in seconds (1-3600, default: 60)
-# enable_wal = true                     # Enable Write-Ahead Logging (default: true)
-# enable_compression = false            # Enable compression (default: false)
-# monitor_interval_secs = 900           # Performance monitoring interval (30-3600s, default: 600)
+# allowed_networks = []

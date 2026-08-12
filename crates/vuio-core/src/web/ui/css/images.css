@@ -1,0 +1,248 @@
+/* Photos Image Grid and Lightbox Styles */
+.image-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px;
+    padding: 0.5rem 0;
+}
+
+.image-card {
+    position: relative;
+    border-radius: 12px;
+    overflow: hidden;
+    aspect-ratio: 1 / 1;
+    background: #181f2a;
+    border: 1px solid var(--card-border);
+    cursor: pointer;
+    transition: all 0.2s ease-in-out;
+}
+
+.image-card:hover {
+    transform: scale(1.02);
+    border-color: var(--accent-color);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.image-card img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.3s ease;
+}
+
+.image-card:hover img {
+    transform: scale(1.05);
+}
+
+.image-card-overlay {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0) 100%);
+    padding: 1.5rem 0.75rem 0.75rem;
+    color: white;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+}
+
+.image-card:hover .image-card-overlay {
+    opacity: 1;
+}
+
+.image-card-name {
+    font-size: 0.75rem;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-right: 0.5rem;
+    flex: 1;
+}
+
+.image-card-download {
+    color: rgba(255,255,255,0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: color 0.2s;
+}
+
+.image-card-download:hover {
+    color: var(--accent-color);
+}
+
+.image-grid .folder-card {
+    aspect-ratio: 1 / 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    gap: 0.75rem;
+    background: rgba(255, 255, 255, 0.02);
+    border: 1px dashed var(--card-border);
+}
+
+.image-grid .folder-card .media-info {
+    flex-direction: column;
+    gap: 0.5rem;
+    align-items: center;
+    width: 100%;
+}
+
+.image-grid .folder-card .media-details {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+    width: 100%;
+}
+
+.image-grid .folder-card .action-area {
+    margin-top: 0.5rem;
+}
+
+/* Lightbox modal styles */
+.lightbox-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(10, 14, 20, 0.95);
+    z-index: 2000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(15px);
+    -webkit-backdrop-filter: blur(15px);
+    animation: fadeIn 0.25s ease-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+.lightbox-close {
+    position: absolute;
+    top: 1.5rem;
+    right: 2rem;
+    color: var(--text-secondary);
+    font-size: 2.5rem;
+    font-weight: 300;
+    cursor: pointer;
+    transition: color 0.2s;
+    line-height: 1;
+    z-index: 2010;
+}
+
+.lightbox-close:hover {
+    color: #ef4444;
+}
+
+.lightbox-nav {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--card-border);
+    color: var(--text-secondary);
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    z-index: 2010;
+}
+
+.lightbox-nav:hover {
+    background: var(--accent-gradient);
+    color: white;
+    border-color: transparent;
+    box-shadow: 0 0 15px rgba(0, 240, 255, 0.4);
+}
+
+.lightbox-prev { left: 2rem; }
+.lightbox-next { right: 2rem; }
+
+@media (max-width: 600px) {
+    .lightbox-prev { left: 0.5rem; }
+    .lightbox-next { right: 0.5rem; }
+    .lightbox-nav {
+        width: 38px;
+        height: 38px;
+    }
+}
+
+.lightbox-content-wrapper {
+    max-width: 85%;
+    max-height: 85%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+}
+
+.lightbox-content-wrapper img {
+    max-width: 100%;
+    max-height: 80vh;
+    object-fit: contain;
+    border-radius: 8px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.lightbox-meta {
+    margin-top: 1rem;
+    color: var(--text-primary);
+    font-size: 0.95rem;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    width: 100%;
+    justify-content: center;
+}
+
+.lightbox-download-btn {
+    color: var(--text-secondary);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0.25rem;
+    border-radius: 6px;
+    transition: all 0.2s;
+}
+
+.lightbox-download-btn:hover {
+    color: var(--accent-color);
+    background: rgba(255, 255, 255, 0.05);
+}
+
+/* Video Player Modal — Plyr is themed entirely through --plyr-* properties,
+   so it inherits the dashboard palette without overriding any of its rules. */
+#video-modal {
+    --plyr-color-main: var(--accent-color);
+    --plyr-font-family: inherit;
+    --plyr-video-background: #000;
+    --plyr-video-control-color: var(--text-primary);
+    --plyr-video-control-background-hover: var(--accent-color);
+    --plyr-video-control-color-hover: #04141a;
+    --plyr-menu-background: rgba(15, 23, 42, 0.97);
+    --plyr-menu-color: var(--text-primary);
+    --plyr-menu-border-color: var(--card-border);
+    --plyr-menu-back-border-color: var(--card-border);
+    --plyr-badge-background: var(--accent-color);
+    --plyr-badge-text-color: #04141a;
+    --plyr-captions-background: rgba(10, 14, 20, 0.75);
+    --plyr-tooltip-background: rgba(15, 23, 42, 0.97);
+    --plyr-tooltip-color: var(--text-primary);
+}

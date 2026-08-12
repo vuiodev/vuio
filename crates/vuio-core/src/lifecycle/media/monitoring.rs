@@ -14,8 +14,10 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
     info!("Starting file system monitoring...");
 
     // Get directories to monitor
+    // `current_config()`, not the frozen `config` snapshot: the reconciliation loop below
+    // already reads the live view, and reading both from one task invites them to disagree.
     let all_directories: Vec<std::path::PathBuf> = app_state
-        .config
+        .current_config()
         .media
         .directories
         .iter()
@@ -181,7 +183,17 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                     if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
                         error!("Failed to refresh unavailable-root visibility: {}", error);
                     }
-                    match validate_and_cleanup_deleted_files(app_state_clone.database.clone(), &configured_directories).await {
+                    // Gated, and read live so the setting can be changed without a restart.
+                    // Ungated, `cleanup_deleted_files = false` did not prevent deletions at
+                    // all — the startup scan honoured it and this tick then removed the same
+                    // files up to five minutes later.
+                    match validate_and_cleanup_deleted_files(
+                        app_state_clone.database.clone(),
+                        &configured_directories,
+                        app_state_clone.current_config().media.cleanup_deleted_files,
+                    )
+                    .await
+                    {
                         Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
                         Ok(_) => {}
                         Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),

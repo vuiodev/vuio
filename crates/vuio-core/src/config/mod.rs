@@ -16,8 +16,8 @@ use model::{
     default_redb_cache_mb, default_session_ttl_hours, default_unavailable_root_grace_hours,
 };
 pub use model::{
-    AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
-    NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
+    AppConfig, ConfigOverrides, DatabaseConfig, ManagementConfig, MediaConfig,
+    MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
 };
 
 use crate::platform::config::PlatformConfig;
@@ -32,6 +32,9 @@ mod platform;
 pub enum ConfigChangeImpact {
     NoChange,
     LiveReload,
+    /// Nothing to apply: the setting only describes what happens at startup. Distinct
+    /// from `RestartRequired`, where the running server is still using the old value.
+    NextStart,
     RestartRequired,
 }
 
@@ -66,9 +69,12 @@ pub enum ConfigChangeEvent {
 pub struct ConfigManager {
     config: Arc<RwLock<AppConfig>>,
     config_path: PathBuf,
+    /// Host settings layered over the file after every load, so `--port` holds for the
+    /// run without the file having to be frozen or rewritten to carry it.
+    overrides: ConfigOverrides,
     change_sender: broadcast::Sender<ConfigChangeEvent>,
     /// Held so the watcher outlives this manager; dropping it stops reloads.
-    _debouncer: Option<
+    debouncer: Option<
         notify_debouncer_full::Debouncer<
             notify::RecommendedWatcher,
             notify_debouncer_full::FileIdMap,
@@ -79,15 +85,25 @@ pub struct ConfigManager {
 impl ConfigManager {
     /// Create a new configuration manager
     pub fn new<P: AsRef<Path>>(config_path: P) -> Result<Self> {
+        Self::with_overrides(config_path, ConfigOverrides::default())
+    }
+
+    /// Create a manager whose loads are layered with host overrides.
+    pub fn with_overrides<P: AsRef<Path>>(
+        config_path: P,
+        overrides: ConfigOverrides,
+    ) -> Result<Self> {
         let config_path = config_path.as_ref().to_path_buf();
-        let config = AppConfig::load_or_create(&config_path)?;
+        let mut config = AppConfig::load_or_create(&config_path)?;
+        overrides.apply(&mut config);
         let (change_sender, _) = broadcast::channel(100);
 
         Ok(Self {
             config: Arc::new(RwLock::new(config)),
             config_path,
+            overrides,
             change_sender,
-            _debouncer: None,
+            debouncer: None,
         })
     }
 
@@ -97,8 +113,31 @@ impl ConfigManager {
         cancellation: tokio_util::sync::CancellationToken,
         background_tasks: tokio_util::task::TaskTracker,
     ) -> Result<Self> {
+        Self::watching_with_overrides(
+            config_path,
+            ConfigOverrides::default(),
+            cancellation,
+            background_tasks,
+        )
+        .await
+    }
+
+    /// Watch a configuration file, re-applying host overrides to every load.
+    ///
+    /// Overrides used to force the whole configuration into a scratch file with no
+    /// watcher, on the reasoning that a reload would drop them. Re-applying them after
+    /// each load keeps them in force without that cost: the real file stays watched,
+    /// hot reload keeps working, and it stays the durable configuration that the admin
+    /// API can edit.
+    pub async fn watching_with_overrides<P: AsRef<Path>>(
+        config_path: P,
+        overrides: ConfigOverrides,
+        cancellation: tokio_util::sync::CancellationToken,
+        background_tasks: tokio_util::task::TaskTracker,
+    ) -> Result<Self> {
         let config_path = config_path.as_ref().to_path_buf();
-        let config = AppConfig::load_or_create(&config_path)?;
+        let mut config = AppConfig::load_or_create(&config_path)?;
+        overrides.apply(&mut config);
         let (change_sender, _) = broadcast::channel(100);
 
         let config_arc = Arc::new(RwLock::new(config));
@@ -111,6 +150,7 @@ impl ConfigManager {
             path_clone,
             config_clone,
             sender_clone,
+            overrides.clone(),
             cancellation,
             background_tasks,
         )
@@ -119,9 +159,29 @@ impl ConfigManager {
         Ok(Self {
             config: config_arc,
             config_path,
+            overrides,
             change_sender,
-            _debouncer: Some(debouncer),
+            debouncer: Some(debouncer),
         })
+    }
+
+    /// Host settings layered over this configuration for the lifetime of the run.
+    pub fn overrides(&self) -> &ConfigOverrides {
+        &self.overrides
+    }
+
+    /// Load a config the same way the manager's in-memory copy was built.
+    ///
+    /// `load_or_create` applies platform defaults and the host overrides; a bare
+    /// `load_from_file` does neither. Reloading without them made every reload look
+    /// like a change — an unset `exclude_patterns` or `database.path` came back as
+    /// `None` against an in-memory `Some`, which reports every media root as modified
+    /// and drops and rescans it.
+    fn load_comparable(config_path: &Path, overrides: &ConfigOverrides) -> Result<AppConfig> {
+        let mut config = AppConfig::load_from_file(config_path)?;
+        config.apply_platform_defaults()?;
+        overrides.apply(&mut config);
+        Ok(config)
     }
 
     /// Set up file watcher for configuration changes using notify-debouncer-full
@@ -129,6 +189,7 @@ impl ConfigManager {
         config_path: PathBuf,
         config: Arc<RwLock<AppConfig>>,
         sender: broadcast::Sender<ConfigChangeEvent>,
+        overrides: ConfigOverrides,
         cancellation: tokio_util::sync::CancellationToken,
         background_tasks: tokio_util::task::TaskTracker,
     ) -> Result<
@@ -192,7 +253,7 @@ impl ConfigManager {
                         }
 
                         // Attempt to reload configuration
-                        match AppConfig::load_from_file(&config_path) {
+                        match Self::load_comparable(&config_path, &overrides) {
                             Ok(new_config) => {
                                 // Validate the new configuration
                                 if let Err(e) = ConfigValidator::validate_flexible(&new_config) {
@@ -205,6 +266,17 @@ impl ConfigManager {
 
                                 let old_config = {
                                     let mut config_guard = config.write().await;
+                                    if *config_guard == new_config {
+                                        // A rewrite that changed nothing still reaches us —
+                                        // an editor saving, or the server writing the file
+                                        // back itself. Broadcasting it would bump the
+                                        // ContentDirectory update id, drop the browse cache
+                                        // and NOTIFY every UPnP subscriber for no reason.
+                                        tracing::debug!(
+                                            "Configuration file rewritten with no changes, ignoring"
+                                        );
+                                        continue;
+                                    }
                                     let old = config_guard.clone();
                                     *config_guard = new_config.clone();
                                     old
@@ -269,7 +341,7 @@ impl ConfigManager {
 
     /// Reload configuration from file
     pub async fn reload(&self) -> Result<()> {
-        let new_config = AppConfig::load_from_file(&self.config_path)?;
+        let new_config = Self::load_comparable(&self.config_path, &self.overrides)?;
 
         let old_config = {
             let mut config_guard = self.config.write().await;
@@ -287,6 +359,17 @@ impl ConfigManager {
     /// Get the configuration file path
     pub fn get_config_path(&self) -> &Path {
         &self.config_path
+    }
+
+    /// Whether the config file is a durable one this manager watches.
+    ///
+    /// It is not in two cases: a container, whose configuration comes from
+    /// environment variables and is dumped to a scratch file, and a run with
+    /// command-line overrides, which are written to a scratch file so a reload
+    /// cannot drop them. Writing to either would be discarded on restart, so the
+    /// admin API refuses to.
+    pub fn is_watched(&self) -> bool {
+        self.debouncer.is_some()
     }
 
     /// Subscribe to configuration change events

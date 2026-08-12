@@ -1,6 +1,41 @@
 use super::super::*;
 
-/// Validate cached files and remove any that no longer exist on disk
+/// A library root in the form the index stores paths in.
+///
+/// Falls back to the path as written when it cannot be resolved — the caller treats a
+/// match against either form as belonging to the library, so a failure here can only
+/// make the comparison more conservative, never less.
+fn canonical_root(path: &Path) -> PathBuf {
+    crate::platform::filesystem::create_platform_path_normalizer()
+        .to_canonical(path)
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The configured library a stored path belongs to, or `None` if it belongs to none.
+///
+/// Matched against the root both as the config writes it and in the form the index
+/// stores paths in, because those routinely differ: a library reached through a symlink
+/// is stored resolved on Unix (`/tmp/media` becomes `/private/tmp/media` on macOS), and
+/// on Windows the canonical form is lower-cased. Comparing only the raw form would read
+/// every file in such a library as belonging to no library at all — and for a deletion
+/// pass, that means discarding the entire library's index. Matching either form can only
+/// keep files, never remove more.
+fn owning_root(path: &Path, raw: &[PathBuf], canonical: &[PathBuf]) -> Option<PathBuf> {
+    raw.iter()
+        .chain(canonical.iter())
+        .find(|root| path.starts_with(root))
+        .cloned()
+}
+
+/// Validate cached files and remove the ones that no longer belong in the index:
+/// files deleted from disk, and files left behind by a library that is no longer
+/// configured.
+///
+/// `enabled` is `media.cleanup_deleted_files`, and it is taken as an argument rather than
+/// checked by each caller so that "do not remove anything from the index automatically"
+/// means exactly that. It used to be honoured by the startup scan and ignored by the
+/// periodic pass, which removed the same files five minutes later.
 ///
 /// Uses two-phase approach to avoid RwLock deadlock:
 /// 1. Stream all files and collect paths to delete (read lock)
@@ -8,27 +43,61 @@ use super::super::*;
 pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: DatabaseManager>(
     database: Arc<D>,
     monitored_roots: &[PathBuf],
+    enabled: bool,
 ) -> anyhow::Result<usize> {
+    if !enabled {
+        debug!("Skipping index cleanup: cleanup_deleted_files is off");
+        return Ok(0);
+    }
+
     info!("Validating cached media files...");
 
     // Phase 1: Collect paths to delete (holds read lock)
     let mut paths_to_delete = Vec::new();
+    let mut orphaned_count = 0_usize;
     let mut total_checked = 0;
-    let unavailable_roots = database
-        .list_root_availability()
-        .await?
-        .into_iter()
+    let availability = database.list_root_availability().await?;
+    let unavailable_roots = availability
+        .iter()
         .filter(|root| root.unavailable_since_secs.is_some())
-        .map(|root| root.path)
+        .map(|root| root.path.clone())
+        .collect::<Vec<_>>();
+
+    // Removing a root through the config watcher drops its content, but a root that
+    // simply is not in the config at startup never got that treatment: its files stay
+    // indexed forever, because the only other check asks whether they still exist on
+    // disk, and they do. They then show up in Browse with no folder structure, since
+    // nothing can work out a path relative to a library that is not configured.
+    //
+    // Guarded on a non-empty root list: an empty one would mean discarding the whole
+    // index, and validation should have rejected that configuration long before here.
+    let prune_orphans = !monitored_roots.is_empty();
+    if !prune_orphans {
+        warn!("No media libraries are configured; leaving the existing index alone");
+    }
+
+    let canonical_roots = monitored_roots
+        .iter()
+        .map(|root| canonical_root(root))
         .collect::<Vec<_>>();
 
     {
         for media_file in database.load_file_fingerprints().await? {
             total_checked += 1;
 
-            let unavailable_root = monitored_roots
-                .iter()
-                .any(|root| media_file.path.starts_with(root) && !root.is_dir())
+            let Some(configured_root) = owning_root(&media_file.path, monitored_roots, &canonical_roots)
+            else {
+                if prune_orphans {
+                    orphaned_count += 1;
+                    paths_to_delete.push(media_file.path.clone());
+                }
+                continue;
+            };
+
+            // A configured library that is offline keeps its content: the files are
+            // unreachable rather than gone. That grace only applies to a library the
+            // configuration still lists, which is why it is checked after the above.
+            let unavailable_root = !configured_root.is_dir()
                 || unavailable_roots
                     .iter()
                     .any(|root| media_file.path.starts_with(root));
@@ -43,17 +112,49 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
         }
     } // Stream dropped here, read lock released
 
+    if orphaned_count > 0 {
+        info!(
+            "Removing {} indexed files from libraries that are no longer configured",
+            orphaned_count
+        );
+        // Forget the roots themselves too, so their derived content and availability
+        // records do not outlive the files.
+        for root in availability
+            .iter()
+            .map(|root| &root.path)
+            .filter(|root| !monitored_roots.iter().any(|kept| root.starts_with(kept)))
+        {
+            if let Err(error) = database.remove_derived_content_by_source(root).await {
+                warn!(
+                    "Failed to remove derived content for unconfigured library {}: {}",
+                    root.display(),
+                    error
+                );
+            }
+            if let Err(error) = database.remove_root_availability(root).await {
+                warn!(
+                    "Failed to forget unconfigured library {}: {}",
+                    root.display(),
+                    error
+                );
+            }
+        }
+    }
+
     // Phase 2: Bulk delete (acquires write lock)
     let removed_count = paths_to_delete.len();
     if !paths_to_delete.is_empty() {
-        info!("Removing {} deleted files from database", removed_count);
         database.bulk_remove_media_files(&paths_to_delete).await?;
     }
 
     if removed_count > 0 {
         info!(
-            "Cleaned up {} deleted files from database (checked {} total)",
-            removed_count, total_checked
+            "Cleaned up {} files from the index — {} deleted from disk, {} from libraries \
+             no longer configured (checked {} total)",
+            removed_count,
+            removed_count - orphaned_count,
+            orphaned_count,
+            total_checked
         );
     } else {
         info!(
@@ -271,30 +372,36 @@ pub(in crate::lifecycle) async fn perform_initial_media_scan<D: DatabaseManager 
         );
 
         // Validate files to catch any that were deleted while app was offline
-        if config.media.cleanup_deleted_files {
-            let roots: Vec<_> = config
-                .media
-                .directories
-                .iter()
-                .map(|d| PathBuf::from(&d.path))
-                .collect();
-            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
-        }
+        let roots: Vec<_> = config
+            .media
+            .directories
+            .iter()
+            .map(|d| PathBuf::from(&d.path))
+            .collect();
+        validate_and_cleanup_deleted_files(
+            database.clone(),
+            &roots,
+            config.media.cleanup_deleted_files,
+        )
+        .await?;
 
         Ok(())
     } else {
         info!("Skipping full scan (scan on startup disabled)");
 
         // Validate that cached files still exist on disk and remove any that don't (if enabled)
-        if config.media.cleanup_deleted_files {
-            let roots: Vec<_> = config
-                .media
-                .directories
-                .iter()
-                .map(|d| PathBuf::from(&d.path))
-                .collect();
-            validate_and_cleanup_deleted_files(database.clone(), &roots).await?;
-        }
+        let roots: Vec<_> = config
+            .media
+            .directories
+            .iter()
+            .map(|d| PathBuf::from(&d.path))
+            .collect();
+        validate_and_cleanup_deleted_files(
+            database.clone(),
+            &roots,
+            config.media.cleanup_deleted_files,
+        )
+        .await?;
 
         Ok(())
     }
@@ -360,4 +467,229 @@ pub(in crate::lifecycle) async fn perform_initial_playlist_scan<D: DatabaseManag
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::{redb::RedbDatabase, MediaFile, MediaRepository};
+
+    async fn database_with(files: &[PathBuf]) -> (Arc<RedbDatabase>, tempfile::TempDir) {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let database = Arc::new(
+            RedbDatabase::new(temp.path().join("test.redb"))
+                .await
+                .expect("database"),
+        );
+        for path in files {
+            database
+                .store_media_file(&MediaFile::new(path.clone(), 1024, "video/mp4".to_string()))
+                .await
+                .expect("store");
+        }
+        (database, temp)
+    }
+
+    async fn indexed_paths(database: &Arc<RedbDatabase>) -> Vec<PathBuf> {
+        let mut paths = database
+            .load_file_fingerprints()
+            .await
+            .expect("fingerprints")
+            .into_iter()
+            .map(|file| file.path)
+            .collect::<Vec<_>>();
+        paths.sort();
+        paths
+    }
+
+    /// Removing a library through the config watcher drops its content, but a library
+    /// that is simply absent at startup never got that treatment. Its files stayed
+    /// indexed forever — they still exist on disk, which was the only question asked —
+    /// and showed up in Browse with no folder structure, because nothing can express
+    /// their path relative to a library that is not configured.
+    #[tokio::test]
+    async fn files_from_an_unconfigured_library_are_dropped() {
+        let kept_root = tempfile::TempDir::new().expect("kept");
+        let gone_root = tempfile::TempDir::new().expect("gone");
+        let kept_file = kept_root.path().join("keep.mp4");
+        let orphan = gone_root.path().join("orphan.mp4");
+        std::fs::write(&kept_file, b"x").expect("write");
+        // Still present on disk: the point is that existing is no longer sufficient.
+        std::fs::write(&orphan, b"x").expect("write");
+
+        let (database, _temp) = database_with(&[kept_file.clone(), orphan.clone()]).await;
+        let removed =
+            validate_and_cleanup_deleted_files(database.clone(), &[kept_root.path().to_path_buf()], true)
+                .await
+                .expect("cleanup");
+
+        assert_eq!(removed, 1);
+        // The index stores canonical paths, which on macOS resolves /var to /private/var.
+        assert_eq!(indexed_paths(&database).await, vec![canonical_root(&kept_file)]);
+    }
+
+    /// `cleanup_deleted_files = false` has to mean nothing is removed from the index
+    /// automatically. The startup scan honoured it and the 300-second reconciliation tick
+    /// did not, so switching it off delayed deletions by five minutes rather than
+    /// preventing them — and once the orphan prune started running through the same
+    /// ungated call, it removed whole libraries too.
+    #[tokio::test]
+    async fn cleanup_disabled_removes_nothing() {
+        let root = tempfile::TempDir::new().expect("root");
+        let gone_root = tempfile::TempDir::new().expect("gone");
+        let present = root.path().join("here.mp4");
+        let deleted = root.path().join("gone.mp4");
+        let orphan = gone_root.path().join("orphan.mp4");
+        std::fs::write(&present, b"x").expect("write");
+        std::fs::write(&orphan, b"x").expect("write");
+
+        let (database, _temp) =
+            database_with(&[present.clone(), deleted.clone(), orphan.clone()]).await;
+        let removed = validate_and_cleanup_deleted_files(
+            database.clone(),
+            &[root.path().to_path_buf()],
+            false,
+        )
+        .await
+        .expect("cleanup");
+
+        assert_eq!(removed, 0);
+        // Both the file missing from disk and the orphaned library survive.
+        assert_eq!(indexed_paths(&database).await.len(), 3);
+
+        // And with it on, the same call removes both.
+        let removed = validate_and_cleanup_deleted_files(
+            database.clone(),
+            &[root.path().to_path_buf()],
+            true,
+        )
+        .await
+        .expect("cleanup");
+        assert_eq!(removed, 2);
+        assert_eq!(indexed_paths(&database).await, vec![canonical_root(&present)]);
+    }
+
+    /// A configured library that is offline is not the same as one that was removed:
+    /// its files are unreachable, not gone, and must survive until the grace expires.
+    #[tokio::test]
+    async fn an_offline_library_keeps_its_content() {
+        let root = tempfile::TempDir::new().expect("root");
+        let file = root.path().join("on-the-nas.mp4");
+        std::fs::write(&file, b"x").expect("write");
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
+
+        // The library is still configured, but the path is gone — an unmounted volume.
+        let offline = root.path().to_path_buf();
+        let stored = canonical_root(&file);
+        drop(root);
+
+        let removed = validate_and_cleanup_deleted_files(database.clone(), &[offline], true)
+            .await
+            .expect("cleanup");
+
+        assert_eq!(removed, 0, "an offline library must not lose its index");
+        assert_eq!(indexed_paths(&database).await, vec![stored]);
+    }
+
+    /// Files deleted from a library that is still configured and online are still
+    /// removed — the behaviour this function had before orphans were considered.
+    #[tokio::test]
+    async fn files_deleted_from_a_live_library_are_still_dropped() {
+        let root = tempfile::TempDir::new().expect("root");
+        let present = root.path().join("here.mp4");
+        let deleted = root.path().join("gone.mp4");
+        std::fs::write(&present, b"x").expect("write");
+
+        let (database, _temp) = database_with(&[present.clone(), deleted]).await;
+        let removed =
+            validate_and_cleanup_deleted_files(database.clone(), &[root.path().to_path_buf()], true)
+                .await
+                .expect("cleanup");
+
+        assert_eq!(removed, 1);
+        assert_eq!(indexed_paths(&database).await, vec![canonical_root(&present)]);
+    }
+
+    /// Nothing configured means nothing to compare against. Treating every file as an
+    /// orphan would discard the whole index over what is almost certainly a misload.
+    #[tokio::test]
+    async fn an_empty_library_list_never_prunes() {
+        let root = tempfile::TempDir::new().expect("root");
+        let file = root.path().join("keep.mp4");
+        std::fs::write(&file, b"x").expect("write");
+
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
+        let removed = validate_and_cleanup_deleted_files(database.clone(), &[], true)
+            .await
+            .expect("cleanup");
+
+        assert_eq!(removed, 0);
+        assert_eq!(indexed_paths(&database).await, vec![canonical_root(&file)]);
+    }
+
+    /// The hazard that makes this pass safe to run at all, tested on the matching itself
+    /// so it holds on every platform rather than only the one running the suite.
+    ///
+    /// Stored paths are canonical and the configured root usually is not: on Unix a
+    /// symlinked library is stored resolved, on Windows the canonical form is
+    /// lower-cased. Matching only the root as written would read every file in such a
+    /// library as belonging to none, and this pass deletes those.
+    #[test]
+    fn a_root_matches_in_both_its_written_and_canonical_forms() {
+        let written = PathBuf::from("/Media/Films");
+        // Whatever the platform's normaliser does to it — resolve a link, lower-case
+        // the drive — the stored path is keyed off the canonical form.
+        let canonical = PathBuf::from("/private/media/films");
+        let raw = vec![written.clone()];
+        let canonicalised = vec![canonical.clone()];
+
+        // Stored under the canonical form: matched via the canonical root.
+        assert_eq!(
+            owning_root(&canonical.join("a.mkv"), &raw, &canonicalised),
+            Some(canonical.clone())
+        );
+        // Stored under the written form, as an older index would be: still matched.
+        assert_eq!(
+            owning_root(&written.join("a.mkv"), &raw, &canonicalised),
+            Some(written)
+        );
+        // A file under neither is an orphan, which is the only case that deletes.
+        assert_eq!(
+            owning_root(Path::new("/elsewhere/a.mkv"), &raw, &canonicalised),
+            None
+        );
+        // Prefix matching is by component, so a sibling with a shared prefix is not a
+        // child: /media/films-old must not be swept up by the /media/films root.
+        assert_eq!(
+            owning_root(Path::new("/private/media/films-old/a.mkv"), &raw, &canonicalised),
+            None
+        );
+    }
+
+    /// The Unix half of the above, end to end through a real symlink.
+    ///
+    /// Gated rather than early-returning on other platforms: an early return leaves the
+    /// rest of the body unreachable, which is a hard error under `-D warnings` and broke
+    /// the Windows CI job.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_symlinked_library_is_not_mistaken_for_an_orphan() {
+        let real = tempfile::TempDir::new().expect("real");
+        let link_parent = tempfile::TempDir::new().expect("link parent");
+        let link = link_parent.path().join("library");
+        std::os::unix::fs::symlink(real.path(), &link).expect("symlink");
+
+        let file = link.join("through-the-link.mp4");
+        std::fs::write(&file, b"x").expect("write");
+
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
+        // Configured by the symlinked path, stored under the resolved one.
+        let removed =
+            validate_and_cleanup_deleted_files(database.clone(), std::slice::from_ref(&link), true)
+                .await
+                .expect("cleanup");
+
+        assert_eq!(removed, 0, "a symlinked library must keep its index");
+        assert_eq!(indexed_paths(&database).await.len(), 1);
+    }
 }

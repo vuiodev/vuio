@@ -45,6 +45,11 @@ VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: 
 - **Sleek Dashboard**: Real-time server status, monitored directories, and database statistics.
 - **Media Explorer**: Browse all scanned videos, music, and pictures directly in your web browser.
 - **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
+- **Admin Tab**: Every setting `config.toml` accepts, editable in the browser and written
+  back to the file. Options you have not configured are still listed, showing the default
+  in force, so nothing is hidden behind a key you would have to know to type. Almost
+  everything applies without a restart — including the HTTP port, which the server moves
+  to while running. It requires a token only if authentication is on.
 
 ## Quick Start
 
@@ -158,6 +163,7 @@ docker run -d \
 |----------|---------|-------------|
 | `VUIO_IP` | - | **Required.** Host IP for DLNA announcements |
 | `VUIO_PORT` | 8080 | HTTP server port |
+| `VUIO_INTERFACE` | 0.0.0.0 | Address the HTTP server binds |
 | `VUIO_SERVER_NAME` | VuIO | DLNA server name |
 | `VUIO_UUID` | random | Device UUID (set for persistence) |
 | `VUIO_MEDIA_DIRS` | /media | Comma-separated media paths |
@@ -169,7 +175,21 @@ docker run -d \
 | `VUIO_MULTICAST_TTL` | 4 | Multicast TTL |
 | `VUIO_ANNOUNCE_INTERVAL` | 30 | SSDP announce interval (seconds) |
 | `VUIO_AUTH` | false | Enable administrative/management authentication |
+| `VUIO_MANAGEMENT_ENABLED` | false | Same thing; either one is enough to require the token |
 | `VUIO_ADMIN_TOKEN` | - | Pre-configured admin password token for sign in |
+| `VUIO_ADMIN_TOKEN_FILE` | - | Read the token from this file instead of `admin.token` |
+| `VUIO_ADMIN_SESSION_TTL_HOURS` | 12 | How long a browser stays signed in |
+| `VUIO_MANAGEMENT_ALLOWED_NETWORKS` | - | Comma-separated CIDRs allowed to manage the server |
+| `VUIO_MDNS` | true | Advertise over Bonjour/DNS-SD as well as SSDP |
+| `VUIO_AUTOPLAY` | true | Let renderers continue to the next item in a folder |
+| `VUIO_UNAVAILABLE_ROOT_GRACE_HOURS` | 168 | How long an offline library keeps its content |
+| `VUIO_DB_VACUUM` | false | Compact the index at startup |
+| `VUIO_DB_BACKUP` | false | Back up the index at startup, daily, and at shutdown |
+| `VUIO_REDB_CACHE_MB` | 128 | Megabytes of the index kept cached |
+| `VUIO_UPNP_CALLBACK_ALLOWED_NETWORKS` | - | Extra CIDRs allowed as UPnP event callbacks |
+
+A container is configured entirely by these variables, so the dashboard's Admin tab is
+read-only there — it tells you as much rather than silently discarding an edit.
 
 **Find your host IP:**
 ```bash
@@ -252,6 +272,37 @@ Refer to the default [values.yaml](helm/vuio/values.yaml) file for a complete li
 
 VuIO uses TOML configuration files on native platforms. Config location: `./config/config.toml`
 
+Everything below can also be edited from the dashboard's **Admin** tab, which writes back
+to this file in place, preserving your comments. A container configured by environment
+variables shows the tab read-only, since its configuration comes from those variables and
+a file edit would be discarded.
+
+Command-line options (`--port`, `--name`, `-m`) are layered on top of the file rather than
+replacing it. They win for the run they were given in; the file stays editable, hot reload
+keeps working, and the Admin tab marks any setting the command line is currently forcing,
+so a value you save there is understood to take effect at the next start without that
+option.
+
+### What needs a restart
+
+Almost nothing. Of the 25 settings, 21 apply to the running server: editing the file, or
+saving from the Admin tab, moves the HTTP listener, re-announces the server over SSDP and
+mDNS, swaps the authentication settings, and starts or stops file monitoring, all in place.
+
+Two describe what happens at startup and so have nothing to apply now — `scan_on_startup`
+and `vacuum_on_startup`. They are marked **next start** rather than "restart required",
+because restarting on their account achieves nothing.
+
+Two genuinely need a restart: `database.path` and `database.redb_cache_mb`, since the index
+cannot be reopened underneath a running server. The Admin tab marks those and offers a
+restart button.
+
+Changing `server.port` or `server.interface` moves the listener while the server runs. The
+new address is bound before the old one is released, so a port that is already in use
+leaves the server exactly where it was with an error rather than taking it offline.
+Connections open at the time — a stream in progress to a TV — are given a short grace
+period and then dropped, because the address they are using has gone.
+
 ### Configuration Options
 
 **Server:**
@@ -262,15 +313,20 @@ VuIO uses TOML configuration files on native platforms. Config location: `./conf
 - `ip` - Specific IP for DLNA announcements (optional)
 
 **Network:**
-- `interface_selection` - "Auto", "All", or specific interface name
-- `multicast_ttl` - Multicast time-to-live
+- `interface_selection` - "Auto", "All", or specific interface name. Selects the address
+  advertised in media URLs; it does not choose which interface SSDP binds to
+- `multicast_ttl` - Multicast time-to-live. Not currently applied: the SSDP socket TTL is fixed at 4
 - `announce_interval_seconds` - SSDP announcement interval
+- `mdns_enabled` - Also advertise over Bonjour/DNS-SD (default: true)
+- `upnp_callback_allowed_networks` - Extra CIDRs allowed as UPnP event callback destinations
 
 **Media:**
 - `scan_on_startup` - Scan directories on startup
 - `watch_for_changes` - Real-time file monitoring
 - `cleanup_deleted_files` - Auto-remove deleted files from database
+- `autoplay_enabled` - Let renderers continue to the next item in a folder (default: true)
 - `scan_playlists` - Import M3U/PLS playlist files
+- `unavailable_root_grace_hours` - How long an offline library keeps its indexed content (default: 168)
 - `supported_extensions` - Global list of media extensions
 
 **Media Directories:**
@@ -284,7 +340,18 @@ VuIO uses TOML configuration files on native platforms. Config location: `./conf
 **Database:**
 - `path` - Database file location
 - `vacuum_on_startup` - Compact database on startup
-- `backup_enabled` - Enable automatic backups
+- `backup_enabled` - Enable automatic backups. Only starts the daily backup task if it
+  was already on at boot
+- `redb_cache_mb` - Megabytes of the index kept cached (default: 128)
+
+**Management (`[management]`):**
+- `enabled` - Require the admin token for the dashboard and every management endpoint
+  (default: false). `--auth` and `VUIO_AUTH=1` also turn it on; any of the three is enough
+- `token_file` - Where the admin token is read from. Omit for `admin.token` beside the
+  config file; `VUIO_ADMIN_TOKEN` overrides both
+- `session_ttl_hours` - How long a browser stays signed in (default: 12)
+- `allowed_networks` - CIDRs allowed to reach management endpoints. Empty permits
+  loopback and private/link-local addresses only
 
 ## Audio Features (ALPHA)
 

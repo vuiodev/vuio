@@ -59,6 +59,8 @@ pub struct SsdpConfig {
     pub announce_interval: Duration,
     /// Maximum number of retries for network operations
     pub max_retries: u32,
+    /// Hop limit for outbound SSDP multicast
+    pub multicast_ttl: u8,
     /// Specific interfaces to use (empty means use all suitable interfaces)
     pub interfaces: Vec<NetworkInterface>,
 }
@@ -71,6 +73,7 @@ impl Default for SsdpConfig {
             multicast_address: SSDP_MULTICAST_IP,
             announce_interval: Duration::from_secs(300), // 5 minutes
             max_retries: 3,
+            multicast_ttl: crate::platform::network::socket::DEFAULT_MULTICAST_TTL,
             interfaces: Vec::new(),
         }
     }

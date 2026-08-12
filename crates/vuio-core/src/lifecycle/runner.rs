@@ -142,6 +142,16 @@ where
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
+        // Seeded from the configured port so nothing reads a zero before the first
+        // bind; overwritten with the address actually taken once the listener is up.
+        http_binding: Arc::new(crate::state::HttpBinding::new(config.server.port)),
+        config_source: Arc::new(crate::state::ConfigSource {
+            path: config_manager.get_config_path().to_path_buf(),
+            // The manager only watches a config it loaded from a durable location; a
+            // container's env-var configuration gets an unwatched scratch file.
+            durable: config_manager.is_watched(),
+            overrides: config_manager.overrides().clone(),
+        }),
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         database: database.clone(),
@@ -189,7 +199,10 @@ where
 
     let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
 
-    if config.database.backup_enabled {
+    // Always spawned, gated per tick. Spawning only when backups were on at boot made
+    // the setting one-way: turning it off worked, turning it on did nothing until a
+    // restart, because there was no task left to notice.
+    {
         let backup_database = database.clone();
         let backup_state = app_state.clone();
         let backup_cancellation = cancellation.clone();
@@ -241,28 +254,22 @@ where
         )
     });
 
-    // Start file system monitoring
-    match start_file_monitoring(
-        file_watcher.clone(),
-        app_state.clone(),
-        cancellation.clone(),
-    )
-    .await
-    {
-        Ok(Some(handle)) => {
-            services.spawn(async move {
-                (
-                    "media monitoring",
-                    handle.await.map_err(anyhow::Error::from),
-                )
-            });
-        }
-        Ok(None) => {}
-        Err(e) => {
-            warn!("Failed to start file system monitoring: {}", e);
-            warn!("Continuing without real-time file monitoring");
-        }
-    }
+    // Supervised rather than started once, so watch_for_changes can be toggled without
+    // a restart.
+    let monitoring_watcher = file_watcher.clone();
+    let monitoring_state = app_state.clone();
+    let monitoring_cancellation = cancellation.clone();
+    services.spawn(async move {
+        (
+            "media monitoring",
+            supervisor::run_monitoring_supervisor(
+                monitoring_watcher,
+                monitoring_state,
+                monitoring_cancellation,
+            )
+            .await,
+        )
+    });
 
     // Scan only after the watcher is active. This closes the startup blind
     // window: a download that lands while the scan is running is either found
@@ -309,41 +316,33 @@ where
         )
     });
 
-    // Start SSDP discovery service with platform abstraction
-    let ssdp_handle = start_ssdp_service(app_state.clone(), cancellation.clone()).await?;
-    services.spawn(async move {
-        let result = ssdp_handle
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result);
-        ("SSDP", result)
-    });
-
-    // Start the HTTP server as a background task
-    let network_handles =
-        match start_http_server_task(app_state.clone(), cancellation.clone()).await {
-            Ok(handles) => handles,
-            Err(e) => {
-                error!("Failed to start HTTP server: {}", e);
-                return Err(e);
-            }
-        };
-    services.spawn(async move {
-        let result = network_handles
-            .http
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|result| result);
-        ("HTTP", result)
-    });
+    // The listener and the discovery advertisement are supervised rather than started,
+    // so a port, identity or discovery change can be applied by rebuilding them instead
+    // of by restarting the process. Both tasks run until shutdown; see `supervisor`.
+    let http_state = app_state.clone();
+    let http_cancellation = cancellation.clone();
+    let http_started = supervisor::bind_first_listener(&http_state).await?;
     services.spawn(async move {
         (
-            "TV discovery",
-            network_handles
-                .tv_discovery
-                .await
-                .map_err(anyhow::Error::from),
+            "HTTP",
+            supervisor::run_http_supervisor(http_state, http_cancellation, http_started).await,
         )
+    });
+
+    let discovery_state = app_state.clone();
+    let discovery_cancellation = cancellation.clone();
+    services.spawn(async move {
+        (
+            "discovery",
+            supervisor::run_advertisement_supervisor(discovery_state, discovery_cancellation).await,
+        )
+    });
+
+    // Renderer discovery has nothing to do with the listener; it used to be started
+    // beside it and would otherwise be cycled by every rebind.
+    let tv_discovery = start_tv_discovery(app_state.clone(), cancellation.clone());
+    services.spawn(async move {
+        ("TV discovery", tv_discovery.await.map_err(anyhow::Error::from))
     });
 
     // Determine if console logging is verbose
@@ -365,7 +364,9 @@ where
             } else {
                 config.server.interface.clone()
             };
-        let web_url = format!("http://{}:{}", display_ip, config.server.port);
+        // The bound port, not the configured one: a banner naming a port nothing answers
+        // on is worse than no banner.
+        let web_url = format!("http://{}:{}", display_ip, app_state.http_binding.port());
         let db_path = config.get_database_path().with_extension("redb");
 
         fn tail_with_ellipsis(value: &str, max_chars: usize) -> String {

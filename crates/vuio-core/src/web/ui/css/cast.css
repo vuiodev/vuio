@@ -1,0 +1,28 @@
+/* TV Selection Modal Styles */
+.tv-select-btn {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--card-border);
+    color: var(--text-primary);
+    padding: 0.85rem 1.15rem;
+    border-radius: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    transition: all 0.2s ease;
+    font-weight: 600;
+    outline: none;
+    width: 100%;
+    font-size: 0.95rem;
+}
+.tv-select-btn:hover {
+    border-color: var(--accent-color);
+    background: rgba(0, 240, 255, 0.06);
+    box-shadow: 0 0 12px rgba(0, 240, 255, 0.2);
+    transform: translateY(-1px);
+}
+.tv-icon-wrapper {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+}

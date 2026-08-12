@@ -143,9 +143,12 @@ impl AppConfig {
             media,
             database,
             management: ManagementConfig {
+                // Defaults off. It used to default on, which was harmless only
+                // because nothing read it; now that it turns auth on, defaulting
+                // on would lock every container out of its own dashboard.
                 enabled: std::env::var("VUIO_MANAGEMENT_ENABLED")
                     .map(|value| value.eq_ignore_ascii_case("true"))
-                    .unwrap_or(true),
+                    .unwrap_or(false),
                 token_file: std::env::var("VUIO_ADMIN_TOKEN_FILE").ok(),
                 session_ttl_hours: std::env::var("VUIO_ADMIN_SESSION_TTL_HOURS")
                     .ok()

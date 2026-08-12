@@ -314,3 +314,38 @@ fn callback_allowlist_requires_valid_cidr_notation() {
         .to_string()
         .contains("Invalid UPnP callback network CIDR"));
 }
+
+/// These land in `validate_flexible`, not just the startup-only platform check,
+/// because that is the gate a hot reload and the admin API both pass through.
+/// A CIDR that only fails at `AuthState::load` would be accepted into a running
+/// server and then stop the next boot.
+#[test]
+fn management_settings_are_validated_on_every_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let mut config = AppConfig::default_for_platform();
+    config.media.directories = vec![super::MonitoredDirectoryConfig {
+        path: temp_dir.path().to_string_lossy().to_string(),
+        recursive: true,
+        case_sensitive: None,
+        extensions: None,
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Skip,
+    }];
+    config.management.allowed_networks = vec!["10.0.0.0/8".to_string()];
+    assert!(ConfigValidator::validate_flexible(&config).is_ok());
+
+    config.management.allowed_networks = vec!["10.0.0.0/64".to_string()];
+    let error = ConfigValidator::validate_flexible(&config).unwrap_err();
+    assert!(
+        error.to_string().contains("Invalid management network CIDR"),
+        "unexpected error: {error}"
+    );
+
+    config.management.allowed_networks.clear();
+    config.management.session_ttl_hours = 0;
+    let error = ConfigValidator::validate_flexible(&config).unwrap_err();
+    assert!(
+        error.to_string().contains("session TTL"),
+        "unexpected error: {error}"
+    );
+}

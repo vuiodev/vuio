@@ -58,6 +58,110 @@ Creates a temporary playlist and starts casting it to the selected playback devi
   }
   ```
 
+### Read the configuration
+Returns the full settings schema, the values currently in force, and which keys the
+configuration file actually writes. Backs the dashboard's Admin tab.
+* **Endpoint**: `GET /api/admin/config`
+* **Response**: `200 OK`
+  ```jsonc
+  {
+    "sections": [
+      {
+        "id": "network",
+        "title": "Network",
+        "blurb": "Discovery and advertisement on the local network.",
+        "fields": [
+          {
+            "key": "network.mdns_enabled",
+            "label": "Advertise over mDNS",
+            "type": "bool",
+            "impact": "live",
+            "removable": true,
+            "help": "Also announce the server over Bonjour/DNS-SD, alongside SSDP."
+          }
+        ]
+      }
+    ],
+    // The file's value where the file sets one; otherwise the default in force.
+    "values": { "network.mdns_enabled": true },
+    // False means the key is absent from config.toml and `values` is showing a default.
+    "present": { "network.mdns_enabled": false },
+    // Settings the command line forces for this run, which the file cannot change until restart.
+    "overrides": { "server.port": "9090" },
+    // Libraries as the file writes them; absent optional keys stay absent.
+    "directories": [{ "path": "/media", "recursive": true }],
+    // The same libraries with defaults filled in, for display only.
+    "effective_directories": [{ "path": "/media", "recursive": true, "validation_mode": "Warn" }],
+    "runtime": {
+      "config_path": "/opt/vuio/config/config.toml",
+      "writable": true,
+      "read_only_reason": null,
+      "auth_enabled": false,
+      "is_docker": false,
+      "version": "0.0.42",
+      // Where the server is actually accepting, which is what every advertised URL uses.
+      "bound_addr": "0.0.0.0:8080",
+      "desired_addr": null,
+      "bind_error": null
+    }
+  }
+  ```
+
+Field `type` is one of `bool`, `int` (with `min`/`max`), `text`, `path`, `enum` (with
+`options` and `free_form`), or `string_list`. `impact` is `live`, `next_start` — the setting
+only describes startup, so there is nothing to apply now — or `restart`, meaning the running
+server is still using the old value. Only `database.path` and `database.redb_cache_mb` are
+`restart`.
+`removable: false` marks a key that must always carry a value, because `AppConfig`
+declares no default for it. Some fields carry a `note` describing a caveat in what the
+setting actually does.
+
+### Write the configuration
+Applies a set of changes to `config.toml`. The file is edited in place, so comments and
+unrecognised keys survive. The result is parsed and validated before anything is written,
+and the write is atomic, so a rejected change leaves the file untouched. The file watcher
+then reloads it — the same path a hand edit takes.
+* **Endpoint**: `POST /api/admin/config`
+* **Request Payload**:
+  ```jsonc
+  {
+    // Dotted key to value. `null` removes the key, restoring its default.
+    "values": { "media.autoplay_enabled": false, "server.ip": null },
+    // Optional. Replaces the whole [[media.directories]] array.
+    "directories": [{ "path": "/media", "recursive": true }]
+  }
+  ```
+* **Response**: `200 OK` — `{"saved": true, "impact": "live"}`, where `impact` is
+  `no_change`, `live`, `next_start`, or `restart_required`.
+* A save that changes `server.port` or `server.interface` also carries `moved`, reporting
+  what the listener actually did rather than predicting it:
+  ```jsonc
+  { "state": "moved",  "serving": "0.0.0.0:9090", "port": 9090 }
+  { "state": "failed", "serving": "0.0.0.0:8080", "desired": "0.0.0.0:80",
+    "error": "Failed to bind to 0.0.0.0:80: Permission denied (os error 13)" }
+  { "state": "pending", "serving": "0.0.0.0:8080" }
+  ```
+  On `failed` the server keeps serving on the old address and every advertised URL keeps
+  naming it; `runtime.bound_addr`, `runtime.desired_addr` and `runtime.bind_error` report
+  the same disagreement on subsequent `GET`s, so it survives a page reload.
+* `400 Bad Request` — `{"error": "..."}` for an unknown key, a value of the wrong type, a
+  failed validation, or an attempt to unset a key that has no default.
+* `409 Conflict` — the configuration is not editable. This means a container configured by
+  environment variables, whose config is a scratch file that a restart discards.
+
+Command-line overrides (`--port`, `--name`, `-m`) do **not** make the configuration
+read-only. They are layered over the file on every load, so they hold for the run while
+the file stays editable. `overrides` in the `GET` response reports what they force, keyed
+by config key, so a value saved for one of those keys can be shown as taking effect at the
+next start rather than looking as though it failed. `values` deliberately reports the
+file's value, not the running one, so a save cannot write an override back into the file.
+
+### Restart the server
+Runs the normal graceful shutdown and exits. The process only returns if something
+supervises it — Docker, systemd or launchd.
+* **Endpoint**: `POST /api/admin/restart`
+* **Response**: `202 Accepted` — `{"stopping": true, "supervised": false}`
+
 ---
 
 ## 2. Media Streaming APIs

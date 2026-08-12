@@ -198,7 +198,7 @@ pub async fn generate_browse_response(
                     &mut didl,
                     "<upnp:albumArtURI>http://{}:{}/media/{}/cover</upnp:albumArtURI>",
                     server_ip,
-                    state.current_config().server.port,
+                    state.http_binding.port(),
                     file_id
                 );
             }
@@ -287,7 +287,7 @@ pub async fn generate_browse_response(
                     &mut didl,
                     r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
                     server_ip,
-                    state.current_config().server.port,
+                    state.http_binding.port(),
                     file_id
                 );
             }
@@ -296,7 +296,7 @@ pub async fn generate_browse_response(
                 &mut didl,
                 r#">http://{}:{}/media/{}</res>"#,
                 server_ip,
-                state.current_config().server.port,
+                state.http_binding.port(),
                 file_id
             );
 
@@ -306,7 +306,7 @@ pub async fn generate_browse_response(
                     r#"
                 <res protocolInfo="http-get:*:text/srt:*">http://{}:{}/media/{}/subtitle</res>"#,
                     server_ip,
-                    state.current_config().server.port,
+                    state.http_binding.port(),
                     file_id
                 );
             }
@@ -320,7 +320,7 @@ pub async fn generate_browse_response(
                     r#"
                 <sec:CaptionInfoEx sec:type="srt">http://{}:{}/media/{}/subtitle</sec:CaptionInfoEx>"#,
                     server_ip,
-                    state.current_config().server.port,
+                    state.http_binding.port(),
                     file_id
                 );
             }

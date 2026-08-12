@@ -31,11 +31,22 @@ pub(super) async fn start_platform_adaptation<D: DatabaseManager + 'static>(
                                         || old_config.server.uuid != new_config.server.uuid
                                         || old_config.network != new_config.network
                                         || old_config.database != new_config.database
-                                        || old_config.management != new_config.management
                                     {
                                         warn!(
-                                            "Configuration reloaded; server identity/bind, network, database, or management changes require restart"
+                                            "Configuration reloaded; server identity/bind, network or database changes require restart"
                                         );
+                                    }
+                                    if old_config.management != new_config.management {
+                                        if let Err(error) = app_state
+                                            .auth
+                                            .apply(&new_config.management, &app_state.config_source.path)
+                                        {
+                                            error!(
+                                                "Keeping the previous management settings: {error:#}"
+                                            );
+                                        } else {
+                                            info!("Applied new management settings");
+                                        }
                                     }
                                     *app_state.media_directories.write().await =
                                         new_config.media.directories.clone();
@@ -261,14 +272,23 @@ pub(super) async fn initialize_config_manager(
         default_path
     };
 
+    // Host overrides are layered on top of every load rather than replacing the file
+    // or being frozen into a scratch copy. `--port` says what this run listens on; it
+    // does not make the rest of the configuration read-only, and the file stays the
+    // durable configuration that hot reload and the admin API work against.
+    if !overrides.is_empty() {
+        info!("Applying command line overrides on top of the configuration file");
+    }
+
     // Create ConfigManager with file watching for configuration files
     let config_manager = if config_path.exists() {
         info!(
             "Loading existing configuration from: {}",
             config_path.display()
         );
-        ConfigManager::new_with_watching(
+        ConfigManager::watching_with_overrides(
             &config_path,
+            overrides.clone(),
             cancellation.clone(),
             background_tasks.clone(),
         )
@@ -302,38 +322,21 @@ pub(super) async fn initialize_config_manager(
         );
 
         // Create ConfigManager with file watching
-        ConfigManager::new_with_watching(&config_path, cancellation, background_tasks)
-            .await
-            .context("Failed to create ConfigManager with file watching")?
+        ConfigManager::watching_with_overrides(
+            &config_path,
+            overrides.clone(),
+            cancellation,
+            background_tasks,
+        )
+        .await
+        .context("Failed to create ConfigManager with file watching")?
     };
-
-    // Layer any host-supplied overrides on top of the file that was just
-    // loaded, rather than replacing it. Passing `--port` must not silently
-    // discard the rest of a `--config` file, which is what building a whole
-    // replacement AppConfig used to do.
-    if !overrides.is_empty() {
-        info!("Applying command line overrides on top of the loaded configuration");
-        let mut config = config_manager.get_config().await;
-        overrides.apply(&mut config);
-        config
-            .apply_platform_defaults()
-            .context("Failed to apply platform-specific defaults to the overridden configuration")?;
-        config
-            .validate_for_platform()
-            .context("Overridden configuration validation failed")?;
-
-        // Overrides live only for this run, so they go to a scratch file and
-        // the manager watches nothing: reloading would drop them.
-        let overridden_path = std::env::temp_dir().join("vuio_cmdline_config.toml");
-        config
-            .save_to_file(&overridden_path)
-            .context("Failed to save the overridden configuration")?;
-        return ConfigManager::new(&overridden_path)
-            .context("Failed to create ConfigManager for the overridden configuration");
-    }
 
     // Get the current configuration for logging
     let config = config_manager.get_config().await;
+    config
+        .validate_for_platform()
+        .context("Configuration validation failed")?;
 
     info!("Configuration initialized successfully with file watching enabled");
     info!(
