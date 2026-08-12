@@ -95,7 +95,12 @@ impl LinuxNetworkManager {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let socket = socket2::SockRef::from(socket);
         socket.set_reuse_address(true)?;
-        socket.set_multicast_ttl_v4(4)?;
+        // Only reached by the port-availability probe, whose socket is dropped
+        // immediately; the real SSDP socket gets its hop limit from the configuration
+        // via `SsdpSocket::set_multicast_ttl`.
+        socket.set_multicast_ttl_v4(u32::from(
+            crate::platform::network::socket::DEFAULT_MULTICAST_TTL,
+        ))?;
         socket.set_multicast_loop_v4(true)?;
 
         debug!("Configured multicast socket options for optimal Docker compatibility");

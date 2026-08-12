@@ -111,6 +111,19 @@ impl UnifiedSsdpService {
             warn!("Failed to join multicast group: {}", e);
         }
 
+        // Applied after the socket exists so it lands on every platform, including the
+        // Linux path that never runs the shared multicast configuration.
+        if let Err(error) = socket.set_multicast_ttl(ssdp_config.multicast_ttl) {
+            warn!(
+                "Failed to set multicast TTL to {}: {}",
+                ssdp_config.multicast_ttl, error
+            );
+        } else {
+            // Logged at info deliberately: this setting spent its whole life being
+            // validated and never applied, so the log should say what actually took.
+            info!("SSDP multicast TTL set to {}", ssdp_config.multicast_ttl);
+        }
+
         // Tokio's UDP socket supports concurrent send and receive through
         // shared references. Keeping the configured wrapper in an Arc avoids
         // holding an async mutex across the indefinitely pending receive.
@@ -218,6 +231,14 @@ impl UnifiedSsdpService {
                                 .map_err(|error| {
                                     anyhow::anyhow!("SSDP multicast rejoin failed: {error}")
                                 })?;
+                            // A replacement socket starts from platform defaults, so the
+                            // configured hop limit has to be re-applied or a recovered
+                            // socket quietly announces with a shorter reach than before.
+                            if let Err(error) =
+                                replacement.set_multicast_ttl(ssdp_config.multicast_ttl)
+                            {
+                                warn!("Failed to set multicast TTL on the replacement socket: {error}");
+                            }
                             *socket.write().unwrap_or_else(|error| error.into_inner()) =
                                 Arc::new(replacement);
                             consecutive_errors = 0;
@@ -574,6 +595,7 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
             multicast_address: SSDP_MULTICAST_IP,
             announce_interval: Duration::from_secs(config.network.announce_interval_seconds),
             max_retries: 3,
+            multicast_ttl: config.network.multicast_ttl,
             interfaces: Vec::new(),
         }
     }
