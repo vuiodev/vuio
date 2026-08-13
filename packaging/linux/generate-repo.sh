@@ -151,8 +151,11 @@ repo_gpgcheck=0
 EOF
 
 for distro in fedora rhel centos rocky alma; do
-    if [ ! -e "$distro" ]; then
-        ln -s . "$distro" 2>/dev/null || true
+    if [ ! -d "$distro" ]; then
+        mkdir -p "$distro"
+        ln -s ../repodata "$distro/repodata" 2>/dev/null || true
+        ln -s ../packages "$distro/packages" 2>/dev/null || true
+        ln -s ../vuio.repo "$distro/vuio.repo" 2>/dev/null || true
     fi
 done
 popd > /dev/null
