@@ -81,6 +81,18 @@ port = 8090                             # Must differ from server.port
 # Management is loopback-only unless CIDRs are explicitly listed.
 # allowed_networks = []
 
+# Model Context Protocol server, at POST /mcp on the main port.
+# Lets an AI assistant such as Claude browse, search, build playlists and cast
+# to your devices. See the MCP section of the README to connect a client.
+[mcp]
+# enabled = true
+# Offer only the browsing and searching tools, hiding everything that changes a
+# playlist or drives a device.
+# read_only = false
+# Demand `Authorization: Bearer <admin token>` on /mcp even when [management] is
+# off. Worth turning on whenever this server is reachable beyond loopback.
+# require_auth = false
+
 [mediainfo]
 # Fetch titles, synopses, ratings and artwork from public metadata services.
 # This is the only part of VuIO that contacts anything outside the local

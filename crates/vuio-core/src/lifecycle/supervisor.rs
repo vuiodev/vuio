@@ -147,6 +147,34 @@ fn spawn_http<D: DatabaseManager + 'static>(
     })
 }
 
+/// Say so, loudly, when the MCP endpoint is reachable off this machine with no
+/// credential.
+///
+/// The tools are not all read-only: an assistant reaching this endpoint can
+/// delete playlists and start playback on any device it finds on the network.
+/// That is fine on loopback and fine behind a token; it is worth a warning when
+/// it is neither, because nothing else in the startup output would say so.
+#[cfg_attr(not(feature = "mcp"), allow(unused_variables))]
+fn warn_if_mcp_is_open<D: DatabaseManager + 'static>(state: &AppState<D>, addr: SocketAddr) {
+    #[cfg(feature = "mcp")]
+    {
+        let config = state.current_config();
+        if !config.mcp.enabled || addr.ip().is_loopback() {
+            return;
+        }
+        if state.auth.enabled() || config.mcp.require_auth {
+            return;
+        }
+        warn!(
+            "The MCP endpoint at http://{addr}/mcp accepts requests from anywhere on this \
+             network with no credential. It can delete playlists and cast to your devices. \
+             Set [mcp].require_auth = true (or [management].enabled = true) to require a token, \
+             [mcp].read_only = true to offer only browsing, or [mcp].enabled = false to switch \
+             it off."
+        );
+    }
+}
+
 /// Whether two addresses can be bound at the same time.
 ///
 /// They cannot when they share a port and either is the wildcard, which is exactly the
@@ -291,6 +319,7 @@ pub(super) async fn run_http_supervisor<D: DatabaseManager + 'static>(
     let mut current = spawn_http(&state, started.listener, &global, web::Surface::Primary)?;
     state.http_binding.publish_serving(current.addr);
     info!("HTTP server started successfully");
+    warn_if_mcp_is_open(&state, current.addr);
 
     loop {
         tokio::select! {
