@@ -31,7 +31,7 @@ path = "src/lib.rs"
 # Never gated, because they are what a media server *is*: SSDP discovery, UPnP
 # ContentDirectory, HTTP range streaming, media scanning and indexing, the
 # database, and configuration.
-default = ["casting", "dashboard", "diagnostics", "mcp", "metadata"]
+default = ["casting", "dashboard", "diagnostics", "mcp", "metadata", "mediainfo"]
 
 # Cast to Chromecast, AirPlay and DLNA renderers.
 #
@@ -60,6 +60,17 @@ dashboard = []
 diagnostics = ["dep:sysinfo"]
 mcp = []
 metadata = ["dep:symphonia"]
+
+# Fetch titles, synopses, ratings and artwork for the library from public metadata
+# APIs. This is the one part of VuIO that leaves the LAN, and it is the reason
+# `reqwest` is in the tree at all: `http_client.rs` is deliberately cleartext with
+# no TLS, no redirects and no name resolution, which is right for talking to a TV
+# on the same subnet and useless for talking to musicbrainz.org.
+#
+# On by default because the dashboard section has to be visible for anyone to find
+# the feature, and nothing here opens a socket until the operator presses the
+# button. Drop it for a build that must never reach the internet.
+mediainfo = ["dep:reqwest"]
 unstable-internals = []
 
 [dependencies]
@@ -114,6 +125,11 @@ getrandom = { version = "0.3", optional = true }
 plist = { version = "1.8", optional = true }
 hex = { version = "0.4", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
+# Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
+# over TLS. `rustls-no-provider` rather than a provider-selecting feature because
+# `Runtime::start` already installs the ring provider process-wide, and a second
+# installation from a dependency's default would be the one that loses.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.62", features = [

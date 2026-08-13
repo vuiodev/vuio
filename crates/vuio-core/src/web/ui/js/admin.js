@@ -49,6 +49,12 @@ async function loadAdminConfig() {
         adminEdits = {};
         adminDirectories = null;
         renderAdmin();
+        // Providers and job progress come from a second endpoint, and a failure
+        // there must not take the settings screen down with it — the panel renders
+        // its own loading state until this lands.
+        loadMediaInfo()
+            .then(renderAdmin)
+            .catch(() => {});
     } catch (error) {
         const body = document.getElementById('admin-pane-body');
         body.replaceChildren();
@@ -193,6 +199,10 @@ function renderAdminPane() {
     }
     for (const spec of section.fields) {
         body.appendChild(renderAdminRow(spec));
+    }
+    // Sections may carry actions that are not settings — see mediainfo.js.
+    if (section.panel) {
+        renderMediaInfoPanel(body);
     }
 }
 

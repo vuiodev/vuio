@@ -143,6 +143,27 @@ pub struct BrowseRenderContext {
     pub autoplay_enabled: bool,
     pub update_id: u32,
     pub bookmarks: HashMap<i64, u32>,
+    /// Whether a fetched title outranks the one read from the file's own tags.
+    pub prefer_online_titles: bool,
+    /// Matches weaker than this are left out of `mediainfo` entirely.
+    pub min_confidence: u8,
+    /// Fetched media info for the items on this page, filled in by the response
+    /// generators just before rendering. Empty when nothing has been fetched.
+    pub mediainfo: HashMap<i64, crate::database::MediaInfoOverlay>,
+}
+
+impl BrowseRenderContext {
+    /// The fetched title to show for `file_id`, if there is one and it is wanted.
+    fn online_title(&self, file_id: i64) -> Option<&str> {
+        if !self.prefer_online_titles {
+            return None;
+        }
+        self.mediainfo
+            .get(&file_id)?
+            .title
+            .as_deref()
+            .filter(|title| !title.is_empty())
+    }
 }
 
 /// UPnP container classes.
@@ -293,7 +314,14 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
     let mime = file.mime_type();
     let is_radio = mime == "audio/radio";
     let has_srt = file.subtitle_available();
-    let title = didl_display_title(file.title(), file.filename(), context.client);
+    // A fetched title is the readable one — "Arrival" rather than
+    // "Arrival.2016.1080p.BluRay.x264-GRP" — so it wins when there is one and the
+    // operator asked for it.
+    let title = didl_display_title(
+        context.online_title(file_id).or_else(|| file.title()),
+        file.filename(),
+        context.client,
+    );
     write!(
         output,
         r#"<item id="{}" parentID="{}" restricted="1"><dc:title>{}"#,
@@ -305,6 +333,32 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
         output.write_char('.')?;
     }
     output.write_str("</dc:title>")?;
+
+    // Synopsis and genres from the fetch. Video had neither before: nothing read
+    // metadata out of a video file, so a TV showed a filename and nothing else.
+    if let Some(overlay) = context.mediainfo.get(&file_id) {
+        if let Some(overview) = overlay.overview.as_deref().filter(|text| !text.is_empty()) {
+            write!(
+                output,
+                "<dc:description>{}</dc:description>",
+                xml_escape(overview)
+            )?;
+        }
+        if !mime.starts_with("audio/") {
+            if let Some(genre) = overlay.genres.first() {
+                write!(output, "<upnp:genre>{}</upnp:genre>", xml_escape(genre))?;
+            }
+            // Audio already advertises its cover below; this is what gives a movie
+            // or an episode a poster for the first time.
+            if overlay.has_artwork {
+                write!(
+                    output,
+                    "<upnp:albumArtURI>http://{}:{}/media/{}/cover</upnp:albumArtURI>",
+                    context.server_ip, context.server_port, file_id
+                )?;
+            }
+        }
+    }
 
     if mime.starts_with("audio/") {
         if let Some(value) = file.artist() {
@@ -464,6 +518,40 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
     output.write_str("</item>")
 }
 
+/// Load the fetched media info for the page about to be rendered.
+///
+/// A first pass collects the ids, because the writer cannot ask the session for
+/// anything while the session is lending it a row. Both passes run the same
+/// indexed query on the same connection, and the first does no formatting, so the
+/// cost is one extra index walk rather than a second round trip.
+///
+/// A failure here is not worth failing a browse over: the page renders with local
+/// metadata, exactly as it did before this feature existed.
+fn with_mediainfo<S: DatabaseReadSession>(
+    session: &mut S,
+    query: &MediaFileQuery,
+    offset: usize,
+    limit: usize,
+    mut context: BrowseRenderContext,
+) -> Result<BrowseRenderContext> {
+    if limit == 0 {
+        return Ok(context);
+    }
+    let mut ids = Vec::with_capacity(limit);
+    session.visit_files(query, offset, limit, |file| {
+        if let Some(id) = file.id().filter(|id| *id > 0) {
+            ids.push(id);
+        }
+        Ok(())
+    })?;
+
+    match session.mediainfo_overlays(&ids, context.min_confidence) {
+        Ok(overlays) => context.mediainfo = overlays,
+        Err(error) => tracing::debug!(%error, "Could not load media info for this page"),
+    }
+    Ok(context)
+}
+
 pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
     session: &mut S,
     canonical_parent: &str,
@@ -506,6 +594,7 @@ pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
         path: canonical_parent.to_owned(),
         mime_family: (!mime_family.is_empty()).then(|| mime_family.to_owned()),
     };
+    let context = with_mediainfo(session, &query, file_offset, file_limit, context)?;
     let summary = session.visit_files(&query, file_offset, file_limit, |file| {
         write_media_view(&mut result, object_id, &file, &context)
             .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))
@@ -531,6 +620,7 @@ pub fn generate_indexed_items_response<S: DatabaseReadSession>(
     <s:Body><u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><Result>"#)?;
     let mut result = SoapResultWriter(&mut response);
     result.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
+    let context = with_mediainfo(session, &query, starting_index, requested_count, context)?;
     let summary = session.visit_files(&query, starting_index, requested_count, |file| {
         write_media_view(&mut result, object_id, &file, &context)
             .map_err(|_| anyhow::anyhow!("failed to construct browse XML"))

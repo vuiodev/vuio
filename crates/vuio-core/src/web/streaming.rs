@@ -467,12 +467,14 @@ pub async fn serve_cover<D: DatabaseManager>(
             AppError::NotFound
         })?;
 
-    if !file_info.mime_type.starts_with("audio/") {
-        return Err(AppError::NotFound);
-    }
+    // Video used to be rejected outright, because the only artwork VuIO could find
+    // was a sidecar file or an embedded audio tag and a video file has neither. A
+    // fetched poster is artwork it does have, so video falls through to the cache
+    // below instead of 404ing here.
+    let local_sources_apply = file_info.mime_type.starts_with("audio/");
 
     // 1. Primary: Search parent directory for cover images (fast)
-    if let Some(parent) = file_info.path.parent() {
+    if let Some(parent) = file_info.path.parent().filter(|_| local_sources_apply) {
         let base_name = file_info
             .path
             .file_stem()
@@ -507,7 +509,7 @@ pub async fn serve_cover<D: DatabaseManager>(
     // (blocking task). Only the embedded path needs a tag reader — the
     // directory search above still serves cover art without the feature.
     #[cfg(feature = "metadata")]
-    {
+    if local_sources_apply {
         let path = file_info.path.clone();
         let cover = tokio::task::spawn_blocking(move || {
             crate::platform::filesystem::extract_embedded_cover(&path)
@@ -522,7 +524,46 @@ pub async fn serve_cover<D: DatabaseManager>(
         }
     }
 
+    // 3. Last: a poster downloaded by the media info fetch. Comes last so anything
+    // shipped alongside the file still wins — the operator's own artwork is a
+    // deliberate choice, and a provider's guess is not.
+    #[cfg(feature = "mediainfo")]
+    {
+        if let Some(response) = serve_cached_artwork(&state, file_id).await {
+            return Ok(response);
+        }
+    }
+
     Err(AppError::NotFound)
+}
+
+/// Serve the artwork the media info fetch cached for this file, if any.
+#[cfg(feature = "mediainfo")]
+async fn serve_cached_artwork<D: DatabaseManager>(
+    state: &AppState<D>,
+    file_id: i64,
+) -> Option<Response> {
+    let config = state.current_config();
+    if !config.mediainfo.artwork_enabled {
+        return None;
+    }
+    let root = config.mediainfo.artwork_path.as_ref()?;
+    let key = state
+        .database
+        .get_mediainfo(file_id)
+        .await
+        .ok()
+        .flatten()?
+        .artwork_key?;
+
+    let cache = crate::mediainfo::ArtworkCache::new(root);
+    let path = cache.lookup(&key)?;
+    let content_type = crate::mediainfo::artwork_content_type(&path);
+    let data = tokio::fs::read(&path).await.ok()?;
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(data))
+        .ok()
 }
 
 #[cfg(test)]

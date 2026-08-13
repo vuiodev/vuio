@@ -438,3 +438,98 @@ textarea.admin-input {
     color: var(--accent-color) !important;
     font-weight: 600;
 }
+
+/* MediaInfo panel — provider cards, the fetch action and its progress. Built on
+   the .admin-library card so a provider reads like the library entries above it. */
+.mediainfo-group {
+    color: var(--text-secondary);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    margin: 1.25rem 0 0.5rem;
+    text-transform: uppercase;
+}
+
+.mediainfo-provider {
+    margin-bottom: 0.75rem;
+}
+
+.mediainfo-credential {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+}
+
+.mediainfo-credential .admin-input {
+    flex: 1 1 14rem;
+    min-width: 0;
+}
+
+.mediainfo-signup {
+    color: var(--accent-color);
+    display: inline-block;
+    font-size: 0.82rem;
+    margin-top: 0.5rem;
+    text-decoration: none;
+}
+
+.mediainfo-signup:hover {
+    text-decoration: underline;
+}
+
+.mediainfo-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 0.75rem 0;
+}
+
+.mediainfo-progress {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.75rem;
+}
+
+.mediainfo-bar {
+    background: var(--card-border);
+    border-radius: 999px;
+    height: 0.5rem;
+    overflow: hidden;
+}
+
+.mediainfo-bar-fill {
+    background: var(--accent-gradient);
+    height: 100%;
+    /* The counter moves once a second; easing keeps it from looking like a jump. */
+    transition: width 0.4s ease;
+}
+
+.mediainfo-counts {
+    color: var(--text-secondary);
+    display: flex;
+    flex-wrap: wrap;
+    font-size: 0.85rem;
+    gap: 0.25rem 1rem;
+}
+
+.mediainfo-error {
+    color: #ff6b6b !important;
+}
+
+.mediainfo-flagged {
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    margin-top: 1rem;
+    padding: 0.75rem 1rem;
+}
+
+.mediainfo-flagged summary {
+    cursor: pointer;
+    font-weight: 600;
+}
+
+.mediainfo-flagged .admin-runtime {
+    margin-top: 0.75rem;
+}

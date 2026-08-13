@@ -270,3 +270,17 @@
     font-size: 0.85rem;
     color: var(--text-secondary);
 }
+
+/* Synopsis from the media info fetch. Clamped to two lines: it is a hint about
+   what the file is, and a full plot summary would push every other card off. */
+.media-overview {
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    color: var(--text-secondary);
+    display: -webkit-box;
+    font-size: 0.78rem;
+    line-clamp: 2;
+    line-height: 1.4;
+    margin-top: 0.2rem;
+    overflow: hidden;
+}

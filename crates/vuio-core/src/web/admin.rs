@@ -88,6 +88,11 @@ struct SectionSpec {
     /// than a list of fields.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     directories: bool,
+    /// Marks a section that carries an action panel below its fields — provider
+    /// credentials and the Fetch button, which are not settings in the file and
+    /// so cannot be described as `FieldSpec`s.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    panel: bool,
 }
 
 /// A setting the file must always carry: `AppConfig` has no serde default for it,
@@ -359,6 +364,71 @@ const MANAGEMENT_FIELDS: &[FieldSpec] = &[
     ),
 ];
 
+const MEDIAINFO_FIELDS: &[FieldSpec] = &[
+    noted(
+        optional(
+            "mediainfo.enabled",
+            "Enable online lookups",
+            FieldKind::Bool,
+            Impact::Live,
+            "Allow VuIO to fetch titles, synopses and artwork from public metadata services.",
+        ),
+        "This is the only feature that contacts anything outside the local network. Nothing \
+         is requested until you press Fetch below.",
+    ),
+    noted(
+        optional(
+            "mediainfo.providers",
+            "Providers",
+            FieldKind::StringList,
+            Impact::Live,
+            "Which services to consult, one id per line, in the order they should be tried.",
+        ),
+        "tvmaze, musicbrainz, jikan, anilist and kitsu need no account. tmdb, omdb, discogs, \
+         lastfm and genius stay idle until you save a credential for them below.",
+    ),
+    optional(
+        "mediainfo.artwork_enabled",
+        "Download artwork",
+        FieldKind::Bool,
+        Impact::Live,
+        "Cache posters and cover art locally so DLNA clients, which usually cannot reach the \
+         internet, can still display them.",
+    ),
+    optional(
+        "mediainfo.artwork_path",
+        "Artwork cache",
+        FieldKind::Path,
+        Impact::Restart,
+        "Where downloaded artwork is kept. Leave unset to keep it beside the database.",
+    ),
+    noted(
+        optional(
+            "mediainfo.min_confidence",
+            "Confidence threshold",
+            FieldKind::Int { min: 0, max: 100 },
+            Impact::Live,
+            "How sure a match must be before it is trusted, from 0 to 100.",
+        ),
+        "Weaker matches are still stored, but are listed below for review instead of being \
+         used. Raising this makes a later run reconsider everything below the new value.",
+    ),
+    optional(
+        "mediainfo.prefer_online_titles",
+        "Prefer fetched titles",
+        FieldKind::Bool,
+        Impact::Live,
+        "Show the fetched title instead of the one read from the file's own tags.",
+    ),
+    optional(
+        "mediainfo.request_timeout_seconds",
+        "Request timeout",
+        FieldKind::Int { min: 1, max: 120 },
+        Impact::Live,
+        "Seconds to wait for a provider before giving up on one lookup.",
+    ),
+];
+
 const SECTIONS: &[SectionSpec] = &[
     SectionSpec {
         id: "server",
@@ -366,6 +436,7 @@ const SECTIONS: &[SectionSpec] = &[
         blurb: "Identity and the address this server answers on.",
         fields: SERVER_FIELDS,
         directories: false,
+        panel: false,
     },
     SectionSpec {
         id: "library",
@@ -373,6 +444,7 @@ const SECTIONS: &[SectionSpec] = &[
         blurb: "The folders scanned for media. Changes apply without a restart.",
         fields: &[],
         directories: true,
+        panel: false,
     },
     SectionSpec {
         id: "media",
@@ -380,6 +452,7 @@ const SECTIONS: &[SectionSpec] = &[
         blurb: "What gets indexed, and how playback behaves.",
         fields: MEDIA_FIELDS,
         directories: false,
+        panel: false,
     },
     SectionSpec {
         id: "network",
@@ -387,6 +460,7 @@ const SECTIONS: &[SectionSpec] = &[
         blurb: "Discovery and advertisement on the local network.",
         fields: NETWORK_FIELDS,
         directories: false,
+        panel: false,
     },
     SectionSpec {
         id: "database",
@@ -394,6 +468,7 @@ const SECTIONS: &[SectionSpec] = &[
         blurb: "Storage for the media index.",
         fields: DATABASE_FIELDS,
         directories: false,
+        panel: false,
     },
     SectionSpec {
         id: "management",
@@ -401,6 +476,16 @@ const SECTIONS: &[SectionSpec] = &[
         blurb: "Who may reach the dashboard and the management API.",
         fields: MANAGEMENT_FIELDS,
         directories: false,
+        panel: false,
+    },
+    SectionSpec {
+        id: "mediainfo",
+        title: "MediaInfo",
+        blurb: "Fetch titles, synopses, ratings and artwork for the library from public \
+                metadata services.",
+        fields: MEDIAINFO_FIELDS,
+        directories: false,
+        panel: true,
     },
 ];
 

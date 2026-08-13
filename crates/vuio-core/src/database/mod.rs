@@ -612,6 +612,38 @@ pub trait DatabaseReadSession {
     ) -> Result<VisitSummary>
     where
         F: for<'a> FnMut(Self::Playlist<'a>) -> Result<()>;
+
+    /// The fetched media info for `ids`, for rendering a browse page.
+    ///
+    /// Inside the session because DIDL is written from a blocking read and cannot
+    /// await a lookup mid-row. Defaulted to empty so a backend that stores no
+    /// media info still satisfies the trait.
+    ///
+    /// Rows below `min_confidence` are not returned. They are kept in the table so
+    /// the operator can review them, but a guess that was not good enough to trust
+    /// must not end up relabelling the library — showing "Dead on Arrival" for a
+    /// film called Arrival is worse than showing the filename.
+    fn mediainfo_overlays(
+        &mut self,
+        ids: &[i64],
+        min_confidence: u8,
+    ) -> Result<std::collections::HashMap<i64, MediaInfoOverlay>> {
+        let _ = (ids, min_confidence);
+        Ok(std::collections::HashMap::new())
+    }
+}
+
+/// The few fetched fields a browse response actually renders.
+///
+/// Deliberately not [`MediaInfoRecord`]: that carries the provider's whole JSON
+/// payload, and pulling one of those per row would dwarf the DIDL document it is
+/// decorating.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct MediaInfoOverlay {
+    pub title: Option<String>,
+    pub overview: Option<String>,
+    pub genres: Vec<String>,
+    pub has_artwork: bool,
 }
 
 /// Media-library storage and query operations implemented by a database backend.
@@ -918,6 +950,73 @@ pub trait SecretStore: Send + Sync {
     async fn delete_secret(&self, key: &str) -> Result<bool>;
 }
 
+/// What a public metadata service said about one file.
+///
+/// Kept apart from [`MediaFile`] because the two have different lifetimes: a
+/// media record is re-derived from the file on every scan, and this is not
+/// derivable from the file at all. `payload` holds the provider's own record
+/// whole, so a field that turns out to be worth showing is a query rather than
+/// another migration — the same bargain `media_tags` makes for local tags.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MediaInfoRecord {
+    pub media_file_id: i64,
+    pub provider: String,
+    pub remote_id: String,
+    /// `movie` | `series` | `episode` | `album` | `track` | `anime`
+    pub kind: String,
+    pub title: Option<String>,
+    pub original_title: Option<String>,
+    pub overview: Option<String>,
+    pub release_date: Option<String>,
+    pub year: Option<u32>,
+    pub rating: Option<f64>,
+    pub genres: Vec<String>,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    /// Key into the artwork cache, if a poster was downloaded.
+    pub artwork_key: Option<String>,
+    pub payload: String,
+    /// 0–100. Below the configured threshold the row is kept but flagged.
+    pub confidence: u8,
+    pub fetched_at: SystemTime,
+    pub mediainfo_version: u32,
+}
+
+/// How much of the library has been looked up.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct MediaInfoStats {
+    pub total: u64,
+    /// Rows at or above the confidence threshold they were stored with.
+    pub confident: u64,
+    pub low_confidence: u64,
+    pub with_artwork: u64,
+}
+
+/// Storage for fetched media info.
+///
+/// Not gated behind the `mediainfo` feature: it is plain SQL with no HTTP in it,
+/// and gating it would fragment this trait and the conformance suite for no gain.
+/// A build without the feature simply never writes a row.
+#[async_trait]
+pub trait MediaInfoRepository: Send + Sync {
+    async fn get_mediainfo(&self, media_file_id: i64) -> Result<Option<MediaInfoRecord>>;
+    /// Look up many at once. The browse path renders a page at a time and must not
+    /// issue one query per row.
+    async fn get_mediainfo_batch(&self, media_file_ids: &[i64]) -> Result<Vec<MediaInfoRecord>>;
+    async fn bulk_store_mediainfo(&self, records: &[MediaInfoRecord]) -> Result<()>;
+    /// The least certain matches first, for the operator to review.
+    async fn list_low_confidence(&self, threshold: u8, limit: usize)
+        -> Result<Vec<MediaInfoRecord>>;
+    async fn mediainfo_stats(&self, threshold: u8) -> Result<MediaInfoStats>;
+    /// Forget everything, so the next run starts over.
+    async fn clear_mediainfo(&self) -> Result<u64>;
+    /// Ids of files that have no usable row yet, oldest first.
+    ///
+    /// `version` is the current reader version: rows written by an older one are
+    /// treated as absent so a bumped version re-fetches.
+    async fn media_ids_missing_mediainfo(&self, version: u32, threshold: u8) -> Result<Vec<i64>>;
+}
+
 /// Aggregate database capability used by the application.
 #[async_trait]
 pub trait DatabaseManager:
@@ -926,6 +1025,7 @@ pub trait DatabaseManager:
     + HealthRepository
     + StatsRepository
     + SecretStore
+    + MediaInfoRepository
     + Send
     + Sync
 {

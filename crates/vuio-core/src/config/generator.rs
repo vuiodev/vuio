@@ -425,8 +425,9 @@ mod tests {
     use super::*;
     use crate::config::validation::ConfigValidator;
     use crate::config::{
-        AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MonitoredDirectoryConfig,
-        NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
+        AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MediaInfoConfig,
+        MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
+        ValidationMode,
     };
     use uuid::Uuid;
 
@@ -474,6 +475,7 @@ mod tests {
                 cache_mb: 128,
             },
             management: ManagementConfig::default(),
+            mediainfo: MediaInfoConfig::default(),
         };
 
         // Generate TOML
@@ -583,6 +585,7 @@ mod tests {
                 cache_mb: 128,
             },
             management: ManagementConfig::default(),
+            mediainfo: MediaInfoConfig::default(),
         };
 
         // Generate TOML

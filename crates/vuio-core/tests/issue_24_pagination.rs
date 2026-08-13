@@ -140,6 +140,8 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
+        #[cfg(feature = "mediainfo")]
+        mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         discovered_tvs: Arc::new(RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),
@@ -243,6 +245,8 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
         mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
+        #[cfg(feature = "mediainfo")]
+        mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         discovered_tvs: Arc::new(RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         cancellation: tokio_util::sync::CancellationToken::new(),

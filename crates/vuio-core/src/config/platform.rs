@@ -15,6 +15,24 @@ impl AppConfig {
             );
         }
 
+        // Artwork sits beside the database rather than in the media folders: those
+        // may be read-only mounts, and a cache written into someone's library would
+        // then be picked up by the scanner as media.
+        //
+        // Filled in here rather than left as None because the reload path compares
+        // whole configs for equality, and a field that normalises later would make
+        // every reload look like a change.
+        if self.mediainfo.artwork_path.is_none() {
+            let artwork = self
+                .database
+                .path
+                .as_ref()
+                .map(std::path::PathBuf::from)
+                .and_then(|path| path.parent().map(|parent| parent.join("artwork")))
+                .unwrap_or_else(|| platform_config.get_database_path().with_file_name("artwork"));
+            self.mediainfo.artwork_path = Some(artwork.to_string_lossy().to_string());
+        }
+
         // Ensure media directories have platform-appropriate exclude patterns
         for dir_config in &mut self.media.directories {
             if dir_config.exclude_patterns.is_none() {

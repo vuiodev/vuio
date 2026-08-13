@@ -72,3 +72,23 @@ path = "./config/media.db"
 # session_ttl_hours = 12
 # Management is loopback-only unless CIDRs are explicitly listed.
 # allowed_networks = []
+
+[mediainfo]
+# Fetch titles, synopses, ratings and artwork from public metadata services.
+# This is the only part of VuIO that contacts anything outside the local
+# network, and nothing is requested until you press Fetch in the dashboard.
+# enabled = false
+# Providers to consult. The five listed here need no account; tmdb, omdb,
+# discogs, lastfm and genius work once you save a key in the dashboard.
+# providers = ["tvmaze", "musicbrainz", "jikan", "anilist", "kitsu"]
+# Download posters and cover art into a local cache so DLNA clients, which
+# usually cannot reach the internet, can still display them.
+# artwork_enabled = true
+# Omit to keep the cache beside the database.
+# artwork_path = "./config/artwork"
+# Matches scoring below this are stored but flagged for review rather than
+# trusted. 0-100.
+# min_confidence = 60
+# Whether a fetched title outranks the one read from the file's own tags.
+# prefer_online_titles = true
+# request_timeout_seconds = 15

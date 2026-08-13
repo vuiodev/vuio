@@ -9,6 +9,8 @@ pub mod eventing;
 mod format;
 #[cfg(feature = "mcp")]
 pub mod mcp;
+#[cfg(all(feature = "dashboard", feature = "mediainfo"))]
+pub mod mediainfo;
 #[cfg(feature = "casting")]
 pub mod remux_streaming;
 pub mod soap;
@@ -80,6 +82,16 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
             .route("/api/admin/config", post(admin::put_config::<D>))
             .route("/api/admin/restart", post(admin::restart::<D>));
     }
+    #[cfg(all(feature = "dashboard", feature = "mediainfo"))]
+    {
+        json_routes = json_routes
+            .route(
+                "/api/admin/mediainfo/credentials",
+                post(mediainfo::put_credential::<D>),
+            )
+            .route("/api/admin/mediainfo/run", post(mediainfo::run::<D>))
+            .route("/api/admin/mediainfo/cancel", post(mediainfo::cancel::<D>));
+    }
     let json_routes = json_routes.layer(DefaultBodyLimit::max(JSON_BODY_LIMIT));
 
     #[allow(unused_mut)]
@@ -95,6 +107,11 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
             .route("/api/server-info", get(ui::server_info_handler::<D>))
             .route("/api/media", get(ui::media_page_handler::<D>))
             .route("/api/admin/config", get(admin::get_config::<D>));
+    }
+    #[cfg(all(feature = "dashboard", feature = "mediainfo"))]
+    {
+        management_routes =
+            management_routes.route("/api/admin/mediainfo", get(mediainfo::get_status::<D>));
     }
     #[cfg(feature = "casting")]
     {

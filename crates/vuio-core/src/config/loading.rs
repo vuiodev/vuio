@@ -162,6 +162,40 @@ impl AppConfig {
                     .map(str::to_owned)
                     .collect(),
             },
+            mediainfo: MediaInfoConfig {
+                enabled: std::env::var("VUIO_MEDIAINFO_ENABLED")
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false),
+                // An empty list would mean "consult nothing", which is not what an
+                // unset variable asks for, so fall back to the key-free default.
+                providers: std::env::var("VUIO_MEDIAINFO_PROVIDERS")
+                    .ok()
+                    .map(|value| {
+                        value
+                            .split(',')
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(str::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|providers| !providers.is_empty())
+                    .unwrap_or_else(default_mediainfo_providers),
+                artwork_enabled: std::env::var("VUIO_MEDIAINFO_ARTWORK")
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(true),
+                artwork_path: std::env::var("VUIO_MEDIAINFO_ARTWORK_PATH").ok(),
+                min_confidence: std::env::var("VUIO_MEDIAINFO_MIN_CONFIDENCE")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(default_min_confidence),
+                prefer_online_titles: std::env::var("VUIO_MEDIAINFO_PREFER_ONLINE_TITLES")
+                    .map(|value| value.eq_ignore_ascii_case("true"))
+                    .unwrap_or(true),
+                request_timeout_seconds: std::env::var("VUIO_MEDIAINFO_TIMEOUT_SECONDS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or_else(default_mediainfo_timeout_seconds),
+            },
         })
     }
 
@@ -325,6 +359,7 @@ impl AppConfig {
                 cache_mb: default_cache_mb(),
             },
             management: ManagementConfig::default(),
+            mediainfo: MediaInfoConfig::default(),
         }
     }
 

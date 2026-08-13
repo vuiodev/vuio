@@ -86,6 +86,7 @@ internal_modules!(
     logging,
     mdns,
     media,
+    mediainfo,
     platform,
     runtime,
     runtime_state,
