@@ -303,19 +303,48 @@ Endpoints for health monitoring, log scraping, and metrics.
 
 ---
 
-## 4. Model Context Protocol (MCP) APIs
+## 4. Model Context Protocol (MCP) API
 
-Endpoints used by AI agents (e.g. LM Studio, Claude Desktop) to connect to the server.
+One endpoint, on the main port, letting an AI assistant browse, search and cast
+the library. See the [MCP section of the README](../README.md#ai-agent--mcp-integration)
+for how to connect a client, and `mcp/reference.json` for the tool schemas.
 
-### SSE Session Stream
-Establishes the Server-Sent Events stream, which sends back a unique `client_id`.
-* **Endpoint**: `GET /sse`
-* **Response**: `text/event-stream`
-
-### MCP JSON-RPC Endpoint
-Post JSON-RPC messages to command the server.
-* **Endpoint**: `POST /mcp/message?client_id={uuid}`
+### MCP endpoint
+* **Endpoint**: `POST /mcp`
 * **Content-Type**: `application/json`
+* **Protocol**: MCP `2026-07-28`. Clients that open with an `initialize`
+  handshake are answered too, for `2025-11-25`, `2025-06-18` and `2025-03-26`.
+* **Methods**: `server/discover`, `tools/list`, `tools/call`. Plus `initialize`
+  and `ping` for the handshake-based revisions.
+* **Required headers**:
+  * `MCP-Protocol-Version` — must equal `params._meta`'s
+    `io.modelcontextprotocol/protocolVersion`
+  * `Mcp-Method` — must equal the body's `method`
+  * `Mcp-Name` — on `tools/call`, must equal `params.name`
+
+  A mismatch returns `400` with JSON-RPC error `-32020`; an unsupported version
+  returns `400` with `-32022` and the list of versions the server does speak.
+* **Origin**: validated when present, to prevent DNS rebinding. Clients that
+  send no `Origin` — which is most of them — are unaffected.
+* **Auth**: behind the management middleware, plus `[mcp].require_auth` for a
+  bearer token even when management authentication is off.
+* **`GET` / `DELETE`**: `405`. Both belonged to the session-based revisions of
+  the transport; this one has no sessions.
+* **Body limit**: 256 KiB, shared with the other JSON endpoints.
+
+Notifications (a message with no `id`) are answered `202 Accepted` with no body.
+Everything else returns `200` with the JSON-RPC response in the body.
+
+### stdio bridge
+
+For clients that launch a local process instead of calling an endpoint:
+
+```bash
+vuio mcp --url http://nas.local:8080 --token-file ~/.vuio/admin.token
+```
+
+It reads JSON-RPC on stdin and writes answers to stdout, forwarding to the
+server's `/mcp`. It serves nothing itself.
 
 ---
 
