@@ -1,0 +1,7 @@
+Origin: VuIO
+Label: VuIO Media Server Repository
+Suite: stable
+Codename: stable
+Architectures: amd64 arm64
+Components: main
+Description: Official APT repository for VuIO Media Server

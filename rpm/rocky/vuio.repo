@@ -1,0 +1,6 @@
+[vuio]
+name=VuIO Media Server Repository
+baseurl=https://vuiodev.github.io/vuio/rpm/
+enabled=1
+gpgcheck=0
+repo_gpgcheck=0

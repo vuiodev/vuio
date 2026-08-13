@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VuIO Media Server - Linux Packages & Repositories</title>
+    <style>
+        :root {
+            --bg: #0f172a;
+            --card-bg: #1e293b;
+            --accent: #38bdf8;
+            --accent-hover: #0284c7;
+            --text: #f8fafc;
+            --text-muted: #94a3b8;
+            --code-bg: #090d16;
+            --border: #334155;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 40px 20px;
+            line-height: 1.6;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+        h1 {
+            font-size: 2.5rem;
+            color: var(--accent);
+            margin-bottom: 8px;
+        }
+        p.subtitle {
+            color: var(--text-muted);
+            font-size: 1.1rem;
+        }
+        .card {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+        }
+        h2 {
+            font-size: 1.4rem;
+            margin-top: 0;
+            color: var(--text);
+            border-bottom: 1px solid var(--border);
+            padding-bottom: 10px;
+        }
+        pre {
+            background-color: var(--code-bg);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px;
+            overflow-x: auto;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+            font-size: 0.9rem;
+            color: #e2e8f0;
+        }
+        code {
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+        }
+        .btn {
+            display: inline-block;
+            background-color: var(--accent);
+            color: #0f172a;
+            font-weight: 600;
+            padding: 10px 18px;
+            border-radius: 6px;
+            text-decoration: none;
+            margin-right: 10px;
+            margin-top: 10px;
+            transition: background-color 0.2s;
+        }
+        .btn:hover {
+            background-color: var(--accent-hover);
+            color: #fff;
+        }
+        .badge {
+            display: inline-block;
+            background: #334155;
+            color: #38bdf8;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 0.8rem;
+            font-weight: bold;
+        }
+        footer {
+            text-align: center;
+            color: var(--text-muted);
+            margin-top: 50px;
+            font-size: 0.9rem;
+        }
+        footer a {
+            color: var(--accent);
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>VuIO Media Server</h1>
+            <p class="subtitle">Official Linux Package Repositories & Direct Downloads</p>
+        </header>
+
+        <div class="card">
+            <h2>Ubuntu / Debian (APT Repository) <span class="badge">Debian, Ubuntu, Mint, Pop!_OS</span></h2>
+            <p>Add the official APT repository to get automatic updates:</p>
+            <pre>echo "deb [trusted=yes] https://vuiodev.github.io/vuio/apt stable main" | sudo tee /etc/apt/sources.list.d/vuio.list
+sudo apt update
+sudo apt install vuio</pre>
+            <p>Or download direct <code>.deb</code> packages:</p>
+            <a href="packages/vuio_latest_amd64.deb" class="btn">Download .deb (x86_64)</a>
+            <a href="packages/vuio_latest_arm64.deb" class="btn">Download .deb (ARM64)</a>
+        </div>
+
+        <div class="card">
+            <h2>Fedora / RHEL / CentOS (RPM Repository) <span class="badge">Fedora, RHEL, CentOS, Rocky, Alma</span></h2>
+            <p>Add the official DNF / YUM repository:</p>
+            <pre>sudo dnf config-manager --add-repo https://vuiodev.github.io/vuio/rpm/vuio.repo
+sudo dnf install vuio</pre>
+            <p>Or download direct <code>.rpm</code> packages:</p>
+            <a href="packages/vuio_latest_x86_64.rpm" class="btn">Download .rpm (x86_64)</a>
+            <a href="packages/vuio_latest_aarch64.rpm" class="btn">Download .rpm (ARM64)</a>
+        </div>
+
+        <div class="card">
+            <h2>Arch Linux (Pacman Repository) <span class="badge">Arch Linux / Manjaro</span></h2>
+            <p>Add the official Arch Linux repository to <code>/etc/pacman.conf</code>:</p>
+            <pre>[vuio]
+SigLevel = Optional TrustAll
+Server = https://vuiodev.github.io/vuio/arch/os/$arch
+
+# Then update pacman and install:
+sudo pacman -Sy vuio</pre>
+            <p>Or download direct <code>.pkg.tar.zst</code> packages:</p>
+            <a href="packages/vuio_latest_x86_64.pkg.tar.zst" class="btn">Download .pkg.tar.zst (x86_64)</a>
+            <a href="packages/vuio_latest_aarch64.pkg.tar.zst" class="btn">Download .pkg.tar.zst (ARM64)</a>
+        </div>
+
+        <div class="card">
+            <h2>Alpine Linux (APK Repository) <span class="badge">Alpine Linux / APK</span></h2>
+            <p>Add the official Alpine APK repository to <code>/etc/apk/repositories</code>:</p>
+            <pre>echo "https://vuiodev.github.io/vuio/alpine/stable/main" | sudo tee -a /etc/apk/repositories
+sudo apk update
+sudo apk add --allow-untrusted vuio</pre>
+            <p>Or download direct <code>.apk</code> packages:</p>
+            <a href="packages/vuio_latest_x86_64.apk" class="btn">Download .apk (x86_64)</a>
+            <a href="packages/vuio_latest_aarch64.apk" class="btn">Download .apk (ARM64)</a>
+        </div>
+
+        <div class="card">
+            <h2>Docker Multi-Architecture Image <span class="badge">Docker / Podman</span></h2>
+            <p>Run the official container from GitHub Container Registry (supports x86_64 and ARM64):</p>
+            <pre>docker run -d \
+  --name vuio-server \
+  --restart unless-stopped \
+  --network host \
+  -v /path/to/media:/media:ro \
+  -v ./vuio-config:/config \
+  ghcr.io/vuiodev/vuio:latest</pre>
+        </div>
+
+        <div class="card">
+            <h2>Homebrew (macOS & Linux) <span class="badge">Brew</span></h2>
+            <pre>brew tap vuiodev/vuio
+brew install vuio</pre>
+        </div>
+
+        <footer>
+            <p>VuIO Media Server &bull; <a href="https://github.com/vuiodev/vuio">GitHub Repository</a> &bull; <a href="https://github.com/vuiodev/vuio/blob/main/install.md">Detailed Installation Guide</a></p>
+        </footer>
+    </div>
+</body>
+</html>

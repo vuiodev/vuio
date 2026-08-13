@@ -1,0 +1,25 @@
+Package: vuio
+Version: 0.0.43
+Architecture: arm64
+Maintainer: VuIO <vuio@vuio.dev>
+Installed-Size: 13520
+Depends: libc6 (>= 2.17)
+Filename: pool/main/v/vuio/vuio_0.0.43_arm64.deb
+Size: 5128508
+MD5sum: 287f83f7b6268740a3aa827cf3e50210
+SHA1: 9e384873ed2fea3b336cade4fe39240f3a8f5019
+SHA256: a3333103a52a2f19fa9272da3440a4e20ab02b70df05f2e51646845417c996e1
+Section: net
+Priority: optional
+Homepage: https://github.com/vuio/vuio
+Description: Cross-platform DLNA media server
+ VuIO is a cross-platform DLNA media server that allows you to share
+ your media files with DLNA-compatible devices on your network.
+ .
+ Features:
+  - Cross-platform compatibility (Linux, Windows, macOS)
+  - Automatic media discovery and indexing
+  - Real-time file system monitoring
+  - Configurable via TOML configuration files
+  - Systemd and SysVinit integration for service management
+
