@@ -1,0 +1,17 @@
+{
+  "name": "vuio",
+  "displayName": "VuIO Media Server",
+  "version": "0.0.44",
+  "description": "Browse, search and cast your VuIO media library — and control the TVs and speakers on your network — from Claude.",
+  "author": {
+    "name": "vyrti",
+    "url": "https://github.com/vuiodev"
+  },
+  "homepage": "https://github.com/vuiodev/vuio",
+  "repository": "https://github.com/vuiodev/vuio",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["dlna", "upnp", "chromecast", "airplay", "media-server", "casting"],
+  "skills": "./skills/",
+  "commands": "./commands/",
+  "mcpServers": "./.mcp.json"
+}

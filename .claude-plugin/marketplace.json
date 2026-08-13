@@ -1,0 +1,32 @@
+{
+  "marketplaceVersion": 1,
+  "name": "vuio",
+  "owner": {
+    "name": "vuiodev",
+    "url": "https://github.com/vuiodev"
+  },
+  "plugins": [
+    {
+      "name": "vuio",
+      "displayName": "VuIO Media Server",
+      "description": "Browse, search and cast your VuIO media library — and control the TVs and speakers on your network — from Claude.",
+      "version": "0.0.44",
+      "author": {
+        "name": "vyrti",
+        "url": "https://github.com/vuiodev"
+      },
+      "homepage": "https://github.com/vuiodev/vuio",
+      "repository": "https://github.com/vuiodev/vuio",
+      "license": "MIT OR Apache-2.0",
+      "keywords": [
+        "dlna",
+        "upnp",
+        "chromecast",
+        "airplay",
+        "media-server",
+        "casting"
+      ],
+      "source": "./claude/plugin"
+    }
+  ]
+}

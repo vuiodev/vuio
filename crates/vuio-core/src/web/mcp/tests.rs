@@ -197,3 +197,60 @@ fn parameterless_tools_reject_extra_properties() {
         .expect("get_server_stats");
     assert_eq!(stats["inputSchema"]["additionalProperties"], false);
 }
+
+/// `mcp/reference.json` is the tool catalog as JSON, for anyone building a
+/// client without running the server.
+///
+/// It used to be maintained by hand, and drifted: it documented `list_tvs`,
+/// `cast_media_to_tv` and `control_tv` long after those were renamed. Generating
+/// it and checking it here means the next rename cannot leave it behind.
+///
+/// Run with `VUIO_UPDATE_MCP_REFERENCE=1` to rewrite it.
+#[test]
+#[cfg_attr(
+    not(feature = "casting"),
+    ignore = "the reference documents the full-featured build"
+)]
+fn the_published_tool_reference_matches_the_catalog() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../mcp/reference.json");
+
+    let reference = serde_json::json!({
+        "protocol": format!("Model Context Protocol (MCP) {PROTOCOL_VERSION}"),
+        "transport": "Streamable HTTP — a single POST /mcp on the server's main port",
+        "endpoint": "POST /mcp",
+        "notes": [
+            "Every request carries its version in `_meta` as \
+             `io.modelcontextprotocol/protocolVersion`, mirrored in the \
+             `MCP-Protocol-Version` header.",
+            "`Mcp-Method` must equal the body's `method`; for `tools/call`, \
+             `Mcp-Name` must equal `params.name`.",
+            format!(
+                "Clients that open with an `initialize` handshake are answered too, \
+                 for protocol versions {}.",
+                LEGACY_PROTOCOL_VERSIONS.join(", ")
+            ),
+            "Set `Authorization: Bearer <admin token>` when the server requires it.",
+            "Generated from the tool catalog — edit `catalog.rs`, not this file."
+        ],
+        "tools": get_tools_list(false)["tools"],
+    });
+    let rendered = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&reference).expect("the catalog serialises")
+    );
+
+    if std::env::var("VUIO_UPDATE_MCP_REFERENCE").is_ok() {
+        std::fs::write(&path, &rendered).expect("could not write the reference");
+        return;
+    }
+
+    let committed = std::fs::read_to_string(&path).unwrap_or_default();
+    assert_eq!(
+        committed,
+        rendered,
+        "mcp/reference.json is out of date. Regenerate it:\n    \
+         VUIO_UPDATE_MCP_REFERENCE=1 cargo test --all-features \
+         the_published_tool_reference_matches_the_catalog"
+    );
+}
