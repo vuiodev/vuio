@@ -24,6 +24,8 @@ on:
         description: 'Required for "release", "release-freebsd-aarch64", or "docker" task: The tag for the action (e.g., v1.0.1)'
         required: false
 
+
+
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
@@ -843,5 +845,7 @@ jobs:
           git add Formula/vuio.rb
           git commit -m "Update vuio formula to version ${VERSION}"
           git push origin main
+
+
 
 
