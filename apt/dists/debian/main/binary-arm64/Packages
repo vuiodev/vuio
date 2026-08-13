@@ -5,10 +5,10 @@ Maintainer: VuIO <vuio@vuio.dev>
 Installed-Size: 13520
 Depends: libc6 (>= 2.17)
 Filename: pool/main/v/vuio/vuio_0.0.43_arm64.deb
-Size: 5128508
-MD5sum: 287f83f7b6268740a3aa827cf3e50210
-SHA1: 9e384873ed2fea3b336cade4fe39240f3a8f5019
-SHA256: a3333103a52a2f19fa9272da3440a4e20ab02b70df05f2e51646845417c996e1
+Size: 5128516
+MD5sum: a85f88e69caf3964fbaffc4ccdbcf0d8
+SHA1: b0ca537ae9e24e969bbaabede63079b2d938a7a9
+SHA256: dc980b82f9565ba13dcd1e7c8b039b386887cfac7a158e62fb3c4317c0c298a6
 Section: net
 Priority: optional
 Homepage: https://github.com/vuio/vuio
