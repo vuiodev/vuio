@@ -59,7 +59,11 @@ fn record_for(media_file_id: i64, confidence: u8) -> MediaInfoRecord {
 
 async fn database_with_one_file() -> (Arc<SqliteDatabase>, i64, TempDir) {
     let temp = tempdir().unwrap();
-    let database = Arc::new(SqliteDatabase::new(temp.path().join("test.db")).await.unwrap());
+    let database = Arc::new(
+        SqliteDatabase::new(temp.path().join("test.db"))
+            .await
+            .unwrap(),
+    );
     database.initialize().await.unwrap();
     let file = MediaFile::new(
         PathBuf::from("/media/Show.Name.S02E05.1080p.mkv"),
@@ -98,7 +102,10 @@ async fn a_record_round_trips_through_the_database() {
 async fn storing_the_same_file_twice_replaces_rather_than_duplicates() {
     let (database, id, _temp) = database_with_one_file().await;
 
-    database.bulk_store_mediainfo(&[record_for(id, 40)]).await.unwrap();
+    database
+        .bulk_store_mediainfo(&[record_for(id, 40)])
+        .await
+        .unwrap();
     let mut better = record_for(id, 95);
     better.title = Some("A Better Match".to_string());
     database.bulk_store_mediainfo(&[better]).await.unwrap();
@@ -155,7 +162,10 @@ async fn work_is_whatever_is_missing_stale_or_not_good_enough() {
     );
 
     // A good match is done.
-    database.bulk_store_mediainfo(&[record_for(id, 90)]).await.unwrap();
+    database
+        .bulk_store_mediainfo(&[record_for(id, 90)])
+        .await
+        .unwrap();
     assert!(database
         .media_ids_missing_mediainfo(1, 60)
         .await
@@ -181,7 +191,10 @@ async fn a_rescan_does_not_wipe_fetched_media_info() {
     // cleared and rewritten every time a record is re-scanned. If a scan could
     // destroy this, every run of the fetch would have to start over.
     let (database, id, _temp) = database_with_one_file().await;
-    database.bulk_store_mediainfo(&[record_for(id, 88)]).await.unwrap();
+    database
+        .bulk_store_mediainfo(&[record_for(id, 88)])
+        .await
+        .unwrap();
 
     let mut rescanned = MediaFile::new(
         PathBuf::from("/media/Show.Name.S02E05.1080p.mkv"),
@@ -202,7 +215,10 @@ async fn a_rescan_does_not_wipe_fetched_media_info() {
 #[tokio::test]
 async fn removing_a_file_takes_its_media_info_with_it() {
     let (database, id, _temp) = database_with_one_file().await;
-    database.bulk_store_mediainfo(&[record_for(id, 88)]).await.unwrap();
+    database
+        .bulk_store_mediainfo(&[record_for(id, 88)])
+        .await
+        .unwrap();
 
     database
         .remove_media_file(&PathBuf::from("/media/Show.Name.S02E05.1080p.mkv"))
@@ -215,7 +231,10 @@ async fn removing_a_file_takes_its_media_info_with_it() {
 #[tokio::test]
 async fn clearing_forgets_everything() {
     let (database, id, _temp) = database_with_one_file().await;
-    database.bulk_store_mediainfo(&[record_for(id, 88)]).await.unwrap();
+    database
+        .bulk_store_mediainfo(&[record_for(id, 88)])
+        .await
+        .unwrap();
 
     assert_eq!(database.clear_mediainfo().await.unwrap(), 1);
     assert!(database.get_mediainfo(id).await.unwrap().is_none());
@@ -295,7 +314,10 @@ fn authed(method: &str, uri: &str, body: Option<&str>) -> Request<Body> {
         builder = builder.header("content-type", "application/json");
     }
     builder
-        .body(body.map(|body| Body::from(body.to_owned())).unwrap_or(Body::empty()))
+        .body(
+            body.map(|body| Body::from(body.to_owned()))
+                .unwrap_or(Body::empty()),
+        )
         .unwrap()
 }
 
@@ -496,7 +518,10 @@ async fn the_endpoints_require_management_auth() {
 #[tokio::test]
 async fn browse_json_carries_the_fetched_title_and_synopsis() {
     let (database, id, temp) = database_with_one_file().await;
-    database.bulk_store_mediainfo(&[record_for(id, 92)]).await.unwrap();
+    database
+        .bulk_store_mediainfo(&[record_for(id, 92)])
+        .await
+        .unwrap();
 
     let router = create_router(state_with(database, &temp).await);
     let response = router
@@ -524,7 +549,12 @@ async fn an_uncertain_match_is_stored_but_never_shown() {
 
     // Still on record.
     assert_eq!(
-        database.get_mediainfo(id).await.unwrap().unwrap().confidence,
+        database
+            .get_mediainfo(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .confidence,
         5
     );
 
