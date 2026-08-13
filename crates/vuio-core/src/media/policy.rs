@@ -91,12 +91,15 @@ impl ScanPolicy {
     }
 
     pub fn allows_media(&self, path: &Path) -> bool {
-        self.contains(path)
-            && !self.is_excluded(path)
-            && path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| self.extensions.contains(&extension.to_ascii_lowercase()))
+        if !self.contains(path) || self.is_excluded(path) {
+            return false;
+        }
+        let Some(extension) = path.extension().and_then(|extension| extension.to_str()) else {
+            return false;
+        };
+        let ext_lower = extension.to_ascii_lowercase();
+        self.extensions.contains(&ext_lower)
+            || (self.scan_playlists && matches!(ext_lower.as_str(), "m3u" | "m3u8" | "pls"))
     }
 
     pub fn allows_playlist(&self, path: &Path) -> bool {

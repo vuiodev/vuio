@@ -270,6 +270,10 @@ pub const SUPPORTED_MEDIA_TYPES: &[(&str, &str)] = &[
     ("heif", "image/heif"),
     ("heic", "image/heic"),
     ("avif", "image/avif"),
+    // Playlist & Radio formats
+    ("m3u", "audio/radio"),
+    ("m3u8", "audio/radio"),
+    ("pls", "audio/radio"),
 ];
 
 /// Get MIME type for a file based on its extension

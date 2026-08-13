@@ -559,7 +559,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
             .unwrap_or("unknown")
             .to_string();
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
+        let mut mime_type = crate::platform::filesystem::get_mime_type_for_extension(ext);
+        if let Some(parent) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+            if parent.eq_ignore_ascii_case("radio") {
+                mime_type = "audio/radio".to_string();
+            }
+        }
         let size = metadata.len();
         let modified = metadata.modified().unwrap_or_else(|_| SystemTime::now());
         let storage_path = self
@@ -596,6 +601,38 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         if media_file.mime_type.starts_with("audio/") {
             let _ = crate::platform::filesystem::extract_audio_metadata(&mut media_file).await;
+        }
+
+        if matches!(ext.to_lowercase().as_str(), "m3u" | "m3u8" | "pls") || media_file.mime_type == "audio/radio" {
+            if let Ok(content) = tokio::fs::read_to_string(path).await {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("#EXTINF:") {
+                        if let Some((_, title)) = trimmed.split_once(',') {
+                            let clean = title.trim();
+                            if !clean.is_empty() {
+                                media_file.title = Some(clean.to_string());
+                                break;
+                            }
+                        }
+                    } else if trimmed.starts_with("Title") && trimmed.contains('=') {
+                        if let Some((_, title)) = trimmed.split_once('=') {
+                            let clean = title.trim();
+                            if !clean.is_empty() {
+                                media_file.title = Some(clean.to_string());
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            if media_file.title.is_none() {
+                media_file.title = Some(
+                    path.file_stem()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| media_file.filename.clone()),
+                );
+            }
         }
 
         Ok(media_file)

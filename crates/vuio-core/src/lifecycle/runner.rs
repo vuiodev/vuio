@@ -146,6 +146,10 @@ where
     #[cfg(feature = "mediainfo")]
     crate::mediainfo::env_keys::set_config_dir(config_manager.get_config_path());
 
+    let radio_broadcast = Arc::new(
+        crate::web::radio_broadcast::RadioBroadcastState::load_from_database(database.as_ref()).await,
+    );
+
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
@@ -186,6 +190,7 @@ where
         #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        radio_broadcast,
         cancellation: cancellation.clone(),
         background_tasks: background_tasks.clone(),
     };

@@ -97,6 +97,7 @@ async fn make_test_state() -> (TempDir, AppState) {
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        radio_broadcast: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     };
@@ -222,6 +223,7 @@ async fn test_mcp_initialize_and_tools_list() {
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        radio_broadcast: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     };

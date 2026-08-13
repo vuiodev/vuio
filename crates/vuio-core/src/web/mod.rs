@@ -16,6 +16,7 @@ pub mod remux_streaming;
 pub mod soap;
 pub mod streaming;
 pub mod subtitles;
+pub mod radio_broadcast;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
@@ -114,7 +115,11 @@ pub fn create_router<D: DatabaseManager + 'static>(
     {
         json_routes = json_routes
             .route("/api/admin/config", post(admin::put_config::<D>))
-            .route("/api/admin/restart", post(admin::restart::<D>));
+            .route("/api/admin/restart", post(admin::restart::<D>))
+            .route(
+                "/api/radio/broadcast/control",
+                post(radio_broadcast::post_broadcast_control::<D>),
+            );
     }
     #[cfg(all(feature = "dashboard", feature = "mediainfo"))]
     {
@@ -133,7 +138,15 @@ pub fn create_router<D: DatabaseManager + 'static>(
         .route("/metrics", get(diagnostics::get_prometheus_metrics::<D>))
         .route("/metrics/json", get(diagnostics::get_web_metrics::<D>))
         .route("/logs", get(diagnostics::get_logs_handler::<D>))
-        .route("/logout", post(auth::logout::<D>));
+        .route("/logout", post(auth::logout::<D>))
+        .route(
+            "/api/radio/broadcast/status",
+            get(radio_broadcast::get_broadcast_status::<D>),
+        )
+        .route(
+            "/api/radio/broadcast/stream",
+            get(radio_broadcast::serve_icy_broadcast_stream::<D>),
+        );
     #[cfg(feature = "dashboard")]
     {
         management_routes = management_routes

@@ -93,9 +93,20 @@ pub async fn serve_media<D: DatabaseManager>(
         })?;
 
     if file_info.mime_type == "audio/radio" {
+        let path_str = file_info.path.to_string_lossy();
+        if path_str.starts_with("http://") || path_str.starts_with("https://") {
+            return Ok(axum::response::Redirect::temporary(&path_str).into_response());
+        }
+        if let Ok(content) = std::fs::read_to_string(&file_info.path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+                    return Ok(axum::response::Redirect::temporary(trimmed).into_response());
+                }
+            }
+        }
         return Ok(
-            axum::response::Redirect::temporary(file_info.path.to_string_lossy().as_ref())
-                .into_response(),
+            axum::response::Redirect::temporary(&path_str).into_response(),
         );
     }
 
