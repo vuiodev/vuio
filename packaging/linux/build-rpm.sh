@@ -295,7 +295,6 @@ Summary:        $SUMMARY
 License:        MIT
 URL:            https://github.com/vuio/vuio
 Source0:        %{name}-%{version}.tar.gz
-BuildArch:      $ARCHITECTURE
 
 Requires(pre):  shadow-utils
 %{?systemd_requires}
