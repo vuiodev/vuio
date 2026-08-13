@@ -107,9 +107,19 @@ pub fn create_router<D: DatabaseManager + 'static>(
                 post(casting::api_pairing_forget::<D>),
             );
     }
+    // The MCP endpoint lives on the primary listener only. It is one endpoint
+    // over one AppState, and publishing it on both ports would give an agent
+    // two addresses for the same server with nothing to choose between them.
     #[cfg(feature = "mcp")]
-    {
-        json_routes = json_routes.route("/mcp/message", post(mcp::message_handler::<D>));
+    if surface == Surface::Primary && state.current_config().mcp.enabled {
+        json_routes = json_routes.route(
+            "/mcp",
+            post(mcp::mcp_handler::<D>)
+                // GET and DELETE belonged to the session-based revisions of the
+                // transport. Answering 405 is how an older client finds out.
+                .get(mcp::method_not_allowed)
+                .delete(mcp::method_not_allowed),
+        );
     }
     #[cfg(feature = "dashboard")]
     {
@@ -167,10 +177,6 @@ pub fn create_router<D: DatabaseManager + 'static>(
     {
         management_routes =
             management_routes.route("/api/renderers", get(casting::api_list_renderers::<D>));
-    }
-    #[cfg(feature = "mcp")]
-    {
-        management_routes = management_routes.route("/sse", get(mcp::sse_handler::<D>));
     }
     // The dashboard's own stylesheets and scripts are part of the management surface,
     // so they sit behind the same middleware as the page that loads them. That is only

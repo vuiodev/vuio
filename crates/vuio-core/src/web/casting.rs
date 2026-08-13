@@ -310,7 +310,7 @@ async fn resolve_castable_folder<D: DatabaseManager>(
 ///
 /// `None` accepts anything castable, which is what the folder API does when a
 /// caller does not care.
-fn matches_media_kind(mime: &str, media: Option<&str>) -> bool {
+pub(crate) fn matches_media_kind(mime: &str, media: Option<&str>) -> bool {
     match media {
         Some("audio") => mime.starts_with("audio/"),
         Some("video") => !mime.starts_with("audio/"),
@@ -323,7 +323,7 @@ fn matches_media_kind(mime: &str, media: Option<&str>) -> bool {
 /// Audio is included because AirPlay receivers take an RTP audio stream even
 /// when they cannot play video. Each provider still validates the item, so a
 /// renderer that cannot take audio rejects it with its own message.
-fn is_castable_mime(mime: &str) -> bool {
+pub(crate) fn is_castable_mime(mime: &str) -> bool {
     let base = mime.split(';').next().unwrap_or(mime).trim();
     mime.starts_with("video/")
         || (base.starts_with("audio/") && base != "audio/radio")

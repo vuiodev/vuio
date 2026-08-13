@@ -400,6 +400,9 @@ impl MediaFileView for MediaFile {
     fn composer(&self) -> Option<&str> {
         self.tags.composer.as_deref()
     }
+    fn codec(&self) -> Option<&str> {
+        self.stream.codec.as_deref()
+    }
     fn sample_rate(&self) -> Option<u32> {
         self.stream.sample_rate
     }
@@ -464,6 +467,9 @@ pub trait MediaFileView {
         None
     }
     fn composer(&self) -> Option<&str> {
+        None
+    }
+    fn codec(&self) -> Option<&str> {
         None
     }
     fn sample_rate(&self) -> Option<u32> {

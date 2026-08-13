@@ -145,6 +145,9 @@ impl MediaFileView for SqliteMediaFileView<'_> {
     fn composer(&self) -> Option<&str> {
         self.optional_text(column::COMPOSER)
     }
+    fn codec(&self) -> Option<&str> {
+        self.optional_text(column::CODEC)
+    }
     fn sample_rate(&self) -> Option<u32> {
         self.optional_integer(column::SAMPLE_RATE)
             .map(|value| value as u32)

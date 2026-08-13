@@ -513,6 +513,128 @@ pub(crate) async fn tool_cast_playlist_to_renderer<D: DatabaseManager + 'static>
     cast_playlist_helper(state, playlist_id, renderer_id, track_index).await
 }
 
+/// Cast everything castable under a folder, without leaving a playlist behind.
+///
+/// The HTTP twin, `POST /api/cast` with `{kind:"folder"}`, addresses a folder by
+/// path components relative to each configured root, because that is the shape
+/// the browser's folder view already holds. An agent has a whole path instead —
+/// it got one from `browse_folder` — so this resolves by path prefix, which the
+/// index answers directly.
+pub(crate) async fn tool_cast_folder_to_renderer<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let path = args
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'path' parameter")?;
+    let renderer_id = args
+        .get("renderer_id")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'renderer_id' parameter")?;
+    let media = args.get("media").and_then(|v| v.as_str());
+
+    let canonical = crate::web::mcp::canonical_media_path(state, path).await?;
+    let files = state
+        .database
+        .get_files_with_path_prefix(&canonical)
+        .await
+        .map_err(|error| format!("Database error: {error}"))?;
+
+    let mut tracks: Vec<(String, FileLocation)> = files
+        .into_iter()
+        .filter(|file| {
+            crate::web::casting::is_castable_mime(file.mime_type())
+                && crate::web::casting::matches_media_kind(file.mime_type(), media)
+        })
+        .filter_map(|file| {
+            let name = file.path.to_string_lossy().into_owned();
+            file.to_file_location().map(|location| (name, location))
+        })
+        .collect();
+    if tracks.is_empty() {
+        return Err(format!("No castable media found under {path}"));
+    }
+    tracks.sort_by(|left, right| crate::natural_cmp(&left.0, &right.0));
+
+    let tracks: Vec<FileLocation> = tracks.into_iter().map(|(_, file)| file).collect();
+    let mut result = cast_tracks_helper(state, tracks, renderer_id, 0).await?;
+    if let Some(object) = result.as_object_mut() {
+        object.insert("path".to_string(), serde_json::json!(canonical));
+    }
+    Ok(result)
+}
+
+/// What a renderer says it is doing, alongside what this server last sent it.
+///
+/// Both halves are needed and neither is sufficient. The renderer knows its own
+/// transport state but not which library file the URL it is playing belongs to;
+/// `active_casts` knows what was sent but not whether it is still playing.
+pub(crate) async fn tool_get_playback_status<D: DatabaseManager>(
+    state: &AppState<D>,
+    args: &serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let requested = args.get("renderer_id").and_then(|v| v.as_str());
+
+    let renderers = cached_renderers(state).await?;
+    let active = state.active_casts.lock().await.snapshot();
+
+    let targets: Vec<_> = match requested {
+        Some(id) => renderers
+            .iter()
+            .filter(|renderer| renderer.id == id)
+            .collect(),
+        // Without a specific renderer, report only the ones this server has
+        // actually cast to. Polling every device on the network would mean a
+        // round trip per device to answer a question about none of them.
+        None => renderers
+            .iter()
+            .filter(|renderer| active.contains_key(&renderer.id))
+            .collect(),
+    };
+    if targets.is_empty() && requested.is_some() {
+        return Err(format!(
+            "No renderer found with ID '{}'",
+            requested.unwrap_or_default()
+        ));
+    }
+
+    let mut reports = Vec::with_capacity(targets.len());
+    for renderer in targets {
+        // A renderer that has gone away mid-question is reported as unknown
+        // rather than failing the whole call: the other renderers' answers are
+        // still worth having.
+        let (state_name, current_url) = match state.discovered_tvs.status(renderer).await {
+            Ok(status) => (playback_state_name(status.state), status.current_url),
+            Err(error) => {
+                debug!(renderer = %renderer.id, %error, "Renderer status unavailable");
+                ("unknown", None)
+            }
+        };
+        reports.push(serde_json::json!({
+            "renderer_id": renderer.id,
+            "friendly_name": renderer.friendly_name,
+            "protocol": renderer.protocol,
+            "state": state_name,
+            "current_url": current_url,
+            "last_sent_by_this_server": active.get(&renderer.id),
+        }));
+    }
+
+    Ok(serde_json::json!({ "renderers": reports }))
+}
+
+fn playback_state_name(state: PlaybackState) -> &'static str {
+    match state {
+        PlaybackState::Playing => "playing",
+        PlaybackState::Paused => "paused",
+        PlaybackState::Stopped => "stopped",
+        PlaybackState::Finished => "finished",
+        PlaybackState::Error => "error",
+        PlaybackState::Unknown => "unknown",
+    }
+}
+
 // ──────────────────────────────────────────
 // Helpers
 // ──────────────────────────────────────────

@@ -141,6 +141,44 @@ pub struct AppConfig {
     pub mediainfo: MediaInfoConfig,
     #[serde(default)]
     pub web_ui: WebUiConfig,
+    #[serde(default)]
+    pub mcp: McpConfig,
+}
+
+/// The Model Context Protocol server, which lets an AI agent browse, search and
+/// cast the library.
+///
+/// Defaulted as a whole, like `[management]` and `[web_ui]`: a config file
+/// written before this existed has no `[mcp]` table and must keep loading, with
+/// the behaviour it had then.
+///
+/// The tools are not all read-only — playlists can be deleted and casting drives
+/// real devices on the network — so `read_only` exists to hand an agent the
+/// browsing half without the rest, and `require_auth` exists to demand a token
+/// for it even on a server that leaves the dashboard open.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Hide every mutating and casting tool. They vanish from `tools/list` and
+    /// are refused by `tools/call`, so an agent cannot reach them by guessing a
+    /// name it saw elsewhere.
+    #[serde(default = "default_false")]
+    pub read_only: bool,
+    /// Require `Authorization: Bearer <admin token>` on the MCP endpoint even
+    /// when `[management].enabled` is false.
+    #[serde(default = "default_false")]
+    pub require_auth: bool,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            read_only: false,
+            require_auth: false,
+        }
+    }
 }
 
 /// The second HTTP listener, carrying the Svelte browser interface.

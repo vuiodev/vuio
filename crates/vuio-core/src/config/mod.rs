@@ -18,9 +18,9 @@ use model::{
     default_web_ui_port,
 };
 pub use model::{
-    AppConfig, ConfigOverrides, DatabaseConfig, ManagementConfig, MediaConfig, MediaInfoConfig,
-    MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
-    WebUiConfig,
+    AppConfig, ConfigOverrides, DatabaseConfig, ManagementConfig, McpConfig, MediaConfig,
+    MediaInfoConfig, MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
+    ValidationMode, WebUiConfig,
 };
 
 use crate::platform::config::PlatformConfig;

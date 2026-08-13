@@ -283,7 +283,6 @@ async fn state_with(database: Arc<SqliteDatabase>, temp: &TempDir) -> AppState<S
         browse_cache: Arc::new(tokio::sync::Mutex::new(
             vuio_core::runtime_state::BrowseResponseCache::new(),
         )),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(
             vuio_core::runtime_state::ActiveCastRegistry::new(),
