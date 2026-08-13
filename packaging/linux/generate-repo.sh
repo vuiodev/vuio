@@ -5,8 +5,8 @@
 
 set -e
 
-PACKAGES_DIR="${1:-./builds}"
-OUTPUT_DIR="${2:-./pages_site}"
+PACKAGES_DIR="$(cd "$(dirname "${1:-./builds}")" && pwd)/$(basename "${1:-./builds}")"
+OUTPUT_DIR="$(mkdir -p "${2:-./pages_site}" && cd "${2:-./pages_site}" && pwd)"
 
 # Colors
 GREEN='\033[0;32m'
@@ -62,7 +62,7 @@ if ls "$PACKAGES_DIR"/*.pkg.tar.zst 1> /dev/null 2>&1; then
 fi
 
 # Create convenient "latest" symlinks/copies in packages/
-cd "$OUTPUT_DIR/packages"
+pushd "$OUTPUT_DIR/packages" > /dev/null
 for arch in amd64 arm64; do
     latest_deb=$(ls vuio_*_${arch}.deb 2>/dev/null | tail -n1 || true)
     if [ -n "$latest_deb" ]; then
@@ -83,14 +83,15 @@ for arch in x86_64 aarch64; do
         cp -f "$latest_archpkg" "vuio_latest_${arch}.pkg.tar.zst"
     fi
 done
-cd - > /dev/null
+popd > /dev/null
 
 # -----------------------------------------------------------------------------
 # 1. Build APT Repository Metadata
 # -----------------------------------------------------------------------------
 echo -e "${YELLOW}Building APT repository metadata...${NC}"
 
-cd "$OUTPUT_DIR/apt"
+APT_DIR="$OUTPUT_DIR/apt"
+pushd "$APT_DIR" > /dev/null
 
 if command -v dpkg-scanpackages &> /dev/null; then
     dpkg-scanpackages --arch amd64 pool/main/v/vuio /dev/null > dists/stable/main/binary-amd64/Packages 2>/dev/null || true
@@ -117,20 +118,20 @@ Components: main
 Description: Official APT repository for VuIO Media Server
 EOF
 
-cd dists
 for codename in jammy noble focal bionic bookworm bullseye buster ubuntu debian; do
-    if [ ! -d "$codename" ]; then
-        ln -s stable "$codename" 2>/dev/null || cp -r stable "$codename"
+    if [ ! -e "dists/$codename" ]; then
+        ln -s stable "dists/$codename" 2>/dev/null || cp -r dists/stable "dists/$codename"
     fi
 done
-cd ../..
+popd > /dev/null
 
 # -----------------------------------------------------------------------------
 # 2. Build RPM Repository Metadata
 # -----------------------------------------------------------------------------
 echo -e "${YELLOW}Building RPM repository metadata...${NC}"
 
-cd "$OUTPUT_DIR/rpm"
+RPM_DIR="$OUTPUT_DIR/rpm"
+pushd "$RPM_DIR" > /dev/null
 
 if command -v createrepo_c &> /dev/null; then
     createrepo_c .
@@ -149,41 +150,39 @@ gpgcheck=0
 repo_gpgcheck=0
 EOF
 
-for distro in fedora rhel centos rockymal; do
-    if [ ! -d "$distro" ]; then
+for distro in fedora rhel centos rocky alma; do
+    if [ ! -e "$distro" ]; then
         ln -s . "$distro" 2>/dev/null || true
     fi
 done
-cd - > /dev/null
+popd > /dev/null
 
 # -----------------------------------------------------------------------------
 # 3. Build Alpine APK Repository Metadata (APKINDEX.tar.gz)
 # -----------------------------------------------------------------------------
 echo -e "${YELLOW}Building Alpine APK repository metadata...${NC}"
 
-cd "$OUTPUT_DIR/alpine/stable/main"
-
 for arch in x86_64 aarch64; do
-    if [ -d "$arch" ]; then
-        cd "$arch"
+    ARCH_DIR="$OUTPUT_DIR/alpine/stable/main/$arch"
+    if [ -d "$ARCH_DIR" ] && ls "$ARCH_DIR"/*.apk 1>/dev/null 2>&1; then
+        pushd "$ARCH_DIR" > /dev/null
         if command -v apk &> /dev/null; then
             apk index -o APKINDEX.tar.gz *.apk 2>/dev/null || true
         else
             rm -f APKINDEX APKINDEX.tar.gz
-            for apk in *.apk; do
-                if [ -f "$apk" ]; then
-                    tar -xf "$apk" control.tar.gz 2>/dev/null || true
-                    if [ -f control.tar.gz ]; then
-                        tar -xzf control.tar.gz .PKGINFO 2>/dev/null || true
-                        if [ -f .PKGINFO ]; then
-                            pkgname=$(grep "^pkgname = " .PKGINFO | cut -d'=' -f2)
-                            pkgver=$(grep "^pkgver = " .PKGINFO | cut -d'=' -f2)
-                            pkgdesc=$(grep "^pkgdesc = " .PKGINFO | cut -d'=' -f2)
-                            url=$(grep "^url = " .PKGINFO | cut -d'=' -f2)
-                            size=$(grep "^size = " .PKGINFO | cut -d'=' -f2)
-                            bdate=$(grep "^builddate = " .PKGINFO | cut -d'=' -f2)
+            for apkfile in *.apk; do
+                if [ -f "$apkfile" ]; then
+                    # APK files are gzipped tarballs concatenated; extract .PKGINFO from control segment
+                    tar -xzf "$apkfile" .PKGINFO 2>/dev/null || true
+                    if [ -f .PKGINFO ]; then
+                        pkgname=$(grep "^pkgname = " .PKGINFO | cut -d'=' -f2)
+                        pkgver=$(grep "^pkgver = " .PKGINFO | cut -d'=' -f2)
+                        pkgdesc=$(grep "^pkgdesc = " .PKGINFO | cut -d'=' -f2)
+                        url=$(grep "^url = " .PKGINFO | cut -d'=' -f2)
+                        size=$(grep "^size = " .PKGINFO | cut -d'=' -f2)
+                        bdate=$(grep "^builddate = " .PKGINFO | cut -d'=' -f2)
 
-                            cat >> APKINDEX << EOF
+                        cat >> APKINDEX << EOF
 P:${pkgname// /}
 V:${pkgver// /}
 A:${arch}
@@ -195,36 +194,38 @@ L:MIT OR Apache-2.0
 t:${bdate// /}
 
 EOF
-                            rm -f .PKGINFO control.tar.gz
-                        fi
+                        rm -f .PKGINFO
                     fi
                 fi
             done
-            touch APKINDEX
-            gzip -9c APKINDEX > APKINDEX.tar.gz
+            if [ -f APKINDEX ]; then
+                tar -czf APKINDEX.tar.gz APKINDEX
+                rm -f APKINDEX
+            else
+                touch APKINDEX.tar.gz
+            fi
         fi
-        cd ..
+        popd > /dev/null
     fi
 done
 
-cd ..
+# Create Alpine version symlinks
+ALPINE_BASE="$OUTPUT_DIR/alpine"
 for ver in v3.20 v3.21 v3.19 v3.18 edge latest-stable; do
-    if [ ! -d "$ver" ]; then
-        ln -s stable "$ver" 2>/dev/null || cp -r stable "$ver"
+    if [ ! -e "$ALPINE_BASE/$ver" ]; then
+        ln -s stable "$ALPINE_BASE/$ver" 2>/dev/null || cp -r "$ALPINE_BASE/stable" "$ALPINE_BASE/$ver"
     fi
 done
-cd ../..
 
 # -----------------------------------------------------------------------------
 # 4. Build Arch Linux Package Repository Metadata (vuio.db.tar.gz)
 # -----------------------------------------------------------------------------
 echo -e "${YELLOW}Building Arch Linux repository metadata...${NC}"
 
-cd "$OUTPUT_DIR/arch/os"
-
 for arch in x86_64 aarch64; do
-    if [ -d "$arch" ]; then
-        cd "$arch"
+    ARCH_DIR="$OUTPUT_DIR/arch/os/$arch"
+    if [ -d "$ARCH_DIR" ] && ls "$ARCH_DIR"/*.pkg.tar.zst 1>/dev/null 2>&1; then
+        pushd "$ARCH_DIR" > /dev/null
         if command -v repo-add &> /dev/null; then
             repo-add vuio.db.tar.gz *.pkg.tar.zst 2>/dev/null || true
         else
@@ -234,7 +235,8 @@ for arch in x86_64 aarch64; do
                 if [ -f "$pkg" ]; then
                     # Extract PKGINFO from Arch package
                     mkdir -p pkgtemp
-                    tar -I zstd -xf "$pkg" .PKGINFO -C pkgtemp 2>/dev/null || tar -xf "$pkg" .PKGINFO -C pkgtemp 2>/dev/null || true
+                    zstd -d "$pkg" -o pkgtemp/pkg.tar --quiet 2>/dev/null && \
+                        tar -xf pkgtemp/pkg.tar -C pkgtemp .PKGINFO 2>/dev/null || true
                     if [ -f pkgtemp/.PKGINFO ]; then
                         pname=$(grep "^pkgname = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
                         pver=$(grep "^pkgver = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
@@ -271,24 +273,22 @@ $(du -b "$pkg" | cut -f1)
 $psize
 
 EOF
-                        rm -rf pkgtemp
                     fi
+                    rm -rf pkgtemp
                 fi
             done
-            if [ -d db_build ]; then
-                cd db_build
-                tar -czf ../vuio.db.tar.gz * 2>/dev/null || touch ../vuio.db.tar.gz
-                cd ..
+            if [ -d db_build ] && [ "$(ls db_build)" ]; then
+                tar -czf vuio.db.tar.gz -C db_build .
                 rm -rf db_build
             else
+                rm -rf db_build
                 touch vuio.db.tar.gz
             fi
             ln -sf vuio.db.tar.gz vuio.db 2>/dev/null || true
         fi
-        cd ..
+        popd > /dev/null
     fi
 done
-cd ../..
 
 # -----------------------------------------------------------------------------
 # 5. Generate HTML Landing Page for GitHub Pages

@@ -24,6 +24,7 @@ jobs:
   build_and_publish_packages:
     name: Build Linux Packages & Publish Repositories
     runs-on: ubuntu-latest
+    timeout-minutes: 120
     permissions:
       contents: write
       pages: write
@@ -38,7 +39,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
 
       - name: Install packaging dependencies
         run: |
@@ -50,23 +51,25 @@ jobs:
             dpkg-dev \
             fakeroot \
             rpm \
-            rpm-build \
-            createrepo-c \
-            apt-utils
+            apt-utils \
+            zstd
 
-      - name: Configure ARM cross-linker
+      - name: Configure cross-linkers
         run: |
           mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml << 'EOF'
-          [target.aarch64-unknown-linux-gnu]
-          linker = "aarch64-linux-gnu-gcc"
+          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
 
-          [target.aarch64-unknown-linux-musl]
-          linker = "aarch64-linux-gnu-gcc"
-          EOF
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: linux-pkg-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Determine Version
-        id: version_step
         run: |
           if [ -n "${{ inputs.version }}" ]; then
             RAW_VER="${{ inputs.version }}"
@@ -74,57 +77,48 @@ jobs:
             RAW_VER="${{ inputs.ref }}"
           fi
           VER="${RAW_VER#v}"
-          if [ "$VER" == "main" ] || [ "$VER" == "master" ]; then
-            VER="0.0.43"
+          # If ref is a branch name, read version from Cargo.toml
+          if [[ "$VER" =~ ^[a-zA-Z] ]]; then
+            VER=$(grep -m1 '^version' crates/vuio-cli/Cargo.toml | cut -d'"' -f2)
           fi
           echo "VERSION=$VER" >> $GITHUB_ENV
           echo "Determined package version: $VER"
 
-      - name: Build Rust release binaries (x86_64 & ARM64 - GNU & MUSL)
+      - name: Build release binaries (x86_64 & ARM64 GNU, x86_64 MUSL)
         run: |
           cargo build --release --target x86_64-unknown-linux-gnu
           cargo build --release --target aarch64-unknown-linux-gnu
-          cargo build --release --target x86_64-unknown-linux-musl || true
-          cargo build --release --target aarch64-unknown-linux-musl || true
+          cargo build --release --target x86_64-unknown-linux-musl || echo "::warning::musl x86_64 build failed"
 
-      - name: Build DEB and RPM packages
+      - name: Build all packages (DEB, RPM, APK, Arch)
         run: |
           mkdir -p builds
           cd packaging/linux
 
-          # x86_64 DEB, RPM & Arch package
+          # x86_64 DEB, RPM & Arch
           if [ -f "../../target/x86_64-unknown-linux-gnu/release/vuio" ]; then
             ./build-deb.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "amd64"
             ./build-rpm.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "1" "x86_64"
             ./build-arch.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "x86_64"
           fi
 
-          # ARM64 DEB, RPM & Arch package
+          # ARM64 DEB, RPM & Arch
           if [ -f "../../target/aarch64-unknown-linux-gnu/release/vuio" ]; then
             ./build-deb.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "arm64"
             ./build-rpm.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "1" "aarch64"
             ./build-arch.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "aarch64"
           fi
 
-          # MUSL DEB, RPM & Alpine APK (x86_64)
+          # MUSL x86_64 Alpine APK
           if [ -f "../../target/x86_64-unknown-linux-musl/release/vuio" ]; then
-            ./build-deb.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION-musl" "amd64"
-            ./build-rpm.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "1.musl" "x86_64"
             ./build-apk.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "x86_64"
           fi
-
-          # MUSL Alpine APK (ARM64)
-          if [ -f "../../target/aarch64-unknown-linux-musl/release/vuio" ]; then
-            ./build-apk.sh "../../target/aarch64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "aarch64"
-          fi
-
 
           cd ../..
           echo "Generated packages:"
           ls -la builds/
 
-
-      - name: Generate APT & RPM repository site
+      - name: Generate repository site (APT, RPM, APK, Arch)
         run: |
           ./packaging/linux/generate-repo.sh ./builds ./pages_site
 

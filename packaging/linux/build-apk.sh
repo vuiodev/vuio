@@ -49,12 +49,16 @@ if [[ "$APK_VER" != *-r* ]]; then
     APK_VER="${APK_VER}-r0"
 fi
 
-TEMP_DIR="temp_apk"
-rm -rf "$TEMP_DIR"
+# Resolve OUTPUT_DIR to absolute path before any cd
+OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_DIR")" && pwd)/$(basename "$OUTPUT_DIR")"
+mkdir -p "$OUTPUT_DIR"
+
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf '$TEMP_DIR'" EXIT
+
 mkdir -p "$TEMP_DIR/pkg/usr/bin"
 mkdir -p "$TEMP_DIR/pkg/etc/vuio"
 mkdir -p "$TEMP_DIR/pkg/etc/init.d"
-mkdir -p "$OUTPUT_DIR"
 
 # Copy binary & config
 cp "$BINARY_PATH" "$TEMP_DIR/pkg/usr/bin/vuio"
@@ -115,12 +119,10 @@ cd "$TEMP_DIR"
 # Create control stream and data stream
 tar -czf control.tar.gz .PKGINFO
 cd pkg
-tar -czf ../data.tar.gz *
+tar -czf ../data.tar.gz .
 cd ..
 
-# Assemble final APK file
-tar -cf "$APK_FILE" control.tar.gz data.tar.gz
-cd ..
-rm -rf "$TEMP_DIR"
+# Assemble final APK file (cat approach is more compatible than nested tar)
+cat control.tar.gz data.tar.gz > "$APK_FILE"
 
 echo -e "${GREEN}✓ Successfully created APK package: $APK_FILE${NC}"
