@@ -79,7 +79,25 @@ For detailed guides on all HTTP, REST, UPnP, and MCP endpoints, see the [API Ref
 
 ## Web Interface & Search
 
-VuIO features a built-in web dashboard at `http://<server-ip>:<port>` (default: `http://localhost:8080`):
+VuIO serves two browser interfaces from one server. They are two front ends, not two
+servers: both are the same routes over the same state and the same in-process database
+handle, so nothing is proxied and nothing is duplicated but the socket.
+
+| | Address | What it is |
+|---|---|---|
+| **Web interface** | `http://<server-ip>:8090` | The modern Svelte interface: folder browsing, video and audio players, casting, admin. Developed in its own repository, [vuiodev/vuio-web](https://github.com/vuiodev/vuio-web); this one carries the built bundle. |
+| **Dashboard** | `http://<server-ip>:8080` | The original built-in dashboard, on the same port as DLNA and streaming. |
+
+The web interface is on by default and can be moved or turned off under `[web_ui]` in
+`config.toml`, from the dashboard's Admin tab, or with `VUIO_WEB_PORT` / `VUIO_WEB_UI`
+in Docker. It binds the same interface as the main server, so restricting that
+restricts both, and it sits behind the same `[management]` authentication.
+
+Folder browsing is answered by the server from an index on the parent directory
+(`/api/browse`), so opening a folder costs the same on a library of ten million files as
+on one of ten.
+
+The dashboard at `http://<server-ip>:<port>` (default: `http://localhost:8080`) offers:
 - **Sleek Dashboard**: Real-time server status, monitored directories, and database statistics.
 - **Media Explorer**: Browse all scanned videos, music, and pictures directly in your web browser.
 - **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
@@ -201,6 +219,8 @@ docker run -d \
 |----------|---------|-------------|
 | `VUIO_IP` | - | **Required.** Host IP for DLNA announcements |
 | `VUIO_PORT` | 8080 | HTTP server port |
+| `VUIO_WEB_PORT` | 8090 | Port for the Svelte web interface |
+| `VUIO_WEB_UI` | true | Serve the web interface at all (`0`/`false`/`no`/`off` to disable) |
 | `VUIO_INTERFACE` | 0.0.0.0 | Address the HTTP server binds |
 | `VUIO_SERVER_NAME` | VuIO | DLNA server name |
 | `VUIO_UUID` | random | Device UUID (set for persistence) |
@@ -357,6 +377,11 @@ period and then dropped, because the address they are using has gone.
 - `announce_interval_seconds` - SSDP announcement interval
 - `mdns_enabled` - Also advertise over Bonjour/DNS-SD (default: true)
 - `upnp_callback_allowed_networks` - Extra CIDRs allowed as UPnP event callback destinations
+
+**Web interface (`[web_ui]`):**
+- `enabled` - Serve the Svelte web interface on its own listener (default: true)
+- `port` - Port it answers on (default: 8090). Must differ from `server.port`; it follows
+  `server.interface`, so binding the server to one interface binds this to the same one
 
 **Media:**
 - `scan_on_startup` - Scan directories on startup
@@ -640,6 +665,12 @@ export VUIO_ADMIN_TOKEN="your-custom-secure-token"
 
 Contributions welcome! Please ensure cross-platform compatibility is maintained.
 Input license = output license
+
+**Working on the web interface?** It has its own repository —
+[vuiodev/vuio-web](https://github.com/vuiodev/vuio-web) — with its own toolchain. Clone
+it, `npm run dev`, and point it at any running VuIO server; you need no Rust and no
+checkout of this repository. This one carries only the built bundle
+(`crates/vuio-web/dist`), refreshed with `./scripts/build-web.sh`.
 
 ## Credits & Third-Party Code
 

@@ -67,6 +67,9 @@ ENV PGID=1000
 
 # Set default environment variables for configuration
 ENV VUIO_PORT=8080
+# The Svelte browser interface, on its own listener beside the main port.
+# VUIO_WEB_UI=0 turns it off.
+ENV VUIO_WEB_PORT=8090
 ENV VUIO_MEDIA_DIR=/media
 ENV VUIO_BIND_INTERFACE=0.0.0.0
 # Can be "Auto", "All", or a specific interface name e.g., "eth0"
@@ -77,8 +80,9 @@ ENV VUIO_SERVER_NAME=VuIO
 COPY docker-entrypoint.sh /usr/local/bin/
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Expose ports for HTTP server (TCP) and SSDP (UDP)
+# Expose ports for HTTP server (TCP), the web interface (TCP) and SSDP (UDP)
 EXPOSE 8080/tcp
+EXPOSE 8090/tcp
 EXPOSE 1900/udp
 
 # Use root for entrypoint to allow user switching

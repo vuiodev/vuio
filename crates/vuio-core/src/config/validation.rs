@@ -49,6 +49,21 @@ impl ConfigValidator {
             return Err(anyhow!("Server port cannot be 0"));
         }
 
+        if config.web_ui.enabled {
+            if config.web_ui.port == 0 {
+                return Err(anyhow!("Web UI port cannot be 0"));
+            }
+            // Caught here rather than at bind time, where one of the two
+            // listeners would simply lose the race and the operator would be
+            // told a port was busy without being told by what.
+            if config.web_ui.port == config.server.port {
+                return Err(anyhow!(
+                    "Web UI port {} is already the server port; they are separate listeners and cannot share one",
+                    config.web_ui.port
+                ));
+            }
+        }
+
         // Validate interface address
         if config.server.interface != "0.0.0.0" && config.server.interface != "::" {
             config.server.interface.parse::<IpAddr>().with_context(|| {

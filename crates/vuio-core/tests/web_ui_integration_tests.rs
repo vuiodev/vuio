@@ -1,0 +1,446 @@
+//! The secondary listener's surface: server-side folder browse, and the app
+//! that consumes it.
+//!
+//! `/api/browse` exists because the folder hierarchy cannot be rebuilt in the
+//! browser from a page of files — the folders to group by are spread across
+//! pages the client has not fetched, so client-side grouping is not merely slow
+//! on a large library, it is wrong. These drive the real router, so what they
+//! assert is what the browser receives.
+
+use axum::{
+    body::Body,
+    extract::ConnectInfo,
+    http::{Request, StatusCode},
+};
+use serde_json::Value;
+use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use tempfile::{tempdir, TempDir};
+use tower::ServiceExt;
+
+use vuio_core::config::{AppConfig, MonitoredDirectoryConfig, ValidationMode};
+use vuio_core::database::sqlite::SqliteDatabase;
+use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository};
+use vuio_core::platform::filesystem::create_platform_filesystem_manager;
+use vuio_core::platform::PlatformInfo;
+use vuio_core::state::AppState;
+use vuio_core::web::diagnostics::WebHandlerMetrics;
+use vuio_core::web::{create_router, Surface};
+
+/// A library shaped so that folders, nested folders and loose files all appear
+/// in one listing:
+///
+/// ```text
+/// media/
+///   Movies/
+///     Action/boom.mp4
+///     Sci-Fi/orbit.mp4
+///     loose.mp4
+///   Music/track.mp3
+/// ```
+async fn library() -> (TempDir, AppState, PathBuf) {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("media");
+
+    let files = [
+        ("Movies/Action/boom.mp4", "video/mp4"),
+        ("Movies/Sci-Fi/orbit.mp4", "video/mp4"),
+        ("Movies/loose.mp4", "video/mp4"),
+        ("Music/track.mp3", "audio/mpeg"),
+    ];
+    let mut records = Vec::new();
+    for (relative, mime) in files {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"media").unwrap();
+        records.push(MediaFile::new(path, 5, mime.to_string()));
+    }
+
+    let database = Arc::new(
+        SqliteDatabase::new(temp.path().join("browse.db"))
+            .await
+            .unwrap(),
+    );
+    database.initialize().await.unwrap();
+    database.bulk_store_media_files(&records).await.unwrap();
+
+    let mut config = AppConfig::default();
+    config.media.directories = vec![MonitoredDirectoryConfig {
+        path: root.to_string_lossy().into_owned(),
+        recursive: true,
+        case_sensitive: None,
+        extensions: None,
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Skip,
+    }];
+    let config = Arc::new(config);
+
+    let state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        config_source: Arc::new(vuio_core::state::ConfigSource::default()),
+        http_binding: Arc::new(vuio_core::state::HttpBinding::new(8080)),
+        live_config: Arc::new(vuio_core::state::LiveConfig::new(config)),
+        database,
+        auth: Arc::new(vuio_core::web::auth::AuthState::testing()),
+        platform_info: Arc::new(PlatformInfo::detect().await.unwrap()),
+        filesystem_manager: Arc::from(create_platform_filesystem_manager()),
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        web_metrics: Arc::new(WebHandlerMetrics::new()),
+        runtime_diagnostics: Arc::new(
+            vuio_core::platform::diagnostics::SystemDiagnosticsSampler::new(),
+        ),
+        lifecycle_stats: Arc::new(vuio_core::lifecycle::ApplicationStats::new()),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            vuio_core::runtime_state::BookmarkRegistry::new(
+                vuio_core::runtime_state::BOOKMARK_MAX_ENTRIES,
+            ),
+        )),
+        log_file_path: temp.path().join("vuio.log"),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            vuio_core::runtime_state::BrowseResponseCache::new(),
+        )),
+        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            vuio_core::runtime_state::ActiveCastRegistry::new(),
+        )),
+        #[cfg(feature = "mediainfo")]
+        mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        background_tasks: tokio_util::task::TaskTracker::new(),
+    };
+
+    (temp, state, root)
+}
+
+/// `AuthState::testing()` has management auth on, which is the interesting
+/// case: the browser app is management surface and sits behind exactly the same
+/// middleware as the dashboard.
+const TEST_TOKEN: &str = "test-management-token-which-is-long-enough";
+
+/// The management middleware extracts the peer address, which `oneshot` does
+/// not supply the way `into_make_service_with_connect_info` does at runtime.
+fn anonymous(uri: &str) -> Request<Body> {
+    Request::get(uri)
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 51234))))
+        .body(Body::empty())
+        .unwrap()
+}
+
+fn request(uri: &str) -> Request<Body> {
+    Request::get(uri)
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 51234))))
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap()
+}
+
+async fn get(state: &AppState, surface: Surface, uri: &str) -> (StatusCode, Vec<u8>, String) {
+    let response = create_router(state.clone(), surface)
+        .oneshot(request(uri))
+        .await
+        .unwrap();
+    let status = response.status();
+    let content_type = response
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_owned();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, body, content_type)
+}
+
+async fn browse(state: &AppState, query: &str) -> Value {
+    let (status, body, content_type) =
+        get(state, Surface::Primary, &format!("/api/browse?{query}")).await;
+    assert_eq!(status, StatusCode::OK, "browsing {query} failed");
+    assert!(content_type.starts_with("application/json"), "{content_type}");
+    serde_json::from_slice(&body).expect("browse returns JSON")
+}
+
+fn names(value: &Value, key: &str) -> Vec<String> {
+    value[key]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn encode(path: &Path) -> String {
+    // Only what a path can contain and a query string cannot carry literally.
+    path.to_string_lossy().replace(' ', "%20").replace('#', "%23")
+}
+
+#[tokio::test]
+async fn browse_without_a_path_lists_the_media_roots() {
+    let (_temp, state, root) = library().await;
+
+    let page = browse(&state, "").await;
+
+    assert!(page["path"].is_null(), "the roots have no parent directory");
+    assert_eq!(names(&page, "folders"), vec!["media"]);
+    assert_eq!(
+        page["folders"][0]["path"].as_str().unwrap(),
+        root.to_string_lossy()
+    );
+    assert!(page["files"].as_array().unwrap().is_empty());
+    assert_eq!(page["total"], 1);
+}
+
+#[tokio::test]
+async fn browse_lists_subfolders_then_files() {
+    let (_temp, state, root) = library().await;
+
+    let page = browse(&state, &format!("path={}", encode(&root))).await;
+    assert_eq!(names(&page, "folders"), vec!["Movies", "Music"]);
+    assert!(
+        page["files"].as_array().unwrap().is_empty(),
+        "the root holds no files of its own"
+    );
+    assert_eq!(page["total"], 2);
+
+    let movies = browse(&state, &format!("path={}", encode(&root.join("Movies")))).await;
+    assert_eq!(names(&movies, "folders"), vec!["Action", "Sci-Fi"]);
+    assert_eq!(names(&movies, "files"), vec!["loose.mp4"]);
+    assert_eq!(movies["total"], 3);
+    assert_eq!(
+        movies["parent"].as_str().map(std::path::PathBuf::from),
+        Some(std::path::PathBuf::from(
+            page["path"].as_str().expect("a browsed directory reports itself")
+        )),
+        "a subfolder points back at the directory it was reached through"
+    );
+}
+
+/// The count a folder card shows. Recursive, because a folder whose media all
+/// sits in grandchildren is not empty and must not read as though it were.
+#[tokio::test]
+async fn a_folder_reports_how_much_its_whole_subtree_holds() {
+    let (_temp, state, root) = library().await;
+
+    let page = browse(&state, &format!("path={}", encode(&root))).await;
+    let counts: Vec<u64> = page["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|folder| folder["file_count"].as_u64().unwrap())
+        .collect();
+    // Movies holds three files, none of them directly.
+    assert_eq!(counts, vec![3, 1]);
+}
+
+/// One offset walks the folders and then continues into the files, so a client
+/// pages the listing exactly as it is displayed.
+#[tokio::test]
+async fn offset_paging_crosses_the_folder_to_file_boundary() {
+    let (_temp, state, root) = library().await;
+    let movies = encode(&root.join("Movies"));
+
+    let first = browse(&state, &format!("path={movies}&offset=0&limit=2")).await;
+    assert_eq!(names(&first, "folders"), vec!["Action", "Sci-Fi"]);
+    assert!(first["files"].as_array().unwrap().is_empty());
+    assert_eq!(first["total"], 3, "total counts the whole listing, not the page");
+
+    let second = browse(&state, &format!("path={movies}&offset=2&limit=2")).await;
+    assert!(second["folders"].as_array().unwrap().is_empty());
+    assert_eq!(names(&second, "files"), vec!["loose.mp4"]);
+    assert_eq!(second["total"], 3);
+
+    // Straddling the boundary returns the tail of the folders and the head of
+    // the files in one page.
+    let straddle = browse(&state, &format!("path={movies}&offset=1&limit=2")).await;
+    assert_eq!(names(&straddle, "folders"), vec!["Sci-Fi"]);
+    assert_eq!(names(&straddle, "files"), vec!["loose.mp4"]);
+}
+
+#[tokio::test]
+async fn a_category_narrows_folders_and_files_together() {
+    let (_temp, state, root) = library().await;
+
+    let audio = browse(&state, &format!("path={}&category=audio", encode(&root))).await;
+    assert_eq!(
+        names(&audio, "folders"),
+        vec!["Music"],
+        "a folder with no audio beneath it is not offered"
+    );
+
+    let video = browse(&state, &format!("path={}&category=video", encode(&root))).await;
+    assert_eq!(names(&video, "folders"), vec!["Movies"]);
+}
+
+/// Without this the endpoint is a directory listing of the whole host.
+#[tokio::test]
+async fn a_path_outside_every_media_root_is_refused() {
+    let (_temp, state, root) = library().await;
+
+    for outside in [
+        PathBuf::from("/etc"),
+        root.parent().unwrap().to_path_buf(),
+        // The traversal that a prefix check applied before canonicalization
+        // would wave through.
+        root.join("Movies/../../.."),
+    ] {
+        let (status, _, _) = get(
+            &state,
+            Surface::Primary,
+            &format!("/api/browse?path={}", encode(&outside)),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "{} was accepted",
+            outside.display()
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_unknown_category_is_refused() {
+    let (_temp, state, root) = library().await;
+    let (status, _, _) = get(
+        &state,
+        Surface::Primary,
+        &format!("/api/browse?path={}&category=holograms", encode(&root)),
+    )
+    .await;
+    assert!(status.is_client_error());
+}
+
+/// The two listeners differ in exactly one respect: what lives at `/`.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn the_two_surfaces_differ_only_at_the_root() {
+    let (_temp, state, _root) = library().await;
+
+    let (status, body, content_type) = get(&state, Surface::WebUi, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content_type.starts_with("text/html"), "{content_type}");
+    let shell = String::from_utf8_lossy(&body);
+    assert!(
+        shell.contains("/_app/immutable/"),
+        "the web UI surface should serve the Svelte shell, got: {}",
+        &shell[..shell.len().min(200)]
+    );
+
+    let (status, body, _) = get(&state, Surface::Primary, "/").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !String::from_utf8_lossy(&body).contains("/_app/immutable/"),
+        "the main port keeps serving the built-in dashboard"
+    );
+}
+
+/// The app and the API are one origin, so the second listener has to carry the
+/// whole surface. Anything less would need CORS, and the session cookie is
+/// SameSite=Strict.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn the_web_ui_surface_serves_the_same_api() {
+    let (_temp, state, root) = library().await;
+
+    for uri in [
+        "/api/media?limit=1".to_string(),
+        "/api/server-info".to_string(),
+        format!("/api/browse?path={}", encode(&root)),
+        "/description.xml".to_string(),
+        "/healthz".to_string(),
+    ] {
+        let (status, _, _) = get(&state, Surface::WebUi, &uri).await;
+        assert_eq!(status, StatusCode::OK, "{uri} was not served on the web UI");
+    }
+}
+
+/// A client-side route has to reach the app; an API typo must not be answered
+/// with 200 bytes of HTML that `res.json()` chokes on somewhere far away.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn unknown_paths_reach_the_app_but_unknown_api_paths_do_not() {
+    let (_temp, state, _root) = library().await;
+
+    let (status, body, content_type) = get(&state, Surface::WebUi, "/library/movies/42").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(content_type.starts_with("text/html"), "{content_type}");
+    assert!(String::from_utf8_lossy(&body).contains("/_app/immutable/"));
+
+    for uri in ["/api/nope", "/media/nope", "/metrics/nope"] {
+        let (status, _, content_type) = get(&state, Surface::WebUi, uri).await;
+        assert!(
+            status.is_client_error() || status.is_server_error(),
+            "{uri} answered {status}"
+        );
+        assert!(
+            !content_type.starts_with("text/html"),
+            "{uri} was answered with the app shell"
+        );
+    }
+}
+
+/// A navigation may be redirected to the login page; a subresource must never
+/// be, because the browser would parse 200 bytes of HTML as JavaScript. The
+/// dashboard's `/assets` was already excluded for this reason and the app's
+/// `/_app` has to be too — every file under it is fetched by a `<script>` or a
+/// dynamic import.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn the_apps_bundles_are_refused_rather_than_redirected() {
+    let (_temp, state, _root) = library().await;
+
+    let router = create_router(state.clone(), Surface::WebUi);
+    let landing = router.oneshot(anonymous("/")).await.unwrap();
+    assert_eq!(
+        landing.status(),
+        StatusCode::SEE_OTHER,
+        "an anonymous navigation should be sent to the login page"
+    );
+
+    let router = create_router(state.clone(), Surface::WebUi);
+    let bundle = router
+        .oneshot(anonymous("/_app/immutable/entry/app.js"))
+        .await
+        .unwrap();
+    assert_eq!(
+        bundle.status(),
+        StatusCode::UNAUTHORIZED,
+        "a bundle must get a bare 401, never a 200 login page a <script> would parse"
+    );
+}
+
+/// Hashed bundle names change on most builds, so this asks the shell which one
+/// it wants rather than hard-coding a name that would rot immediately.
+#[cfg(feature = "web-ui")]
+#[tokio::test]
+async fn the_apps_bundles_are_served_with_immutable_caching() {
+    let (_temp, state, _root) = library().await;
+
+    let (_, body, _) = get(&state, Surface::WebUi, "/").await;
+    let shell = String::from_utf8_lossy(&body);
+    let start = shell.find("/_app/immutable/").expect("the shell loads a bundle");
+    let bundle: String = shell[start..]
+        .chars()
+        .take_while(|character| !"\"'".contains(*character))
+        .collect();
+
+    let response = create_router(state.clone(), Surface::WebUi)
+        .oneshot(request(&bundle))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK, "{bundle}");
+    assert_eq!(
+        response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|value| value.to_str().ok()),
+        Some("public, max-age=31536000, immutable"),
+        "{bundle}"
+    );
+}

@@ -25,7 +25,7 @@ use vuio_core::database::{
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
 use vuio_core::state::AppState;
-use vuio_core::web::create_router;
+use vuio_core::web::{create_router, Surface};
 
 /// The fixed token `AuthState::testing()` accepts.
 const TEST_TOKEN: &str = "test-management-token-which-is-long-enough";
@@ -324,7 +324,7 @@ fn authed(method: &str, uri: &str, body: Option<&str>) -> Request<Body> {
 #[tokio::test]
 async fn the_status_endpoint_lists_every_provider() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     let response = router
         .oneshot(authed("GET", "/api/admin/mediainfo", None))
@@ -358,7 +358,7 @@ async fn the_status_endpoint_lists_every_provider() {
 #[tokio::test]
 async fn a_saved_credential_is_never_returned_by_the_api() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     let response = router
         .clone()
@@ -399,7 +399,7 @@ async fn a_saved_credential_is_never_returned_by_the_api() {
 #[tokio::test]
 async fn an_empty_token_clears_the_stored_one() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     router
         .clone()
@@ -441,7 +441,7 @@ async fn an_empty_token_clears_the_stored_one() {
 #[tokio::test]
 async fn a_credential_for_an_unknown_or_keyless_provider_is_rejected() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     let response = router
         .clone()
@@ -470,7 +470,7 @@ async fn a_credential_for_an_unknown_or_keyless_provider_is_rejected() {
 #[tokio::test]
 async fn cancelling_when_nothing_is_running_is_a_conflict() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     let response = router
         .oneshot(authed("POST", "/api/admin/mediainfo/cancel", None))
@@ -489,7 +489,7 @@ async fn running_with_the_feature_turned_off_is_refused() {
     state.config = config.clone();
     state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
 
-    let response = create_router(state)
+    let response = create_router(state, Surface::Primary)
         .oneshot(authed("POST", "/api/admin/mediainfo/run", None))
         .await
         .unwrap();
@@ -499,7 +499,7 @@ async fn running_with_the_feature_turned_off_is_refused() {
 #[tokio::test]
 async fn the_endpoints_require_management_auth() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     let response = router
         .oneshot(
@@ -523,7 +523,7 @@ async fn browse_json_carries_the_fetched_title_and_synopsis() {
         .await
         .unwrap();
 
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
     let response = router
         .oneshot(authed("GET", "/api/media", None))
         .await
@@ -558,7 +558,7 @@ async fn an_uncertain_match_is_stored_but_never_shown() {
         5
     );
 
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
     let body = json_of(
         router
             .clone()
@@ -589,7 +589,7 @@ async fn an_uncertain_match_is_stored_but_never_shown() {
 #[tokio::test]
 async fn browse_json_reports_no_media_info_when_none_was_fetched() {
     let (database, _id, temp) = database_with_one_file().await;
-    let router = create_router(state_with(database, &temp).await);
+    let router = create_router(state_with(database, &temp).await, Surface::Primary);
 
     let body = json_of(
         router

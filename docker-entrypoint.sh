@@ -27,7 +27,19 @@ validate_env() {
     if [ "$VUIO_PORT" -lt 1 ] || [ "$VUIO_PORT" -gt 65535 ]; then
         error_exit "VUIO_PORT must be between 1 and 65535"
     fi
-    
+
+    # The web interface is a second listener, so it needs its own port. Caught
+    # here rather than at bind time, where one of the two would simply lose the
+    # race and report a busy port without saying what took it.
+    if [ -n "${VUIO_WEB_PORT:-}" ]; then
+        if [ "$VUIO_WEB_PORT" -lt 1 ] || [ "$VUIO_WEB_PORT" -gt 65535 ]; then
+            error_exit "VUIO_WEB_PORT must be between 1 and 65535"
+        fi
+        if [ "$VUIO_WEB_PORT" = "$VUIO_PORT" ]; then
+            error_exit "VUIO_WEB_PORT must differ from VUIO_PORT (both are $VUIO_PORT)"
+        fi
+    fi
+
     log "Environment validation passed"
 }
 
@@ -264,8 +276,20 @@ EOF
     if [ -n "${VUIO_SERVER_IP:-}" ]; then
         echo "ip = \"${VUIO_SERVER_IP}\"" >> "$config_file"
     fi
+
+    # Off only for an explicit falsey value, matching how the server reads it.
+    local web_ui_enabled="true"
+    case "$(printf '%s' "${VUIO_WEB_UI:-1}" | tr '[:upper:]' '[:lower:]')" in
+        0|false|no|off) web_ui_enabled="false" ;;
+    esac
     
     cat >> "$config_file" <<EOF
+
+# The Svelte browser interface, on a second listener carrying the same API and
+# the same media as the main port.
+[web_ui]
+enabled = ${web_ui_enabled}
+port = ${VUIO_WEB_PORT:-8090}
 
 [network]
 multicast_ttl = 4
@@ -313,6 +337,7 @@ EOF
     # Display configuration (without sensitive data)
     log "Configuration summary:"
     log "  Server port: ${VUIO_PORT:-8080}"
+    log "  Web interface: ${VUIO_WEB_UI:-on} on port ${VUIO_WEB_PORT:-8090}"
     log "  Server name: ${VUIO_SERVER_NAME:-VuIO}"
     log "  Bind interface: ${VUIO_BIND_INTERFACE:-0.0.0.0}"
     log "  Server IP: ${VUIO_SERVER_IP:-auto-detect}"

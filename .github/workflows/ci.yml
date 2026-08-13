@@ -49,6 +49,59 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # ===================================================================
+  # The web interface ships compiled into the binary.
+  #
+  # Its source is a separate repository (vuiodev/vuio-web), so this one
+  # carries only the built bundle, committed at crates/vuio-web/dist. That
+  # is what lets `cargo build` and the Docker builder work with no Node,
+  # and what lets the interface be developed without this checkout.
+  #
+  # The trade is that nothing here can prove the bundle matches its source
+  # — that check belongs to vuio-web's own CI. What this job can do is
+  # refuse a bundle that is malformed or has lost its provenance, either
+  # of which would otherwise surface as a blank page at runtime.
+  # ===================================================================
+  web_ui:
+    name: Web UI bundle is intact
+    if: |
+      github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - name: The bundle is present and complete
+        run: |
+          dist=crates/vuio-web/dist
+          test -f "$dist/index.html" || { echo "::error::$dist/index.html is missing"; exit 1; }
+
+          # Every script and stylesheet the shell asks for has to be in the
+          # bundle. A partial commit passes `cargo build` and then serves a
+          # page that silently fails to boot in the browser.
+          missing=0
+          for asset in $(grep -o '/_app/immutable/[A-Za-z0-9./_-]*\.\(js\|css\)' "$dist/index.html" | sort -u); do
+            if [ ! -f "$dist$asset" ]; then
+              echo "::error::$dist/index.html references $asset, which is not committed"
+              missing=1
+            fi
+          done
+          exit $missing
+      - name: The bundle records where it came from
+        run: |
+          info=crates/vuio-web/BUILD_INFO.toml
+          if [ ! -f "$info" ]; then
+            echo "::error::$info is missing — rebuild with ./scripts/build-web.sh"
+            exit 1
+          fi
+          cat "$info"
+          if grep -q 'commit = "unknown"' "$info"; then
+            echo "::error::the bundle cannot be traced to a vuio-web commit"
+            exit 1
+          fi
+
   clippy:
     name: Clippy on ${{ matrix.os }}
     if: |
@@ -180,7 +233,7 @@ jobs:
         run: cargo check -p vuio-core --no-default-features
       - name: Build each feature alone
         run: |
-          for feature in casting dashboard diagnostics mcp metadata; do
+          for feature in casting dashboard diagnostics mcp metadata web-ui; do
             echo "::group::$feature"
             cargo check -p vuio-core --no-default-features --features "$feature"
             echo "::endgroup::"

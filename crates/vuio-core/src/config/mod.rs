@@ -15,10 +15,12 @@ pub mod validation;
 use model::{
     default_cache_mb, default_mediainfo_providers, default_mediainfo_timeout_seconds,
     default_min_confidence, default_session_ttl_hours, default_unavailable_root_grace_hours,
+    default_web_ui_port,
 };
 pub use model::{
     AppConfig, ConfigOverrides, DatabaseConfig, ManagementConfig, MediaConfig, MediaInfoConfig,
     MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig, ValidationMode,
+    WebUiConfig,
 };
 
 use crate::platform::config::PlatformConfig;

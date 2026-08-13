@@ -20,6 +20,14 @@ announce_interval_seconds = 30
 # Optional CIDRs allowed as UPnP event callback destinations in addition to the subscribing peer.
 upnp_callback_allowed_networks = []
 
+# Modern browser interface
+# A second HTTP listener serving the Svelte web interface. It carries the same
+# API and the same media streams as the main port — one server, two front ends —
+# so it is subject to the same [management] auth as the built-in dashboard.
+[web_ui]
+enabled = true
+port = 8090
+
 [management]
 # Requires a token for the dashboard and every management endpoint.
 # --auth and VUIO_AUTH=1 turn this on too; any of the three is enough.

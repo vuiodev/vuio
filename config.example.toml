@@ -63,6 +63,14 @@ backup_enabled = false
 path = "./config/media.db"
 # cache_mb = 128                        # Megabytes of index kept cached
 
+# The modern browser interface, served on a second port beside the built-in
+# dashboard. It is a second front end, not a second server: the same API, the
+# same media streams and the same [management] access rules, on another socket.
+# It binds the same interface as [server], so restricting that restricts both.
+[web_ui]
+enabled = true
+port = 8090                             # Must differ from server.port
+
 [management]
 # Requires a token for the dashboard and every management endpoint.
 # --auth and VUIO_AUTH=1 turn this on too; any of the three is enough.

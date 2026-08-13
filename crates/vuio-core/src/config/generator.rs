@@ -37,6 +37,8 @@ impl ConfigGenerator {
 
         self.update_management_config(config)?;
 
+        self.update_web_ui_config(config)?;
+
         // Replace platform-specific placeholders
         let mut content = self.template_doc.to_string();
         content = self.replace_platform_placeholders(content, &platform_config)?;
@@ -249,6 +251,15 @@ impl ConfigGenerator {
         Ok(())
     }
 
+    fn update_web_ui_config(&mut self, config: &AppConfig) -> Result<()> {
+        let table = self.template_doc["web_ui"]
+            .as_table_mut()
+            .context("Web UI section not found in template")?;
+        table["enabled"] = value(config.web_ui.enabled);
+        table["port"] = value(config.web_ui.port as i64);
+        Ok(())
+    }
+
     /// Replace platform-specific placeholders in the generated content
     fn replace_platform_placeholders(
         &self,
@@ -427,7 +438,7 @@ mod tests {
     use crate::config::{
         AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MediaInfoConfig,
         MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
-        ValidationMode,
+        ValidationMode, WebUiConfig,
     };
     use uuid::Uuid;
 
@@ -476,6 +487,7 @@ mod tests {
             },
             management: ManagementConfig::default(),
             mediainfo: MediaInfoConfig::default(),
+            web_ui: WebUiConfig::default(),
         };
 
         // Generate TOML
@@ -586,6 +598,7 @@ mod tests {
             },
             management: ManagementConfig::default(),
             mediainfo: MediaInfoConfig::default(),
+            web_ui: WebUiConfig::default(),
         };
 
         // Generate TOML

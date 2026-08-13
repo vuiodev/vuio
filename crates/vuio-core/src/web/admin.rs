@@ -364,6 +364,31 @@ const MANAGEMENT_FIELDS: &[FieldSpec] = &[
     ),
 ];
 
+const WEB_UI_FIELDS: &[FieldSpec] = &[
+    noted(
+        optional(
+            "web_ui.enabled",
+            "Serve the web interface",
+            FieldKind::Bool,
+            Impact::Live,
+            "Run the modern browser interface on its own port, beside this dashboard.",
+        ),
+        "Turning this off stops the second listener. It does not affect DLNA, streaming or \
+         this page, which are all served on the main port.",
+    ),
+    noted(
+        optional(
+            "web_ui.port",
+            "Web interface port",
+            FieldKind::Int { min: 1, max: 65535 },
+            Impact::Live,
+            "Port the web interface answers on. It cannot be the same as the HTTP port.",
+        ),
+        "The interface carries the same API and the same media as the main port, so it is \
+         subject to the same access rules as this dashboard.",
+    ),
+];
+
 const MEDIAINFO_FIELDS: &[FieldSpec] = &[
     noted(
         optional(
@@ -467,6 +492,14 @@ const SECTIONS: &[SectionSpec] = &[
         title: "Database",
         blurb: "Storage for the media index.",
         fields: DATABASE_FIELDS,
+        directories: false,
+        panel: false,
+    },
+    SectionSpec {
+        id: "web_ui",
+        title: "Web interface",
+        blurb: "The modern browser interface, served on its own port beside this dashboard.",
+        fields: WEB_UI_FIELDS,
         directories: false,
         panel: false,
     },

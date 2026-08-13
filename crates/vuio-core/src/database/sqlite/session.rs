@@ -238,6 +238,14 @@ impl DirectoryView for SqliteDirectoryView<'_> {
             .and_then(|v| v.as_str().ok())
             .unwrap_or_default()
     }
+    fn file_count(&self) -> u64 {
+        self.row
+            .get_ref(2)
+            .ok()
+            .and_then(|v| v.as_i64().ok())
+            .unwrap_or_default()
+            .max(0) as u64
+    }
 }
 
 impl DatabaseReadSession for SqliteReadSession {
@@ -417,6 +425,12 @@ impl DatabaseReadSession for SqliteReadSession {
 /// such as `audio/mpeg` has no counter, so it falls back to probing the
 /// subtree for a single matching record — correct, and rare enough that the
 /// extra index seek per child does not matter.
+///
+/// The third column is how many matching files the subtree holds, which the
+/// counters already know: `DirectoryDelta::record` walks a file's whole
+/// ancestry, so every count is recursive. The prefix branch has no counter to
+/// read and reports 0, which [`DirectoryView::file_count`] documents as
+/// "unknown".
 pub(super) fn directory_listing_sql(
     parent: &str,
     filter: &MimeFilter,
@@ -427,7 +441,8 @@ pub(super) fn directory_listing_sql(
     let sql = match filter.counter_family() {
         Some(family) => {
             params.push(Value::Text(family.to_owned()));
-            "SELECT directories.path, directories.name FROM directories \
+            "SELECT directories.path, directories.name, directory_mime_counts.count \
+             FROM directories \
              JOIN directory_mime_counts \
                ON directory_mime_counts.dir_path = directories.path \
              WHERE directories.parent_path = ? \
@@ -441,7 +456,7 @@ pub(super) fn directory_listing_sql(
                 unreachable!("only a prefix filter lacks a counter family")
             };
             params.push(Value::Text(format!("{}%", query::escape_like(prefix))));
-            "SELECT directories.path, directories.name FROM directories \
+            "SELECT directories.path, directories.name, 0 FROM directories \
              WHERE directories.parent_path = ? \
                AND EXISTS ( \
                    SELECT 1 FROM media_files \

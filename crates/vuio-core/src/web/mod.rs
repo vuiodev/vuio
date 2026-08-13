@@ -31,7 +31,41 @@ use axum::{
 const SOAP_BODY_LIMIT: usize = 1024 * 1024;
 const JSON_BODY_LIMIT: usize = 256 * 1024;
 
-pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router {
+/// Which listener a router is being built for.
+///
+/// The server answers on two ports, and they differ in exactly one respect:
+/// what lives at `/`. Everything else — DLNA, streaming, the management API —
+/// is the same routes over the same `AppState`, so the second listener is a
+/// second front end rather than a second server. In particular the browser app
+/// reaches the database through the same handlers as the dashboard, in
+/// process, with no proxy hop between them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Surface {
+    /// The main listener: DLNA/UPnP, streaming, and the built-in dashboard.
+    Primary,
+    /// The secondary listener: the same API, with the `vuio-web` app at `/`.
+    #[cfg(feature = "web-ui")]
+    WebUi,
+}
+
+impl Surface {
+    /// Whether the built-in dashboard's own page and assets belong on this
+    /// listener. They do not on the secondary one, where the Svelte app owns
+    /// `/` and `/assets` and brings its own copies of the player libraries.
+    #[cfg(feature = "dashboard")]
+    fn serves_builtin_dashboard(self) -> bool {
+        matches!(self, Self::Primary)
+    }
+}
+
+/// With neither front end compiled in there is nothing at `/` to choose
+/// between, so the surface stops being consulted. The parameter stays rather
+/// than becoming another `#[cfg]` on every call site.
+#[cfg_attr(not(feature = "dashboard"), allow(unused_variables))]
+pub fn create_router<D: DatabaseManager + 'static>(
+    state: AppState<D>,
+    surface: Surface,
+) -> Router {
     let soap_routes = Router::new()
         .route(
             "/control/ContentDirectory",
@@ -103,10 +137,13 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
     #[cfg(feature = "dashboard")]
     {
         management_routes = management_routes
-            .route("/", get(ui::root_handler))
             .route("/api/server-info", get(ui::server_info_handler::<D>))
             .route("/api/media", get(ui::media_page_handler::<D>))
+            .route("/api/browse", get(ui::browse_handler::<D>))
             .route("/api/admin/config", get(admin::get_config::<D>));
+        if surface.serves_builtin_dashboard() {
+            management_routes = management_routes.route("/", get(ui::root_handler));
+        }
     }
     #[cfg(all(feature = "dashboard", feature = "mediainfo"))]
     {
@@ -127,7 +164,7 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
     // safe because `require_management` excludes /assets from its login-page redirect:
     // a 200 login page returned for a <script> tag would be parsed as JavaScript.
     #[cfg(feature = "dashboard")]
-    {
+    if surface.serves_builtin_dashboard() {
         management_routes = management_routes.route("/assets/{file}", get(ui::asset_handler));
     }
     let management_routes = management_routes
@@ -186,7 +223,7 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
             get(remux_streaming::serve_hls_audio_segment::<D>),
         );
 
-    router
+    let router = router
         .route("/media/{id}/cover", get(streaming::serve_cover::<D>))
         .route("/media/{id}/subtitle", get(streaming::serve_subtitle::<D>))
         .route(
@@ -196,7 +233,24 @@ pub fn create_router<D: DatabaseManager + 'static>(state: AppState<D>) -> Router
         .route("/healthz", get(diagnostics::healthz_handler))
         .route("/readyz", get(diagnostics::readyz_handler::<D>))
         .merge(soap_routes)
-        .merge(management_routes)
-        .with_state(state)
+        .merge(management_routes);
+
+    // The browser app is management surface like the dashboard, so it sits
+    // behind the same middleware. `layer` rather than `route_layer` because the
+    // app arrives as a fallback: `route_layer` runs only for matched routes,
+    // which would leave every client-side route of the app unauthenticated.
+    #[cfg(feature = "web-ui")]
+    let router = if surface == Surface::WebUi {
+        router.merge(
+            vuio_web::routes::<AppState<D>>().layer(middleware::from_fn_with_state(
+                state.clone(),
+                auth::require_management::<D>,
+            )),
+        )
+    } else {
+        router
+    };
+
+    router.with_state(state)
 }
 

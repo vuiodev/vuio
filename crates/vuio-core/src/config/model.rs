@@ -36,6 +36,10 @@ pub(super) fn default_true() -> bool {
     true
 }
 
+pub(super) fn default_web_ui_port() -> u16 {
+    8090
+}
+
 /// The providers that need no account. Everything else stays off until the
 /// operator supplies a credential, so the default configuration cannot produce a
 /// run that fails half its lookups on 401.
@@ -135,6 +139,37 @@ pub struct AppConfig {
     pub management: ManagementConfig,
     #[serde(default)]
     pub mediainfo: MediaInfoConfig,
+    #[serde(default)]
+    pub web_ui: WebUiConfig,
+}
+
+/// The second HTTP listener, carrying the Svelte browser interface.
+///
+/// Defaulted as a whole, like `[management]` and `[mediainfo]`: a config file
+/// written before this existed has no `[web_ui]` table and must keep loading.
+///
+/// It is a second front end, not a second server. The listener serves the same
+/// router over the same state as the main port, so the interface reaches the
+/// database through the same in-process handlers — there is no proxy between
+/// the two ports and nothing is duplicated but the socket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WebUiConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Deliberately not `server.port`: the two listeners would fight over the
+    /// address, and the validator rejects that rather than letting one of them
+    /// lose the race at startup.
+    #[serde(default = "default_web_ui_port")]
+    pub port: u16,
+}
+
+impl Default for WebUiConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            port: default_web_ui_port(),
+        }
+    }
 }
 
 /// Fetching titles, synopses and artwork from public metadata APIs.

@@ -507,6 +507,13 @@ pub trait DirectoryView {
     fn id(&self) -> u64;
     fn path(&self) -> &str;
     fn name(&self) -> &str;
+    /// How many matching files the directory's subtree holds, or 0 when the
+    /// backing query cannot say. Recursive, because that is the number the
+    /// maintained counters carry and the number a listing wants to show: a
+    /// folder whose media all lives in grandchildren is not empty.
+    fn file_count(&self) -> u64 {
+        0
+    }
 }
 
 impl DirectoryView for MediaDirectory {

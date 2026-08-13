@@ -23,7 +23,19 @@ use std::{net::SocketAddr, time::Duration};
 /// port does anyway.
 const DRAIN_DEADLINE: Duration = Duration::from_secs(30);
 
-/// The address the configuration is asking the server to answer on.
+/// How long a secondary listener waits before trying an address it could not
+/// take.
+///
+/// Only the web UI's listener retries: the main one is bound before the
+/// supervisor starts, so a port already in use is a startup failure the
+/// operator sees immediately. The web UI must not have that power — a clash on
+/// its port would otherwise stop the media server — so it reports the failure
+/// and keeps trying, and comes up on its own when whatever held the port lets
+/// go.
+#[cfg(feature = "web-ui")]
+const REBIND_RETRY_INTERVAL: Duration = Duration::from_secs(30);
+
+/// The address the configuration is asking a listener to answer on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct DesiredBind {
     interface: String,
@@ -36,6 +48,19 @@ impl DesiredBind {
             interface: config.server.interface.clone(),
             port: config.server.port,
         }
+    }
+
+    /// What the configuration asks of the web UI's listener, or `None` when it
+    /// asks for nothing. It follows the main listener's interface: the two
+    /// surfaces are the same server, and an operator who has bound the media
+    /// server to one interface did not mean to expose its administration on
+    /// every other one.
+    #[cfg(feature = "web-ui")]
+    fn of_web_ui(config: &AppConfig) -> Option<Self> {
+        config.web_ui.enabled.then(|| Self {
+            interface: config.server.interface.clone(),
+            port: config.web_ui.port,
+        })
     }
 
     fn resolve(&self) -> anyhow::Result<SocketAddr> {
@@ -96,12 +121,13 @@ fn spawn_http<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     listener: tokio::net::TcpListener,
     global: &CancellationToken,
+    surface: web::Surface,
 ) -> anyhow::Result<HttpGeneration> {
     let addr = listener.local_addr()?;
     // A child token: cancelling this generation must not cancel the world, while a
     // global shutdown still cascades into it.
     let shutdown = global.child_token();
-    let app = web::create_router(state.clone());
+    let app = web::create_router(state.clone(), surface);
     let token = shutdown.clone();
     let task = tokio::spawn(async move {
         if let Err(error) = axum::serve(
@@ -150,12 +176,13 @@ async fn rebind<D: DatabaseManager + 'static>(
     global: &CancellationToken,
     current: &HttpGeneration,
     target: SocketAddr,
+    surface: web::Surface,
 ) -> Rebound {
     // Disjoint addresses: take the new one first, so there is no instant at which the
     // server is not accepting, and a failure costs nothing.
     if !overlaps(target, current.addr) {
         return match tokio::net::TcpListener::bind(target).await {
-            Ok(listener) => match spawn_http(state, listener, global) {
+            Ok(listener) => match spawn_http(state, listener, global, surface) {
                 Ok(generation) => Rebound::Moved(generation),
                 Err(error) => Rebound::Refused(error),
             },
@@ -177,7 +204,7 @@ async fn rebind<D: DatabaseManager + 'static>(
     for _ in 0..6 {
         tokio::time::sleep(backoff).await;
         match tokio::net::TcpListener::bind(target).await {
-            Ok(listener) => match spawn_http(state, listener, global) {
+            Ok(listener) => match spawn_http(state, listener, global, surface) {
                 Ok(generation) => return Rebound::Moved(generation),
                 Err(error) => last_error = Some(error),
             },
@@ -192,7 +219,7 @@ async fn rebind<D: DatabaseManager + 'static>(
     // Without this the server is simply offline: the old generation already stopped
     // accepting on its way to an address it could not take.
     match tokio::net::TcpListener::bind(current.addr).await {
-        Ok(listener) => match spawn_http(state, listener, global) {
+        Ok(listener) => match spawn_http(state, listener, global, surface) {
             Ok(generation) => Rebound::RolledBack(generation, failure),
             Err(error) => Rebound::Lost(error),
         },
@@ -261,7 +288,7 @@ pub(super) async fn run_http_supervisor<D: DatabaseManager + 'static>(
 ) -> anyhow::Result<()> {
     let mut changes = state.live_config.subscribe();
     let mut requested = DesiredBind::of(&state.current_config());
-    let mut current = spawn_http(&state, started.listener, &global)?;
+    let mut current = spawn_http(&state, started.listener, &global, web::Surface::Primary)?;
     state.http_binding.publish_serving(current.addr);
     info!("HTTP server started successfully");
 
@@ -303,7 +330,7 @@ pub(super) async fn run_http_supervisor<D: DatabaseManager + 'static>(
                     continue;
                 }
 
-                match rebind(&state, &global, &current, target).await {
+                match rebind(&state, &global, &current, target, web::Surface::Primary).await {
                     Rebound::Moved(next) => {
                         let previous = std::mem::replace(&mut current, next);
                         state.http_binding.publish_serving(current.addr);
@@ -339,6 +366,163 @@ pub(super) async fn run_http_supervisor<D: DatabaseManager + 'static>(
                 }
             }
         }
+    }
+}
+
+/// Owns the web UI's listener across configuration changes.
+///
+/// Deliberately weaker than [`run_http_supervisor`] in two ways, both because
+/// this is a second front end rather than a second server:
+///
+/// * it never publishes to `state.http_binding`, which is where the media URLs
+///   handed to TVs and renderers come from. Those must keep pointing at the
+///   main port, which is the one DLNA advertises and the one a renderer on the
+///   network can be expected to reach.
+/// * a listener it cannot bind is reported and retried rather than fatal. The
+///   main port is bound before any of this starts, so a clash there is a
+///   startup error the operator sees; a clash on the web UI's port must not be
+///   able to take the media server down with it.
+///
+/// Like every other service here it never returns while the server is healthy:
+/// `runner` treats a service that finishes as fatal.
+#[cfg(feature = "web-ui")]
+pub(super) async fn run_web_ui_supervisor<D: DatabaseManager + 'static>(
+    state: AppState<D>,
+    global: CancellationToken,
+) -> anyhow::Result<()> {
+    let mut changes = state.live_config.subscribe();
+    let mut requested = DesiredBind::of_web_ui(&state.current_config());
+    let mut current: Option<HttpGeneration> = None;
+    // Ticks continuously; the arm below does nothing unless something is owed.
+    // A timer created on demand would have to be re-armed from three places.
+    let mut retry = tokio::time::interval(REBIND_RETRY_INTERVAL);
+    retry.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    retry.tick().await;
+
+    reconcile_web_ui(&state, &global, &mut current, requested.as_ref()).await;
+
+    loop {
+        // `select!` polls a `None` option's future forever, so an absent
+        // generation simply means the join arm never fires.
+        let serving = async {
+            match current.as_mut() {
+                Some(generation) => (&mut generation.task).await,
+                None => std::future::pending().await,
+            }
+        };
+
+        tokio::select! {
+            _ = global.cancelled() => {
+                if let Some(mut generation) = current.take() {
+                    generation.shutdown.cancel();
+                    let _ = tokio::time::timeout(DRAIN_DEADLINE, &mut generation.task).await;
+                }
+                return Ok(());
+            }
+            joined = serving => {
+                // The listener ended on its own. Fatal for the main server;
+                // here it costs the web UI until the next retry.
+                let addr = current.take().map(|generation| generation.addr);
+                match joined {
+                    Ok(()) => error!(?addr, "Web UI listener stopped unexpectedly; will retry"),
+                    Err(error) => error!(?addr, %error, "Web UI listener panicked; will retry"),
+                }
+            }
+            _ = retry.tick() => {
+                // Only does anything when the configuration wants a listener
+                // and there is none, which is the state a failed bind leaves.
+                if current.is_none() && requested.is_some() {
+                    reconcile_web_ui(&state, &global, &mut current, requested.as_ref()).await;
+                }
+            }
+            changed = changes.changed() => {
+                if changed.is_err() {
+                    continue;
+                }
+                let want = DesiredBind::of_web_ui(&changes.borrow_and_update().clone());
+                // Compared request to request, never request to bound: an
+                // unrelated config change must not cycle the listener.
+                if want == requested {
+                    continue;
+                }
+                requested = want;
+                reconcile_web_ui(&state, &global, &mut current, requested.as_ref()).await;
+            }
+        }
+    }
+}
+
+/// Bring the web UI's listener in line with what the configuration asks for.
+#[cfg(feature = "web-ui")]
+async fn reconcile_web_ui<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    global: &CancellationToken,
+    current: &mut Option<HttpGeneration>,
+    want: Option<&DesiredBind>,
+) {
+    let Some(want) = want else {
+        if let Some(previous) = current.take() {
+            info!(addr = %previous.addr, "Web UI disabled; stopping its listener");
+            drain(state, previous);
+        }
+        return;
+    };
+
+    let target = match want.resolve() {
+        Ok(target) => target,
+        Err(error) => {
+            error!(desired = %want, "Web UI address is unusable: {error:#}");
+            return;
+        }
+    };
+
+    if let Some(existing) = current.as_ref() {
+        if existing.addr == target {
+            return;
+        }
+        match rebind(state, global, existing, target, web::Surface::WebUi).await {
+            Rebound::Moved(next) => {
+                let previous = current.replace(next).expect("checked above");
+                info!(from = %previous.addr, to = %target, "Web UI listener moved");
+                drain(state, previous);
+            }
+            Rebound::Refused(error) => {
+                error!(
+                    desired = %target, serving = %existing.addr,
+                    "Could not move the web UI listener, still serving on the old address: {error:#}"
+                );
+            }
+            Rebound::RolledBack(restored, error) => {
+                let previous = current.replace(restored).expect("checked above");
+                error!(
+                    desired = %target, serving = %previous.addr,
+                    "Could not move the web UI listener; restored the old address: {error:#}"
+                );
+                drain(state, previous);
+            }
+            Rebound::Lost(error) => {
+                // Not fatal, unlike the main listener: the retry timer picks
+                // this up, and the media server is still serving throughout.
+                *current = None;
+                error!(desired = %target, "Web UI listener could not be rebound or restored: {error:#}");
+            }
+        }
+        return;
+    }
+
+    match tokio::net::TcpListener::bind(target).await {
+        Ok(listener) => match spawn_http(state, listener, global, web::Surface::WebUi) {
+            Ok(generation) => {
+                info!("Web interface listening on http://{}", generation.addr);
+                *current = Some(generation);
+            }
+            Err(error) => error!(desired = %target, "Could not start the web UI listener: {error:#}"),
+        },
+        Err(error) => error!(
+            desired = %target,
+            "Could not bind the web UI listener; retrying in {}s: {error}",
+            REBIND_RETRY_INTERVAL.as_secs()
+        ),
     }
 }
 

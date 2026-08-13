@@ -221,6 +221,21 @@ pub struct MediaPageQuery {
     query: Option<String>,
 }
 
+/// The MIME constraint behind one of the browser's category tabs.
+///
+/// Shared by the flat listing and the folder listing so a tab cannot come to
+/// mean two different things depending on which view is open.
+fn mime_family_for_category(category: Option<&str>) -> Result<Option<String>, AppError> {
+    match category.unwrap_or("all") {
+        "all" | "" => Ok(None),
+        "audio" => Ok(Some("audio/".to_string())),
+        "video" => Ok(Some("video/".to_string())),
+        "image" => Ok(Some("image/".to_string())),
+        "radio" => Ok(Some("audio/radio".to_string())),
+        _ => Err(AppError::InvalidInput("Unknown media category".to_string())),
+    }
+}
+
 pub async fn media_page_handler<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     Query(params): Query<MediaPageQuery>,
@@ -232,14 +247,7 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
         .transpose()
         .map_err(|_| AppError::InvalidInput("Invalid media cursor".to_string()))?;
     let limit = params.limit.unwrap_or(250).clamp(1, 500);
-    let mime_family = match params.category.as_deref().unwrap_or("all") {
-        "all" | "" => None,
-        "audio" => Some("audio/".to_string()),
-        "video" => Some("video/".to_string()),
-        "image" => Some("image/".to_string()),
-        "radio" => Some("audio/radio".to_string()),
-        _ => return Err(AppError::InvalidInput("Unknown media category".to_string())),
-    };
+    let mime_family = mime_family_for_category(params.category.as_deref())?;
     let text = params.query.filter(|value| !value.is_empty());
     let query = MediaFileQuery::Filtered {
         after_id,
@@ -301,6 +309,236 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
         response,
     )
         .into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct BrowseQuery {
+    path: Option<String>,
+    offset: Option<usize>,
+    limit: Option<usize>,
+    category: Option<String>,
+}
+
+/// One directory's direct children: its subfolders, then its files.
+///
+/// The flat `/api/media` listing exists to page the whole library and is right
+/// for the category tabs. It is the wrong shape for a folder view, which needs
+/// to know what is *in one directory* — a question the browser cannot answer
+/// from a page of files, because the folders it would have to group by are
+/// spread across pages it has not fetched. Grouping client-side therefore does
+/// not merely get slow on a large library, it gets the answer wrong.
+///
+/// The database already indexes this: `directories` is keyed by `parent_path`,
+/// and `directory_mime_counts` carries a recursive per-family count. So this is
+/// the same work the DLNA browse does (`web::xml::generate_indexed_browse_response`),
+/// answered as JSON.
+///
+/// Paging is by offset rather than by cursor, and deliberately: folders and
+/// files are one ordered listing, and an offset here is bounded by the size of
+/// a single directory rather than of the library, so it does not reintroduce
+/// the deep-paging cost that `/api/media`'s cursor exists to avoid.
+pub async fn browse_handler<D: DatabaseManager + 'static>(
+    State(state): State<AppState<D>>,
+    Query(params): Query<BrowseQuery>,
+) -> Result<Response, AppError> {
+    let mime_family = mime_family_for_category(params.category.as_deref())?;
+    let limit = params.limit.unwrap_or(250).clamp(1, 500);
+    let offset = params.offset.unwrap_or(0);
+
+    let roots = state
+        .media_directories
+        .read()
+        .await
+        .iter()
+        .map(|directory| std::path::PathBuf::from(&directory.path))
+        .collect::<Vec<_>>();
+
+    let requested = params
+        .path
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(requested) = requested else {
+        return Ok(browse_roots_response(&roots, offset, limit));
+    };
+
+    // Canonicalize before the containment check, never after: `..` in the
+    // request would otherwise walk out of a root that still looked like a
+    // prefix, and turn this into a directory listing of the whole host.
+    let canonical = canonical_for_browse(&state, std::path::Path::new(requested));
+    let canonical_roots = roots
+        .iter()
+        .map(|root| canonical_for_browse(&state, root))
+        .collect::<Vec<_>>();
+    if !canonical_roots
+        .iter()
+        .any(|root| canonical == *root || canonical.starts_with(root))
+    {
+        return Err(AppError::InvalidInput(
+            "Path is outside every configured media directory".to_string(),
+        ));
+    }
+
+    let parent = canonical
+        .parent()
+        .filter(|_| !canonical_roots.iter().any(|root| canonical == *root))
+        .map(|parent| parent.to_string_lossy().into_owned());
+    let canonical_parent = canonical.to_string_lossy().into_owned();
+    let min_confidence = state.current_config().mediainfo.min_confidence;
+
+    let response = state
+        .database
+        .clone()
+        .read(move |session| {
+            // How many subfolders there are decides where the file page starts:
+            // one offset walks the folders first and then continues into the
+            // files, so a client pages the listing as it is displayed.
+            let directory_count = session
+                .visit_direct_subdirectories(
+                    &canonical_parent,
+                    mime_family.as_deref(),
+                    0,
+                    0,
+                    |_| Ok(()),
+                )?
+                .matched;
+            let directory_limit = limit.min(directory_count.saturating_sub(offset));
+            let file_offset = offset.saturating_sub(directory_count);
+            let file_limit = limit.saturating_sub(directory_limit);
+
+            let mut output = Vec::with_capacity(limit.saturating_mul(320));
+            output.extend_from_slice(b"{\"path\":");
+            serde_json::to_writer(&mut output, &canonical_parent)?;
+            output.extend_from_slice(b",\"parent\":");
+            serde_json::to_writer(&mut output, &parent)?;
+            output.extend_from_slice(b",\"folders\":[");
+            let mut emitted = 0_usize;
+            session.visit_direct_subdirectories(
+                &canonical_parent,
+                mime_family.as_deref(),
+                offset,
+                directory_limit,
+                |directory| {
+                    if emitted > 0 {
+                        output.push(b',');
+                    }
+                    write_browse_folder(&mut output, &directory)?;
+                    emitted += 1;
+                    Ok(())
+                },
+            )?;
+
+            let query = MediaFileQuery::Directory {
+                path: canonical_parent.clone(),
+                mime_family: mime_family.clone(),
+            };
+            // Collected up front because the writer cannot query the session
+            // while the session is lending it a row.
+            let mut ids = Vec::with_capacity(file_limit);
+            session.visit_files(&query, file_offset, file_limit, |file| {
+                if let Some(id) = file.id().filter(|id| *id > 0) {
+                    ids.push(id);
+                }
+                Ok(())
+            })?;
+            let overlays = session
+                .mediainfo_overlays(&ids, min_confidence)
+                .unwrap_or_default();
+
+            output.extend_from_slice(b"],\"files\":[");
+            let mut emitted = 0_usize;
+            let files = session.visit_files(&query, file_offset, file_limit, |file| {
+                if emitted > 0 {
+                    output.push(b',');
+                }
+                let overlay = file.id().and_then(|id| overlays.get(&id));
+                write_web_media_file(&mut output, &file, overlay)?;
+                emitted += 1;
+                Ok(())
+            })?;
+
+            write!(
+                &mut output,
+                "],\"total\":{},\"offset\":{offset}}}",
+                directory_count + files.matched
+            )?;
+            Ok(Bytes::from(output))
+        })
+        .await
+        .map_err(AppError::Internal)?;
+
+    Ok((
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        response,
+    )
+        .into_response())
+}
+
+/// The top of the tree: the configured media roots, presented as folders.
+///
+/// They have no common parent to browse from, and no counter of their own —
+/// `directory_mime_counts` describes directories the scan discovered, and a
+/// root that is currently empty still has to be listed so the operator can see
+/// it is configured.
+fn browse_roots_response(roots: &[std::path::PathBuf], offset: usize, limit: usize) -> Response {
+    let mut output = Vec::with_capacity(roots.len().saturating_mul(128) + 64);
+    output.extend_from_slice(b"{\"path\":null,\"parent\":null,\"folders\":[");
+    for (emitted, root) in roots.iter().skip(offset).take(limit).enumerate() {
+        if emitted > 0 {
+            output.push(b',');
+        }
+        let path = root.to_string_lossy();
+        let name = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.clone().into_owned());
+        output.extend_from_slice(b"{\"name\":");
+        let _ = serde_json::to_writer(&mut output, &name);
+        output.extend_from_slice(b",\"path\":");
+        let _ = serde_json::to_writer(&mut output, path.as_ref());
+        output.extend_from_slice(b",\"file_count\":null}");
+    }
+    let _ = write!(
+        &mut output,
+        "],\"files\":[],\"total\":{},\"offset\":{offset}}}",
+        roots.len()
+    );
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        Bytes::from(output),
+    )
+        .into_response()
+}
+
+/// The stored form of a path, matching how the scanner wrote it.
+///
+/// Falls back to plain normalization the way the DLNA browse does: a path that
+/// cannot be canonicalized — a root that has been unplugged, most often — must
+/// still produce a lookup rather than an error.
+fn canonical_for_browse<D: DatabaseManager>(
+    state: &AppState<D>,
+    path: &std::path::Path,
+) -> std::path::PathBuf {
+    match state.filesystem_manager.get_canonical_path(path) {
+        Ok(canonical) => std::path::PathBuf::from(canonical),
+        Err(_) => state.filesystem_manager.normalize_path(path),
+    }
+}
+
+fn write_browse_folder(
+    output: &mut Vec<u8>,
+    directory: &impl crate::database::DirectoryView,
+) -> anyhow::Result<()> {
+    output.extend_from_slice(b"{\"name\":");
+    serde_json::to_writer(&mut *output, directory.name())?;
+    output.extend_from_slice(b",\"path\":");
+    serde_json::to_writer(&mut *output, directory.path())?;
+    // Recursive, so a folder whose media all sits in grandchildren still reads
+    // as full rather than empty.
+    write!(output, ",\"file_count\":{}}}", directory.file_count())?;
+    Ok(())
 }
 
 fn write_web_media_file(

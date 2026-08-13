@@ -43,6 +43,8 @@ services:
     environment:
       # Server Configuration
       - VUIO_PORT=8080
+      # The Svelte browser interface, on its own listener. Set VUIO_WEB_UI=0 to disable.
+      - VUIO_WEB_PORT=8090
       - VUIO_INTERFACE=0.0.0.0
       - VUIO_SERVER_NAME=VuIO DLNA Server
       - VUIO_UUID=550e8400-e29b-41d4-a716-446655440000  # Fixed UUID for consistency. CHANGE THIS if running multiple instances on same LAN

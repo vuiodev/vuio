@@ -31,7 +31,15 @@ path = "src/lib.rs"
 # Never gated, because they are what a media server *is*: SSDP discovery, UPnP
 # ContentDirectory, HTTP range streaming, media scanning and indexing, the
 # database, and configuration.
-default = ["casting", "dashboard", "diagnostics", "mcp", "metadata", "mediainfo"]
+default = [
+    "casting",
+    "dashboard",
+    "diagnostics",
+    "mcp",
+    "metadata",
+    "mediainfo",
+    "web-ui",
+]
 
 # Cast to Chromecast, AirPlay and DLNA renderers.
 #
@@ -60,6 +68,17 @@ dashboard = []
 diagnostics = ["dep:sysinfo"]
 mcp = []
 metadata = ["dep:symphonia"]
+
+# The Svelte browser interface, served on its own listener (port 8090 by
+# default) beside the built-in dashboard on the main port. Both surfaces are
+# the same router over the same state, so this adds a second front end rather
+# than a second server: no proxy, no extra database handle, no duplicated API.
+#
+# It implies `dashboard` because that is the gate `/api/media`,
+# `/api/server-info` and `/api/admin/config` are registered behind, and the app
+# calls all three. Drop it for a build that should expose only DLNA and the
+# original dashboard.
+web-ui = ["dep:vuio-web", "dashboard"]
 
 # Fetch titles, synopses, ratings and artwork for the library from public metadata
 # APIs. This is the one part of VuIO that leaves the LAN, and it is the reason
@@ -108,6 +127,7 @@ sysinfo = { version = "0.39", default-features = false, features = ["system", "d
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.20", default-features = false, features = ["async"] }
 vuio-cast = { path = "../vuio-cast", version = "0.0.4", default-features = false, optional = true }
+vuio-web = { path = "../vuio-web", version = "0.0.43", optional = true }
 jwalk = "0.9"
 tokio-stream = "0.1"
 hap-crypto = { version = "1.4", optional = true }

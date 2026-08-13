@@ -196,6 +196,25 @@ impl AppConfig {
                     .and_then(|value| value.parse().ok())
                     .unwrap_or_else(default_mediainfo_timeout_seconds),
             },
+            web_ui: WebUiConfig {
+                // Parsed the way VUIO_MDNS is, rather than as `== "true"`: an
+                // operator turning something off writes 0, no or off at least
+                // as often as false, and silently keeping it on is the worst
+                // way to answer that.
+                enabled: std::env::var("VUIO_WEB_UI")
+                    .map(|value| {
+                        !matches!(
+                            value.trim().to_ascii_lowercase().as_str(),
+                            "0" | "false" | "no" | "off"
+                        )
+                    })
+                    .unwrap_or(true),
+                port: std::env::var("VUIO_WEB_PORT")
+                    .ok()
+                    .map(|value| value.parse().context("Invalid VUIO_WEB_PORT"))
+                    .transpose()?
+                    .unwrap_or_else(default_web_ui_port),
+            },
         })
     }
 
@@ -360,6 +379,7 @@ impl AppConfig {
             },
             management: ManagementConfig::default(),
             mediainfo: MediaInfoConfig::default(),
+            web_ui: WebUiConfig::default(),
         }
     }
 

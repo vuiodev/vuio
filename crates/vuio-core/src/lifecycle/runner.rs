@@ -332,6 +332,22 @@ where
         )
     });
 
+    // The browser interface answers on its own port, with the same router over
+    // the same state: a second front end rather than a second server. Supervised
+    // separately from the main listener because it can be turned off, and
+    // because a port it cannot take must not be able to stop the media server.
+    #[cfg(feature = "web-ui")]
+    {
+        let web_ui_state = app_state.clone();
+        let web_ui_cancellation = cancellation.clone();
+        services.spawn(async move {
+            (
+                "web UI",
+                supervisor::run_web_ui_supervisor(web_ui_state, web_ui_cancellation).await,
+            )
+        });
+    }
+
     let discovery_state = app_state.clone();
     let discovery_cancellation = cancellation.clone();
     services.spawn(async move {

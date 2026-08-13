@@ -774,13 +774,18 @@ pub async fn require_management<D: DatabaseManager>(
         // A subresource must never be answered with the login page: a <script> or
         // <link> would parse 200 bytes of HTML as JavaScript or CSS. Only navigations
         // get redirected; everything a page fetches for itself gets a plain 401.
+        //
+        // `/_app` is where the browser app's bundles live, and it is here for the
+        // same reason as `/assets`: every one of them is loaded by a <script> or a
+        // dynamic import, so a 200 login page would be parsed as JavaScript.
         let path = request.uri().path();
         if request.method() == Method::GET
             && (path == "/"
                 || path == "/logs"
                 || (!path.starts_with("/api")
                     && !path.starts_with("/sse")
-                    && !path.starts_with("/assets")))
+                    && !path.starts_with("/assets")
+                    && !path.starts_with("/_app")))
         {
             return axum::response::Redirect::to("/login").into_response();
         }

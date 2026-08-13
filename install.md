@@ -201,6 +201,7 @@ docker run -d \
   -v ./vuio-config:/config \
   -e VUIO_IP=192.168.1.100 \
   -e VUIO_PORT=8080 \
+  -e VUIO_WEB_PORT=8090 \
   -e VUIO_MEDIA_DIRS=/media \
   ghcr.io/vuiodev/vuio:latest
 ```
@@ -221,6 +222,7 @@ services:
     environment:
       - VUIO_IP=192.168.1.100
       - VUIO_PORT=8080
+      - VUIO_WEB_PORT=8090
       - VUIO_SERVER_NAME=VuIO Media Server
       - VUIO_MEDIA_DIRS=/media/movies,/media/music,/media/pictures
     volumes:
@@ -241,6 +243,8 @@ docker-compose up -d
 |---|---|---|
 | `VUIO_IP` | - | **Required for Docker**. Host IP address for SSDP/DLNA announcements |
 | `VUIO_PORT` | `8080` | HTTP server port |
+| `VUIO_WEB_PORT` | `8090` | Port for the Svelte web interface |
+| `VUIO_WEB_UI` | `true` | Serve the web interface at all |
 | `VUIO_SERVER_NAME` | `VuIO` | Server name shown on DLNA & AirPlay devices |
 | `VUIO_MEDIA_DIRS` | `/media` | Comma-separated media paths |
 | `VUIO_SCAN_ON_STARTUP` | `true` | Automatically scan media directories at startup |

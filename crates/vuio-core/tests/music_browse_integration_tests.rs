@@ -19,7 +19,7 @@ use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository, PlaylistR
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
 use vuio_core::state::AppState;
-use vuio_core::web::create_router;
+use vuio_core::web::{create_router, Surface};
 use vuio_core::web::diagnostics::WebHandlerMetrics;
 
 async fn make_test_state() -> (TempDir, AppState) {
@@ -151,7 +151,7 @@ async fn browse_page(
 </s:Envelope>"#
     );
 
-    let response = create_router(state.clone())
+    let response = create_router(state.clone(), Surface::Primary)
         .oneshot(
             Request::post("/control/ContentDirectory")
                 .header("content-type", "text/xml")

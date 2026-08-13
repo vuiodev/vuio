@@ -21,6 +21,7 @@ use vuio_core::web::diagnostics::WebHandlerMetrics;
 use vuio_core::web::{
     create_router,
     mcp::{message_handler, sse_handler, JsonRpcRequest, MessageQuery},
+    Surface,
 };
 
 fn test_peer() -> SocketAddr {
@@ -470,7 +471,7 @@ async fn blocked_mcp_send_does_not_hold_clients_mutex() {
 )]
 async fn post_endpoints_enforce_tiered_body_limits() {
     let (_temp, state) = make_test_state().await;
-    let router = create_router(state);
+    let router = create_router(state, Surface::Primary);
 
     let soap_response = router
         .clone()
