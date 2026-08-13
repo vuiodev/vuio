@@ -74,13 +74,26 @@ async fn library() -> (TempDir, AppState, PathBuf) {
         exclude_patterns: None,
         validation_mode: ValidationMode::Skip,
     }];
+    // A real config file on disk, because the settings endpoint reads it back to
+    // work out which keys the operator actually set — the distinction the editor
+    // needs to tell "unset, showing the default" from "set to this value".
+    let config_path = temp.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        toml::to_string(&config).expect("the default config serialises"),
+    )
+    .unwrap();
     let config = Arc::new(config);
 
     let state = AppState {
         media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
         unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         config: config.clone(),
-        config_source: Arc::new(vuio_core::state::ConfigSource::default()),
+        config_source: Arc::new(vuio_core::state::ConfigSource {
+            path: config_path,
+            durable: true,
+            ..Default::default()
+        }),
         http_binding: Arc::new(vuio_core::state::HttpBinding::new(8080)),
         live_config: Arc::new(vuio_core::state::LiveConfig::new(config)),
         database,
@@ -163,7 +176,10 @@ async fn browse(state: &AppState, query: &str) -> Value {
     let (status, body, content_type) =
         get(state, Surface::Primary, &format!("/api/browse?{query}")).await;
     assert_eq!(status, StatusCode::OK, "browsing {query} failed");
-    assert!(content_type.starts_with("application/json"), "{content_type}");
+    assert!(
+        content_type.starts_with("application/json"),
+        "{content_type}"
+    );
     serde_json::from_slice(&body).expect("browse returns JSON")
 }
 
@@ -178,7 +194,9 @@ fn names(value: &Value, key: &str) -> Vec<String> {
 
 fn encode(path: &Path) -> String {
     // Only what a path can contain and a query string cannot carry literally.
-    path.to_string_lossy().replace(' ', "%20").replace('#', "%23")
+    path.to_string_lossy()
+        .replace(' ', "%20")
+        .replace('#', "%23")
 }
 
 #[tokio::test]
@@ -216,7 +234,9 @@ async fn browse_lists_subfolders_then_files() {
     assert_eq!(
         movies["parent"].as_str().map(std::path::PathBuf::from),
         Some(std::path::PathBuf::from(
-            page["path"].as_str().expect("a browsed directory reports itself")
+            page["path"]
+                .as_str()
+                .expect("a browsed directory reports itself")
         )),
         "a subfolder points back at the directory it was reached through"
     );
@@ -249,7 +269,10 @@ async fn offset_paging_crosses_the_folder_to_file_boundary() {
     let first = browse(&state, &format!("path={movies}&offset=0&limit=2")).await;
     assert_eq!(names(&first, "folders"), vec!["Action", "Sci-Fi"]);
     assert!(first["files"].as_array().unwrap().is_empty());
-    assert_eq!(first["total"], 3, "total counts the whole listing, not the page");
+    assert_eq!(
+        first["total"], 3,
+        "total counts the whole listing, not the page"
+    );
 
     let second = browse(&state, &format!("path={movies}&offset=2&limit=2")).await;
     assert!(second["folders"].as_array().unwrap().is_empty());
@@ -424,7 +447,9 @@ async fn the_apps_bundles_are_served_with_immutable_caching() {
 
     let (_, body, _) = get(&state, Surface::WebUi, "/").await;
     let shell = String::from_utf8_lossy(&body);
-    let start = shell.find("/_app/immutable/").expect("the shell loads a bundle");
+    let start = shell
+        .find("/_app/immutable/")
+        .expect("the shell loads a bundle");
     let bundle: String = shell[start..]
         .chars()
         .take_while(|character| !"\"'".contains(*character))
@@ -443,4 +468,202 @@ async fn the_apps_bundles_are_served_with_immutable_caching() {
         Some("public, max-age=31536000, immutable"),
         "{bundle}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Contract between the server and the browser interface.
+//
+// The interface reads these responses by field name, and nothing in either
+// language checks that the names still line up. They did not: `/metrics/json`
+// nests everything under `web_handler_metrics` and calls it
+// `average_response_time_ms`, while the interface read a flat object with
+// `avg_response_time_ms` — so every tile was `undefined` and the one that
+// called `.toFixed()` took the whole screen down.
+//
+// These assert the names the interface actually depends on. A rename in Rust
+// now fails here rather than silently blanking a screen nobody looks at until
+// a user reports it.
+// ---------------------------------------------------------------------------
+
+fn field<'a>(value: &'a Value, path: &str) -> &'a Value {
+    let mut current = value;
+    for segment in path.split('.') {
+        current = current.get(segment).unwrap_or_else(|| {
+            panic!("{path} is missing from the response (stopped at {segment})")
+        });
+    }
+    current
+}
+
+#[tokio::test]
+async fn metrics_carry_every_field_the_interface_reads() {
+    let (_temp, state, _root) = library().await;
+    let (status, body, _) = get(&state, Surface::WebUi, "/metrics/json").await;
+    assert_eq!(status, StatusCode::OK);
+    let metrics: Value = serde_json::from_slice(&body).expect("metrics are JSON");
+
+    for path in [
+        "web_handler_metrics.browse_requests",
+        "web_handler_metrics.cache_hits",
+        "web_handler_metrics.cache_hit_rate_percent",
+        "web_handler_metrics.directory_listings",
+        "web_handler_metrics.file_serves",
+        "web_handler_metrics.errors",
+        "web_handler_metrics.average_response_time_ms",
+        "web_handler_metrics.gigabytes_transferred",
+        "web_handler_metrics.database_backend",
+        "database_stats.total_files",
+        "database_stats.total_size_bytes",
+        "database_stats.database_size_bytes",
+        "database_stats.video_files",
+        "database_stats.audio_files",
+        "database_stats.image_files",
+        "database_stats.playlists",
+        "runtime_diagnostics.monitored_directory_count",
+        "runtime_diagnostics.accessible_directory_count",
+        "runtime_diagnostics.platform",
+        "runtime_diagnostics.architecture",
+        "runtime_diagnostics.unavailable_or_incomplete_roots",
+    ] {
+        field(&metrics, path);
+    }
+
+    // Present but nullable: absent on a build without the `diagnostics` feature,
+    // which is why the interface reads every one of its fields defensively.
+    let snapshot = field(&metrics, "runtime_diagnostics.snapshot");
+    if !snapshot.is_null() {
+        for path in ["system.uptime_seconds", "process.pid", "disks.filesystems"] {
+            field(snapshot, path);
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_config_schema_is_shaped_the_way_the_editor_expects() {
+    let (_temp, state, _root) = library().await;
+    let (status, body, _) = get(&state, Surface::WebUi, "/api/admin/config").await;
+    assert_eq!(status, StatusCode::OK);
+    let schema: Value = serde_json::from_slice(&body).expect("the schema is JSON");
+
+    for key in [
+        "sections",
+        "values",
+        "present",
+        "overrides",
+        "directories",
+        "effective_directories",
+        "library_defaults",
+        "runtime",
+    ] {
+        field(&schema, key);
+    }
+    for path in [
+        "runtime.config_path",
+        "runtime.writable",
+        "runtime.version",
+        "library_defaults.exclude_patterns",
+    ] {
+        field(&schema, path);
+    }
+
+    // The editor switches on `type`, lower snake_case, and renders nothing at
+    // all for a variant it does not know. It must see every one that exists.
+    let known = ["bool", "int", "text", "path", "enum", "string_list"];
+    let mut seen = std::collections::HashSet::new();
+    let sections = field(&schema, "sections")
+        .as_array()
+        .expect("sections is a list");
+    assert!(!sections.is_empty());
+    for section in sections {
+        for spec in field(section, "fields")
+            .as_array()
+            .expect("fields is a list")
+        {
+            let kind = field(spec, "type").as_str().expect("type is a string");
+            assert!(
+                known.contains(&kind),
+                "{} has field type {kind:?}, which the editor cannot render",
+                field(spec, "key")
+            );
+            seen.insert(kind.to_owned());
+
+            let impact = field(spec, "impact").as_str().expect("impact is a string");
+            assert!(
+                ["live", "restart", "next_start"].contains(&impact),
+                "unknown impact {impact:?}"
+            );
+            field(spec, "removable");
+            field(spec, "help");
+            field(spec, "label");
+        }
+    }
+
+    // The libraries section is the one the editor renders as cards rather than
+    // as fields, and it is recognised by this flag alone.
+    assert!(
+        sections
+            .iter()
+            .any(|section| section.get("directories").and_then(Value::as_bool) == Some(true)),
+        "no section is marked as the libraries editor"
+    );
+
+    // Every key the editor can show must have a value and a presence entry, or
+    // the field renders empty with no way to tell "unset" from "missing".
+    let values = field(&schema, "values");
+    let present = field(&schema, "present");
+    for section in sections {
+        for spec in field(section, "fields").as_array().unwrap() {
+            let key = field(spec, "key").as_str().unwrap();
+            assert!(values.get(key).is_some(), "{key} has no value");
+            assert!(present.get(key).is_some(), "{key} has no presence entry");
+        }
+    }
+    assert!(seen.contains("bool") && seen.contains("int") && seen.contains("text"));
+}
+
+#[cfg(feature = "mediainfo")]
+#[tokio::test]
+async fn provider_status_says_where_each_credential_comes_from() {
+    let (_temp, state, _root) = library().await;
+    let (status, body, _) = get(&state, Surface::WebUi, "/api/admin/mediainfo").await;
+    assert_eq!(status, StatusCode::OK);
+    let payload: Value = serde_json::from_slice(&body).expect("status is JSON");
+
+    let providers = field(&payload, "providers").as_array().expect("a list");
+    assert!(!providers.is_empty());
+    for provider in providers {
+        for key in [
+            "id",
+            "label",
+            "group",
+            "provides",
+            "needs_credential",
+            "has_credential",
+            "credential_source",
+            "enabled",
+        ] {
+            field(provider, key);
+        }
+        let source = field(provider, "credential_source").as_str().unwrap();
+        assert!(
+            ["user", "environment", "none"].contains(&source),
+            "unknown credential source {source:?}"
+        );
+
+        // A provider that takes a key has to say which variable supplies it,
+        // because in a container that is the only way to set one.
+        if field(provider, "needs_credential").as_bool() == Some(true) {
+            let name = field(provider, "credential_env_var").as_str().unwrap();
+            let id = field(provider, "id").as_str().unwrap();
+            assert_eq!(name, format!("VUIO_{}_API_KEY", id.to_uppercase()));
+        }
+    }
+
+    // TheMovieDB ships on, so a key supplied to the server is used without the
+    // operator also having to edit `mediainfo.providers`.
+    let tmdb = providers
+        .iter()
+        .find(|p| p.get("id").and_then(Value::as_str) == Some("tmdb"))
+        .expect("tmdb is a known provider");
+    assert_eq!(field(tmdb, "enabled").as_bool(), Some(true));
 }

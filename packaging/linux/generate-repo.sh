@@ -250,7 +250,7 @@ for arch in x86_64 aarch64; do
                     zstd -d "$pkg" -o pkgtemp/pkg.tar --quiet 2>/dev/null && \
                         tar -xf pkgtemp/pkg.tar -C pkgtemp .PKGINFO 2>/dev/null || true
                     pname="vuio"
-                    pver="0.0.43-1"
+                    pver="0.0.44-1"
                     pdesc="Cross-platform DLNA media server"
                     purl="https://github.com/vuiodev/vuio"
                     psize="15000000"

@@ -381,7 +381,7 @@ pub async fn browse_handler<D: DatabaseManager + 'static>(
 
     let parent = canonical
         .parent()
-        .filter(|_| !canonical_roots.iter().any(|root| canonical == *root))
+        .filter(|_| !canonical_roots.contains(&canonical))
         .map(|parent| parent.to_string_lossy().into_owned());
     let canonical_parent = canonical.to_string_lossy().into_owned();
     let min_confidence = state.current_config().mediainfo.min_confidence;

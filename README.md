@@ -233,6 +233,7 @@ docker run -d \
 | `VUIO_MULTICAST_TTL` | 4 | Multicast TTL |
 | `VUIO_ANNOUNCE_INTERVAL` | 30 | SSDP announce interval (seconds) |
 | `VUIO_AUTH` | false | Enable administrative/management authentication |
+| `VUIO_TMDB_API_KEY` | - | TheMovieDB API key. See `.env.example` for every provider variable |
 | `VUIO_MANAGEMENT_ENABLED` | false | Same thing; either one is enough to require the token |
 | `VUIO_ADMIN_TOKEN` | - | Pre-configured admin password token for sign in |
 | `VUIO_ADMIN_TOKEN_FILE` | - | Read the token from this file instead of `admin.token` |
@@ -278,7 +279,7 @@ You can deploy VuIO to a Kubernetes cluster using the provided Helm chart.
 You can install the chart directly from GitHub Container Registry without cloning the repository:
 
 ```bash
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.43
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.44
 ```
 
 #### Local Installation
@@ -382,6 +383,19 @@ period and then dropped, because the address they are using has gone.
 - `enabled` - Serve the Svelte web interface on its own listener (default: true)
 - `port` - Port it answers on (default: 8090). Must differ from `server.port`; it follows
   `server.interface`, so binding the server to one interface binds this to the same one
+
+**Provider API keys:**
+
+Metadata providers that need an account read their key from the environment —
+`VUIO_TMDB_API_KEY`, `VUIO_OMDB_API_KEY`, and so on, always
+`VUIO_<PROVIDER ID>_API_KEY`. Copy `.env.example` to `.env` beside your config
+and fill in what you have; a real environment variable (systemd, `docker -e`, a
+shell export) wins over the file. Keys are never compiled into the binary, and
+`.env` is gitignored.
+
+A key can also be saved per-server from the MediaInfo tab in either web
+interface, which takes precedence; clearing it there falls back to the
+environment. A provider with no key is skipped rather than failing.
 
 **Media:**
 - `scan_on_startup` - Scan directories on startup

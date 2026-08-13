@@ -140,6 +140,12 @@ where
     let renderer_cache = crate::runtime_state::RendererCache::persistent(database.clone())
         .await
         .context("Failed to initialize AirPlay credential storage")?;
+    // Provider API keys are read from the environment, and `.env` is looked for
+    // beside the configuration first. Published before anything can ask for a
+    // credential, because the search path is resolved once and then frozen.
+    #[cfg(feature = "mediainfo")]
+    crate::mediainfo::env_keys::set_config_dir(config_manager.get_config_path());
+
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),

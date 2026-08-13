@@ -1,3 +1,10 @@
+# Secrets. Provider API keys are read from the environment at runtime, with .env
+# as a convenience for local runs — never compiled in and never committed. See
+# .env.example for the names.
+.env
+.env.*
+!.env.example
+
 # Rust
 /target/
 /builds/

@@ -1,6 +1,6 @@
 [package]
 name = "vuio-web"
-version = "0.0.43"
+version = "0.0.44"
 edition = "2021"
 rust-version = "1.95"
 authors = ["vyrti"]
@@ -19,9 +19,5 @@ exclude = ["dist/**/*.map"]
 name = "vuio_web"
 path = "src/lib.rs"
 
-# Deliberately one dependency. This crate hands out bytes that were fixed at
-# compile time: it holds no state, opens no socket and knows nothing about the
-# server it is merged into, which is what lets the frontend be developed and
-# released without touching anything in `vuio-core`.
 [dependencies]
 axum = { version = "0.8", default-features = false }

@@ -34,8 +34,18 @@ struct ProviderView {
     #[serde(skip_serializing_if = "Option::is_none")]
     signup_url: Option<&'static str>,
     needs_credential: bool,
-    /// Whether a credential is on file. Never the credential itself.
+    /// Whether a credential was *saved from here*. Never the credential itself,
+    /// and deliberately not "has a usable credential" — the dashboard offers
+    /// Clear from this, and clearing something it never stored does nothing.
     has_credential: bool,
+    /// Which credential is actually in force. `has_credential` cannot say: a key
+    /// supplied to the process is usable but unstored, and "no key" and "a key
+    /// you cannot see from here" look identical without this.
+    credential_source: crate::mediainfo::credentials::CredentialSource,
+    /// The variable a credential can be supplied in, for providers that take
+    /// one. Shown so an operator running in a container knows what to set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    credential_env_var: Option<String>,
     /// Whether this provider is in the configured list.
     enabled: bool,
 }
@@ -98,9 +108,9 @@ pub async fn get_status<D: DatabaseManager + 'static>(
         };
     let stored = credentials.stored_providers().await;
 
-    let providers: Vec<ProviderView> = PROVIDERS
-        .iter()
-        .map(|provider| ProviderView {
+    let mut providers = Vec::with_capacity(PROVIDERS.len());
+    for provider in PROVIDERS {
+        providers.push(ProviderView {
             id: provider.id,
             label: provider.label,
             group: provider.kind.group(),
@@ -109,9 +119,13 @@ pub async fn get_status<D: DatabaseManager + 'static>(
             signup_url: provider.credential.map(|credential| credential.signup_url),
             needs_credential: provider.needs_credential(),
             has_credential: stored.iter().any(|id| id == provider.id),
+            credential_source: credentials.source(provider.id).await,
+            credential_env_var: provider
+                .needs_credential()
+                .then(|| crate::mediainfo::env_keys::env_var_name(provider.id)),
             enabled: settings.providers.iter().any(|id| id == provider.id),
-        })
-        .collect();
+        });
+    }
 
     let job = {
         let job = state.mediainfo_job.lock().await;

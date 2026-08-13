@@ -19,8 +19,8 @@ use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository, PlaylistR
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
 use vuio_core::state::AppState;
-use vuio_core::web::{create_router, Surface};
 use vuio_core::web::diagnostics::WebHandlerMetrics;
+use vuio_core::web::{create_router, Surface};
 
 async fn make_test_state() -> (TempDir, AppState) {
     let temp = tempdir().unwrap();

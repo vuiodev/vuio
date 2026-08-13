@@ -98,7 +98,7 @@ configuration file actually writes. Backs the dashboard's Admin tab.
       "read_only_reason": null,
       "auth_enabled": false,
       "is_docker": false,
-      "version": "0.0.43",
+      "version": "0.0.44",
       // Where the server is actually accepting, which is what every advertised URL uses.
       "bound_addr": "0.0.0.0:8080",
       "desired_addr": null,

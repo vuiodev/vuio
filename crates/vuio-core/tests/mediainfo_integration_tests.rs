@@ -346,10 +346,19 @@ async fn the_status_endpoint_lists_every_provider() {
     // The key-free ones are usable and on out of the box.
     assert_eq!(by_id("tvmaze")["needs_credential"], false);
     assert_eq!(by_id("tvmaze")["enabled"], true);
-    // The rest are listed but idle until a credential is saved.
+
+    // TheMovieDB is on despite needing a key, because a key alone does not
+    // enable a provider that is not in the configured list — it would sit unused
+    // by anyone who supplied one. With no key it is skipped at lookup time
+    // rather than failing, so this costs nothing where none is set.
     assert_eq!(by_id("tmdb")["needs_credential"], true);
+    assert_eq!(by_id("tmdb")["enabled"], true);
     assert_eq!(by_id("tmdb")["has_credential"], false);
-    assert_eq!(by_id("tmdb")["enabled"], false);
+    assert_eq!(by_id("tmdb")["credential_env_var"], "VUIO_TMDB_API_KEY");
+
+    // The other keyed providers stay off until the operator asks for them.
+    assert_eq!(by_id("omdb")["needs_credential"], true);
+    assert_eq!(by_id("omdb")["enabled"], false);
 
     assert_eq!(body["job"]["running"], false);
     assert_eq!(body["stats"]["total"], 0);

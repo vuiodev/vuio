@@ -32,6 +32,8 @@ pub mod client;
 #[cfg(feature = "mediainfo")]
 pub mod credentials;
 #[cfg(feature = "mediainfo")]
+pub mod env_keys;
+#[cfg(feature = "mediainfo")]
 pub mod job;
 #[cfg(feature = "mediainfo")]
 pub mod matching;

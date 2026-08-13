@@ -173,10 +173,25 @@ pub const PROVIDERS: &[ProviderInfo] = &[
     ),
 ];
 
-/// The providers enabled out of the box: every one that answers without an
-/// account. Anything needing a credential stays off until the operator supplies
-/// one, so a default install cannot produce a run that 401s on half its lookups.
-pub const DEFAULT_PROVIDER_IDS: &[&str] = &["tvmaze", "musicbrainz", "jikan", "anilist", "kitsu"];
+/// The providers enabled out of the box.
+///
+/// Every provider that answers without an account, plus TheMovieDB — which needs
+/// a key but is the only worthwhile source of film and television metadata, and
+/// would otherwise sit unused by anyone who supplied one, because a key alone
+/// does not enable a provider that is not on this list.
+///
+/// Listing a keyed provider costs nothing where no key exists: `job.rs` skips a
+/// provider whose credential is missing rather than failing the lookup, so an
+/// install without one behaves exactly as before. Nothing here is contacted at
+/// all until `[mediainfo] enabled` is turned on.
+pub const DEFAULT_PROVIDER_IDS: &[&str] = &[
+    "tvmaze",
+    "tmdb",
+    "musicbrainz",
+    "jikan",
+    "anilist",
+    "kitsu",
+];
 
 pub fn provider_info(id: &str) -> Option<&'static ProviderInfo> {
     PROVIDERS.iter().find(|provider| provider.id == id)
@@ -186,13 +201,32 @@ pub fn provider_info(id: &str) -> Option<&'static ProviderInfo> {
 mod tests {
     use super::*;
 
+    /// A keyed provider may be on by default only if a key can actually reach
+    /// it without editing the config — which today means `VUIO_<ID>_API_KEY`.
+    /// Anything else would be enabled and permanently silent.
+    const KEYED_DEFAULTS: &[&str] = &["tmdb"];
+
     #[test]
-    fn default_providers_all_exist_and_need_no_account() {
+    fn default_providers_all_exist_and_can_be_reached() {
         for id in DEFAULT_PROVIDER_IDS {
             let provider = provider_info(id).unwrap_or_else(|| panic!("unknown provider {id}"));
             assert!(
-                !provider.needs_credential(),
-                "{id} is on by default but needs a credential"
+                !provider.needs_credential() || KEYED_DEFAULTS.contains(id),
+                "{id} is on by default, needs a credential, and has no way to be given one"
+            );
+        }
+    }
+
+    /// Being listed in `KEYED_DEFAULTS` is a claim that the provider takes a
+    /// credential; a free provider listed there would be a copy-paste slip.
+    #[test]
+    fn keyed_defaults_actually_need_a_key_and_are_on() {
+        for id in KEYED_DEFAULTS {
+            let provider = provider_info(id).unwrap_or_else(|| panic!("unknown provider {id}"));
+            assert!(provider.needs_credential(), "{id} needs no credential");
+            assert!(
+                DEFAULT_PROVIDER_IDS.contains(id),
+                "{id} is listed as a keyed default but is not on by default"
             );
         }
     }
