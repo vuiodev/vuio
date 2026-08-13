@@ -134,6 +134,32 @@ impl MediaFileView for SqliteMediaFileView<'_> {
     fn album_artist(&self) -> Option<&str> {
         self.optional_text(column::ALBUM_ARTIST)
     }
+    fn tags_version(&self) -> u32 {
+        self.integer(column::TAGS_VERSION).max(0) as u32
+    }
+    fn disc_number(&self) -> Option<u32> {
+        self.optional_integer(column::DISC_NUMBER)
+            .map(|value| value as u32)
+    }
+    fn composer(&self) -> Option<&str> {
+        self.optional_text(column::COMPOSER)
+    }
+    fn sample_rate(&self) -> Option<u32> {
+        self.optional_integer(column::SAMPLE_RATE)
+            .map(|value| value as u32)
+    }
+    fn channels(&self) -> Option<u16> {
+        self.optional_integer(column::CHANNELS)
+            .map(|value| value as u16)
+    }
+    fn bits_per_sample(&self) -> Option<u16> {
+        self.optional_integer(column::BITS_PER_SAMPLE)
+            .map(|value| value as u16)
+    }
+    fn bit_rate(&self) -> Option<u32> {
+        self.optional_integer(column::BIT_RATE)
+            .map(|value| value as u32)
+    }
     fn subtitle_available(&self) -> bool {
         self.integer(column::SUBTITLE_AVAILABLE) != 0
     }

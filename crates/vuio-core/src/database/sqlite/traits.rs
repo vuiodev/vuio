@@ -4,6 +4,8 @@
 //! forwards to, so the trait surface reads as an index of the module.
 
 use super::*;
+use crate::database::{MusicCategoryFilter, MusicCategoryType};
+use std::collections::HashMap;
 
 #[async_trait]
 impl MediaRepository for SqliteDatabase {
@@ -103,6 +105,15 @@ impl MediaRepository for SqliteDatabase {
         SqliteDatabase::get_album_artists_impl(self).await
     }
 
+    async fn get_music_categories(
+        &self,
+        kind: MusicCategoryType,
+        filter: &MusicCategoryFilter,
+        child_of: Option<MusicCategoryType>,
+    ) -> Result<Vec<MusicCategory>> {
+        SqliteDatabase::get_music_categories_impl(self, kind, filter, child_of).await
+    }
+
     async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>> {
         SqliteDatabase::get_music_by_artist_impl(self, artist).await
     }
@@ -125,6 +136,10 @@ impl MediaRepository for SqliteDatabase {
 
     async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>> {
         SqliteDatabase::get_music_by_album_artist_impl(self, album_artist).await
+    }
+
+    async fn get_media_tags(&self, media_file_id: i64) -> Result<Vec<(String, String)>> {
+        SqliteDatabase::get_media_tags_impl(self, media_file_id).await
     }
 
     async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>> {
@@ -203,6 +218,10 @@ impl PlaylistRepository for SqliteDatabase {
 
     async fn get_playlists(&self) -> Result<Vec<Playlist>> {
         SqliteDatabase::get_playlists_impl(self).await
+    }
+
+    async fn count_playlist_entries(&self) -> Result<HashMap<i64, usize>> {
+        SqliteDatabase::count_playlist_entries_impl(self).await
     }
 
     async fn get_playlist(&self, playlist_id: i64) -> Result<Option<Playlist>> {

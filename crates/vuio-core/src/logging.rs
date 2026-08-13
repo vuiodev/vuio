@@ -94,8 +94,9 @@ pub fn init_logging_with_options(
         "warn"
     };
 
+    let default_console_directives = format!("{console_level},symphonia=off,symphonia_core=off,symphonia_format_isomp4=off,symphonia_bundle_mp3=off,symphonia_format_mkv=off,symphonia_format_ogg=off,symphonia_format_riff=off");
     let console_filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new(console_level))
+        .or_else(|_| EnvFilter::try_new(&default_console_directives))
         .map_err(|error| {
             PlatformError::Configuration(crate::platform::ConfigurationError::ValidationFailed {
                 reason: format!("Invalid console log level: {error}"),
@@ -135,8 +136,9 @@ pub fn init_logging_with_options(
     let file_layer = match RotatingFile::open(resolved_log_file.clone()) {
         Ok(file) => {
             let file_level = if debug { "debug" } else { "info" };
-            let file_filter =
-                EnvFilter::try_new(file_level).unwrap_or_else(|_| EnvFilter::new("info"));
+            let default_file_directives = format!("{file_level},symphonia=off,symphonia_core=off,symphonia_format_isomp4=off,symphonia_bundle_mp3=off,symphonia_format_mkv=off,symphonia_format_ogg=off,symphonia_format_riff=off");
+            let file_filter = EnvFilter::try_new(&default_file_directives)
+                .unwrap_or_else(|_| EnvFilter::new("info"));
             Some(
                 fmt::layer()
                     .with_target(true)

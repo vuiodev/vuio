@@ -10,14 +10,15 @@ use rusqlite::{Connection, OpenFlags, Row};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::database::{FileFingerprint, FileLocation, MediaFile, Playlist};
+use crate::database::{AudioTags, FileFingerprint, FileLocation, MediaFile, Playlist, StreamInfo};
 
-/// Bumped only for a change that makes an existing file unreadable.
+/// The schema version this build writes and expects.
 ///
-/// Startup treats a mismatch the way it treats corruption: the file is
-/// quarantined and rebuilt from a rescan, so this is a last resort rather than
-/// a routine migration mechanism.
-pub(super) const SCHEMA_VERSION: i64 = 1;
+/// Bumped whenever the tables change. An older file is brought forward by
+/// [`MIGRATIONS`]; only a *newer* file — one written by a build that knows
+/// something this one does not — is refused, because there is no way to
+/// downgrade a schema without guessing at what to discard.
+pub(super) const SCHEMA_VERSION: i64 = 2;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -50,26 +51,56 @@ CREATE TABLE IF NOT EXISTS media_files (
     track_number       INTEGER,
     year               INTEGER,
     album_artist       TEXT,
+    disc_number        INTEGER,
+    disc_total         INTEGER,
+    track_total        INTEGER,
+    composer           TEXT,
+    comment            TEXT,
+    bpm                INTEGER,
+    compilation        INTEGER,
+    sort_title         TEXT,
+    sort_artist        TEXT,
+    sort_album         TEXT,
+    release_date       TEXT,
+    musicbrainz_track_id  TEXT,
+    musicbrainz_album_id  TEXT,
+    musicbrainz_artist_id TEXT,
+    codec              TEXT,
+    sample_rate        INTEGER,
+    channels           INTEGER,
+    bits_per_sample    INTEGER,
+    bit_rate           INTEGER,
+    -- Which tag reader wrote this record. A file whose bytes have not changed
+    -- is still re-read when this trails the current reader, which is how a
+    -- better extractor reaches records that were already indexed.
+    tags_version       INTEGER NOT NULL DEFAULT 0,
     subtitle_available INTEGER NOT NULL DEFAULT 0,
     created_at_secs    INTEGER NOT NULL,
     updated_at_secs    INTEGER NOT NULL,
-    -- Browse ordering is "track number, then natural filename", with untagged
-    -- records last. Materializing the rank keeps that an index scan instead of
-    -- a sort over the whole directory.
-    track_sort         INTEGER GENERATED ALWAYS AS (COALESCE(track_number, 4294967296)) STORED
+    -- Browse ordering is "disc, track number, then natural filename", with
+    -- untagged records last. Materializing the rank keeps that an index scan
+    -- instead of a sort over the whole directory.
+    --
+    -- `track_sort` is STORED and predates `disc_sort`; SQLite cannot alter a
+    -- generated column, and ALTER TABLE only accepts VIRTUAL ones, so the disc
+    -- rank is a separate VIRTUAL column that the same indexes cover. Declared
+    -- here exactly as the migration adds it, so old and new files agree.
+    track_sort         INTEGER GENERATED ALWAYS AS (COALESCE(track_number, 4294967296)) STORED,
+    disc_sort          INTEGER GENERATED ALWAYS AS (COALESCE(disc_number, 1)) VIRTUAL
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_media_dir_order
-    ON media_files(parent_path, track_sort, filename COLLATE {NATURAL});
+    ON media_files(parent_path, disc_sort, track_sort, filename COLLATE {NATURAL});
 CREATE INDEX IF NOT EXISTS idx_media_dir_family
     ON media_files(parent_path, mime_family);
 CREATE INDEX IF NOT EXISTS idx_media_album
-    ON media_files(album, track_sort, filename COLLATE {NATURAL});
+    ON media_files(album, disc_sort, track_sort, filename COLLATE {NATURAL});
 CREATE INDEX IF NOT EXISTS idx_media_artist       ON media_files(artist);
 CREATE INDEX IF NOT EXISTS idx_media_genre        ON media_files(genre);
 CREATE INDEX IF NOT EXISTS idx_media_year         ON media_files(year);
 CREATE INDEX IF NOT EXISTS idx_media_album_artist ON media_files(album_artist);
 CREATE INDEX IF NOT EXISTS idx_media_family       ON media_files(mime_family);
+CREATE INDEX IF NOT EXISTS idx_media_tags_version ON media_files(tags_version);
 
 -- Directories exist only by implication from the paths of files, so unlike the
 -- music indexes they cannot be recomputed by a query at browse time.
@@ -126,6 +157,68 @@ CREATE TABLE IF NOT EXISTS secrets (
     key   TEXT PRIMARY KEY,
     value BLOB NOT NULL
 ) STRICT;
+
+-- Every tag the reader found that has no column of its own, kept verbatim so
+-- that using a new one later is a query rather than another migration. The
+-- composite key is what makes multi-valued tags — two artists, three genres —
+-- representable at all.
+CREATE TABLE IF NOT EXISTS media_tags (
+    media_file_id INTEGER NOT NULL REFERENCES media_files(id) ON DELETE CASCADE,
+    key           TEXT    NOT NULL,
+    value         TEXT    NOT NULL,
+    PRIMARY KEY (media_file_id, key, value)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS idx_media_tags_key ON media_tags(key, value);
+"#;
+
+/// Schema upgrades, applied in order to any file older than [`SCHEMA_VERSION`].
+///
+/// Each entry is `(version_it_produces, sql)`. The SQL runs inside the same
+/// transaction that bumps `user_version`, so a failure part-way leaves the file
+/// exactly as it was.
+///
+/// Migrations are additive by construction: they add columns, tables and
+/// indexes, never drop or rewrite user data. Anything that cannot be expressed
+/// that way needs a different plan, not a destructive one — the file holds
+/// AirPlay pairings, imported playlists, and the record ids that DIDL hands out
+/// as object ids, none of which survive a rebuild.
+const MIGRATIONS: &[(i64, &str)] = &[(2, MIGRATION_V2)];
+
+/// v1 → v2: full tag extraction.
+///
+/// Adds the promoted tag and stream columns, the `media_tags` side table, and
+/// disc-aware browse ordering. `tags_version` defaults to 0 on existing rows,
+/// which is below the current reader's version, so the next scan re-writes them
+/// with the new fields filled in.
+const MIGRATION_V2: &str = r#"
+ALTER TABLE media_files ADD COLUMN disc_number           INTEGER;
+ALTER TABLE media_files ADD COLUMN disc_total            INTEGER;
+ALTER TABLE media_files ADD COLUMN track_total           INTEGER;
+ALTER TABLE media_files ADD COLUMN composer              TEXT;
+ALTER TABLE media_files ADD COLUMN comment               TEXT;
+ALTER TABLE media_files ADD COLUMN bpm                   INTEGER;
+ALTER TABLE media_files ADD COLUMN compilation           INTEGER;
+ALTER TABLE media_files ADD COLUMN sort_title            TEXT;
+ALTER TABLE media_files ADD COLUMN sort_artist           TEXT;
+ALTER TABLE media_files ADD COLUMN sort_album            TEXT;
+ALTER TABLE media_files ADD COLUMN release_date          TEXT;
+ALTER TABLE media_files ADD COLUMN musicbrainz_track_id  TEXT;
+ALTER TABLE media_files ADD COLUMN musicbrainz_album_id  TEXT;
+ALTER TABLE media_files ADD COLUMN musicbrainz_artist_id TEXT;
+ALTER TABLE media_files ADD COLUMN codec                 TEXT;
+ALTER TABLE media_files ADD COLUMN sample_rate           INTEGER;
+ALTER TABLE media_files ADD COLUMN channels              INTEGER;
+ALTER TABLE media_files ADD COLUMN bits_per_sample       INTEGER;
+ALTER TABLE media_files ADD COLUMN bit_rate              INTEGER;
+ALTER TABLE media_files ADD COLUMN tags_version          INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE media_files ADD COLUMN disc_sort INTEGER
+    GENERATED ALWAYS AS (COALESCE(disc_number, 1)) VIRTUAL;
+
+-- The ordering indexes now lead with the disc rank, and `CREATE INDEX IF NOT
+-- EXISTS` will not redefine one that already exists.
+DROP INDEX IF EXISTS idx_media_dir_order;
+DROP INDEX IF EXISTS idx_media_album;
 "#;
 
 /// Columns of `media_files`, qualified so the list can be used inside joins.
@@ -134,7 +227,14 @@ media_files.id, media_files.path, media_files.filename, media_files.size, \
 media_files.modified_secs, media_files.mime_type, media_files.duration_secs, \
 media_files.title, media_files.artist, media_files.album, media_files.genre, \
 media_files.track_number, media_files.year, media_files.album_artist, \
-media_files.subtitle_available, media_files.created_at_secs, media_files.updated_at_secs";
+media_files.subtitle_available, media_files.created_at_secs, media_files.updated_at_secs, \
+media_files.disc_number, media_files.disc_total, media_files.track_total, \
+media_files.composer, media_files.comment, media_files.bpm, media_files.compilation, \
+media_files.sort_title, media_files.sort_artist, media_files.sort_album, \
+media_files.release_date, media_files.musicbrainz_track_id, \
+media_files.musicbrainz_album_id, media_files.musicbrainz_artist_id, \
+media_files.codec, media_files.sample_rate, media_files.channels, \
+media_files.bits_per_sample, media_files.bit_rate, media_files.tags_version";
 
 /// Positions within [`MEDIA_COLUMNS`], shared by the owned decoder and the
 /// borrowed views so the two can never drift apart.
@@ -156,6 +256,26 @@ pub(super) mod column {
     pub const SUBTITLE_AVAILABLE: usize = 14;
     pub const CREATED_AT_SECS: usize = 15;
     pub const UPDATED_AT_SECS: usize = 16;
+    pub const DISC_NUMBER: usize = 17;
+    pub const DISC_TOTAL: usize = 18;
+    pub const TRACK_TOTAL: usize = 19;
+    pub const COMPOSER: usize = 20;
+    pub const COMMENT: usize = 21;
+    pub const BPM: usize = 22;
+    pub const COMPILATION: usize = 23;
+    pub const SORT_TITLE: usize = 24;
+    pub const SORT_ARTIST: usize = 25;
+    pub const SORT_ALBUM: usize = 26;
+    pub const RELEASE_DATE: usize = 27;
+    pub const MUSICBRAINZ_TRACK_ID: usize = 28;
+    pub const MUSICBRAINZ_ALBUM_ID: usize = 29;
+    pub const MUSICBRAINZ_ARTIST_ID: usize = 30;
+    pub const CODEC: usize = 31;
+    pub const SAMPLE_RATE: usize = 32;
+    pub const CHANNELS: usize = 33;
+    pub const BITS_PER_SAMPLE: usize = 34;
+    pub const BIT_RATE: usize = 35;
+    pub const TAGS_VERSION: usize = 36;
 }
 
 /// Open one connection and put it in the state every caller expects.
@@ -210,7 +330,7 @@ fn apply_pragmas(connection: &Connection, cache_mb: usize) -> Result<()> {
     Ok(())
 }
 
-/// Create the schema, or reject a file written by an incompatible version.
+/// Create the schema, migrate an older file forward, or reject a newer one.
 pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
@@ -226,11 +346,15 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
         return Ok(());
     }
 
-    if version != SCHEMA_VERSION {
+    if version > SCHEMA_VERSION {
         anyhow::bail!(
             "Incompatible database schema {version}; expected {SCHEMA_VERSION}. \
-             The file was written by a different version of VuIO and is left untouched."
+             The file was written by a newer version of VuIO and is left untouched."
         );
+    }
+
+    if version < SCHEMA_VERSION {
+        migrate(connection, version)?;
     }
 
     // A file at the right version may still predate an additive index, and
@@ -238,6 +362,39 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
     connection
         .execute_batch(&ddl())
         .context("Failed to verify the SQLite schema")?;
+    Ok(())
+}
+
+/// Apply every migration between `from` and [`SCHEMA_VERSION`].
+///
+/// Each step runs with its `user_version` bump in one transaction, so an
+/// interrupted upgrade leaves the file at a version that describes it.
+fn migrate(connection: &Connection, from: i64) -> Result<()> {
+    let pending = MIGRATIONS
+        .iter()
+        .filter(|(produces, _)| *produces > from)
+        .collect::<Vec<_>>();
+
+    if let Some((unreachable_from, _)) = pending.first().filter(|(first, _)| *first > from + 1) {
+        anyhow::bail!(
+            "No migration path from database schema {from} to {unreachable_from}; \
+             the file is left untouched."
+        );
+    }
+
+    for (produces, sql) in pending {
+        tracing::info!(
+            "Migrating the media database to schema version {}",
+            produces
+        );
+        connection
+            .execute_batch(&format!(
+                "BEGIN;\n{}\nPRAGMA user_version = {produces};\nCOMMIT;",
+                sql.replace("{NATURAL}", NATURAL)
+            ))
+            .with_context(|| format!("Failed to migrate the database to schema {produces}"))?;
+    }
+
     Ok(())
 }
 
@@ -260,12 +417,14 @@ pub(super) fn validate_database_file(path: &std::path::Path) -> Result<()> {
         anyhow::bail!("{} failed its integrity check: {integrity}", path.display());
     }
 
+    // An older file is acceptable: opening it will migrate it forward. Only a
+    // newer one has no path back to this build.
     let version: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .context("Failed to read the schema version")?;
-    if version != SCHEMA_VERSION {
+    if !(1..=SCHEMA_VERSION).contains(&version) {
         anyhow::bail!(
-            "{} has schema version {version}; expected {SCHEMA_VERSION}",
+            "{} has schema version {version}; expected 1..={SCHEMA_VERSION}",
             path.display()
         );
     }
@@ -319,10 +478,43 @@ pub(super) fn media_file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> 
             .get::<_, Option<i64>>(column::YEAR)?
             .map(|value| value as u32),
         album_artist: row.get(column::ALBUM_ARTIST)?,
+        tags: AudioTags {
+            disc_number: optional_u32(row, column::DISC_NUMBER)?,
+            disc_total: optional_u32(row, column::DISC_TOTAL)?,
+            track_total: optional_u32(row, column::TRACK_TOTAL)?,
+            composer: row.get(column::COMPOSER)?,
+            comment: row.get(column::COMMENT)?,
+            bpm: optional_u32(row, column::BPM)?,
+            compilation: row
+                .get::<_, Option<i64>>(column::COMPILATION)?
+                .map(|value| value != 0),
+            sort_title: row.get(column::SORT_TITLE)?,
+            sort_artist: row.get(column::SORT_ARTIST)?,
+            sort_album: row.get(column::SORT_ALBUM)?,
+            release_date: row.get(column::RELEASE_DATE)?,
+            musicbrainz_track_id: row.get(column::MUSICBRAINZ_TRACK_ID)?,
+            musicbrainz_album_id: row.get(column::MUSICBRAINZ_ALBUM_ID)?,
+            musicbrainz_artist_id: row.get(column::MUSICBRAINZ_ARTIST_ID)?,
+        },
+        stream: StreamInfo {
+            codec: row.get(column::CODEC)?,
+            sample_rate: optional_u32(row, column::SAMPLE_RATE)?,
+            channels: optional_u32(row, column::CHANNELS)?.map(|value| value as u16),
+            bits_per_sample: optional_u32(row, column::BITS_PER_SAMPLE)?.map(|value| value as u16),
+            bit_rate: optional_u32(row, column::BIT_RATE)?,
+        },
+        // Reading a record for a browse response never needs the long tail of
+        // tags, so it is not joined in.
+        extra_tags: Vec::new(),
+        tags_version: row.get::<_, i64>(column::TAGS_VERSION)? as u32,
         subtitle_available: row.get::<_, i64>(column::SUBTITLE_AVAILABLE)? != 0,
         created_at: seconds_to_time(row.get(column::CREATED_AT_SECS)?),
         updated_at: seconds_to_time(row.get(column::UPDATED_AT_SECS)?),
     })
+}
+
+fn optional_u32(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<u32>> {
+    Ok(row.get::<_, Option<i64>>(index)?.map(|value| value as u32))
 }
 
 pub(super) fn file_location_from_row(row: &Row<'_>) -> rusqlite::Result<FileLocation> {
@@ -340,7 +532,8 @@ pub(super) fn file_location_from_row(row: &Row<'_>) -> rusqlite::Result<FileLoca
 pub(super) const FILE_LOCATION_COLUMNS: &str =
     "id, path, filename, title, mime_type, size, subtitle_available";
 
-pub(super) const FINGERPRINT_COLUMNS: &str = "id, path, size, modified_secs, created_at_secs";
+pub(super) const FINGERPRINT_COLUMNS: &str =
+    "id, path, size, modified_secs, created_at_secs, tags_version";
 
 pub(super) fn fingerprint_from_row(row: &Row<'_>) -> rusqlite::Result<FileFingerprint> {
     Ok(FileFingerprint {
@@ -349,6 +542,7 @@ pub(super) fn fingerprint_from_row(row: &Row<'_>) -> rusqlite::Result<FileFinger
         size: row.get::<_, i64>(2)? as u64,
         modified: seconds_to_time(row.get(3)?),
         created_at: seconds_to_time(row.get(4)?),
+        tags_version: row.get::<_, i64>(5)? as u32,
     })
 }
 

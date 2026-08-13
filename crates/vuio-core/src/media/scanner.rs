@@ -15,6 +15,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             size: file.size,
             modified: file.modified,
             created_at: file.created_at,
+            tags_version: file.tags_version,
         }
     }
 
@@ -244,6 +245,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
             return true;
         }
 
+        // A record written by an older tag reader is stale even though its file
+        // is not. Non-recursive roots come through here rather than through
+        // `fingerprint_needs_update`, and without this they would never pick up
+        // an improved extractor.
+        if existing.tags_version < current.tags_version {
+            return true;
+        }
+
         // Compare modification times with tolerance for Windows timestamp precision issues
         // Windows can have different precision depending on filesystem and access method
         let time_diff = if existing.modified > current.modified {
@@ -261,6 +270,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
     fn fingerprint_needs_update(&self, existing: &FileFingerprint, current: &MediaFile) -> bool {
         if existing.size != current.size {
+            return true;
+        }
+        // A record written by an older tag reader is stale even though its file
+        // is not. The file has already been parsed by the time we get here, so
+        // rewriting it costs one database write and no extra I/O.
+        if existing.tags_version < current.tags_version {
             return true;
         }
         let time_diff = if existing.modified > current.modified {
@@ -568,6 +583,10 @@ impl<D: DatabaseManager> MediaScanner<D> {
             track_number: None,
             year: None,
             album_artist: None,
+            tags: Default::default(),
+            stream: Default::default(),
+            extra_tags: Vec::new(),
+            tags_version: 0,
             subtitle_available: tokio::fs::try_exists(path.with_extension("srt"))
                 .await
                 .unwrap_or(false),

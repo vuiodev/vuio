@@ -2,7 +2,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use futures_util::Stream;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::{Duration, SystemTime};
@@ -59,7 +59,58 @@ pub struct MusicCategory {
     pub id: String,
     pub name: String,
     pub category_type: MusicCategoryType,
+    /// How many records carry this value.
     pub count: usize,
+    /// How many distinct sub-categories it contains, when one was asked for.
+    ///
+    /// A container whose children are containers cannot report `count` as its
+    /// `childCount` — an artist with forty tracks across three albums has three
+    /// children, not forty.
+    pub child_count: Option<usize>,
+    /// One record belonging to this category, used to point a container's
+    /// `upnp:albumArtURI` at cover art without a second query.
+    pub sample_id: Option<i64>,
+}
+
+/// Which records a category listing is drawn from.
+///
+/// Every field is an `AND`, which is what lets one query serve a flat list of
+/// artists and the albums of one artist within one genre alike.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MusicCategoryFilter {
+    pub artist: Option<String>,
+    pub album_artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub year: Option<u32>,
+}
+
+impl MusicCategoryFilter {
+    pub fn artist(artist: impl Into<String>) -> Self {
+        Self {
+            artist: Some(artist.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn album_artist(album_artist: impl Into<String>) -> Self {
+        Self {
+            album_artist: Some(album_artist.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn genre(genre: impl Into<String>) -> Self {
+        Self {
+            genre: Some(genre.into()),
+            ..Self::default()
+        }
+    }
+
+    pub fn with_artist(mut self, artist: impl Into<String>) -> Self {
+        self.artist = Some(artist.into());
+        self
+    }
 }
 
 /// Types of music categorization
@@ -71,6 +122,46 @@ pub enum MusicCategoryType {
     AlbumArtist,
     Year,
     Playlist,
+}
+
+/// Tag fields promoted to columns of their own.
+///
+/// These are the ones browsing, sorting or DIDL read directly. Everything else
+/// a tag reader finds is kept verbatim in `extra_tags`, so learning to use a
+/// new tag later is a query rather than a migration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AudioTags {
+    pub disc_number: Option<u32>,
+    pub disc_total: Option<u32>,
+    pub track_total: Option<u32>,
+    pub composer: Option<String>,
+    pub comment: Option<String>,
+    pub bpm: Option<u32>,
+    pub compilation: Option<bool>,
+    pub sort_title: Option<String>,
+    pub sort_artist: Option<String>,
+    pub sort_album: Option<String>,
+    /// The full release date string. `MediaFile::year` keeps the integer the
+    /// Years category groups on.
+    pub release_date: Option<String>,
+    pub musicbrainz_track_id: Option<String>,
+    pub musicbrainz_album_id: Option<String>,
+    pub musicbrainz_artist_id: Option<String>,
+}
+
+/// Stream properties read off the container while its tags are parsed.
+///
+/// DLNA renderers use these as `res` attributes to decide whether they can play
+/// a track before fetching it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StreamInfo {
+    pub codec: Option<String>,
+    pub sample_rate: Option<u32>,
+    pub channels: Option<u16>,
+    pub bits_per_sample: Option<u16>,
+    /// Average bits per second. DLNA's `res@bitrate` wants *bytes* per second,
+    /// so the renderer layer divides by eight.
+    pub bit_rate: Option<u32>,
 }
 
 /// Enhanced MediaFile structure for database storage
@@ -90,6 +181,17 @@ pub struct MediaFile {
     pub track_number: Option<u32>,
     pub year: Option<u32>,
     pub album_artist: Option<String>,
+    pub tags: AudioTags,
+    pub stream: StreamInfo,
+    /// Every other tag the reader found, as (normalized key, value).
+    ///
+    /// Write-only: the scanner fills it and the writer persists it to
+    /// `media_tags`. Reads that only need to render a browse response leave it
+    /// empty rather than pay for the join.
+    pub extra_tags: Vec<(String, String)>,
+    /// Which version of the tag reader wrote this record. Drives re-reads when
+    /// the reader improves; see `platform::filesystem::TAGS_VERSION`.
+    pub tags_version: u32,
     pub subtitle_available: bool,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
@@ -106,6 +208,9 @@ pub struct FileFingerprint {
     pub size: u64,
     pub modified: SystemTime,
     pub created_at: SystemTime,
+    /// Which tag reader wrote the record. A record whose file is unchanged is
+    /// still re-read when this trails the current reader.
+    pub tags_version: u32,
 }
 
 /// Minimal owned state needed after a database session to serve one resource.
@@ -229,6 +334,10 @@ impl MediaFile {
             track_number: None,
             year: None,
             album_artist: None,
+            tags: AudioTags::default(),
+            stream: StreamInfo::default(),
+            extra_tags: Vec::new(),
+            tags_version: 0,
             subtitle_available: false,
             created_at: now,
             updated_at: now,
@@ -282,6 +391,27 @@ impl MediaFileView for MediaFile {
     fn album_artist(&self) -> Option<&str> {
         self.album_artist.as_deref()
     }
+    fn tags_version(&self) -> u32 {
+        self.tags_version
+    }
+    fn disc_number(&self) -> Option<u32> {
+        self.tags.disc_number
+    }
+    fn composer(&self) -> Option<&str> {
+        self.tags.composer.as_deref()
+    }
+    fn sample_rate(&self) -> Option<u32> {
+        self.stream.sample_rate
+    }
+    fn channels(&self) -> Option<u16> {
+        self.stream.channels
+    }
+    fn bits_per_sample(&self) -> Option<u16> {
+        self.stream.bits_per_sample
+    }
+    fn bit_rate(&self) -> Option<u32> {
+        self.stream.bit_rate
+    }
     fn subtitle_available(&self) -> bool {
         self.subtitle_available
     }
@@ -321,6 +451,34 @@ pub trait MediaFileView {
     fn subtitle_available(&self) -> bool;
     fn created_at_secs(&self) -> u64;
     fn updated_at_secs(&self) -> u64;
+
+    /// Which version of the tag reader wrote this record.
+    fn tags_version(&self) -> u32 {
+        0
+    }
+
+    // The remaining tag and stream fields default to absent so a view that has
+    // no use for them — the index snapshot, say — need not carry them.
+
+    fn disc_number(&self) -> Option<u32> {
+        None
+    }
+    fn composer(&self) -> Option<&str> {
+        None
+    }
+    fn sample_rate(&self) -> Option<u32> {
+        None
+    }
+    fn channels(&self) -> Option<u16> {
+        None
+    }
+    fn bits_per_sample(&self) -> Option<u16> {
+        None
+    }
+    /// Average bits per second; `res@bitrate` is bytes per second.
+    fn bit_rate(&self) -> Option<u32> {
+        None
+    }
 
     fn to_file_location(&self) -> Option<FileLocation> {
         Some(FileLocation {
@@ -382,6 +540,20 @@ pub enum MediaFileQuery {
     Genre(String),
     Year(u32),
     AlbumArtist(String),
+    /// Tracks matching any combination of music tags.
+    ///
+    /// The single-tag variants above stay for the `get_music_by_*` API; this is
+    /// what a nested browse tree needs, where an album is only meaningful
+    /// alongside the artist or genre it was reached through.
+    Music {
+        artist: Option<String>,
+        album_artist: Option<String>,
+        album: Option<String>,
+        genre: Option<String>,
+        year: Option<u32>,
+        /// Leave out internet-radio records, which are audio but not music.
+        exclude_radio: bool,
+    },
     Playlist(i64),
     /// Cursor-paged library scan. Filtering is performed against borrowed
     /// views inside the database read transaction, so rejected rows are never
@@ -555,6 +727,22 @@ pub trait MediaRepository: Send + Sync {
     /// Get all album artists
     async fn get_album_artists(&self) -> Result<Vec<MusicCategory>>;
 
+    /// Distinct values of one tag, restricted to the records a filter selects.
+    ///
+    /// The flat listings above are this with an empty filter; a nested browse
+    /// tree is this with the ancestors it descended through.
+    ///
+    /// `child_of` names the tag one level further down. When given, each result
+    /// also reports how many distinct values of *that* tag it contains, which
+    /// is what a container whose children are containers must announce as its
+    /// `childCount`.
+    async fn get_music_categories(
+        &self,
+        kind: MusicCategoryType,
+        filter: &MusicCategoryFilter,
+        child_of: Option<MusicCategoryType>,
+    ) -> Result<Vec<MusicCategory>>;
+
     /// Get music files by artist
     async fn get_music_by_artist(&self, artist: &str) -> Result<Vec<MediaFile>>;
 
@@ -570,6 +758,12 @@ pub trait MediaRepository: Send + Sync {
 
     /// Get music files by album artist
     async fn get_music_by_album_artist(&self, album_artist: &str) -> Result<Vec<MediaFile>>;
+
+    /// Every tag stored for one record that has no column of its own.
+    ///
+    /// Returned as (normalized key, value) pairs, sorted by key. A tag with
+    /// several values — two artists, three genres — appears once per value.
+    async fn get_media_tags(&self, media_file_id: i64) -> Result<Vec<(String, String)>>;
 
     /// Get multiple files by their paths in a single query.
     async fn get_files_by_paths(&self, paths: &[PathBuf]) -> Result<Vec<MediaFile>>;
@@ -681,6 +875,12 @@ pub trait PlaylistRepository: Send + Sync {
 
     /// Get all tracks in a playlist
     async fn get_playlist_tracks(&self, playlist_id: i64) -> Result<Vec<MediaFile>>;
+
+    /// Track counts for every playlist, keyed by playlist id.
+    ///
+    /// Browsing the playlist list needs one child count per container, which
+    /// would otherwise be a query per row.
+    async fn count_playlist_entries(&self) -> Result<HashMap<i64, usize>>;
 
     /// Reorder tracks in a playlist
     async fn reorder_playlist(

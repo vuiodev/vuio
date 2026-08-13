@@ -50,50 +50,18 @@ pub async fn generate_browse_response(
             }
 
             let path_str = container.path.to_string_lossy();
-            let container_id = if path_str.starts_with("audio/")
-                || path_str.starts_with("video/")
-                || path_str.starts_with("image/")
-                || path_str.starts_with("radio/")
-                || path_str == "audio"
-                || path_str == "video"
-                || path_str == "image"
-                || path_str == "radio"
-            {
-                path_str.into_owned()
-            } else if path_str.starts_with('d') && path_str[1..].chars().all(|c| c.is_ascii_digit())
-            {
-                format!("{}/{}", object_id.trim_end_matches('/'), path_str)
-            } else {
-                format!("{}/{}", object_id.trim_end_matches('/'), container.name)
-            };
-
-            let _ = write!(
-                &mut didl,
-                r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="1"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class>"#,
-                xml_escape(&container_id),
-                xml_escape(object_id),
-                xml_escape(&container.name)
+            let spec = ContainerSpec::folder(
+                directory_container_id(object_id, &path_str, &container.name),
+                &container.name,
             );
-
-            if client == crate::web::client::DlnaClientProfile::SonyBdp
-                || client == crate::web::client::DlnaClientProfile::SonyBravia
-                || client == crate::web::client::DlnaClientProfile::PlayStation
-            {
-                let class_char = if container_id.contains("audio") || container_id.contains("music")
-                {
-                    "A"
-                } else if container_id.contains("image") || container_id.contains("picture") {
-                    "P"
-                } else {
-                    "V"
-                };
-                let _ = write!(
-                    &mut didl,
-                    r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{}</av:mediaClass>"#,
-                    class_char
-                );
-            }
-            didl.push_str("</container>");
+            let _ = write_container(
+                &mut didl,
+                &spec,
+                object_id,
+                client,
+                server_ip,
+                state.http_binding.port(),
+            );
         }
 
         let mut bookmarks_guard = if client == crate::web::client::DlnaClientProfile::SamsungTv
@@ -388,12 +356,63 @@ pub async fn generate_browse_response(
     final_response
 }
 
+/// A DIDL document listing containers only.
+///
+/// Every level of the music tree above the tracks is built from this, which is
+/// why it takes fully-formed [`ContainerSpec`]s rather than deriving ids and
+/// classes from a path the way the folder browse does.
+pub fn generate_container_list_response(
+    object_id: &str,
+    containers: &[ContainerSpec],
+    total_matches: usize,
+    context: &BrowseRenderContext,
+) -> String {
+    use std::fmt::Write;
+
+    let mut response = String::with_capacity(750 + containers.len() * 300);
+    response.push_str(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+    <s:Body>
+        <u:BrowseResponse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+            <Result>"#,
+    );
+    let mut didl = SoapResultWriter(&mut response);
+    didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:pv="http://www.pv.com/pvplay/" xmlns:sec="http://www.sec.co.kr/">"#);
+    for container in containers {
+        let _ = write_container(
+            &mut didl,
+            container,
+            object_id,
+            context.client,
+            &context.server_ip,
+            context.server_port,
+        );
+    }
+    didl.push_str("</DIDL-Lite>");
+    let _ = write!(
+        &mut response,
+        r#"</Result>
+            <NumberReturned>{}</NumberReturned>
+            <TotalMatches>{}</TotalMatches>
+            <UpdateID>{}</UpdateID>
+        </u:BrowseResponse>
+    </s:Body>
+</s:Envelope>"#,
+        containers.len(),
+        total_matches,
+        context.update_id
+    );
+    response
+}
+
 /// Single-container BrowseMetadata response. Samsung TVs probe folders this way and
 /// use `childCount` to decide whether a folder is empty.
 pub fn generate_container_metadata_response(
     object_id: &str,
     parent_id: &str,
     title: &str,
+    class: &str,
     child_count: usize,
     update_id: u32,
 ) -> String {
@@ -411,10 +430,11 @@ pub fn generate_container_metadata_response(
     didl.push_str(r#"<DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:sec="http://www.sec.co.kr/">"#);
     let _ = write!(
         &mut didl,
-        r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="{child_count}"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class></container>"#,
+        r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="{child_count}"><dc:title>{}</dc:title><upnp:class>{}</upnp:class></container>"#,
         xml_escape(object_id),
         xml_escape(parent_id),
-        xml_escape(title)
+        xml_escape(title),
+        class
     );
     didl.push_str("</DIDL-Lite>");
     let _ = write!(

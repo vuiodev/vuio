@@ -16,19 +16,18 @@ use tracing::{debug, error, info, warn};
 mod parser;
 use parser::*;
 
-mod categories;
 mod common;
 mod connection;
 mod content_directory;
 mod metadata;
+mod music;
 
-use categories::*;
 use common::*;
+use music::*;
 pub use connection::{
     connection_manager_control, connection_manager_scpd, media_receiver_registrar_control,
     media_receiver_registrar_scpd,
 };
-use content_directory::ContentDirectoryHandler;
 pub use content_directory::{
     content_directory_control, content_directory_scpd, description_handler,
 };

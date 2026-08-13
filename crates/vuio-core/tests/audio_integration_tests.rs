@@ -595,3 +595,247 @@ https://cast1.asurahosting.com/proxy/julien/stream
         "https://cast1.asurahosting.com/proxy/julien/stream"
     );
 }
+
+/// An ID3v2.3 tag, built by hand.
+///
+/// The tests need a *writer*, and symphonia only reads, so the tag bytes are
+/// assembled here rather than by a second tagging library.
+fn id3v2_tag(frames: &[(&[u8; 4], &str)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (id, text) in frames {
+        let mut payload = vec![0u8]; // ISO-8859-1 encoding marker
+        payload.extend_from_slice(text.as_bytes());
+        body.extend_from_slice(*id);
+        // v2.3 frame sizes are plain big-endian, unlike the synchsafe header.
+        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        body.extend_from_slice(&[0, 0]); // flags
+        body.extend_from_slice(&payload);
+    }
+
+    let size = body.len();
+    let mut tag = b"ID3".to_vec();
+    tag.extend_from_slice(&[3, 0, 0]); // version 2.3, no flags
+    tag.extend_from_slice(&[
+        ((size >> 21) & 0x7f) as u8,
+        ((size >> 14) & 0x7f) as u8,
+        ((size >> 7) & 0x7f) as u8,
+        (size & 0x7f) as u8,
+    ]);
+    tag.extend_from_slice(&body);
+    tag
+}
+
+/// A minimal AIFF carrying an ID3 chunk.
+///
+/// AIFF is the point of the exercise: it is a container the previous tag reader
+/// could not open at all, so a library of these indexed with no artist, album
+/// or genre — which is what "the categories are empty" on issue #11 looked like.
+fn aiff_with_id3(title: &str, artist: &str, album: &str, genre: &str, year: &str) -> Vec<u8> {
+    fn chunk(id: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(8 + payload.len() + 1);
+        out.extend_from_slice(id);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            out.push(0); // IFF chunks are word aligned
+        }
+        out
+    }
+
+    // COMM: channels, frame count, bits per sample, then a 10-byte extended
+    // float sample rate. 0x400EAC44… is 44100 Hz.
+    let mut comm = Vec::new();
+    comm.extend_from_slice(&2i16.to_be_bytes());
+    comm.extend_from_slice(&2u32.to_be_bytes());
+    comm.extend_from_slice(&16i16.to_be_bytes());
+    comm.extend_from_slice(&[0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0]);
+
+    let tag = id3v2_tag(&[
+        (b"TIT2", title),
+        (b"TPE1", artist),
+        (b"TALB", album),
+        (b"TCON", genre),
+        (b"TYER", year),
+        (b"TRCK", "4"),
+    ]);
+
+    let mut ssnd = vec![0u8; 8]; // offset and block size
+    ssnd.extend_from_slice(&[0u8; 8]); // one frame of silence
+
+    let mut body = b"AIFF".to_vec();
+    body.extend(chunk(b"COMM", &comm));
+    body.extend(chunk(b"ID3 ", &tag));
+    body.extend(chunk(b"SSND", &ssnd));
+
+    let mut file = b"FORM".to_vec();
+    file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    file.extend_from_slice(&body);
+    file
+}
+
+/// Append an APEv2 tag, the way a tagger writes one onto an existing file.
+fn with_apev2_tag(mut audio: Vec<u8>, items: &[(&str, &str)]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (key, value) in items {
+        body.extend_from_slice(&(value.len() as u32).to_le_bytes());
+        body.extend_from_slice(&0u32.to_le_bytes()); // flags: UTF-8 text
+        body.extend_from_slice(key.as_bytes());
+        body.push(0);
+        body.extend_from_slice(value.as_bytes());
+    }
+
+    audio.extend_from_slice(&body);
+    audio.extend_from_slice(b"APETAGEX");
+    audio.extend_from_slice(&2000u32.to_le_bytes()); // version 2
+    audio.extend_from_slice(&((body.len() + 32) as u32).to_le_bytes());
+    audio.extend_from_slice(&(items.len() as u32).to_le_bytes());
+    audio.extend_from_slice(&0u32.to_le_bytes()); // footer only, no header
+    audio.extend_from_slice(&[0u8; 8]); // reserved
+    audio
+}
+
+/// The regression behind issue #11: a library in a container the old tag reader
+/// could not open produced categories with nothing in them.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (scanner harness)"
+)]
+async fn tags_from_a_container_the_old_reader_could_not_open() {
+    use vuio_core::database::{MusicCategoryFilter, MusicCategoryType};
+
+    let temp_dir = tempdir().unwrap();
+    let raw_media_dir = temp_dir.path().join("media");
+    fs::create_dir_all(&raw_media_dir).unwrap();
+    let media_dir = fs::canonicalize(raw_media_dir).unwrap();
+
+    let db = Arc::new(
+        SqliteDatabase::new(temp_dir.path().join("aiff.db"))
+            .await
+            .unwrap(),
+    );
+    db.initialize().await.unwrap();
+
+    let path = media_dir.join("silence.aiff");
+    fs::write(
+        &path,
+        aiff_with_id3("Quiet", "Aphex Twin", "Selected Ambient", "Ambient", "1992"),
+    )
+    .unwrap();
+
+    let scanner = MediaScanner::with_database(db.clone());
+    scanner.scan_directory_recursive(&media_dir).await.unwrap();
+
+    let file = db.get_file_by_path(&path).await.unwrap().unwrap();
+    assert_eq!(file.title.as_deref(), Some("Quiet"));
+    assert_eq!(file.artist.as_deref(), Some("Aphex Twin"));
+    assert_eq!(file.album.as_deref(), Some("Selected Ambient"));
+    assert_eq!(file.genre.as_deref(), Some("Ambient"));
+    assert_eq!(file.year, Some(1992));
+    assert_eq!(file.track_number, Some(4));
+
+    // Stream properties come off the same probe, and DIDL advertises them.
+    assert_eq!(file.stream.sample_rate, Some(44_100));
+    assert_eq!(file.stream.channels, Some(2));
+    assert_eq!(file.stream.bits_per_sample, Some(16));
+
+    // Stamped with the reader's version, so it is not rewritten on every scan.
+    assert!(file.tags_version >= 1);
+
+    // And the categories the issue asked for are populated, not empty.
+    let names = |categories: Vec<vuio_core::database::MusicCategory>| {
+        categories
+            .into_iter()
+            .map(|category| category.name)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(names(db.get_artists().await.unwrap()), ["Aphex Twin"]);
+    assert_eq!(
+        names(db.get_albums(None).await.unwrap()),
+        ["Selected Ambient"]
+    );
+    assert_eq!(names(db.get_genres().await.unwrap()), ["Ambient"]);
+    assert_eq!(names(db.get_years().await.unwrap()), ["1992"]);
+    assert_eq!(
+        names(
+            db.get_music_categories(
+                MusicCategoryType::Album,
+                &MusicCategoryFilter::artist("Aphex Twin"),
+                None,
+            )
+            .await
+            .unwrap()
+        ),
+        ["Selected Ambient"]
+    );
+}
+
+/// APEv2 tags sit at the end of the file, in a metadata revision of their own.
+///
+/// A file can carry both those and ID3 frames, so the reader drains the whole
+/// metadata log rather than skipping to the newest revision, which would drop
+/// whichever set came first.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (scanner harness)"
+)]
+async fn apev2_tags_are_read_alongside_id3() {
+    let temp_dir = tempdir().unwrap();
+    let raw_media_dir = temp_dir.path().join("media");
+    fs::create_dir_all(&raw_media_dir).unwrap();
+    let media_dir = fs::canonicalize(raw_media_dir).unwrap();
+
+    let db = Arc::new(
+        SqliteDatabase::new(temp_dir.path().join("ape.db"))
+            .await
+            .unwrap(),
+    );
+    db.initialize().await.unwrap();
+
+    let silent_mp3_base64 = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU2LjM2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU2LjQxAAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV";
+    let path = media_dir.join("apetagged.mp3");
+    fs::write(
+        &path,
+        with_apev2_tag(
+            decode_base64(silent_mp3_base64),
+            &[
+                ("Title", "Roygbiv"),
+                ("Artist", "Boards of Canada"),
+                ("Album", "Music Has the Right"),
+                ("Genre", "Electronic"),
+                ("Year", "1998"),
+                ("Track", "4"),
+            ],
+        ),
+    )
+    .unwrap();
+
+    let scanner = MediaScanner::with_database(db.clone());
+    scanner.scan_directory_recursive(&media_dir).await.unwrap();
+
+    let file = db.get_file_by_path(&path).await.unwrap().unwrap();
+    assert_eq!(file.title.as_deref(), Some("Roygbiv"));
+    assert_eq!(file.artist.as_deref(), Some("Boards of Canada"));
+    assert_eq!(file.album.as_deref(), Some("Music Has the Right"));
+    assert_eq!(file.genre.as_deref(), Some("Electronic"));
+    assert_eq!(file.year, Some(1998));
+    assert_eq!(file.track_number, Some(4));
+
+    // The ID3 frame the encoder wrote lives in a different revision of the
+    // metadata log than the APE items, and both survive: the APE values reached
+    // the columns asserted above, and the ID3 one reached the side table.
+    let stored = db.get_media_tags(file.id.unwrap()).await.unwrap();
+    assert!(
+        stored
+            .iter()
+            .any(|(key, value)| key == "Encoder" && value.starts_with("Lavf")),
+        "the ID3 revision must not be dropped in favour of the APE one: {stored:?}"
+    );
+
+    // A tag with a column of its own is not repeated in the side table.
+    assert!(
+        !stored.iter().any(|(key, _)| key == "Artist"),
+        "promoted tags belong in their column, not both places: {stored:?}"
+    );
+}

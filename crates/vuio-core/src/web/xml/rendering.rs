@@ -145,14 +145,106 @@ pub struct BrowseRenderContext {
     pub bookmarks: HashMap<i64, u32>,
 }
 
-pub(super) fn write_directory<W: std::fmt::Write, D: DirectoryView>(
+/// UPnP container classes.
+///
+/// Control points key display off these: a `musicAlbum` gets album art and
+/// track listing, a `musicArtist` gets grouped under Artists, a
+/// `playlistContainer` offers "play all". Announcing everything as a
+/// `storageFolder` is what makes a categorized library look like a file tree.
+pub mod container_class {
+    pub const STORAGE_FOLDER: &str = "object.container.storageFolder";
+    pub const MUSIC_ARTIST: &str = "object.container.person.musicArtist";
+    pub const MUSIC_ALBUM: &str = "object.container.album.musicAlbum";
+    pub const MUSIC_GENRE: &str = "object.container.genre.musicGenre";
+    pub const PLAYLIST: &str = "object.container.playlistContainer";
+}
+
+/// One container as it will be rendered into a DIDL document.
+#[derive(Clone, Debug)]
+pub struct ContainerSpec {
+    pub id: String,
+    pub title: String,
+    pub class: &'static str,
+    pub child_count: usize,
+    /// A record whose cover art represents this container, if it has one.
+    pub album_art_id: Option<i64>,
+}
+
+impl ContainerSpec {
+    pub fn folder(id: impl Into<String>, title: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            title: title.into(),
+            class: container_class::STORAGE_FOLDER,
+            child_count: 1,
+            album_art_id: None,
+        }
+    }
+
+    pub fn with_class(mut self, class: &'static str) -> Self {
+        self.class = class;
+        self
+    }
+
+    pub fn with_child_count(mut self, child_count: usize) -> Self {
+        self.child_count = child_count;
+        self
+    }
+
+    pub fn with_album_art(mut self, album_art_id: Option<i64>) -> Self {
+        self.album_art_id = album_art_id;
+        self
+    }
+}
+
+/// The one place a `<container>` element is written.
+pub(super) fn write_container<W: std::fmt::Write>(
     output: &mut W,
-    object_id: &str,
-    container: &D,
+    spec: &ContainerSpec,
+    parent_id: &str,
     client: crate::web::client::DlnaClientProfile,
+    server_ip: &str,
+    server_port: u16,
 ) -> std::fmt::Result {
-    let path = container.path();
-    let container_id = if path.starts_with("audio/")
+    write!(
+        output,
+        r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="{}"><dc:title>{}</dc:title><upnp:class>{}</upnp:class>"#,
+        xml_escape(&spec.id),
+        xml_escape(parent_id),
+        spec.child_count,
+        xml_escape(&spec.title),
+        spec.class
+    )?;
+    if let Some(art_id) = spec.album_art_id {
+        write!(
+            output,
+            "<upnp:albumArtURI>http://{server_ip}:{server_port}/media/{art_id}/cover</upnp:albumArtURI>"
+        )?;
+    }
+    if matches!(
+        client,
+        crate::web::client::DlnaClientProfile::SonyBdp
+            | crate::web::client::DlnaClientProfile::SonyBravia
+            | crate::web::client::DlnaClientProfile::PlayStation
+    ) {
+        let class = if spec.id.contains("audio") || spec.id.contains("music") {
+            "A"
+        } else if spec.id.contains("image") || spec.id.contains("picture") {
+            "P"
+        } else {
+            "V"
+        };
+        write!(
+            output,
+            r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{class}</av:mediaClass>"#
+        )?;
+    }
+    output.write_str("</container>")
+}
+
+/// Derive the object id a filesystem-backed subdirectory browses under.
+pub(super) fn directory_container_id(object_id: &str, path: &str, name: &str) -> String {
+    if path.starts_with("audio/")
         || path.starts_with("video/")
         || path.starts_with("image/")
         || path.starts_with("radio/")
@@ -165,34 +257,28 @@ pub(super) fn write_directory<W: std::fmt::Write, D: DirectoryView>(
     } else if path.starts_with('d') && path[1..].chars().all(|c| c.is_ascii_digit()) {
         format!("{}/{}", object_id.trim_end_matches('/'), path)
     } else {
-        format!("{}/{}", object_id.trim_end_matches('/'), container.name())
-    };
-    write!(
-        output,
-        r#"<container id="{}" parentID="{}" restricted="1" searchable="0" childCount="1"><dc:title>{}</dc:title><upnp:class>object.container.storageFolder</upnp:class>"#,
-        xml_escape(&container_id),
-        xml_escape(object_id),
-        xml_escape(container.name())
-    )?;
-    if matches!(
-        client,
-        crate::web::client::DlnaClientProfile::SonyBdp
-            | crate::web::client::DlnaClientProfile::SonyBravia
-            | crate::web::client::DlnaClientProfile::PlayStation
-    ) {
-        let class = if container_id.contains("audio") || container_id.contains("music") {
-            "A"
-        } else if container_id.contains("image") || container_id.contains("picture") {
-            "P"
-        } else {
-            "V"
-        };
-        write!(
-            output,
-            r#"<av:mediaClass xmlns:av="urn:schemas-sony-com:av">{class}</av:mediaClass>"#
-        )?;
+        format!("{}/{}", object_id.trim_end_matches('/'), name)
     }
-    output.write_str("</container>")
+}
+
+pub(super) fn write_directory<W: std::fmt::Write, D: DirectoryView>(
+    output: &mut W,
+    object_id: &str,
+    container: &D,
+    context: &BrowseRenderContext,
+) -> std::fmt::Result {
+    let spec = ContainerSpec::folder(
+        directory_container_id(object_id, container.path(), container.name()),
+        container.name(),
+    );
+    write_container(
+        output,
+        &spec,
+        object_id,
+        context.client,
+        &context.server_ip,
+        context.server_port,
+    )
 }
 
 pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
@@ -243,6 +329,13 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             write!(
                 output,
                 "<upnp:albumArtist>{}</upnp:albumArtist>",
+                xml_escape(value)
+            )?;
+        }
+        if let Some(value) = file.composer() {
+            write!(
+                output,
+                r#"<upnp:author role="Composer">{}</upnp:author>"#,
                 xml_escape(value)
             )?;
         }
@@ -298,6 +391,23 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
                 (seconds % 3600) / 60,
                 seconds % 60
             )?;
+        }
+    }
+    if !is_radio {
+        // Renderers use these to decide whether they can play a track before
+        // fetching a byte of it. Note that DLNA's `res@bitrate` is *bytes* per
+        // second, not bits, which is the usual thing to get wrong.
+        if let Some(bits_per_second) = file.bit_rate().filter(|rate| *rate > 0) {
+            write!(output, r#" bitrate="{}""#, bits_per_second / 8)?;
+        }
+        if let Some(sample_rate) = file.sample_rate().filter(|rate| *rate > 0) {
+            write!(output, r#" sampleFrequency="{sample_rate}""#)?;
+        }
+        if let Some(channels) = file.channels().filter(|count| *count > 0) {
+            write!(output, r#" nrAudioChannels="{channels}""#)?;
+        }
+        if let Some(bits) = file.bits_per_sample().filter(|bits| *bits > 0) {
+            write!(output, r#" bitsPerSample="{bits}""#)?;
         }
     }
     if matches!(
@@ -388,7 +498,7 @@ pub fn generate_indexed_browse_response<S: DatabaseReadSession>(
         starting_index,
         directory_limit,
         |directory| {
-            write_directory(&mut result, object_id, &directory, context.client)
+            write_directory(&mut result, object_id, &directory, &context)
                 .map_err(|_| anyhow::anyhow!("failed to construct directory XML"))
         },
     )?;

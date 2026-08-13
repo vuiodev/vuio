@@ -518,6 +518,15 @@ function renderAdminLibraries(body) {
         const effective = (adminData.effective_directories || [])[index]
             || adminData.library_defaults
             || {};
+        const defaultExcludes = (effective.exclude_patterns && effective.exclude_patterns.length > 0)
+            ? effective.exclude_patterns
+            : ((adminData.library_defaults && adminData.library_defaults.exclude_patterns)
+                ? adminData.library_defaults.exclude_patterns
+                : ['.*', '.DS_Store', '.AppleDouble', '.Trashes', '*.tmp', '.fseventsd']);
+        const excludeVal = (directory.exclude_patterns !== undefined && directory.exclude_patterns !== null)
+            ? directory.exclude_patterns
+            : defaultExcludes;
+
         grid.appendChild(
             libraryField(
                 'Extensions',
@@ -530,8 +539,8 @@ function renderAdminLibraries(body) {
                 libraryList(
                     index,
                     'exclude_patterns',
-                    directory.exclude_patterns,
-                    (effective.exclude_patterns || []).join(', ') || 'None'
+                    excludeVal,
+                    'One entry per line'
                 )
             )
         );
@@ -545,7 +554,14 @@ function renderAdminLibraries(body) {
     add.textContent = 'Add a library folder';
     add.disabled = adminReadOnly();
     add.onclick = () => {
-        adminDirectories = adminDirectoryList().concat([{ path: '', recursive: true }]);
+        const defaultExcludes = (adminData.library_defaults && adminData.library_defaults.exclude_patterns)
+            ? adminData.library_defaults.exclude_patterns.slice()
+            : ['.*', '.DS_Store', '.AppleDouble', '.Trashes', '*.tmp', '.fseventsd'];
+        adminDirectories = adminDirectoryList().concat([{
+            path: '',
+            recursive: true,
+            exclude_patterns: defaultExcludes
+        }]);
         renderAdmin();
     };
     body.appendChild(add);

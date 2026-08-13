@@ -9,10 +9,11 @@ use rusqlite::types::Value;
 use super::{MediaFileQuery, SqliteDatabase};
 use crate::database::sqlite::schema::MEDIA_COLUMNS;
 
-/// Browse order: track number where present, then natural filename, with
-/// untagged records last. `track_sort` materializes the first two rules so an
-/// index can serve the whole clause.
-const BROWSE_ORDER: &str = "media_files.track_sort, media_files.filename COLLATE natural_order";
+/// Browse order: disc, then track number where present, then natural filename,
+/// with untagged records last. `disc_sort` and `track_sort` materialize the
+/// first two rules so an index can serve the whole clause.
+const BROWSE_ORDER: &str =
+    "media_files.disc_sort, media_files.track_sort, media_files.filename COLLATE natural_order";
 /// Insertion order, which is also cursor order for paged scans.
 const ID_ORDER: &str = "media_files.id";
 
@@ -162,6 +163,36 @@ pub(super) fn plan(query: &MediaFileQuery) -> MediaQueryPlan {
         MediaFileQuery::AlbumArtist(album_artist) => {
             clauses.push("media_files.album_artist = ?".to_owned());
             params.push(Value::Text(album_artist.clone()));
+        }
+        MediaFileQuery::Music {
+            artist,
+            album_artist,
+            album,
+            genre,
+            year,
+            exclude_radio,
+        } => {
+            for (column, value) in [
+                ("artist", artist),
+                ("album_artist", album_artist),
+                ("album", album),
+                ("genre", genre),
+            ] {
+                if let Some(value) = value {
+                    clauses.push(format!("media_files.{column} = ?"));
+                    params.push(Value::Text(value.clone()));
+                }
+            }
+            if let Some(year) = year {
+                clauses.push("media_files.year = ?".to_owned());
+                params.push(Value::Integer(i64::from(*year)));
+            }
+            if *exclude_radio {
+                // Radio streams share the audio family but are not part of a
+                // music library, and they have no tags to categorize by.
+                clauses.push("media_files.mime_family = 'audio'".to_owned());
+                clauses.push("media_files.mime_type <> 'audio/radio'".to_owned());
+            }
         }
         MediaFileQuery::Playlist(playlist_id) => {
             source = MEDIA_WITH_ENTRIES;
