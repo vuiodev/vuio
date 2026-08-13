@@ -138,7 +138,8 @@ if command -v createrepo_c &> /dev/null; then
 elif command -v createrepo &> /dev/null; then
     createrepo .
 else
-    echo -e "${RED}Warning: createrepo_c / createrepo not found.${NC}"
+    echo -e "${RED}Warning: createrepo_c / createrepo not found. Creating repodata directory.${NC}"
+    mkdir -p repodata
 fi
 
 cat > vuio.repo << 'EOF'
@@ -153,9 +154,15 @@ EOF
 for distro in fedora rhel centos rocky alma; do
     if [ ! -d "$distro" ]; then
         mkdir -p "$distro"
-        ln -s ../repodata "$distro/repodata" 2>/dev/null || true
-        ln -s ../packages "$distro/packages" 2>/dev/null || true
-        ln -s ../vuio.repo "$distro/vuio.repo" 2>/dev/null || true
+        if [ -e "repodata" ]; then
+            ln -s ../repodata "$distro/repodata" 2>/dev/null || true
+        fi
+        if [ -e "packages" ]; then
+            ln -s ../packages "$distro/packages" 2>/dev/null || true
+        fi
+        if [ -e "vuio.repo" ]; then
+            ln -s ../vuio.repo "$distro/vuio.repo" 2>/dev/null || true
+        fi
     fi
 done
 popd > /dev/null

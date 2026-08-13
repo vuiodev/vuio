@@ -43,7 +43,8 @@ jobs:
             fakeroot \
             rpm \
             apt-utils \
-            zstd
+            zstd \
+            createrepo-c || true
 
       - name: Download binaries from GitHub Releases
         env:
