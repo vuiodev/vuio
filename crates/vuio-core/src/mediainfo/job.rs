@@ -64,6 +64,45 @@ impl MediaInfoJobState {
     }
 }
 
+fn is_season_folder(folder_name: &str) -> bool {
+    let lowered = folder_name.to_ascii_lowercase();
+    let trimmed = lowered.trim();
+    if trimmed.starts_with("season")
+        || trimmed.starts_with("specials")
+        || trimmed.starts_with("extra")
+        || trimmed.starts_with("extras")
+    {
+        return true;
+    }
+    if trimmed.starts_with('s') && trimmed.len() <= 4 {
+        let rest = &trimmed[1..];
+        if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn extract_title_from_parent_dirs(path: &std::path::Path) -> Option<String> {
+    let mut current = path.parent()?;
+    while let Some(name_os) = current.file_name() {
+        let name = name_os.to_string_lossy();
+        if is_season_folder(&name) {
+            current = current.parent()?;
+            continue;
+        }
+        let parsed = parse_media_name(&name);
+        if !parsed.title.is_empty() {
+            return Some(parsed.title);
+        }
+        if !name.trim().is_empty() {
+            return Some(name.to_string());
+        }
+        current = current.parent()?;
+    }
+    None
+}
+
 /// Turn a media record into something worth searching for.
 ///
 /// Returns `None` for anything there is no point asking about — images, and
@@ -103,7 +142,12 @@ fn query_for(file: &MediaFile) -> Option<(MediaQueryKind, MediaQuery)> {
         .file_stem()
         .map(|stem| stem.to_string_lossy().to_string())
         .unwrap_or_else(|| file.filename.clone());
-    let parsed = parse_media_name(&stem);
+    let mut parsed = parse_media_name(&stem);
+    if parsed.title.is_empty() {
+        if let Some(parent_title) = extract_title_from_parent_dirs(&file.path) {
+            parsed.title = parent_title;
+        }
+    }
     if parsed.title.is_empty() {
         return None;
     }
