@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Git tag, commit SHA, or branch to build from (e.g. v0.0.43, main, or a1b2c3d)'
+        description: 'Git tag, commit SHA, or branch to build packages from (e.g. v0.0.43 or main)'
         required: true
         default: 'main'
       version:
-        description: 'Optional package version override (leave blank to auto-detect from ref/tag)'
+        description: 'Optional package version override (leave blank to auto-detect from release tag)'
         required: false
       publish_pages:
         description: 'Publish/update GitHub Pages repository'
@@ -18,104 +18,117 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
 
 jobs:
   build_and_publish_packages:
     name: Build Linux Packages & Publish Repositories
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 15
     permissions:
       contents: write
       pages: write
       id-token: write
 
     steps:
-      - name: Checkout code at target ref
+      - name: Checkout code
         uses: actions/checkout@v6
         with:
           ref: ${{ inputs.ref }}
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl
 
       - name: Install packaging dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            gcc-aarch64-linux-gnu \
-            libc6-dev-arm64-cross \
-            musl-tools \
             dpkg-dev \
             fakeroot \
             rpm \
             apt-utils \
             zstd
 
-      - name: Configure cross-linkers
+      - name: Download binaries from GitHub Releases
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          mkdir -p ~/.cargo
-          printf '[target.aarch64-unknown-linux-gnu]\nlinker = "aarch64-linux-gnu-gcc"\n' >> ~/.cargo/config.toml
+          # Determine tag to fetch release binaries from
+          if [[ "${{ inputs.ref }}" == v* ]]; then
+            TARGET_TAG="${{ inputs.ref }}"
+          elif [ -n "${{ inputs.version }}" ] && [[ "${{ inputs.version }}" == v* ]]; then
+            TARGET_TAG="${{ inputs.version }}"
+          else
+            TARGET_TAG=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName 2>/dev/null || true)
+          fi
 
-      - name: Cache Cargo dependencies
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: linux-pkg-${{ hashFiles('**/Cargo.lock') }}
+          echo "Target Release Tag: ${TARGET_TAG:-latest}"
+          mkdir -p downloaded_assets
+
+          if [ -n "$TARGET_TAG" ]; then
+            gh release download "$TARGET_TAG" --repo "${{ github.repository }}" --pattern "vuio-linux-*.tar.gz" --dir downloaded_assets || true
+          fi
+
+          # Fallback to latest release if specific tag download failed or wasn't set
+          if [ -z "$(ls -A downloaded_assets 2>/dev/null)" ]; then
+            echo "Downloading from latest release..."
+            gh release download --repo "${{ github.repository }}" --pattern "vuio-linux-*.tar.gz" --dir downloaded_assets
+          fi
+
+          echo "Downloaded release archives:"
+          ls -la downloaded_assets/
+
+          # Prepare target directories for packaging scripts
+          mkdir -p target/x86_64-unknown-linux-gnu/release
+          mkdir -p target/aarch64-unknown-linux-gnu/release
+          mkdir -p target/x86_64-unknown-linux-musl/release
+
+          if [ -f downloaded_assets/vuio-linux-x86_64.tar.gz ]; then
+            tar -xzf downloaded_assets/vuio-linux-x86_64.tar.gz -C target/x86_64-unknown-linux-gnu/release
+            cp target/x86_64-unknown-linux-gnu/release/vuio target/x86_64-unknown-linux-musl/release/vuio
+          fi
+
+          if [ -f downloaded_assets/vuio-linux-arm64.tar.gz ]; then
+            tar -xzf downloaded_assets/vuio-linux-arm64.tar.gz -C target/aarch64-unknown-linux-gnu/release
+          fi
 
       - name: Determine Version
         run: |
           if [ -n "${{ inputs.version }}" ]; then
             RAW_VER="${{ inputs.version }}"
-          else
+          elif [[ "${{ inputs.ref }}" == v* ]]; then
             RAW_VER="${{ inputs.ref }}"
+          else
+            RAW_VER=$(gh release view --repo "${{ github.repository }}" --json tagName -q .tagName 2>/dev/null || echo "0.0.43")
           fi
           VER="${RAW_VER#v}"
-          # If ref is a branch name, read version from Cargo.toml
           if [[ "$VER" =~ ^[a-zA-Z] ]]; then
             VER=$(grep -m1 '^version' crates/vuio-cli/Cargo.toml | cut -d'"' -f2)
           fi
           echo "VERSION=$VER" >> $GITHUB_ENV
           echo "Determined package version: $VER"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build release binaries (x86_64 & ARM64 GNU, x86_64 MUSL)
-        run: |
-          cargo build --release --target x86_64-unknown-linux-gnu
-          cargo build --release --target aarch64-unknown-linux-gnu
-          cargo build --release --target x86_64-unknown-linux-musl || echo "::warning::musl x86_64 build failed"
-
-      - name: Build all packages (DEB, RPM, APK, Arch)
+      - name: Build all Linux packages (DEB, RPM, APK, Arch)
         run: |
           mkdir -p builds
           cd packaging/linux
 
-          # x86_64 DEB, RPM & Arch
+          # x86_64 DEB, RPM, Arch, APK
           if [ -f "../../target/x86_64-unknown-linux-gnu/release/vuio" ]; then
             ./build-deb.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "amd64"
             ./build-rpm.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "1" "x86_64"
             ./build-arch.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "x86_64"
+            ./build-apk.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "x86_64"
           fi
 
-          # ARM64 DEB, RPM & Arch
+          # ARM64 DEB, RPM, Arch
           if [ -f "../../target/aarch64-unknown-linux-gnu/release/vuio" ]; then
             ./build-deb.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "arm64"
             ./build-rpm.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "1" "aarch64"
             ./build-arch.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "aarch64"
-          fi
-
-          # MUSL x86_64 Alpine APK
-          if [ -f "../../target/x86_64-unknown-linux-musl/release/vuio" ]; then
-            ./build-apk.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "x86_64"
+            ./build-apk.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "aarch64"
           fi
 
           cd ../..
-          echo "Generated packages:"
+          echo "Generated Linux packages:"
           ls -la builds/
 
       - name: Generate repository site (APT, RPM, APK, Arch)
