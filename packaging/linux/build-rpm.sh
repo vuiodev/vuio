@@ -423,8 +423,8 @@ echo -e "${GREEN}✓ Build environment prepared${NC}"
 echo ""
 echo -e "${YELLOW}--- Building RPM Package ---${NC}"
 
-echo "Building RPM package..."
-rpmbuild --define "_topdir $RPM_ROOT" -ba "$RPM_ROOT/SPECS/${PACKAGE_NAME}.spec"
+echo "Building RPM package for target architecture: $ARCHITECTURE..."
+rpmbuild --target "$ARCHITECTURE" --define "_topdir $RPM_ROOT" -bb "$RPM_ROOT/SPECS/${PACKAGE_NAME}.spec"
 
 # Find the generated RPM
 RPM_FILE=$(find "$RPM_ROOT/RPMS" -name "*.rpm" -type f)
