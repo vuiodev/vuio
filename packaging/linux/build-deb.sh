@@ -62,17 +62,18 @@ fi
 
 echo -e "${GREEN}✓ Binary found at: $BINARY_PATH${NC}"
 
+# Resolve BINARY_PATH and OUTPUT_DIR to absolute paths
+BINARY_PATH="$(cd "$(dirname "$BINARY_PATH")" && pwd)/$(basename "$BINARY_PATH")"
+OUTPUT_DIR="$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)"
+
 # Create build environment
 echo ""
 echo -e "${YELLOW}--- Preparing Build Environment ---${NC}"
 
-TEMP_DIR="temp_deb"
-PKG_DIR="$TEMP_DIR/${PACKAGE_NAME}_${VERSION}_${ARCHITECTURE}"
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf '$TEMP_DIR'" EXIT
 
-# Clean and create package directory structure
-if [[ -d "$TEMP_DIR" ]]; then
-    rm -rf "$TEMP_DIR"
-fi
+PKG_DIR="$TEMP_DIR/${PACKAGE_NAME}_${VERSION}_${ARCHITECTURE}"
 
 mkdir -p "$PKG_DIR"/{DEBIAN,usr/bin,etc/vuio,etc/init.d,var/log/vuio,lib/systemd/system,usr/share/doc/vuio}
 
@@ -484,7 +485,6 @@ echo ""
 echo -e "${YELLOW}--- Building DEB Package ---${NC}"
 
 DEB_FILE="${PACKAGE_NAME}_${VERSION}_${ARCHITECTURE}.deb"
-mkdir -p "$OUTPUT_DIR"
 FINAL_DEB="$OUTPUT_DIR/$DEB_FILE"
 
 echo "Creating DEB package..."
@@ -510,12 +510,6 @@ if [[ -f "$FINAL_DEB" ]]; then
     echo -e "${CYAN}Package Information:${NC}"
     dpkg-deb --info "$FINAL_DEB"
 fi
-
-# Cleanup
-echo ""
-echo -e "${YELLOW}--- Cleaning Up ---${NC}"
-rm -rf "$TEMP_DIR"
-echo -e "${GREEN}✓ Cleanup completed${NC}"
 
 echo ""
 echo -e "${GREEN}--- DEB Build Complete ---${NC}"

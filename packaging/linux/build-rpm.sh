@@ -36,7 +36,6 @@ function show_help() {
     echo ""
     echo "Prerequisites:"
     echo "  - rpmbuild utility"
-    echo "  - rpm-build package"
     echo ""
 }
 
@@ -50,9 +49,7 @@ echo -e "${YELLOW}--- Checking Prerequisites ---${NC}"
 
 if ! command -v rpmbuild &> /dev/null; then
     echo -e "${RED}✗ rpmbuild not found${NC}"
-    echo -e "${YELLOW}Please install rpm-build package:${NC}"
-    echo -e "${YELLOW}  RHEL/CentOS/Fedora: sudo dnf install rpm-build${NC}"
-    echo -e "${YELLOW}  SUSE: sudo zypper install rpm-build${NC}"
+    echo -e "${YELLOW}Please install rpm package containing rpmbuild${NC}"
     exit 1
 fi
 
@@ -66,21 +63,20 @@ fi
 
 echo -e "${GREEN}✓ Binary found at: $BINARY_PATH${NC}"
 
+# Resolve BINARY_PATH and OUTPUT_DIR to absolute paths
+BINARY_PATH="$(cd "$(dirname "$BINARY_PATH")" && pwd)/$(basename "$BINARY_PATH")"
+OUTPUT_DIR="$(mkdir -p "$OUTPUT_DIR" && cd "$OUTPUT_DIR" && pwd)"
+
 # Create build environment
 echo ""
 echo -e "${YELLOW}--- Preparing Build Environment ---${NC}"
 
-TEMP_DIR="temp_rpm"
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf '$TEMP_DIR'" EXIT
+
 RPM_ROOT="$TEMP_DIR/rpmbuild"
-
-# Clean and create RPM build directory structure
-if [[ -d "$TEMP_DIR" ]]; then
-    rm -rf "$TEMP_DIR"
-fi
-
 mkdir -p "$RPM_ROOT"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
 
-# Create source tarball
 SOURCE_DIR="$TEMP_DIR/${PACKAGE_NAME}-${VERSION}"
 mkdir -p "$SOURCE_DIR"/{bin,etc/vuio,etc/init.d,lib/systemd/system}
 
@@ -283,9 +279,9 @@ EOF
 chmod +x "$SOURCE_DIR/etc/init.d/vuio"
 
 # Create source tarball
-cd "$TEMP_DIR"
+pushd "$TEMP_DIR" > /dev/null
 tar -czf "$RPM_ROOT/SOURCES/${PACKAGE_NAME}-${VERSION}.tar.gz" "${PACKAGE_NAME}-${VERSION}"
-cd - > /dev/null
+popd > /dev/null
 
 # Create RPM spec file
 cat > "$RPM_ROOT/SPECS/${PACKAGE_NAME}.spec" << EOF
@@ -425,7 +421,7 @@ echo ""
 echo -e "${YELLOW}--- Building RPM Package ---${NC}"
 
 echo "Building RPM package..."
-rpmbuild --define "_topdir $PWD/$RPM_ROOT" -ba "$RPM_ROOT/SPECS/${PACKAGE_NAME}.spec"
+rpmbuild --define "_topdir $RPM_ROOT" -ba "$RPM_ROOT/SPECS/${PACKAGE_NAME}.spec"
 
 # Find the generated RPM
 RPM_FILE=$(find "$RPM_ROOT/RPMS" -name "*.rpm" -type f)
@@ -435,7 +431,6 @@ if [[ -z "$RPM_FILE" ]]; then
 fi
 
 # Move RPM to output directory
-mkdir -p "$OUTPUT_DIR"
 FINAL_RPM="$OUTPUT_DIR/$(basename "$RPM_FILE")"
 cp "$RPM_FILE" "$FINAL_RPM"
 
@@ -456,23 +451,5 @@ if [[ -f "$FINAL_RPM" ]]; then
     rpm -qip "$FINAL_RPM"
 fi
 
-# Cleanup
-echo ""
-echo -e "${YELLOW}--- Cleaning Up ---${NC}"
-rm -rf "$TEMP_DIR"
-echo -e "${GREEN}✓ Cleanup completed${NC}"
-
 echo ""
 echo -e "${GREEN}--- RPM Build Complete ---${NC}"
-echo ""
-echo "To install the package:"
-echo "  sudo rpm -ivh \"$FINAL_RPM\""
-echo "  # or"
-echo "  sudo dnf install \"$FINAL_RPM\""
-echo "  sudo zypper install \"$FINAL_RPM\""
-echo ""
-echo "To remove the package:"
-echo "  sudo rpm -e $PACKAGE_NAME"
-echo "  # or"
-echo "  sudo dnf remove $PACKAGE_NAME"
-echo "  sudo zypper remove $PACKAGE_NAME"
