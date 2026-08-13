@@ -32,6 +32,28 @@ pub(super) fn default_cache_mb() -> usize {
     128
 }
 
+pub(super) fn default_true() -> bool {
+    true
+}
+
+/// The providers that need no account. Everything else stays off until the
+/// operator supplies a credential, so the default configuration cannot produce a
+/// run that fails half its lookups on 401.
+pub(super) fn default_mediainfo_providers() -> Vec<String> {
+    crate::mediainfo::DEFAULT_PROVIDER_IDS
+        .iter()
+        .map(|id| (*id).to_string())
+        .collect()
+}
+
+pub(super) fn default_min_confidence() -> u8 {
+    60
+}
+
+pub(super) fn default_mediainfo_timeout_seconds() -> u64 {
+    15
+}
+
 /// Settings the host supplied on the command line, which win over the file for the
 /// lifetime of the run.
 ///
@@ -111,6 +133,50 @@ pub struct AppConfig {
     pub database: DatabaseConfig,
     #[serde(default)]
     pub management: ManagementConfig,
+    #[serde(default)]
+    pub mediainfo: MediaInfoConfig,
+}
+
+/// Fetching titles, synopses and artwork from public metadata APIs.
+///
+/// Defaulted as a whole, like `[management]`: a config file written before this
+/// existed has no `[mediainfo]` table and must keep loading.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MediaInfoConfig {
+    /// Whether the feature may run at all. Off until asked for — this is the only
+    /// part of VuIO that talks to anything outside the local network.
+    #[serde(default = "default_false")]
+    pub enabled: bool,
+    /// Provider ids to consult, in preference order. Empty means the key-free set.
+    #[serde(default = "default_mediainfo_providers")]
+    pub providers: Vec<String>,
+    #[serde(default = "default_true")]
+    pub artwork_enabled: bool,
+    /// Where downloaded posters are cached. Filled in from the database directory
+    /// by `apply_platform_defaults` when absent.
+    pub artwork_path: Option<String>,
+    /// Below this score a match is stored but flagged rather than trusted.
+    #[serde(default = "default_min_confidence")]
+    pub min_confidence: u8,
+    /// Whether a fetched title outranks the one read from local tags.
+    #[serde(default = "default_true")]
+    pub prefer_online_titles: bool,
+    #[serde(default = "default_mediainfo_timeout_seconds")]
+    pub request_timeout_seconds: u64,
+}
+
+impl Default for MediaInfoConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            providers: default_mediainfo_providers(),
+            artwork_enabled: true,
+            artwork_path: None,
+            min_confidence: default_min_confidence(),
+            prefer_online_titles: true,
+            request_timeout_seconds: default_mediainfo_timeout_seconds(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

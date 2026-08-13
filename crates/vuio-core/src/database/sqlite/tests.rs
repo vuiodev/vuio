@@ -215,6 +215,37 @@ async fn a_v1_database_migrates_forward_without_losing_anything() {
     // A record left at tags_version 0 is stale against any real reader, so the
     // next scan rewrites it even though the file has not changed.
     assert!(file.tags_version < 1);
+
+    // v3 added the media info table. It arrives empty and usable, and the file it
+    // hangs off keeps the id it already had.
+    use crate::database::MediaInfoRepository;
+    assert!(db.get_mediainfo(7).await.unwrap().is_none());
+    db.bulk_store_mediainfo(&[crate::database::MediaInfoRecord {
+        media_file_id: 7,
+        provider: "musicbrainz".to_string(),
+        remote_id: "release-1".to_string(),
+        kind: "album".to_string(),
+        title: Some("Album".to_string()),
+        original_title: None,
+        overview: None,
+        release_date: None,
+        year: Some(1971),
+        rating: None,
+        genres: Vec::new(),
+        season: None,
+        episode: None,
+        artwork_key: None,
+        payload: "null".to_string(),
+        confidence: 90,
+        fetched_at: std::time::SystemTime::now(),
+        mediainfo_version: 1,
+    }])
+    .await
+    .unwrap();
+    assert_eq!(
+        db.get_mediainfo(7).await.unwrap().unwrap().year,
+        Some(1971)
+    );
 }
 
 #[tokio::test]

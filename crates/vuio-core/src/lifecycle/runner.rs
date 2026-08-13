@@ -175,6 +175,8 @@ where
         active_casts: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::ActiveCastRegistry::new(),
         )),
+        #[cfg(feature = "mediainfo")]
+        mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),

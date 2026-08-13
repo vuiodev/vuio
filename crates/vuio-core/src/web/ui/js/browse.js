@@ -31,6 +31,9 @@ function render() {
         const matchesSearch = searchQuery === ''
             || file.name.toLowerCase().includes(searchQuery)
             || (file.title || '').toLowerCase().includes(searchQuery)
+            // Searching for the real title should find a file whose name is a
+            // release string that does not contain it.
+            || (file.info_title || '').toLowerCase().includes(searchQuery)
             || (file.artist || '').toLowerCase().includes(searchQuery)
             || (file.album || '').toLowerCase().includes(searchQuery);
         if (currentTab === 'radio') {
@@ -274,7 +277,9 @@ function createFileCard(file) {
     `;
     card.querySelector('.media-icon-wrapper').innerHTML = iconSvg;
     const name = card.querySelector('.media-name');
-    name.textContent = file.title || file.name;
+    // A fetched title is the readable one, and for video it is usually the only
+    // title there is — nothing reads metadata out of a video file.
+    name.textContent = file.info_title || file.title || file.name;
     name.title = file.name;
     const details = card.querySelector('.media-details');
     const metadataParts = [file.artist, file.album].filter(Boolean);
@@ -284,6 +289,13 @@ function createFileCard(file) {
         metadata.style.cssText = 'font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.1rem;';
         metadata.textContent = metadataParts.join(' — ');
         details.insertBefore(metadata, details.querySelector('.media-meta'));
+    }
+    if (file.info_overview) {
+        const overview = document.createElement('div');
+        overview.className = 'media-overview';
+        overview.textContent = file.info_overview;
+        overview.title = file.info_overview;
+        details.insertBefore(overview, details.querySelector('.media-meta'));
     }
     card.querySelector('.media-size').textContent = file.size_str;
     card.querySelector('.media-extension').textContent = file.ext;

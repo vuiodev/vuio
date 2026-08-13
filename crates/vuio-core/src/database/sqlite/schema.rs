@@ -18,7 +18,7 @@ use crate::database::{AudioTags, FileFingerprint, FileLocation, MediaFile, Playl
 /// [`MIGRATIONS`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 2;
+pub(super) const SCHEMA_VERSION: i64 = 3;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -170,6 +170,39 @@ CREATE TABLE IF NOT EXISTS media_tags (
 ) STRICT;
 
 CREATE INDEX IF NOT EXISTS idx_media_tags_key ON media_tags(key, value);
+
+-- What a public metadata service said about a file: title, synopsis, rating and
+-- a pointer into the artwork cache.
+--
+-- Deliberately not `media_tags`. That table is cleared and rewritten in full
+-- every time a record is re-scanned, because it holds what the file itself
+-- claims and the file is the authority on that. This holds what somebody else
+-- said, which no amount of re-reading the file can reproduce, so it has to
+-- survive a scan. It still goes when the file does, via the cascade.
+CREATE TABLE IF NOT EXISTS mediainfo (
+    media_file_id     INTEGER PRIMARY KEY REFERENCES media_files(id) ON DELETE CASCADE,
+    provider          TEXT    NOT NULL,
+    remote_id         TEXT    NOT NULL,
+    kind              TEXT    NOT NULL,
+    title             TEXT,
+    original_title    TEXT,
+    overview          TEXT,
+    release_date      TEXT,
+    year              INTEGER,
+    rating            REAL,
+    genres            TEXT,
+    season            INTEGER,
+    episode           INTEGER,
+    artwork_key       TEXT,
+    payload           TEXT    NOT NULL,
+    confidence        INTEGER NOT NULL,
+    fetched_at        INTEGER NOT NULL,
+    mediainfo_version INTEGER NOT NULL
+) STRICT;
+
+-- The dashboard lists the least certain matches first, which is a sort over the
+-- whole table.
+CREATE INDEX IF NOT EXISTS idx_mediainfo_confidence ON mediainfo(confidence);
 "#;
 
 /// Schema upgrades, applied in order to any file older than [`SCHEMA_VERSION`].
@@ -183,7 +216,7 @@ CREATE INDEX IF NOT EXISTS idx_media_tags_key ON media_tags(key, value);
 /// that way needs a different plan, not a destructive one — the file holds
 /// AirPlay pairings, imported playlists, and the record ids that DIDL hands out
 /// as object ids, none of which survive a rebuild.
-const MIGRATIONS: &[(i64, &str)] = &[(2, MIGRATION_V2)];
+const MIGRATIONS: &[(i64, &str)] = &[(2, MIGRATION_V2), (3, MIGRATION_V3)];
 
 /// v1 → v2: full tag extraction.
 ///
@@ -219,6 +252,34 @@ ALTER TABLE media_files ADD COLUMN disc_sort INTEGER
 -- EXISTS` will not redefine one that already exists.
 DROP INDEX IF EXISTS idx_media_dir_order;
 DROP INDEX IF EXISTS idx_media_album;
+"#;
+
+/// v2 → v3: online media info.
+///
+/// Only adds the `mediainfo` table. Existing rows are untouched and the table
+/// starts empty, so an upgraded file behaves exactly as before until someone
+/// presses Fetch. The idempotent DDL creates the same table on a fresh file.
+const MIGRATION_V3: &str = r#"
+CREATE TABLE IF NOT EXISTS mediainfo (
+    media_file_id     INTEGER PRIMARY KEY REFERENCES media_files(id) ON DELETE CASCADE,
+    provider          TEXT    NOT NULL,
+    remote_id         TEXT    NOT NULL,
+    kind              TEXT    NOT NULL,
+    title             TEXT,
+    original_title    TEXT,
+    overview          TEXT,
+    release_date      TEXT,
+    year              INTEGER,
+    rating            REAL,
+    genres            TEXT,
+    season            INTEGER,
+    episode           INTEGER,
+    artwork_key       TEXT,
+    payload           TEXT    NOT NULL,
+    confidence        INTEGER NOT NULL,
+    fetched_at        INTEGER NOT NULL,
+    mediainfo_version INTEGER NOT NULL
+) STRICT;
 "#;
 
 /// Columns of `media_files`, qualified so the list can be used inside joins.

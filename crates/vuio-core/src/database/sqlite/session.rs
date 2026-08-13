@@ -11,7 +11,8 @@ use super::query::{self, MimeFilter};
 use super::schema::column;
 use super::PooledConnection;
 use crate::database::{
-    DatabaseReadSession, DirectoryView, MediaFileQuery, MediaFileView, PlaylistView, VisitSummary,
+    DatabaseReadSession, DirectoryView, MediaFileQuery, MediaFileView, MediaInfoOverlay,
+    PlaylistView, VisitSummary,
 };
 
 /// A read transaction plus the connection it runs on.
@@ -370,6 +371,43 @@ impl DatabaseReadSession for SqliteReadSession {
             summary.visited += 1;
         }
         Ok(summary)
+    }
+
+    fn mediainfo_overlays(
+        &mut self,
+        ids: &[i64],
+        min_confidence: u8,
+    ) -> Result<std::collections::HashMap<i64, MediaInfoOverlay>> {
+        let mut overlays = std::collections::HashMap::new();
+        if ids.is_empty() {
+            return Ok(overlays);
+        }
+        // Bounded by the browse page size, so a placeholder list is well inside
+        // SQLite's parameter limit. `payload` is deliberately not selected.
+        let placeholders = std::iter::repeat_n("?", ids.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT media_file_id, title, overview, genres, artwork_key IS NOT NULL \
+             FROM mediainfo WHERE confidence >= ? AND media_file_id IN ({placeholders})"
+        ))?;
+        let parameters = std::iter::once(min_confidence as i64).chain(ids.iter().copied());
+        let mut rows = statement.query(rusqlite::params_from_iter(parameters))?;
+        while let Some(row) = rows.next()? {
+            let genres: Option<String> = row.get(3)?;
+            overlays.insert(
+                row.get::<_, i64>(0)?,
+                MediaInfoOverlay {
+                    title: row.get(1)?,
+                    overview: row.get(2)?,
+                    genres: genres
+                        .and_then(|genres| serde_json::from_str::<Vec<String>>(&genres).ok())
+                        .unwrap_or_default(),
+                    has_artwork: row.get::<_, i64>(4)? != 0,
+                },
+            );
+        }
+        Ok(overlays)
     }
 }
 

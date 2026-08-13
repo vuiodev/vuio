@@ -16,13 +16,14 @@ use tracing::{debug, info};
 use super::{
     DatabaseBackend, DatabaseHealth, DatabaseManager, DatabaseSettings, DatabaseStats,
     FileFingerprint, FileLocation, HealthRepository, MediaDirectory, MediaFile, MediaFileQuery,
-    MediaRepository, MusicCategory, Playlist, PlaylistRepository, RemovalSummary, RootAvailability,
-    SecretStore, StatsRepository,
+    MediaInfoRecord, MediaInfoRepository, MediaInfoStats, MediaRepository, MusicCategory, Playlist,
+    PlaylistRepository, RemovalSummary, RootAvailability, SecretStore, StatsRepository,
 };
 
 mod directory;
 mod health;
 mod media_repo;
+mod mediainfo_repo;
 mod playlist_repo;
 mod query;
 mod root_repo;

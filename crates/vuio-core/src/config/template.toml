@@ -57,5 +57,11 @@ path = "PLACEHOLDER_DATABASE_PATH"
 vacuum_on_startup = false
 backup_enabled = false
 
+# Online media info
+# The only part of VuIO that contacts anything outside the local network, and
+# only when asked to from the dashboard.
+[mediainfo]
+enabled = false
+
 # Platform-specific notes:
 # PLACEHOLDER_PLATFORM_NOTES

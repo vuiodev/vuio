@@ -234,6 +234,14 @@ pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
         >,
     >,
     pub active_casts: Arc<tokio::sync::Mutex<crate::runtime_state::ActiveCastRegistry>>,
+    /// Progress of the online media info fetch, which the dashboard polls.
+    ///
+    /// A library run takes minutes to hours — the providers' rate limits see to
+    /// that — so it cannot be the body of a request. The state lives here for the
+    /// same reason `active_monitors` does: a handler starts the work, and later
+    /// handlers need to report on it or stop it.
+    #[cfg(feature = "mediainfo")]
+    pub mediainfo_job: Arc<tokio::sync::Mutex<crate::mediainfo::MediaInfoJobState>>,
     #[cfg(feature = "casting")]
     pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
     pub upnp_subscriptions:
@@ -265,6 +273,8 @@ impl<D: DatabaseManager> Clone for AppState<D> {
             mcp_clients: self.mcp_clients.clone(),
             active_monitors: self.active_monitors.clone(),
             active_casts: self.active_casts.clone(),
+            #[cfg(feature = "mediainfo")]
+            mediainfo_job: self.mediainfo_job.clone(),
             #[cfg(feature = "casting")]
             discovered_tvs: self.discovered_tvs.clone(),
             upnp_subscriptions: self.upnp_subscriptions.clone(),

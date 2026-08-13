@@ -24,7 +24,13 @@ const NAV_VIEWS = {
             }
         },
     },
-    admin: { display: 'flex', enter: () => loadAdminConfig() },
+    // The media info fetch keeps running on the server after the tab is left; only
+    // the polling that draws its progress stops.
+    admin: {
+        display: 'flex',
+        enter: () => loadAdminConfig(),
+        leave: () => stopMediaInfoPolling(),
+    },
 };
 
 function switchNav(nav) {

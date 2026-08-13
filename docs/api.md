@@ -162,6 +162,81 @@ supervises it — Docker, systemd or launchd.
 * **Endpoint**: `POST /api/admin/restart`
 * **Response**: `202 Accepted` — `{"stopping": true, "supervised": false}`
 
+### Online media info
+
+Fetches titles, synopses, ratings and artwork from public metadata services. This is the
+only part of VuIO that contacts anything outside the local network, and it is only reached
+by an explicit request to `/run`. Requires the `mediainfo` cargo feature (on by default)
+and `mediainfo.enabled` in the configuration.
+
+Five providers answer without an account — `tvmaze`, `musicbrainz` (with Cover Art Archive
+for artwork), `jikan`, `anilist` and `kitsu`. Five more work once a credential is saved:
+`tmdb`, `omdb`, `discogs`, `lastfm` and `genius`. Requests are paced per provider to the
+rate limits each publisher documents; MusicBrainz's one-per-second ceiling makes a large
+music library slow by design.
+
+#### Status and progress
+* **Endpoint**: `GET /api/admin/mediainfo`
+* **Response**: `200 OK`
+  ```jsonc
+  {
+    "enabled": true,
+    "min_confidence": 60,
+    "providers": [
+      {
+        "id": "tmdb", "label": "TheMovieDB", "group": "Movies & TV",
+        "provides": "Movies, TV, posters, trailers and ratings.",
+        "credential_label": "API key",
+        "signup_url": "https://developer.themoviedb.org",
+        "needs_credential": true,
+        "has_credential": true,   // whether one is stored — never the value
+        "enabled": true           // whether it is in mediainfo.providers
+      }
+    ],
+    "job": {
+      "running": true, "total": 1240, "processed": 318,
+      "matched": 290, "low_confidence": 22, "failed": 6,
+      "cancelled": false, "current": "Arrival.2016.1080p.mkv",
+      "started_at": 1765000000
+    },
+    "stats": { "total": 318, "confident": 290, "low_confidence": 28, "with_artwork": 271 },
+    "flagged": [
+      { "media_file_id": 91, "confidence": 35, "provider": "tvmaze",
+        "matched_title": "Some Show", "filename": "unknown.s01e02.mkv" }
+    ]
+  }
+  ```
+  Stored credentials are never returned by this or any other endpoint; `has_credential`
+  is the only thing reported about them.
+
+#### Save or clear a provider credential
+* **Endpoint**: `POST /api/admin/mediainfo/credentials`
+* **Body**: `{"provider": "tmdb", "token": "…"}` — an empty `token` clears the stored one.
+* **Response**: `200 OK` — `{"saved": true, "has_credential": true}`
+* **Errors**: `400 Bad Request` for an unknown provider, or for one that needs no account.
+
+Credentials are kept in the database's `secrets` table rather than `config.toml`. Under
+Docker the configuration is built from environment variables and `PUT /api/admin/config`
+returns `409`, so a credential in the file would be unsettable in exactly the deployment
+most likely to need one.
+
+#### Start a library fetch
+Walks every file with no usable record — never looked up, looked up by an older reader
+version, or matched too weakly to trust — and returns as soon as the run is scheduled.
+* **Endpoint**: `POST /api/admin/mediainfo/run`
+* **Response**: `200 OK` — `{"started": true, "total": 1240}`
+* **Errors**: `409 Conflict` if a run is already going, if the feature is off, or if no
+  provider is enabled.
+
+#### Cancel a running fetch
+Stops after the item currently in flight; whatever was already matched stays.
+* **Endpoint**: `POST /api/admin/mediainfo/cancel`
+* **Response**: `200 OK` — `{"cancelled": true}`
+* **Errors**: `409 Conflict` when nothing is running.
+
+When a run finishes it publishes a ContentDirectory revision, so DLNA clients and the
+dashboard both pick up the new titles, synopses and artwork without further prompting.
+
 ---
 
 ## 2. Media Streaming APIs
@@ -175,6 +250,16 @@ Streams the requested media file. Supports HTTP range requests (essential for sc
   - `Content-Type`: Matching media file mime type (e.g. `video/x-matroska`, `audio/mpeg`)
   - `Accept-Ranges`: `bytes`
   - `TransferMode.dlna.org`: `Streaming`
+
+### Serve Cover Art
+Returns artwork for an item, trying three sources in order: an image file sitting beside
+the media (`cover.jpg`, `folder.png`, `<basename>.webp`, …), artwork embedded in the file's
+own tags, and finally a poster cached by the media info fetch. The local sources apply to
+audio only; video reaches this endpoint through the cache, which is what gives a movie or
+an episode a poster at all.
+* **Endpoint**: `GET /media/{id}/cover`
+* **Response**: `200 OK` with the image, or `404 Not Found` when no source has one.
+* Also advertised to DLNA clients as `upnp:albumArtURI`.
 
 ### Serve Subtitles
 Serves the sidecar subtitle track (`<media basename>.srt`) if one exists, in either of two

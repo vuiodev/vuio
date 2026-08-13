@@ -39,6 +39,7 @@ const CAST_JS: &str = include_str!("ui/js/cast.js");
 const BROWSE_JS: &str = include_str!("ui/js/browse.js");
 const STATS_JS: &str = include_str!("ui/js/stats.js");
 const ADMIN_JS: &str = include_str!("ui/js/admin.js");
+const MEDIAINFO_JS: &str = include_str!("ui/js/mediainfo.js");
 const INIT_JS: &str = include_str!("ui/js/init.js");
 
 // Third-party player libraries, checked in under ui/vendor/ and compiled into the
@@ -99,6 +100,7 @@ fn lookup_asset(file: &str) -> Option<(&'static [u8], &'static str, AssetCache)>
         "browse.js" => (BROWSE_JS, JAVASCRIPT, Revalidate),
         "stats.js" => (STATS_JS, JAVASCRIPT, Revalidate),
         "admin.js" => (ADMIN_JS, JAVASCRIPT, Revalidate),
+        "mediainfo.js" => (MEDIAINFO_JS, JAVASCRIPT, Revalidate),
         "init.js" => (INIT_JS, JAVASCRIPT, Revalidate),
         _ => return None,
     };
@@ -245,6 +247,9 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
         text,
     };
     let fetch_limit = limit + 1;
+    // Uncertain matches stay out of the listing; they are reviewed in the Admin
+    // tab rather than shown as though they were the file's real title.
+    let min_confidence = state.current_config().mediainfo.min_confidence;
     let response = state
         .database
         .clone()
@@ -253,6 +258,19 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
             output.extend_from_slice(b"{\"files\":[");
             let mut emitted = 0_usize;
             let mut last_id = None;
+            // Fetched titles and synopses, collected up front because the writer
+            // cannot query the session while the session is lending it a row.
+            let mut ids = Vec::with_capacity(fetch_limit);
+            session.visit_files(&query, 0, fetch_limit, |file| {
+                if let Some(id) = file.id().filter(|id| *id > 0) {
+                    ids.push(id);
+                }
+                Ok(())
+            })?;
+            let overlays = session
+                .mediainfo_overlays(&ids, min_confidence)
+                .unwrap_or_default();
+
             let summary = session.visit_files(&query, 0, fetch_limit, |file| {
                 if emitted >= limit {
                     return Ok(());
@@ -260,7 +278,8 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
                 if emitted > 0 {
                     output.push(b',');
                 }
-                write_web_media_file(&mut output, &file)?;
+                let overlay = file.id().and_then(|id| overlays.get(&id));
+                write_web_media_file(&mut output, &file, overlay)?;
                 last_id = file.id();
                 emitted += 1;
                 Ok(())
@@ -284,7 +303,11 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
         .into_response())
 }
 
-fn write_web_media_file(output: &mut Vec<u8>, file: &impl MediaFileView) -> anyhow::Result<()> {
+fn write_web_media_file(
+    output: &mut Vec<u8>,
+    file: &impl MediaFileView,
+    overlay: Option<&crate::database::MediaInfoOverlay>,
+) -> anyhow::Result<()> {
     let mime_type = file.mime_type();
     let category = if mime_type == "audio/radio" {
         "radio"
@@ -330,6 +353,22 @@ fn write_web_media_file(output: &mut Vec<u8>, file: &impl MediaFileView) -> anyh
     output.extend_from_slice(b",\"dur\":");
     // serde_json cannot encode NaN/Infinity, and a bad tag must not fail the whole page.
     serde_json::to_writer(&mut *output, &file.duration_secs().filter(|d| d.is_finite()))?;
+
+    // What the media info fetch found, kept under its own keys so the browse view
+    // can show it as fetched rather than passing it off as a local tag.
+    output.extend_from_slice(b",\"info_title\":");
+    serde_json::to_writer(&mut *output, &overlay.and_then(|info| info.title.as_deref()))?;
+    output.extend_from_slice(b",\"info_overview\":");
+    serde_json::to_writer(
+        &mut *output,
+        &overlay.and_then(|info| info.overview.as_deref()),
+    )?;
+    output.extend_from_slice(b",\"info_art\":");
+    output.extend_from_slice(if overlay.is_some_and(|info| info.has_artwork) {
+        b"true".as_slice()
+    } else {
+        b"false".as_slice()
+    });
     output.push(b'}');
     Ok(())
 }
@@ -353,6 +392,7 @@ mod tests {
             BROWSE_JS,
             STATS_JS,
             ADMIN_JS,
+            MEDIAINFO_JS,
             INIT_JS,
         ]
         .concat()

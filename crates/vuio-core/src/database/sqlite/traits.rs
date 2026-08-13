@@ -328,3 +328,38 @@ impl SecretStore for SqliteDatabase {
         SqliteDatabase::delete_secret_impl(self, key).await
     }
 }
+
+#[async_trait]
+impl MediaInfoRepository for SqliteDatabase {
+    async fn get_mediainfo(&self, media_file_id: i64) -> Result<Option<MediaInfoRecord>> {
+        SqliteDatabase::get_mediainfo_impl(self, media_file_id).await
+    }
+
+    async fn get_mediainfo_batch(&self, media_file_ids: &[i64]) -> Result<Vec<MediaInfoRecord>> {
+        SqliteDatabase::get_mediainfo_batch_impl(self, media_file_ids).await
+    }
+
+    async fn bulk_store_mediainfo(&self, records: &[MediaInfoRecord]) -> Result<()> {
+        SqliteDatabase::bulk_store_mediainfo_impl(self, records).await
+    }
+
+    async fn list_low_confidence(
+        &self,
+        threshold: u8,
+        limit: usize,
+    ) -> Result<Vec<MediaInfoRecord>> {
+        SqliteDatabase::list_low_confidence_impl(self, threshold, limit).await
+    }
+
+    async fn mediainfo_stats(&self, threshold: u8) -> Result<MediaInfoStats> {
+        SqliteDatabase::mediainfo_stats_impl(self, threshold).await
+    }
+
+    async fn clear_mediainfo(&self) -> Result<u64> {
+        SqliteDatabase::clear_mediainfo_impl(self).await
+    }
+
+    async fn media_ids_missing_mediainfo(&self, version: u32, threshold: u8) -> Result<Vec<i64>> {
+        SqliteDatabase::media_ids_missing_mediainfo_impl(self, version, threshold).await
+    }
+}
