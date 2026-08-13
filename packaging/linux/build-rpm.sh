@@ -285,6 +285,9 @@ popd > /dev/null
 
 # Create RPM spec file
 cat > "$RPM_ROOT/SPECS/${PACKAGE_NAME}.spec" << EOF
+%{!?_unitdir: %define _unitdir /usr/lib/systemd/system}
+%{!?_initddir: %define _initddir /etc/init.d}
+
 Name:           $PACKAGE_NAME
 Version:        $VERSION
 Release:        $RELEASE%{?dist}
