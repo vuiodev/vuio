@@ -227,7 +227,7 @@ async fn a_v1_database_migrates_forward_without_losing_anything() {
         kind: "album".to_string(),
         title: Some("Album".to_string()),
         original_title: None,
-        overview: None,
+        overview: Some("A remarkably hoopy record".to_string()),
         release_date: None,
         year: Some(1971),
         rating: None,
@@ -246,6 +246,46 @@ async fn a_v1_database_migrates_forward_without_losing_anything() {
         db.get_mediainfo(7).await.unwrap().unwrap().year,
         Some(1971)
     );
+
+    // v4 added full-text search. The rows already on disk have to become
+    // searchable during the migration — a record only reaches the index through
+    // a trigger, and this one was written years before the trigger existed.
+    let db = std::sync::Arc::new(db);
+    assert_eq!(
+        search_ids(&db, "artist").await,
+        vec![Some(7)],
+        "rows that predate the index must be backfilled by the migration"
+    );
+
+    // And a synopsis fetched after the migration is searchable too — that is
+    // the second index, over a different table, with its own triggers. The word
+    // appears nowhere in the file's own tags, so only `mediainfo_fts` can
+    // answer it.
+    assert_eq!(search_ids(&db, "hoopy").await, vec![Some(7)]);
+}
+
+async fn search_ids(db: &std::sync::Arc<SqliteDatabase>, text: &str) -> Vec<Option<i64>> {
+    use crate::database::{DatabaseReadSession, MediaFileView};
+    let text = text.to_string();
+    db.clone()
+        .read(move |session| {
+            let mut ids = Vec::new();
+            session.visit_files(
+                &crate::database::MediaFileQuery::Search {
+                    text,
+                    mime_family: None,
+                },
+                0,
+                10,
+                |file| {
+                    ids.push(file.id());
+                    Ok(())
+                },
+            )?;
+            Ok(ids)
+        })
+        .await
+        .unwrap()
 }
 
 #[tokio::test]

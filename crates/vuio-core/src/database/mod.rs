@@ -576,6 +576,18 @@ pub enum MediaFileQuery {
         mime_family: Option<String>,
         text: Option<String>,
     },
+    /// Ranked full-text search across filenames, tags and fetched synopses.
+    ///
+    /// Separate from [`MediaFileQuery::Filtered`] because the two page
+    /// differently and cannot share a cursor: `Filtered` scans in id order and
+    /// resumes from `after_id`, while these results come back by relevance,
+    /// where an id says nothing about position. Search pages by offset instead,
+    /// which is affordable because a result set is bounded by how much actually
+    /// matched rather than by the size of the library.
+    Search {
+        text: String,
+        mime_family: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Default)]

@@ -15,10 +15,10 @@ use crate::database::{AudioTags, FileFingerprint, FileLocation, MediaFile, Playl
 /// The schema version this build writes and expects.
 ///
 /// Bumped whenever the tables change. An older file is brought forward by
-/// [`MIGRATIONS`]; only a *newer* file — one written by a build that knows
+/// [`migrations`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 4;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -30,7 +30,7 @@ pub(super) const NATURAL: &str = "natural_order";
 /// The schema, with the collation name substituted so it cannot drift from
 /// the name the connections actually register.
 pub(super) fn ddl() -> String {
-    DDL_TEMPLATE.replace("{NATURAL}", NATURAL)
+    format!("{}{FTS_DDL}", DDL_TEMPLATE.replace("{NATURAL}", NATURAL))
 }
 
 const DDL_TEMPLATE: &str = r#"
@@ -203,6 +203,102 @@ CREATE TABLE IF NOT EXISTS mediainfo (
 -- The dashboard lists the least certain matches first, which is a sort over the
 -- whole table.
 CREATE INDEX IF NOT EXISTS idx_mediainfo_confidence ON mediainfo(confidence);
+"#
+;
+
+/// The full-text index, defined once and shared by the fresh-file DDL and the
+/// migration that adds it to an existing file.
+///
+/// Search used to be `LIKE '%needle%'` over four columns: a leading wildcard no
+/// index can serve, so every query read the whole table, and the results came
+/// back in row order because there was no relevance to sort by. FTS5 answers the
+/// same question from an index, ranked, across every field worth searching.
+///
+/// Both tables are **external-content**: the text stays in `media_files` and
+/// `mediainfo`, and the index stores only what it needs to find a rowid. That
+/// costs nothing in duplicated storage and makes recovery a one-liner
+/// (`INSERT INTO … VALUES('rebuild')`).
+///
+/// Two tables rather than one because external content binds an index to exactly
+/// one table, and a film's synopsis lives in `mediainfo` while its filename
+/// lives in `media_files`. Searches union the two.
+///
+/// `remove_diacritics 2` folds accents across the whole Unicode range, so
+/// "bjork" finds "Björk" — which is the difference between a search box that
+/// works on a real music library and one that does not.
+const FTS_DDL: &str = r#"
+CREATE VIRTUAL TABLE IF NOT EXISTS media_fts USING fts5(
+    filename, title, artist, album, album_artist, genre, composer, comment,
+    content='media_files',
+    content_rowid='id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Triggers rather than call-site updates: `media_files` is written from the
+-- scanner's bulk paths, the watcher's incremental ones, subtree removal and
+-- native cleanup. A trigger covers all of them by construction, and cannot be
+-- forgotten by the next write path someone adds.
+CREATE TRIGGER IF NOT EXISTS media_fts_insert AFTER INSERT ON media_files BEGIN
+    INSERT INTO media_fts(rowid, filename, title, artist, album, album_artist,
+                          genre, composer, comment)
+    VALUES (new.id, new.filename, new.title, new.artist, new.album,
+            new.album_artist, new.genre, new.composer, new.comment);
+END;
+
+-- External-content tables are updated by inserting a matching 'delete' row that
+-- cancels the old one, then inserting the new one. The old *values* have to be
+-- given exactly, which is why the delete half spells out `old.`.
+CREATE TRIGGER IF NOT EXISTS media_fts_delete AFTER DELETE ON media_files BEGIN
+    INSERT INTO media_fts(media_fts, rowid, filename, title, artist, album,
+                          album_artist, genre, composer, comment)
+    VALUES ('delete', old.id, old.filename, old.title, old.artist, old.album,
+            old.album_artist, old.genre, old.composer, old.comment);
+END;
+
+CREATE TRIGGER IF NOT EXISTS media_fts_update AFTER UPDATE ON media_files BEGIN
+    INSERT INTO media_fts(media_fts, rowid, filename, title, artist, album,
+                          album_artist, genre, composer, comment)
+    VALUES ('delete', old.id, old.filename, old.title, old.artist, old.album,
+            old.album_artist, old.genre, old.composer, old.comment);
+    INSERT INTO media_fts(rowid, filename, title, artist, album, album_artist,
+                          genre, composer, comment)
+    VALUES (new.id, new.filename, new.title, new.artist, new.album,
+            new.album_artist, new.genre, new.composer, new.comment);
+END;
+
+CREATE VIRTUAL TABLE IF NOT EXISTS mediainfo_fts USING fts5(
+    title, original_title, overview,
+    content='mediainfo',
+    content_rowid='media_file_id',
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+CREATE TRIGGER IF NOT EXISTS mediainfo_fts_insert AFTER INSERT ON mediainfo BEGIN
+    INSERT INTO mediainfo_fts(rowid, title, original_title, overview)
+    VALUES (new.media_file_id, new.title, new.original_title, new.overview);
+END;
+
+CREATE TRIGGER IF NOT EXISTS mediainfo_fts_delete AFTER DELETE ON mediainfo BEGIN
+    INSERT INTO mediainfo_fts(mediainfo_fts, rowid, title, original_title, overview)
+    VALUES ('delete', old.media_file_id, old.title, old.original_title, old.overview);
+END;
+
+CREATE TRIGGER IF NOT EXISTS mediainfo_fts_update AFTER UPDATE ON mediainfo BEGIN
+    INSERT INTO mediainfo_fts(mediainfo_fts, rowid, title, original_title, overview)
+    VALUES ('delete', old.media_file_id, old.title, old.original_title, old.overview);
+    INSERT INTO mediainfo_fts(rowid, title, original_title, overview)
+    VALUES (new.media_file_id, new.title, new.original_title, new.overview);
+END;
+"#;
+
+/// Recompute both full-text indexes from the tables they shadow.
+///
+/// Cheap enough to be the answer to any doubt about the index: it reads the
+/// content tables once. Used by the migration that introduces them and by
+/// `rebuild_derived_indexes`, which is the repair path for the same reason.
+pub(super) const FTS_REBUILD: &str = r#"
+INSERT INTO media_fts(media_fts) VALUES('rebuild');
+INSERT INTO mediainfo_fts(mediainfo_fts) VALUES('rebuild');
 "#;
 
 /// Schema upgrades, applied in order to any file older than [`SCHEMA_VERSION`].
@@ -216,7 +312,16 @@ CREATE INDEX IF NOT EXISTS idx_mediainfo_confidence ON mediainfo(confidence);
 /// that way needs a different plan, not a destructive one — the file holds
 /// AirPlay pairings, imported playlists, and the record ids that DIDL hands out
 /// as object ids, none of which survive a rebuild.
-const MIGRATIONS: &[(i64, &str)] = &[(2, MIGRATION_V2), (3, MIGRATION_V3)];
+///
+/// Owned rather than borrowed because v4 is assembled from the shared FTS
+/// definitions rather than written out a second time.
+fn migrations() -> Vec<(i64, String)> {
+    vec![
+        (2, MIGRATION_V2.to_owned()),
+        (3, MIGRATION_V3.to_owned()),
+        (4, migration_v4()),
+    ]
+}
 
 /// v1 → v2: full tag extraction.
 ///
@@ -281,6 +386,16 @@ CREATE TABLE IF NOT EXISTS mediainfo (
     mediainfo_version INTEGER NOT NULL
 ) STRICT;
 "#;
+
+/// v3 → v4: ranked full-text search.
+///
+/// Adds the two FTS5 indexes and their triggers, then populates them from the
+/// rows already on disk. Purely additive: nothing in `media_files` or
+/// `mediainfo` is touched, and a file that fails part-way through is rolled back
+/// with the rest of the migration transaction.
+fn migration_v4() -> String {
+    format!("{FTS_DDL}{FTS_REBUILD}")
+}
 
 /// Columns of `media_files`, qualified so the list can be used inside joins.
 pub(super) const MEDIA_COLUMNS: &str = "\
@@ -431,7 +546,8 @@ pub(super) fn initialize_schema(connection: &Connection) -> Result<()> {
 /// Each step runs with its `user_version` bump in one transaction, so an
 /// interrupted upgrade leaves the file at a version that describes it.
 fn migrate(connection: &Connection, from: i64) -> Result<()> {
-    let pending = MIGRATIONS
+    let all = migrations();
+    let pending = all
         .iter()
         .filter(|(produces, _)| *produces > from)
         .collect::<Vec<_>>();

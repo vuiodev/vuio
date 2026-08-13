@@ -14,43 +14,35 @@ pub(crate) async fn tool_list_library_roots<D: DatabaseManager + 'static>(
 ) -> Result<serde_json::Value, String> {
     let directories = state.media_directories.read().await.clone();
     let unavailable = state.unavailable_roots.read().await.clone();
+    // What the last scan of each root found. Deliberately not a live count of
+    // the subtree: that would be a query per root, and the recursive counters
+    // that could answer it are keyed by directory rather than by root.
+    let scanned: std::collections::HashMap<std::path::PathBuf, u64> = state
+        .database
+        .list_root_availability()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|root| (root.path, root.indexed_count))
+        .collect();
 
-    let mut roots = Vec::with_capacity(directories.len());
-    for directory in directories {
-        let path = std::path::PathBuf::from(&directory.path);
-        let canonical = canonical_for_browse(state, &path);
-        let file_count = state
-            .database
-            .clone()
-            .read({
-                let canonical = canonical.to_string_lossy().into_owned();
-                move |session| {
-                    Ok(session
-                        .visit_files(
-                            &MediaFileQuery::Directory {
-                                path: canonical,
-                                mime_family: None,
-                            },
-                            0,
-                            0,
-                            |_| Ok(()),
-                        )?
-                        .matched)
-                }
+    let roots: Vec<serde_json::Value> = directories
+        .into_iter()
+        .map(|directory| {
+            let path = std::path::PathBuf::from(&directory.path);
+            let canonical = canonical_for_browse(state, &path);
+            serde_json::json!({
+                "path": canonical.to_string_lossy(),
+                "name": path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| directory.path.clone()),
+                "indexed_at_last_scan": scanned.get(&canonical).or_else(|| scanned.get(&path)),
+                "recursive": directory.recursive,
+                "available": !unavailable.contains(&path),
             })
-            .await
-            .unwrap_or(0);
-        roots.push(serde_json::json!({
-            "path": canonical.to_string_lossy(),
-            "name": path
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| directory.path.clone()),
-            "file_count": file_count,
-            "recursive": directory.recursive,
-            "available": !unavailable.contains(&path),
-        }));
-    }
+        })
+        .collect();
 
     Ok(serde_json::json!({ "roots": roots }))
 }
@@ -63,21 +55,27 @@ pub(crate) async fn tool_search_media<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     args: &serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let query = args
+    let text = args
         .get("query")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'query' parameter")?
         .to_string();
     let limit = requested_limit(args, 50);
-    let after_id = cursor_after_id(args)?;
-    let mime_family = mime_family_for_category(args)?;
-    let (matches_json, next_cursor) =
-        query_media_page(state, after_id, mime_family, Some(query), limit).await?;
+    // Search results come back by relevance, where a row id says nothing about
+    // position, so the cursor carries an offset rather than a last-seen id.
+    let offset = cursor_offset(args)?;
+    let query = MediaFileQuery::Search {
+        text,
+        mime_family: mime_family_for_category(args)?,
+    };
+
+    let (files, total) = read_media_page(state, query, offset, limit).await?;
+    let next_offset = offset.saturating_add(files.len());
 
     Ok(serde_json::json!({
-        "total_matches": matches_json.len(),
-        "files": matches_json,
-        "next_cursor": next_cursor
+        "total_matches": total,
+        "files": files,
+        "next_cursor": (next_offset < total).then(|| next_offset.to_string())
     }))
 }
 
@@ -606,6 +604,60 @@ pub(crate) fn cursor_after_id(args: &serde_json::Value) -> Result<Option<i64>, S
         .parse::<i64>()
         .map(Some)
         .map_err(|_| "Invalid media cursor".to_string())
+}
+
+/// A search cursor, which carries an offset into the ranked results.
+fn cursor_offset(args: &serde_json::Value) -> Result<usize, String> {
+    let Some(cursor) = args.get("cursor").filter(|value| !value.is_null()) else {
+        return Ok(0);
+    };
+    cursor
+        .as_str()
+        .ok_or("'cursor' must be a string")?
+        .parse::<usize>()
+        .map_err(|_| "Invalid search cursor".to_string())
+}
+
+/// One page of a query, with the total it was drawn from.
+///
+/// The total is what lets a caller know whether to ask for another page when
+/// the results are not id-ordered and there is no last-seen id to resume from.
+async fn read_media_page<D: DatabaseManager + 'static>(
+    state: &AppState<D>,
+    query: MediaFileQuery,
+    offset: usize,
+    limit: usize,
+) -> Result<(Vec<serde_json::Value>, usize), String> {
+    let origin = server_origin(state);
+    let min_confidence = state.current_config().mediainfo.min_confidence;
+    state
+        .database
+        .clone()
+        .read(move |session| {
+            // Ids first, then rows: the session lends one row at a time and
+            // cannot be queried while it is doing so, so the overlay lookup has
+            // to happen between the two passes.
+            let mut ids = Vec::with_capacity(limit);
+            session.visit_files(&query, offset, limit, |file| {
+                if let Some(id) = file.id().filter(|id| *id > 0) {
+                    ids.push(id);
+                }
+                Ok(())
+            })?;
+            let overlays = session
+                .mediainfo_overlays(&ids, min_confidence)
+                .unwrap_or_default();
+
+            let mut page = Vec::with_capacity(limit);
+            let summary = session.visit_files(&query, offset, limit, |file| {
+                let overlay = file.id().and_then(|id| overlays.get(&id));
+                page.push(media_file_view_to_json(&file, &origin, overlay));
+                Ok(())
+            })?;
+            Ok((page, summary.matched))
+        })
+        .await
+        .map_err(|error| format!("Database error: {error}"))
 }
 
 pub(crate) async fn query_media_page<D: DatabaseManager + 'static>(

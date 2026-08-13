@@ -240,20 +240,40 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     Query(params): Query<MediaPageQuery>,
 ) -> Result<Response, AppError> {
-    let after_id = params
-        .cursor
-        .as_deref()
-        .map(str::parse::<i64>)
-        .transpose()
-        .map_err(|_| AppError::InvalidInput("Invalid media cursor".to_string()))?;
     let limit = params.limit.unwrap_or(250).clamp(1, 500);
     let mime_family = mime_family_for_category(params.category.as_deref())?;
     let text = params.query.filter(|value| !value.is_empty());
-    let query = MediaFileQuery::Filtered {
-        after_id,
-        mime_family,
-        text,
+
+    // A search is ranked by relevance, so its cursor is an offset into the
+    // results; a plain scan is id-ordered, so its cursor is the last id seen.
+    // The two share one opaque `cursor` parameter, which is why the browser
+    // never has to know which of them it is paging.
+    let cursor = params.cursor.as_deref();
+    let (query, offset) = match text {
+        Some(text) => {
+            let offset = cursor
+                .map(str::parse::<usize>)
+                .transpose()
+                .map_err(|_| AppError::InvalidInput("Invalid media cursor".to_string()))?
+                .unwrap_or(0);
+            (MediaFileQuery::Search { text, mime_family }, offset)
+        }
+        None => {
+            let after_id = cursor
+                .map(str::parse::<i64>)
+                .transpose()
+                .map_err(|_| AppError::InvalidInput("Invalid media cursor".to_string()))?;
+            (
+                MediaFileQuery::Filtered {
+                    after_id,
+                    mime_family,
+                    text: None,
+                },
+                0,
+            )
+        }
     };
+    let searching = matches!(query, MediaFileQuery::Search { .. });
     let fetch_limit = limit + 1;
     // Uncertain matches stay out of the listing; they are reviewed in the Admin
     // tab rather than shown as though they were the file's real title.
@@ -269,7 +289,7 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
             // Fetched titles and synopses, collected up front because the writer
             // cannot query the session while the session is lending it a row.
             let mut ids = Vec::with_capacity(fetch_limit);
-            session.visit_files(&query, 0, fetch_limit, |file| {
+            session.visit_files(&query, offset, fetch_limit, |file| {
                 if let Some(id) = file.id().filter(|id| *id > 0) {
                     ids.push(id);
                 }
@@ -279,7 +299,7 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
                 .mediainfo_overlays(&ids, min_confidence)
                 .unwrap_or_default();
 
-            let summary = session.visit_files(&query, 0, fetch_limit, |file| {
+            let summary = session.visit_files(&query, offset, fetch_limit, |file| {
                 if emitted >= limit {
                     return Ok(());
                 }
@@ -293,11 +313,14 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
                 Ok(())
             })?;
             output.extend_from_slice(b"],\"next_cursor\":");
-            if summary.visited > limit {
-                serde_json::to_writer(&mut output, &last_id.map(|id| id.to_string()))?;
-            } else {
-                output.extend_from_slice(b"null");
-            }
+            let next = (summary.visited > limit).then(|| {
+                if searching {
+                    Some((offset + emitted).to_string())
+                } else {
+                    last_id.map(|id| id.to_string())
+                }
+            });
+            serde_json::to_writer(&mut output, &next.flatten())?;
             output.push(b'}');
             Ok(Bytes::from(output))
         })

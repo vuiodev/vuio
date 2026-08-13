@@ -80,14 +80,14 @@ impl SqliteDatabase {
     }
 
     pub(super) async fn rebuild_derived_indexes_impl(&self) -> Result<DatabaseHealth> {
+        let mut health = healthy();
+
         let rebuilt = self
             .transact(move |transaction| {
                 directory::rebuild(transaction)?;
                 Ok(())
             })
             .await;
-
-        let mut health = healthy();
         match rebuilt {
             Ok(()) => info!("Rebuilt the directory index"),
             Err(error) => {
@@ -101,6 +101,33 @@ impl SqliteDatabase {
                 });
             }
         }
+
+        // The full-text index is maintained by triggers, so it should never
+        // need this — but it shadows two tables, and 'rebuild' costs one pass
+        // over them. Cheap enough to be the standing answer to any doubt about
+        // whether search is showing the whole library.
+        let searchable = self
+            .execute_write(move |connection| {
+                connection
+                    .execute_batch(crate::database::sqlite::schema::FTS_REBUILD)
+                    .context("Failed to rebuild the full-text index")?;
+                Ok(())
+            })
+            .await;
+        match searchable {
+            Ok(()) => info!("Rebuilt the full-text index"),
+            Err(error) => {
+                warn!("Failed to rebuild the full-text index: {error:#}");
+                health.is_healthy = false;
+                health.issues.push(DatabaseIssue {
+                    severity: IssueSeverity::Error,
+                    description: format!("Full-text index rebuild failed: {error}"),
+                    table_affected: Some("media_fts".to_owned()),
+                    suggested_action: "Restore a backup or rescan the library".to_owned(),
+                });
+            }
+        }
+
         Ok(health)
     }
 

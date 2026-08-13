@@ -222,10 +222,19 @@ static TOOLS: &[ToolSpec] = &[
                     "items": {
                         "type": "object",
                         "properties": {
-                            "path": { "type": "string" },
+                            "path": {
+                                "type": "string",
+                                "description": "Pass to browse_folder to list this root"
+                            },
                             "name": { "type": "string" },
-                            "file_count": { "type": "integer" },
-                            "available": { "type": "boolean" }
+                            "recursive": { "type": "boolean" },
+                            "indexed_at_last_scan": { "type": ["integer", "null"] },
+                            "available": {
+                                "type": "boolean",
+                                "description": "False when the root is missing — an unplugged \
+                                                drive, usually. Its files stay indexed but \
+                                                cannot be played."
+                            }
                         }
                     }
                 }
