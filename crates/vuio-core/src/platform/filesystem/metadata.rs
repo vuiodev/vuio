@@ -54,17 +54,17 @@ pub(crate) async fn extract_audio_metadata(
     match tokio::task::spawn_blocking(move || probe_metadata(&path)).await {
         Ok(Ok(probed)) => probed.apply(media_file),
         Ok(Err(error)) => {
-            debug!(
-                "Failed to extract metadata for {}: {}",
-                media_file.path.display(),
-                error
+            tracing::debug!(
+                path = %media_file.path.display(),
+                %error,
+                "Failed to extract audio metadata during format probe; falling back to filename metadata"
             );
         }
         Err(error) => {
-            debug!(
-                "Failed to execute blocking metadata extraction for {}: {}",
-                media_file.path.display(),
-                error
+            tracing::debug!(
+                path = %media_file.path.display(),
+                %error,
+                "Failed to execute blocking metadata extraction"
             );
         }
     }
