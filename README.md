@@ -220,7 +220,7 @@ You can deploy VuIO to a Kubernetes cluster using the provided Helm chart.
 You can install the chart directly from GitHub Container Registry without cloning the repository:
 
 ```bash
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.42
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.43
 ```
 
 #### Local Installation
