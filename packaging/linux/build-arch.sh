@@ -231,25 +231,47 @@ cd "$PKG_DIR"
 
 if command -v makepkg &> /dev/null; then
     echo "Running makepkg..."
-    # Build package using makepkg
     makepkg -f -p PKGBUILD --noconfirm
-    
-    # Find built package file
     PKG_FILE=$(find . -name "*.pkg.tar.zst" -type f)
     if [[ -n "$PKG_FILE" ]]; then
         cp "$PKG_FILE" "$FINAL_OUTPUT_DIR/"
-        echo -e "${GREEN}✓ Arch package created successfully: $FINAL_OUTPUT_DIR/\$(basename "\$PKG_FILE")${NC}"
+        echo -e "${GREEN}✓ Arch package created successfully: $FINAL_OUTPUT_DIR/$(basename "$PKG_FILE")${NC}"
     else
         echo -e "${RED}✗ Package file not found after makepkg${NC}"
         exit 1
     fi
 else
-    echo -e "${YELLOW}! makepkg not found. Preparing the build directory only.${NC}"
-    echo "Arch packaging directory prepared at: $PWD"
-    echo "To build on an Arch Linux machine, run:"
-    echo "  cd $PWD"
-    echo "  makepkg -f"
+    echo -e "${YELLOW}makepkg not found. Assembling Arch package using tar and zstd...${NC}"
+    mkdir -p pkgroot/usr/bin pkgroot/etc/vuio pkgroot/usr/lib/systemd/system
+    cp vuio pkgroot/usr/bin/vuio
+    cp vuio.toml pkgroot/etc/vuio/vuio.toml
+    cp vuio.service pkgroot/usr/lib/systemd/system/vuio.service
+    
+    SIZE=$(du -sb pkgroot | cut -f1)
+    BUILD_DATE=$(date +%s)
+    
+    cat > pkgroot/.PKGINFO << EOF
+pkgname = vuio
+pkgver = ${VERSION}-1
+pkgdesc = ${DESCRIPTION}
+url = https://github.com/vuiodev/vuio
+builddate = ${BUILD_DATE}
+packager = ${MAINTAINER}
+size = ${SIZE}
+arch = ${ARCHITECTURE}
+license = MIT OR Apache-2.0
+depend = glibc
+provides = vuio
+EOF
+    
+    ARCH_PKG_NAME="vuio-${VERSION}-1-${ARCHITECTURE}.pkg.tar.zst"
+    cd pkgroot
+    tar --owner=0 --group=0 -cf - .PKGINFO usr etc | zstd -z -19 -c - > "$FINAL_OUTPUT_DIR/$ARCH_PKG_NAME"
+    cd ..
+    rm -rf pkgroot
+    echo -e "${GREEN}✓ Arch package created successfully: $FINAL_OUTPUT_DIR/$ARCH_PKG_NAME${NC}"
 fi
+
 
 cd - > /dev/null
 

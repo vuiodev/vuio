@@ -23,21 +23,59 @@ Built with Tokio, Axum, and SQLite for high performance and reliability.
 - **Cross-platform** - Native integration for Windows, macOS, Linux
 - **SQLite Database** - Embedded ACID-compliant database with crash recovery
 
-## Homebrew (macOS & Linux)
 
-You can install VuIO using our official Homebrew Tap:
+📖 **Complete Setup Guide**: For full installation options across all operating systems and package managers, see the [Installation Guide (install.md)](install.md).
+
+## Installation
+
+### Ubuntu / Debian (APT Repository)
+
+```bash
+echo "deb [trusted=yes] https://vuiodev.github.io/vuio/apt stable main" | sudo tee /etc/apt/sources.list.d/vuio.list
+sudo apt update && sudo apt install vuio
+```
+
+### Fedora / RHEL / CentOS (RPM Repository)
+
+```bash
+sudo dnf config-manager --add-repo https://vuiodev.github.io/vuio/rpm/vuio.repo
+sudo dnf install vuio
+```
+
+### Alpine Linux (APK Repository)
+
+```bash
+echo "https://vuiodev.github.io/vuio/alpine/stable/main" | sudo tee -a /etc/apk/repositories
+sudo apk update && sudo apk add --allow-untrusted vuio
+```
+
+### Arch Linux (Pacman Repository)
+
+Add `[vuio]` section to `/etc/pacman.conf`:
+```ini
+[vuio]
+SigLevel = Optional TrustAll
+Server = https://vuiodev.github.io/vuio/arch/os/$arch
+```
+Then run: `sudo pacman -Sy vuio`
+
+
+
+### Homebrew (macOS & Linux)
 
 ```bash
 brew tap vuiodev/vuio
 brew install vuio
 ```
 
-Once installed, start the server using:
+### Docker (Multi-Architecture Image)
+
 ```bash
-vuio /path/to/media
+docker run -d --name vuio-server --restart unless-stopped --network host -v /path/to/media:/media:ro ghcr.io/vuiodev/vuio:latest
 ```
 
-For a detailed guide on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](docs/api.md).
+For detailed guides on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](docs/api.md). For all installation options (Windows, Arch, FreeBSD, Helm, Systemd), visit [install.md](install.md).
+
 
 ## Web Interface & Search
 

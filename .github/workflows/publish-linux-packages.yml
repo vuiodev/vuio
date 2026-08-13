@@ -1,0 +1,145 @@
+name: Publish Linux Packages to GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Git tag, commit SHA, or branch to build from (e.g. v0.0.43, main, or a1b2c3d)'
+        required: true
+        default: 'main'
+      version:
+        description: 'Optional package version override (leave blank to auto-detect from ref/tag)'
+        required: false
+      publish_pages:
+        description: 'Publish/update GitHub Pages repository'
+        type: boolean
+        required: true
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build_and_publish_packages:
+    name: Build Linux Packages & Publish Repositories
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+
+    steps:
+      - name: Checkout code at target ref
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu, aarch64-unknown-linux-gnu, x86_64-unknown-linux-musl, aarch64-unknown-linux-musl
+
+      - name: Install packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            libc6-dev-arm64-cross \
+            musl-tools \
+            dpkg-dev \
+            fakeroot \
+            rpm \
+            rpm-build \
+            createrepo-c \
+            apt-utils
+
+      - name: Configure ARM cross-linker
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml << 'EOF'
+          [target.aarch64-unknown-linux-gnu]
+          linker = "aarch64-linux-gnu-gcc"
+
+          [target.aarch64-unknown-linux-musl]
+          linker = "aarch64-linux-gnu-gcc"
+          EOF
+
+      - name: Determine Version
+        id: version_step
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            RAW_VER="${{ inputs.version }}"
+          else
+            RAW_VER="${{ inputs.ref }}"
+          fi
+          VER="${RAW_VER#v}"
+          if [ "$VER" == "main" ] || [ "$VER" == "master" ]; then
+            VER="0.0.43"
+          fi
+          echo "VERSION=$VER" >> $GITHUB_ENV
+          echo "Determined package version: $VER"
+
+      - name: Build Rust release binaries (x86_64 & ARM64 - GNU & MUSL)
+        run: |
+          cargo build --release --target x86_64-unknown-linux-gnu
+          cargo build --release --target aarch64-unknown-linux-gnu
+          cargo build --release --target x86_64-unknown-linux-musl || true
+          cargo build --release --target aarch64-unknown-linux-musl || true
+
+      - name: Build DEB and RPM packages
+        run: |
+          mkdir -p builds
+          cd packaging/linux
+
+          # x86_64 DEB, RPM & Arch package
+          if [ -f "../../target/x86_64-unknown-linux-gnu/release/vuio" ]; then
+            ./build-deb.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "amd64"
+            ./build-rpm.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "1" "x86_64"
+            ./build-arch.sh "../../target/x86_64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "x86_64"
+          fi
+
+          # ARM64 DEB, RPM & Arch package
+          if [ -f "../../target/aarch64-unknown-linux-gnu/release/vuio" ]; then
+            ./build-deb.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "arm64"
+            ./build-rpm.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "1" "aarch64"
+            ./build-arch.sh "../../target/aarch64-unknown-linux-gnu/release/vuio" "../../builds" "$VERSION" "aarch64"
+          fi
+
+          # MUSL DEB, RPM & Alpine APK (x86_64)
+          if [ -f "../../target/x86_64-unknown-linux-musl/release/vuio" ]; then
+            ./build-deb.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION-musl" "amd64"
+            ./build-rpm.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "1.musl" "x86_64"
+            ./build-apk.sh "../../target/x86_64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "x86_64"
+          fi
+
+          # MUSL Alpine APK (ARM64)
+          if [ -f "../../target/aarch64-unknown-linux-musl/release/vuio" ]; then
+            ./build-apk.sh "../../target/aarch64-unknown-linux-musl/release/vuio" "../../builds" "$VERSION" "aarch64"
+          fi
+
+
+          cd ../..
+          echo "Generated packages:"
+          ls -la builds/
+
+
+      - name: Generate APT & RPM repository site
+        run: |
+          ./packaging/linux/generate-repo.sh ./builds ./pages_site
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages-${{ env.VERSION }}
+          path: builds/*
+
+      - name: Deploy to GitHub Pages branch (gh-pages)
+        if: ${{ inputs.publish_pages }}
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./pages_site
+          keep_files: true
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'
