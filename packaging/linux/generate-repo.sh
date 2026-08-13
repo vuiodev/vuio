@@ -34,51 +34,51 @@ mkdir -p "$OUTPUT_DIR/arch/os/aarch64"
 # Copy DEB packages
 if ls "$PACKAGES_DIR"/*.deb 1> /dev/null 2>&1; then
     echo -e "${CYAN}Processing DEB packages...${NC}"
-    cp "$PACKAGES_DIR"/*.deb "$OUTPUT_DIR/apt/pool/main/v/vuio/" 2>/dev/null || true
-    cp "$PACKAGES_DIR"/*.deb "$OUTPUT_DIR/packages/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*.deb "$OUTPUT_DIR/apt/pool/main/v/vuio/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*.deb "$OUTPUT_DIR/packages/" 2>/dev/null || true
 fi
 
 # Copy RPM packages
 if ls "$PACKAGES_DIR"/*.rpm 1> /dev/null 2>&1; then
     echo -e "${CYAN}Processing RPM packages...${NC}"
-    cp "$PACKAGES_DIR"/*.rpm "$OUTPUT_DIR/rpm/packages/" 2>/dev/null || true
-    cp "$PACKAGES_DIR"/*.rpm "$OUTPUT_DIR/packages/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*.rpm "$OUTPUT_DIR/rpm/packages/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*.rpm "$OUTPUT_DIR/packages/" 2>/dev/null || true
 fi
 
 # Copy APK packages (Alpine Linux)
 if ls "$PACKAGES_DIR"/*.apk 1> /dev/null 2>&1; then
     echo -e "${CYAN}Processing Alpine APK packages...${NC}"
-    cp "$PACKAGES_DIR"/*x86_64.apk "$OUTPUT_DIR/alpine/stable/main/x86_64/" 2>/dev/null || true
-    cp "$PACKAGES_DIR"/*aarch64.apk "$OUTPUT_DIR/alpine/stable/main/aarch64/" 2>/dev/null || true
-    cp "$PACKAGES_DIR"/*.apk "$OUTPUT_DIR/packages/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*x86_64.apk "$OUTPUT_DIR/alpine/stable/main/x86_64/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*aarch64.apk "$OUTPUT_DIR/alpine/stable/main/aarch64/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*.apk "$OUTPUT_DIR/packages/" 2>/dev/null || true
 fi
 
 # Copy Arch packages (Arch Linux)
 if ls "$PACKAGES_DIR"/*.pkg.tar.zst 1> /dev/null 2>&1; then
     echo -e "${CYAN}Processing Arch Linux packages...${NC}"
-    cp "$PACKAGES_DIR"/*x86_64.pkg.tar.zst "$OUTPUT_DIR/arch/os/x86_64/" 2>/dev/null || true
-    cp "$PACKAGES_DIR"/*aarch64.pkg.tar.zst "$OUTPUT_DIR/arch/os/aarch64/" 2>/dev/null || true
-    cp "$PACKAGES_DIR"/*.pkg.tar.zst "$OUTPUT_DIR/packages/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*x86_64.pkg.tar.zst "$OUTPUT_DIR/arch/os/x86_64/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*aarch64.pkg.tar.zst "$OUTPUT_DIR/arch/os/aarch64/" 2>/dev/null || true
+    cp -f "$PACKAGES_DIR"/*.pkg.tar.zst "$OUTPUT_DIR/packages/" 2>/dev/null || true
 fi
 
 # Create convenient "latest" symlinks/copies in packages/
 pushd "$OUTPUT_DIR/packages" > /dev/null
 for arch in amd64 arm64; do
-    latest_deb=$(ls vuio_*_${arch}.deb 2>/dev/null | tail -n1 || true)
+    latest_deb=$(ls vuio_*_${arch}.deb 2>/dev/null | grep -v 'latest' | tail -n1 || true)
     if [ -n "$latest_deb" ]; then
         cp -f "$latest_deb" "vuio_latest_${arch}.deb"
     fi
 done
 for arch in x86_64 aarch64; do
-    latest_rpm=$(ls vuio-*-1.${arch}.rpm 2>/dev/null | tail -n1 || true)
+    latest_rpm=$(ls vuio-*-1.${arch}.rpm 2>/dev/null | grep -v 'latest' | tail -n1 || true)
     if [ -n "$latest_rpm" ]; then
         cp -f "$latest_rpm" "vuio_latest_${arch}.rpm"
     fi
-    latest_apk=$(ls vuio-*.${arch}.apk 2>/dev/null | tail -n1 || true)
+    latest_apk=$(ls vuio-*.${arch}.apk 2>/dev/null | grep -v 'latest' | tail -n1 || true)
     if [ -n "$latest_apk" ]; then
         cp -f "$latest_apk" "vuio_latest_${arch}.apk"
     fi
-    latest_archpkg=$(ls vuio-*-1-${arch}.pkg.tar.zst 2>/dev/null | tail -n1 || true)
+    latest_archpkg=$(ls vuio-*-1-${arch}.pkg.tar.zst 2>/dev/null | grep -v 'latest' | tail -n1 || true)
     if [ -n "$latest_archpkg" ]; then
         cp -f "$latest_archpkg" "vuio_latest_${arch}.pkg.tar.zst"
     fi
@@ -212,7 +212,9 @@ EOF
                 tar -czf APKINDEX.tar.gz APKINDEX
                 rm -f APKINDEX
             else
-                touch APKINDEX.tar.gz
+                touch APKINDEX
+                tar -czf APKINDEX.tar.gz APKINDEX
+                rm -f APKINDEX
             fi
         fi
         popd > /dev/null
@@ -241,12 +243,19 @@ for arch in x86_64 aarch64; do
         else
             rm -rf db_build vuio.db vuio.db.tar.gz vuio.files vuio.files.tar.gz
             mkdir -p db_build
-            for pkg in *.pkg.tar.zst; do
+            for pkg in $(ls vuio*.pkg.tar.zst 2>/dev/null | grep -v 'latest'); do
                 if [ -f "$pkg" ]; then
                     # Extract PKGINFO from Arch package
                     mkdir -p pkgtemp
                     zstd -d "$pkg" -o pkgtemp/pkg.tar --quiet 2>/dev/null && \
                         tar -xf pkgtemp/pkg.tar -C pkgtemp .PKGINFO 2>/dev/null || true
+                    pname="vuio"
+                    pver="0.0.43-1"
+                    pdesc="Cross-platform DLNA media server"
+                    purl="https://github.com/vuiodev/vuio"
+                    psize="15000000"
+                    parch="$arch"
+
                     if [ -f pkgtemp/.PKGINFO ]; then
                         pname=$(grep "^pkgname = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
                         pver=$(grep "^pkgver = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
@@ -254,10 +263,16 @@ for arch in x86_64 aarch64; do
                         purl=$(grep "^url = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
                         psize=$(grep "^size = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
                         parch=$(grep "^arch = " pkgtemp/.PKGINFO | cut -d'=' -f2 | xargs)
+                    fi
 
-                        ENTRY_DIR="db_build/${pname}-${pver}"
-                        mkdir -p "$ENTRY_DIR"
-                        cat > "$ENTRY_DIR/desc" << EOF
+                    csize=$(stat -c%s "$pkg" 2>/dev/null || stat -f%z "$pkg" 2>/dev/null || wc -c < "$pkg" | tr -d ' ')
+                    pmd5=$(md5sum "$pkg" 2>/dev/null | cut -d' ' -f1 || md5 -q "$pkg" 2>/dev/null || true)
+                    psha256=$(sha256sum "$pkg" 2>/dev/null | cut -d' ' -f1 || shasum -a 256 "$pkg" 2>/dev/null | cut -d' ' -f1 || true)
+                    bdate=$(date +%s)
+
+                    ENTRY_DIR="db_build/${pname}-${pver}"
+                    mkdir -p "$ENTRY_DIR"
+                    cat > "$ENTRY_DIR/desc" << EOF
 %FILENAME%
 $pkg
 
@@ -276,19 +291,36 @@ $purl
 %ARCH%
 $parch
 
+%BUILDDATE%
+$bdate
+
+%PACKAGER%
+VuIO <vuio@vuio.dev>
+
 %CSIZE%
-$(du -b "$pkg" | cut -f1)
+$csize
 
 %ISIZE%
 $psize
 
+%DEPENDS%
+glibc
+
+%PROVIDES%
+vuio
+
+%MD5SUM%
+$pmd5
+
+%SHA256SUM%
+$psha256
+
 EOF
-                    fi
                     rm -rf pkgtemp
                 fi
             done
             if [ -d db_build ] && [ "$(ls db_build)" ]; then
-                tar -czf vuio.db.tar.gz -C db_build .
+                (cd db_build && COPYFILE_DISABLE=1 tar --exclude='._*' -czf ../vuio.db.tar.gz *)
                 rm -rf db_build
             else
                 rm -rf db_build

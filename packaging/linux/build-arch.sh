@@ -253,7 +253,11 @@ else
     cp vuio.service pkgroot/usr/lib/systemd/system/vuio.service
     chmod 644 pkgroot/usr/lib/systemd/system/vuio.service
 
-    SIZE=$(du -sb pkgroot | cut -f1)
+    SIZE=$(du -sb pkgroot 2>/dev/null | cut -f1 || true)
+    if [ -z "$SIZE" ]; then
+        SIZE=$(du -sk pkgroot | cut -f1)
+        SIZE=$((SIZE * 1024))
+    fi
     BUILD_DATE=$(date +%s)
 
     cat > pkgroot/.PKGINFO << PKGINFO_EOF
@@ -272,7 +276,7 @@ PKGINFO_EOF
 
     cd pkgroot
     # .PKGINFO must come first in the archive
-    tar --owner=0 --group=0 -cf - .PKGINFO usr etc | zstd -19 -o "$OUTPUT_DIR/$ARCH_PKG_NAME"
+    COPYFILE_DISABLE=1 tar --owner=0 --group=0 --numeric-owner --exclude='._*' -cf - .PKGINFO usr etc | zstd -19 -o "$OUTPUT_DIR/$ARCH_PKG_NAME"
     cd ..
     echo -e "${GREEN}✓ Arch package created successfully: $OUTPUT_DIR/$ARCH_PKG_NAME${NC}"
 fi

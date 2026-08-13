@@ -94,8 +94,11 @@ depend() {
 EOF
 chmod 755 "$TEMP_DIR/pkg/etc/init.d/vuio"
 
-# Calculate installed size
-SIZE=$(du -sb "$TEMP_DIR/pkg" | cut -f1)
+SIZE=$(du -sb "$TEMP_DIR/pkg" 2>/dev/null | cut -f1 || true)
+if [ -z "$SIZE" ]; then
+    SIZE=$(du -sk "$TEMP_DIR/pkg" | cut -f1)
+    SIZE=$((SIZE * 1024))
+fi
 BUILD_DATE=$(date +%s)
 
 # Create .PKGINFO
@@ -116,13 +119,8 @@ EOF
 APK_FILE="${OUTPUT_DIR}/${PACKAGE_NAME}-${APK_VER}.${ARCHITECTURE}.apk"
 
 cd "$TEMP_DIR"
-# Create control stream and data stream
-tar -czf control.tar.gz .PKGINFO
+cp .PKGINFO pkg/
 cd pkg
-tar -czf ../data.tar.gz .
-cd ..
-
-# Assemble final APK file (cat approach is more compatible than nested tar)
-cat control.tar.gz data.tar.gz > "$APK_FILE"
+tar -czf "$APK_FILE" .PKGINFO etc usr
 
 echo -e "${GREEN}✓ Successfully created APK package: $APK_FILE${NC}"
