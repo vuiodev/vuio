@@ -40,7 +40,7 @@ RUN RUST_TARGET=$(cat /tmp/rust_target) && \
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN RUST_TARGET=$(cat /tmp/rust_target) && \
-    cargo build --release --locked --target $RUST_TARGET --package vuio --bin vuio && \
+    cargo build --release --locked --target $RUST_TARGET --package vuio-cli --bin vuio && \
     cp target/$RUST_TARGET/release/vuio /tmp/vuio
 
 # ---- Final Stage ----
