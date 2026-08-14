@@ -512,7 +512,10 @@ where
             Err(error) => warn!("Shutdown database backup failed: {}", error),
         }
     }
-    if let Err(e) = perform_graceful_shutdown(&database, &lifecycle_stats).await {
+    let compact_on_shutdown = app_state.current_config().database.vacuum_on_startup;
+    if let Err(e) =
+        perform_graceful_shutdown(&database, &lifecycle_stats, compact_on_shutdown).await
+    {
         error!("Error during graceful shutdown: {}", e);
     }
     info!("Shutdown completed in {:?}", shutdown_start.elapsed());

@@ -309,12 +309,16 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
         Impact::Restart,
         "Where the media index lives. Leave unset for the platform default location.",
     ),
-    field(
-        "database.vacuum_on_startup",
-        "Compact at startup",
-        FieldKind::Bool,
-        Impact::NextStart,
-        "Reclaim space in the index file at boot. Slows startup on a large library.",
+    noted(
+        field(
+            "database.vacuum_on_startup",
+            "Compact the index",
+            FieldKind::Bool,
+            Impact::NextStart,
+            "Reclaim free space in the index file when the server starts and stops.",
+        ),
+        "Compaction rewrites the whole file, so on a large library it adds time to both. \
+         It is not needed for durability — only to give back space left by deletions.",
     ),
     noted(
         field(

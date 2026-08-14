@@ -57,6 +57,7 @@ recursive = true
 # extensions = ["mp3", "flac", "wav"]
 
 [database]
+# Reclaim free space in the index at startup and shutdown; rewrites the whole file.
 vacuum_on_startup = false
 backup_enabled = false
 # Omit to use the platform-appropriate default location.

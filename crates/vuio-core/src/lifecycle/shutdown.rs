@@ -4,6 +4,7 @@ use super::*;
 pub(super) async fn perform_graceful_shutdown<D: DatabaseManager>(
     database: &Arc<D>,
     stats: &ApplicationStats,
+    compact: bool,
 ) -> anyhow::Result<()> {
     info!("Performing graceful shutdown with atomic state persistence...");
 
@@ -37,11 +38,17 @@ pub(super) async fn perform_graceful_shutdown<D: DatabaseManager>(
         }
     }
 
-    // Perform database vacuum if needed (this will also ensure all data is persisted)
-    info!("Performing final database maintenance...");
-    match database.vacuum().await {
-        Ok(compacted) => info!(compacted, "Final database compaction completed"),
-        Err(e) => warn!("Could not compact database during shutdown: {}", e),
+    // Only when asked. A VACUUM rewrites the entire database file, so on a large
+    // library this turned every stop into a multi-gigabyte copy — and it ran
+    // regardless of `database.vacuum_on_startup`, the setting that exists to say
+    // whether compaction is wanted at all. Write-ahead logging has already made
+    // the data durable; compaction only reclaims free pages.
+    if compact {
+        info!("Performing final database maintenance...");
+        match database.vacuum().await {
+            Ok(compacted) => info!(compacted, "Final database compaction completed"),
+            Err(e) => warn!("Could not compact database during shutdown: {}", e),
+        }
     }
 
     info!("Graceful shutdown with atomic state persistence completed");
@@ -76,8 +83,9 @@ impl ShutdownCoordinator {
     pub async fn finalize<D: DatabaseManager>(
         database: &Arc<D>,
         stats: &ApplicationStats,
+        compact: bool,
     ) -> anyhow::Result<()> {
-        perform_graceful_shutdown(database, stats).await
+        perform_graceful_shutdown(database, stats, compact).await
     }
 }
 

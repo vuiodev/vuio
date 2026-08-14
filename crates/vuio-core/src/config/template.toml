@@ -71,6 +71,8 @@ validation_mode = "Warn"
 # Platform default database location: PLACEHOLDER_DEFAULT_DATABASE_PATH
 [database]
 path = "PLACEHOLDER_DATABASE_PATH"
+# Reclaim free space in the index file at startup and shutdown. Rewrites the
+# whole file, so it adds time to both on a large library.
 vacuum_on_startup = false
 backup_enabled = false
 
