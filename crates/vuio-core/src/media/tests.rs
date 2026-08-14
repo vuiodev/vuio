@@ -211,8 +211,18 @@ async fn test_recursive_scan_optimization() {
     let second_result = scanner.scan_directory_recursive(&root_dir).await.unwrap();
     assert_eq!(second_result.new_files.len(), 0);
     assert_eq!(second_result.updated_files.len(), 0);
-    assert_eq!(second_result.unchanged_files.len(), 4);
+    assert_eq!(second_result.unchanged, 4);
     assert_eq!(second_result.total_changes(), 0);
+    // The point of the second scan: it still visited all four files, and opened
+    // none of them. Reading a file means canonicalizing its path, probing for a
+    // subtitle sidecar and, for audio, parsing the whole container — which used
+    // to happen on every scan of an unchanged library, and there is one every
+    // five minutes.
+    assert_eq!(second_result.total_scanned, 4);
+    assert_eq!(
+        second_result.files_read, 0,
+        "a rescan of an unchanged library must not open any file"
+    );
 
     // Verify the optimization is working by checking that we can handle the recursive scan
     // without making individual database queries for each directory

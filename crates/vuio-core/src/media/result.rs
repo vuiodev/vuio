@@ -12,11 +12,24 @@ pub struct ScanResult {
     /// Files that were removed from the database
     pub removed_files: Vec<FileFingerprint>,
 
-    /// Files that were unchanged
-    pub unchanged_files: Vec<FileFingerprint>,
+    /// How many files were found to be unchanged.
+    ///
+    /// A count rather than the records themselves: nothing has ever needed more
+    /// than the number, and on a large library retaining one clone per unchanged
+    /// file meant building and dropping a copy of most of the index on every
+    /// scan.
+    pub unchanged: usize,
 
     /// Total number of files scanned from the file system
     pub total_scanned: usize,
+
+    /// How many files this scan actually opened and read.
+    ///
+    /// Distinct from `total_scanned`, which counts everything the walk saw. A
+    /// scan of a library that has not changed should read nothing: each file
+    /// costs one `stat`, and the difference between the two numbers is the work
+    /// avoided.
+    pub files_read: usize,
 
     /// Errors encountered during scanning
     pub errors: Vec<ScanError>,
@@ -32,8 +45,9 @@ impl ScanResult {
             new_files: Vec::with_capacity(100),
             updated_files: Vec::with_capacity(50),
             removed_files: Vec::with_capacity(50),
-            unchanged_files: Vec::with_capacity(1000),
+            unchanged: 0,
             total_scanned: 0,
+            files_read: 0,
             errors: Vec::with_capacity(10),
             complete: true,
         }
@@ -44,8 +58,9 @@ impl ScanResult {
         self.new_files.extend(other.new_files);
         self.updated_files.extend(other.updated_files);
         self.removed_files.extend(other.removed_files);
-        self.unchanged_files.extend(other.unchanged_files);
+        self.unchanged += other.unchanged;
         self.total_scanned += other.total_scanned;
+        self.files_read += other.files_read;
         self.errors.extend(other.errors);
         self.complete &= other.complete;
     }
@@ -59,12 +74,13 @@ impl ScanResult {
     /// Get a summary string of the scan results
     pub fn summary(&self) -> String {
         format!(
-            "Scanned {} files: {} new, {} updated, {} removed, {} unchanged, {} errors",
+            "Scanned {} files ({} read): {} new, {} updated, {} removed, {} unchanged, {} errors",
             self.total_scanned,
+            self.files_read,
             self.new_files.len(),
             self.updated_files.len(),
             self.removed_files.len(),
-            self.unchanged_files.len(),
+            self.unchanged,
             self.errors.len()
         )
     }

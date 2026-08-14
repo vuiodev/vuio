@@ -78,9 +78,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
                     .to_owned(),
             });
-            result
-                .unchanged_files
-                .extend(existing_files.iter().map(Self::fingerprint));
+            result.unchanged += existing_files.len();
             return Ok(result);
         }
         self.perform_incremental_update(&canonical_dir, existing_files, current_files)
@@ -138,9 +136,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
                         files_to_update.push(updated_file);
                     } else {
-                        result
-                            .unchanged_files
-                            .push(Self::fingerprint(existing_file));
+                        result.unchanged += 1;
                     }
                 }
                 None => {
@@ -227,7 +223,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             result.new_files.len(),
             result.updated_files.len(),
             result.removed_files.len(),
-            result.unchanged_files.len()
+            result.unchanged
         );
 
         Ok(result)
@@ -266,6 +262,32 @@ impl<D: DatabaseManager> MediaScanner<D> {
             Ok(diff) => diff.as_secs() > 10,
             Err(_) => true, // If we can't calculate the difference, assume it needs updating
         }
+    }
+
+    /// Whether a record is stale, judged from `stat` alone.
+    ///
+    /// The same three rules as [`Self::fingerprint_needs_update`], asked before
+    /// the file is opened rather than after. Every rule is answerable from
+    /// metadata the filesystem already has, which is what makes an unchanged
+    /// library nearly free to re-scan.
+    fn stat_needs_update(existing: &FileFingerprint, metadata: &std::fs::Metadata) -> bool {
+        if existing.size != metadata.len() {
+            return true;
+        }
+        // A record written by an older tag reader is stale even though its file
+        // is not, so it is re-read to pick up the fields the new reader knows.
+        if existing.tags_version < crate::platform::filesystem::TAGS_VERSION {
+            return true;
+        }
+        let Ok(modified) = metadata.modified() else {
+            return true;
+        };
+        let difference = if existing.modified > modified {
+            existing.modified.duration_since(modified)
+        } else {
+            modified.duration_since(existing.modified)
+        };
+        difference.map_or(true, |difference| difference.as_secs() > 10)
     }
 
     fn fingerprint_needs_update(&self, existing: &FileFingerprint, current: &MediaFile) -> bool {
@@ -408,14 +430,70 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let mut current_paths: HashSet<PathBuf> = HashSet::with_capacity(total_files);
         let mut processed = 0;
 
-        for path in file_paths {
-            // jwalk descendants inherit the already-canonical root. It does not
-            // follow file symlinks, so ordinary entries require no syscall here.
-            current_paths.insert(path.clone());
+        // Pass one: classify every path with a single `stat`.
+        //
+        // Building a `MediaFile` canonicalizes the path, probes for a subtitle
+        // sidecar and, for audio, parses the entire container with symphonia. Ask
+        // the cheap question first, or a library that has not changed is fully
+        // re-read on every scan — and there is one every five minutes.
+        //
+        // Concurrent because a `stat` blocks, on a network filesystem as readily
+        // as a local one, and because the answers are independent.
+        let concurrency = std::thread::available_parallelism()
+            .map(|value| value.get())
+            .unwrap_or(4);
+        let mut needs_reading: Vec<PathBuf> = Vec::new();
+        {
+            let mut classified = futures_util::stream::iter(file_paths)
+                .map(|path| async move {
+                    let metadata = tokio::fs::metadata(&path).await.ok();
+                    (path, metadata)
+                })
+                .buffer_unordered(concurrency);
 
-            // Create MediaFile from path
-            let current_file = match self.create_media_file_from_path(&path).await {
-                Ok(f) => f,
+            while let Some((path, metadata)) = classified.next().await {
+                // jwalk descendants inherit the already-canonical root. It does
+                // not follow file symlinks, so no syscall is needed here.
+                current_paths.insert(path.clone());
+                processed += 1;
+
+                match (existing_files_map.get(&path), metadata) {
+                    (Some(existing), Some(metadata))
+                        if !Self::stat_needs_update(existing, &metadata) =>
+                    {
+                        result.unchanged += 1;
+                    }
+                    // Anything else has to be read: a new file, a changed one, or
+                    // one whose `stat` failed — `create_media_file_from_path`
+                    // makes the same call and reports the error properly.
+                    _ => needs_reading.push(path),
+                }
+
+                if processed % 10_000 == 0 {
+                    debug!("Examined {}/{} files", processed, total_files);
+                }
+            }
+        }
+
+        info!(
+            "{} of {} files need reading",
+            needs_reading.len(),
+            total_files
+        );
+
+        // Pass two: read the files that actually changed, several at a time.
+        //
+        // Each read ends in `spawn_blocking`, so the work already lands on the
+        // blocking pool — but awaiting them one after another meant only ever one
+        // was in flight, and a scan used a single core however many the machine
+        // had.
+        let mut built = futures_util::stream::iter(needs_reading)
+            .map(|path| async move { (path.clone(), self.create_media_file_from_path(&path).await) })
+            .buffer_unordered(concurrency);
+
+        while let Some((path, outcome)) = built.next().await {
+            let current_file = match outcome {
+                Ok(file) => file,
                 Err(e) => {
                     debug!("Failed to create MediaFile for {}: {}", path.display(), e);
                     result.errors.push(ScanError {
@@ -425,6 +503,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     continue;
                 }
             };
+            result.files_read += 1;
 
             // Check if file exists in database
             if let Some(existing) = existing_files_map.get(&path) {
@@ -435,13 +514,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     updated.updated_at = SystemTime::now();
                     files_to_update.push(updated);
                 } else {
-                    result.unchanged_files.push(existing.clone());
+                    result.unchanged += 1;
                 }
             } else {
                 files_to_insert.push(current_file);
             }
-
-            processed += 1;
 
             // Process batch when full
             if files_to_insert.len() >= BATCH_SIZE {
@@ -540,11 +617,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
         result.total_scanned = total_files;
 
         info!(
-            "Scan completed: {} new, {} updated, {} removed, {} unchanged",
+            "Scan completed: {} new, {} updated, {} removed, {} unchanged, {} files read",
             result.new_files.len(),
             result.updated_files.len(),
             result.removed_files.len(),
-            result.unchanged_files.len()
+            result.unchanged,
+            result.files_read
         );
 
         Ok(result)
@@ -591,7 +669,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
             tags: Default::default(),
             stream: Default::default(),
             extra_tags: Vec::new(),
-            tags_version: 0,
+            // Which reader has examined this record, not which one found
+            // something. A file with no readable tags — a video, or audio whose
+            // container will not parse — still counts as examined, or it would
+            // be opened again on every scan for as long as it exists.
+            tags_version: crate::platform::filesystem::TAGS_VERSION,
             subtitle_available: tokio::fs::try_exists(path.with_extension("srt"))
                 .await
                 .unwrap_or(false),

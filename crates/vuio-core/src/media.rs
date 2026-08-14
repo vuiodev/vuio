@@ -1,4 +1,5 @@
 use anyhow::Result;
+use futures_util::StreamExt as _;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
