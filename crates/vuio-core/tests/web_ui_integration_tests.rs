@@ -741,6 +741,21 @@ async fn radio_listening_is_public_and_running_a_station_is_not() {
 async fn a_station_is_created_stopped_and_remembers_being_started() {
     let (_temp, state, root) = library().await;
 
+    // Take the folder from the browse API rather than from the fixture's own
+    // path, because that is where the studio gets it: a media root reached
+    // through a symlink — /var on macOS — is stored canonicalised, and a test
+    // that passes its own spelling of the path is testing the wrong thing.
+    let listing = browse(&state, &format!("path={}", encode(&root))).await;
+    let movies = listing["folders"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|folder| folder["name"] == "Movies")
+        .expect("the fixture has a Movies folder")["path"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
     let create = Request::post("/api/radio/admin/stations")
         .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 51234))))
         .header("authorization", format!("Bearer {TEST_TOKEN}"))
@@ -749,7 +764,7 @@ async fn a_station_is_created_stopped_and_remembers_being_started() {
             serde_json::json!({
                 "name": "Test Station",
                 "genre": "Test",
-                "folders": [root.to_string_lossy()],
+                "folders": [movies],
                 "mode": "linear",
             })
             .to_string(),
@@ -772,8 +787,8 @@ async fn a_station_is_created_stopped_and_remembers_being_started() {
     );
     assert_eq!(station["is_live"], false);
 
-    // The fixture library holds no audio that can be broadcast, so starting
-    // fails with a reason rather than leaving a silent station "live".
+    // That folder holds only video, so there is nothing to broadcast and
+    // starting fails with a reason rather than leaving a silent station "live".
     let id = station["id"].as_i64().unwrap();
     let start = Request::post(format!("/api/radio/admin/stations/{id}/start"))
         .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 51234))))
