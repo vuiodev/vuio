@@ -611,3 +611,75 @@ async fn browse_json_reports_no_media_info_when_none_was_fetched() {
     assert!(file["info_title"].is_null());
     assert_eq!(file["info_art"], false);
 }
+
+#[tokio::test]
+async fn dlna_browse_shows_filename_not_mediainfo_title_or_description() {
+    let temp = tempdir().unwrap();
+    let database = Arc::new(
+        SqliteDatabase::new(temp.path().join("test.db"))
+            .await
+            .unwrap(),
+    );
+    database.initialize().await.unwrap();
+
+    let media_path = temp.path().join("media");
+    tokio::fs::create_dir_all(&media_path).await.unwrap();
+    let file = MediaFile::new(
+        media_path.join("Show.Name.S02E05.1080p.mkv"),
+        1024,
+        "video/x-matroska".to_string(),
+    );
+    let id = database.store_media_file(&file).await.unwrap();
+
+    database
+        .bulk_store_mediainfo(&[record_for(id, 92)])
+        .await
+        .unwrap();
+
+    let state = state_with(database, &temp).await;
+    let router = create_router(state, Surface::Primary);
+
+    let soap_browse = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+      <ObjectID>video/d0</ObjectID>
+      <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+      <Filter>*</Filter>
+      <StartingIndex>0</StartingIndex>
+      <RequestedCount>10</RequestedCount>
+      <SortCriteria></SortCriteria>
+    </u:Browse>
+  </s:Body>
+</s:Envelope>"#;
+
+    let response = router
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/control/ContentDirectory")
+                .header(
+                    "soapaction",
+                    "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\"",
+                )
+                .header("content-type", "text/xml; charset=utf-8")
+                .extension(ConnectInfo(test_peer()))
+                .body(Body::from(soap_browse))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let bytes = axum::body::to_bytes(response.into_body(), 128 * 1024)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+
+    // DLNA client should see original filename, not fetched online title "Some Show"
+    assert!(body.contains("Show.Name.S02E05.1080p.mkv"));
+    assert!(!body.contains("&lt;dc:title&gt;Some Show&lt;/dc:title&gt;"));
+    // DLNA should not contain fetched overview / description
+    assert!(!body.contains("A tale."));
+}
+

@@ -191,9 +191,6 @@ impl ContentDirectoryHandler {
                 autoplay_enabled: state.current_config().media.autoplay_enabled,
                 update_id: current_update_id,
                 bookmarks,
-                prefer_online_titles: state.current_config().mediainfo.prefer_online_titles,
-                min_confidence: state.current_config().mediainfo.min_confidence,
-                mediainfo: Default::default(),
             };
             let canonical_parent = canonical_browse_path.to_string_lossy().into_owned();
             let mime_family = media_type_filter.to_owned();
@@ -380,9 +377,6 @@ impl ContentDirectoryHandler {
             autoplay_enabled: state.current_config().media.autoplay_enabled,
             update_id: state.content_update_id.load(Ordering::SeqCst),
             bookmarks: state.bookmarks.lock().await.snapshot(),
-            prefer_online_titles: state.current_config().mediainfo.prefer_online_titles,
-            min_confidence: state.current_config().mediainfo.min_confidence,
-            mediainfo: Default::default(),
         };
         let starting_index = params.starting_index as usize;
         let requested_count = browse_page_limit(params);
