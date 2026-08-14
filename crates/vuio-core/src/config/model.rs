@@ -50,8 +50,13 @@ pub(super) fn default_unavailable_root_grace_hours() -> u64 {
 /// search is the one thing that responds, and as a step rather than a curve: it
 /// stays slow until the search index fits, then roughly halves. At 500,000 files
 /// that step fell between 160 and 192.
+///
+/// So the default is small. A larger one bought nothing measurable below the
+/// step — at 500,000 files, 128 cost 170 MB more than 8 and left search exactly
+/// as slow — and a server that wants the faster search has to be raised past the
+/// step, not merely raised.
 pub(super) fn default_cache_mb() -> usize {
-    128
+    8
 }
 
 pub(super) fn default_true() -> bool {
