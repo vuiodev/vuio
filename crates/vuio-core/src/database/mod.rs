@@ -785,6 +785,17 @@ pub trait MediaRepository: Send + Sync {
     /// Load compact scanner comparison records instead of complete media metadata.
     async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>>;
 
+    /// The same, for one subtree.
+    ///
+    /// A scan compares what is on disk against what is indexed, and it only ever
+    /// scans one root — so loading the whole table means every other library's
+    /// rows are held in memory for nothing. That is most of the cost when a
+    /// watcher event rescans a single folder.
+    async fn load_file_fingerprints_under(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileFingerprint>>;
+
     async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>>;
 
     async fn list_root_availability(&self) -> Result<Vec<RootAvailability>>;

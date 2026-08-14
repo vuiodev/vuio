@@ -253,7 +253,6 @@ pub(super) fn swap_one_ascii_case(value: &str) -> Option<String> {
 
 #[derive(Debug)]
 pub(super) struct TraversalReport {
-    pub(super) file_paths: Vec<PathBuf>,
     pub(super) uncertain_prefixes: Vec<PathBuf>,
     pub(super) errors: Vec<ScanError>,
     pub(super) root_complete: bool,

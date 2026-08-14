@@ -69,6 +69,13 @@ impl MediaRepository for SqliteDatabase {
         SqliteDatabase::load_file_fingerprints_impl(self).await
     }
 
+    async fn load_file_fingerprints_under(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileFingerprint>> {
+        SqliteDatabase::load_file_fingerprints_under_impl(self, canonical_prefix.to_owned()).await
+    }
+
     async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>> {
         SqliteDatabase::get_root_availability_impl(self, path).await
     }

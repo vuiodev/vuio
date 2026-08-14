@@ -128,6 +128,98 @@ async fn test_scan_result_operations() {
     assert!(summary.contains("2 removed"));
 }
 
+/// The scan reconciles what is on disk against what is indexed, and it does so
+/// by marking the records the walk produced — so what is left unmarked is what
+/// has been deleted. This is the destructive half of a scan and had no coverage
+/// at all, which is uncomfortable for the one operation that removes user data.
+#[tokio::test]
+async fn recursive_scan_removes_what_is_gone_from_disk() {
+    let temp_dir = tempdir().unwrap();
+    let db = Arc::new(
+        SqliteDatabase::new(temp_dir.path().join("deletions.db"))
+            .await
+            .unwrap(),
+    );
+    db.initialize().await.unwrap();
+    let scanner =
+        MediaScanner::with_filesystem_manager(Box::new(BaseFileSystemManager::new(true)), db.clone());
+
+    let root = temp_dir.path().join("media");
+    let keep_dir = root.join("keep");
+    let doomed_dir = root.join("doomed");
+    tokio::fs::create_dir_all(&keep_dir).await.unwrap();
+    tokio::fs::create_dir_all(&doomed_dir).await.unwrap();
+
+    tokio::fs::write(keep_dir.join("stays.mp4"), b"a").await.unwrap();
+    let single = keep_dir.join("goes.mp4");
+    tokio::fs::write(&single, b"b").await.unwrap();
+    tokio::fs::write(doomed_dir.join("one.mp4"), b"c").await.unwrap();
+    tokio::fs::write(doomed_dir.join("two.mp4"), b"d").await.unwrap();
+
+    assert_eq!(scanner.scan_directory_recursive(&root).await.unwrap().new, 4);
+
+    // One file, and then a whole directory.
+    tokio::fs::remove_file(&single).await.unwrap();
+    let after_file = scanner.scan_directory_recursive(&root).await.unwrap();
+    assert_eq!(after_file.removed, 1, "a deleted file must leave the index");
+    assert_eq!(after_file.unchanged, 3);
+    assert!(db.get_file_by_path(&single).await.unwrap().is_none());
+
+    tokio::fs::remove_dir_all(&doomed_dir).await.unwrap();
+    let after_dir = scanner.scan_directory_recursive(&root).await.unwrap();
+    assert_eq!(
+        after_dir.removed, 2,
+        "a directory deleted whole must take its files with it"
+    );
+    assert_eq!(after_dir.unchanged, 1);
+
+    let mut remaining = db.stream_all_media_files();
+    let mut survivors = Vec::new();
+    while let Some(file) = remaining.next().await {
+        survivors.push(file.unwrap());
+    }
+    assert_eq!(survivors.len(), 1);
+    assert_eq!(survivors[0].filename, "stays.mp4");
+}
+
+/// A scan compares one root against one root. It loads only that subtree's
+/// records, and a sibling library — including one whose path is a string prefix
+/// of this one — must be neither examined nor deleted.
+#[tokio::test]
+async fn recursive_scan_leaves_other_roots_alone() {
+    let temp_dir = tempdir().unwrap();
+    let db = Arc::new(
+        SqliteDatabase::new(temp_dir.path().join("roots.db"))
+            .await
+            .unwrap(),
+    );
+    db.initialize().await.unwrap();
+    let scanner =
+        MediaScanner::with_filesystem_manager(Box::new(BaseFileSystemManager::new(true)), db.clone());
+
+    // `Films` shares a prefix with `Film`, which a `LIKE 'path%'` would sweep up.
+    let film = temp_dir.path().join("Film");
+    let films = temp_dir.path().join("Films");
+    tokio::fs::create_dir_all(&film).await.unwrap();
+    tokio::fs::create_dir_all(&films).await.unwrap();
+    tokio::fs::write(film.join("a.mp4"), b"a").await.unwrap();
+    let sibling = films.join("b.mp4");
+    tokio::fs::write(&sibling, b"b").await.unwrap();
+
+    assert_eq!(scanner.scan_directory_recursive(&film).await.unwrap().new, 1);
+    assert_eq!(scanner.scan_directory_recursive(&films).await.unwrap().new, 1);
+
+    // Rescanning `Film` must not notice, touch, or remove anything under `Films`.
+    let rescan = scanner.scan_directory_recursive(&film).await.unwrap();
+    assert_eq!(rescan.unchanged, 1, "only its own root is compared");
+    assert_eq!(rescan.removed, 0);
+    assert_eq!(rescan.total_scanned, 1);
+    assert!(
+        db.get_file_by_path(&sibling).await.unwrap().is_some(),
+        "the sibling root's file must survive a scan of Film"
+    );
+}
+
 #[tokio::test]
 async fn test_recursive_scan_optimization() {
     let temp_dir = tempdir().unwrap();

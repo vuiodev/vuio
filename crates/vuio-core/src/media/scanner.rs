@@ -7,7 +7,146 @@ pub struct MediaScanner<D: DatabaseManager = ActiveDatabase> {
     database_manager: Arc<D>,
 }
 
+/// How many paths the walker may run ahead of the classifier.
+///
+/// Bounded so that a walk of a large library does not become a list of the
+/// library: past this the walking thread blocks until the consumer catches up.
+const WALK_QUEUE: usize = 4096;
+
+/// How many changed files to read before writing them out.
+///
+/// Only files that actually changed reach this, so on an unchanged library it
+/// never fills. On a first scan it is what keeps peak memory flat instead of
+/// proportional to the library.
+const READ_WINDOW: usize = 4096;
+
+/// What a scan needs to know about a file it may already have indexed.
+///
+/// Deliberately not [`FileFingerprint`]: that carries the path, and this lives
+/// in a map keyed by the path, so storing it again doubled the largest
+/// allocation a scan makes.
+struct IndexedFile {
+    id: i64,
+    size: u64,
+    modified: SystemTime,
+    created_at: SystemTime,
+    tags_version: u32,
+    /// Set when the walk produced this path. What is left unset is what has been
+    /// deleted from disk — which is why the scan needs no second collection of
+    /// every path it saw.
+    seen: bool,
+}
+
+impl IndexedFile {
+    /// Split a loaded record into the map's key and value, moving the path
+    /// rather than copying it into both halves.
+    fn split(fingerprint: FileFingerprint) -> (PathBuf, Self) {
+        let FileFingerprint {
+            id,
+            path,
+            size,
+            modified,
+            created_at,
+            tags_version,
+        } = fingerprint;
+        (
+            path,
+            Self {
+                id,
+                size,
+                modified,
+                created_at,
+                tags_version,
+                seen: false,
+            },
+        )
+    }
+}
+
 impl<D: DatabaseManager> MediaScanner<D> {
+    /// Read a window of changed files, several at a time, and sort them into
+    /// inserts and updates.
+    ///
+    /// Each read ends in `spawn_blocking`, so the work already lands on the
+    /// blocking pool — but awaiting them one after another meant only ever one
+    /// was in flight, and a scan used a single core however many the machine had.
+    async fn read_window(
+        &self,
+        paths: &mut Vec<PathBuf>,
+        existing_files_map: &HashMap<PathBuf, IndexedFile>,
+        files_to_insert: &mut Vec<MediaFile>,
+        files_to_update: &mut Vec<MediaFile>,
+        result: &mut ScanResult,
+        concurrency: usize,
+    ) -> Result<()> {
+        let mut built = futures_util::stream::iter(paths.drain(..))
+            .map(|path| async move { (path.clone(), self.create_media_file_from_path(&path).await) })
+            .buffer_unordered(concurrency);
+
+        while let Some((path, outcome)) = built.next().await {
+            let current_file = match outcome {
+                Ok(file) => file,
+                Err(e) => {
+                    debug!("Failed to create MediaFile for {}: {}", path.display(), e);
+                    result.errors.push(ScanError {
+                        path,
+                        error: e.to_string(),
+                    });
+                    continue;
+                }
+            };
+            result.files_read += 1;
+
+            match existing_files_map.get(&path) {
+                Some(existing) => {
+                    if self.fingerprint_needs_update(existing, &current_file) {
+                        let mut updated = current_file;
+                        updated.id = Some(existing.id);
+                        updated.created_at = existing.created_at;
+                        updated.updated_at = SystemTime::now();
+                        files_to_update.push(updated);
+                    } else {
+                        result.unchanged += 1;
+                    }
+                }
+                None => files_to_insert.push(current_file),
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Write out whichever batch has reached `threshold`.
+    ///
+    /// Pass a threshold of 1 to flush whatever is left.
+    async fn flush_batches(
+        &self,
+        files_to_insert: &mut Vec<MediaFile>,
+        files_to_update: &mut Vec<MediaFile>,
+        result: &mut ScanResult,
+        threshold: usize,
+    ) -> Result<()> {
+        if files_to_insert.len() >= threshold && !files_to_insert.is_empty() {
+            info!("Inserting batch of {} files", files_to_insert.len());
+            self.database_manager
+                .bulk_store_canonical_media_files(files_to_insert)
+                .await?;
+            result.new += files_to_insert.len();
+            files_to_insert.clear();
+        }
+
+        if files_to_update.len() >= threshold && !files_to_update.is_empty() {
+            info!("Updating batch of {} files", files_to_update.len());
+            self.database_manager
+                .bulk_update_canonical_media_files(files_to_update)
+                .await?;
+            result.updated += files_to_update.len();
+            files_to_update.clear();
+        }
+
+        Ok(())
+    }
+
     /// Create a new media scanner with database manager
     pub fn with_database(database_manager: Arc<D>) -> Self {
         Self {
@@ -251,7 +390,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
     /// the file is opened rather than after. Every rule is answerable from
     /// metadata the filesystem already has, which is what makes an unchanged
     /// library nearly free to re-scan.
-    fn stat_needs_update(existing: &FileFingerprint, metadata: &std::fs::Metadata) -> bool {
+    fn stat_needs_update(existing: &IndexedFile, metadata: &std::fs::Metadata) -> bool {
         if existing.size != metadata.len() {
             return true;
         }
@@ -271,7 +410,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         difference.map_or(true, |difference| difference.as_secs() > 10)
     }
 
-    fn fingerprint_needs_update(&self, existing: &FileFingerprint, current: &MediaFile) -> bool {
+    fn fingerprint_needs_update(&self, existing: &IndexedFile, current: &MediaFile) -> bool {
         if existing.size != current.size {
             return true;
         }
@@ -325,28 +464,31 @@ impl<D: DatabaseManager> MediaScanner<D> {
             canonical_root.display()
         );
 
-        // Load all existing files from database once at the start (for incremental updates)
+        // Load the index for this subtree only. A scan compares one root against
+        // one root; the rest of the library would be held for nothing, and a
+        // watcher event that rescans a single folder used to load every row.
         debug!("Loading existing files from database...");
-        let existing_files_map: HashMap<PathBuf, FileFingerprint> = self
+        let canonical_root_str = canonical_root.to_string_lossy().into_owned();
+        let mut existing_files_map: HashMap<PathBuf, IndexedFile> = self
             .database_manager
-            .load_file_fingerprints()
+            .load_file_fingerprints_under(&canonical_root_str)
             .await?
             .into_iter()
-            .map(|fingerprint| (fingerprint.path.clone(), fingerprint))
+            .map(IndexedFile::split)
             .collect();
-        debug!(
-            "Loaded {} existing files from database",
-            existing_files_map.len()
-        );
+        let existing_in_root = existing_files_map.len();
+        debug!("Loaded {existing_in_root} existing files from database");
 
-        // Use jwalk for parallel directory traversal - runs in a blocking thread pool
+        // Walk on a blocking thread, handing paths over as they are found rather
+        // than collecting the library into a `Vec` first. The channel is bounded,
+        // so a slow consumer backs the walker up instead of buffering.
         let root_clone = canonical_root.clone();
         let mut traversal_policy = policy.clone();
         traversal_policy.root = canonical_root.clone();
+        let (path_sender, path_receiver) = tokio::sync::mpsc::channel::<PathBuf>(WALK_QUEUE);
 
-        let traversal = tokio::task::spawn_blocking(move || {
+        let traversal_task = tokio::task::spawn_blocking(move || {
             let mut report = TraversalReport {
-                file_paths: Vec::new(),
                 uncertain_prefixes: Vec::new(),
                 errors: Vec::new(),
                 root_complete: true,
@@ -355,8 +497,9 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 match entry {
                     Ok(entry) if entry.file_type().is_file() => {
                         let path = entry.path();
-                        if traversal_policy.allows_media(&path) {
-                            report.file_paths.push(path);
+                        if traversal_policy.allows_media(&path) && path_sender.blocking_send(path).is_err() {
+                            // The consumer is gone, so the scan is over.
+                            break;
                         }
                     }
                     Ok(_) => {}
@@ -377,41 +520,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 }
             }
             report
-        })
-        .await?;
+        });
 
-        let file_paths = traversal.file_paths;
-
-        let total_files = file_paths.len();
-        let existing_in_root = existing_files_map
-            .keys()
-            .filter(|path| path.starts_with(&canonical_root))
-            .count();
-        let suspect_empty_root = total_files == 0 && existing_in_root > 0;
-        info!(
-            "Found {} media files, processing in batches of {}",
-            total_files, BATCH_SIZE
-        );
-
-        // Process files in batches
         let mut result = ScanResult::new();
-        result.errors.extend(traversal.errors);
-        result.complete = traversal.root_complete
-            && traversal.uncertain_prefixes.is_empty()
-            && !suspect_empty_root;
-        if suspect_empty_root {
-            result.errors.push(ScanError {
-                path: canonical_root.clone(),
-                error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
-                    .to_owned(),
-            });
-        }
         let mut files_to_insert: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
         let mut files_to_update: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
-        let mut current_paths: HashSet<PathBuf> = HashSet::with_capacity(total_files);
-        let mut processed = 0;
+        let mut processed = 0_usize;
 
-        // Pass one: classify every path with a single `stat`.
+        // Classify each path with a single `stat`, several at a time.
         //
         // Building a `MediaFile` canonicalizes the path, probes for a subtitle
         // sidecar and, for audio, parses the entire container with symphonia. Ask
@@ -423,9 +539,9 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let concurrency = std::thread::available_parallelism()
             .map(|value| value.get())
             .unwrap_or(4);
-        let mut needs_reading: Vec<PathBuf> = Vec::new();
+        let mut pending_reads: Vec<PathBuf> = Vec::with_capacity(READ_WINDOW);
         {
-            let mut classified = futures_util::stream::iter(file_paths)
+            let mut classified = tokio_stream::wrappers::ReceiverStream::new(path_receiver)
                 .map(|path| async move {
                     let metadata = tokio::fs::metadata(&path).await.ok();
                     (path, metadata)
@@ -433,141 +549,115 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 .buffer_unordered(concurrency);
 
             while let Some((path, metadata)) = classified.next().await {
-                // jwalk descendants inherit the already-canonical root. It does
-                // not follow file symlinks, so no syscall is needed here.
-                current_paths.insert(path.clone());
                 processed += 1;
 
-                match (existing_files_map.get(&path), metadata) {
-                    (Some(existing), Some(metadata))
-                        if !Self::stat_needs_update(existing, &metadata) =>
-                    {
-                        result.unchanged += 1;
+                // jwalk descendants inherit the already-canonical root. It does
+                // not follow file symlinks, so no syscall is needed here.
+                let unchanged = match (existing_files_map.get_mut(&path), metadata) {
+                    (Some(existing), Some(metadata)) => {
+                        // Marking the record is what replaces a second set of every
+                        // path on disk: whatever is left unmarked is what is gone.
+                        existing.seen = true;
+                        !Self::stat_needs_update(existing, &metadata)
                     }
-                    // Anything else has to be read: a new file, a changed one, or
-                    // one whose `stat` failed — `create_media_file_from_path`
-                    // makes the same call and reports the error properly.
-                    _ => needs_reading.push(path),
+                    (Some(existing), None) => {
+                        existing.seen = true;
+                        false
+                    }
+                    // A new file, or one whose `stat` failed —
+                    // `create_media_file_from_path` makes the same call and
+                    // reports the error properly.
+                    (None, _) => false,
+                };
+
+                if unchanged {
+                    result.unchanged += 1;
+                } else {
+                    pending_reads.push(path);
+                    if pending_reads.len() >= READ_WINDOW {
+                        self.read_window(
+                            &mut pending_reads,
+                            &existing_files_map,
+                            &mut files_to_insert,
+                            &mut files_to_update,
+                            &mut result,
+                            concurrency,
+                        )
+                        .await?;
+                        self.flush_batches(
+                            &mut files_to_insert,
+                            &mut files_to_update,
+                            &mut result,
+                            BATCH_SIZE,
+                        )
+                        .await?;
+                    }
                 }
 
                 if processed % 10_000 == 0 {
-                    debug!("Examined {}/{} files", processed, total_files);
+                    debug!("Examined {processed} files");
                 }
             }
         }
 
-        info!(
-            "{} of {} files need reading",
-            needs_reading.len(),
-            total_files
-        );
+        if !pending_reads.is_empty() {
+            self.read_window(
+                &mut pending_reads,
+                &existing_files_map,
+                &mut files_to_insert,
+                &mut files_to_update,
+                &mut result,
+                concurrency,
+            )
+            .await?;
+        }
+        self.flush_batches(&mut files_to_insert, &mut files_to_update, &mut result, 1)
+            .await?;
 
-        // Pass two: read the files that actually changed, several at a time.
-        //
-        // Each read ends in `spawn_blocking`, so the work already lands on the
-        // blocking pool — but awaiting them one after another meant only ever one
-        // was in flight, and a scan used a single core however many the machine
-        // had.
-        let mut built = futures_util::stream::iter(needs_reading)
-            .map(|path| async move { (path.clone(), self.create_media_file_from_path(&path).await) })
-            .buffer_unordered(concurrency);
+        // The walker's own findings — which prefixes it could not read — only
+        // arrive once the channel has closed, and deletion depends on them.
+        let traversal = traversal_task.await?;
 
-        while let Some((path, outcome)) = built.next().await {
-            let current_file = match outcome {
-                Ok(file) => file,
-                Err(e) => {
-                    debug!("Failed to create MediaFile for {}: {}", path.display(), e);
-                    result.errors.push(ScanError {
-                        path: path.clone(),
-                        error: e.to_string(),
-                    });
-                    continue;
-                }
-            };
-            result.files_read += 1;
-
-            // Check if file exists in database
-            if let Some(existing) = existing_files_map.get(&path) {
-                if self.fingerprint_needs_update(existing, &current_file) {
-                    let mut updated = current_file;
-                    updated.id = Some(existing.id);
-                    updated.created_at = existing.created_at;
-                    updated.updated_at = SystemTime::now();
-                    files_to_update.push(updated);
-                } else {
-                    result.unchanged += 1;
-                }
-            } else {
-                files_to_insert.push(current_file);
-            }
-
-            // Process batch when full
-            if files_to_insert.len() >= BATCH_SIZE {
-                info!(
-                    "Inserting batch of {} files ({}/{})",
-                    files_to_insert.len(),
-                    processed,
-                    total_files
-                );
-                self.database_manager
-                    .bulk_store_canonical_media_files(&files_to_insert)
-                    .await?;
-                result.new += files_to_insert.len();
-                files_to_insert.clear();
-            }
-
-            if files_to_update.len() >= BATCH_SIZE {
-                info!(
-                    "Updating batch of {} files ({}/{})",
-                    files_to_update.len(),
-                    processed,
-                    total_files
-                );
-                self.database_manager
-                    .bulk_update_canonical_media_files(&files_to_update)
-                    .await?;
-                result.updated += files_to_update.len();
-                files_to_update.clear();
-            }
-
-            // Progress logging every 1000 files
-            if processed % 1000 == 0 {
-                info!("Progress: {}/{} files processed", processed, total_files);
-            }
+        let total_files = processed;
+        let suspect_empty_root = total_files == 0 && existing_in_root > 0;
+        result.errors.extend(traversal.errors);
+        result.complete = traversal.root_complete
+            && traversal.uncertain_prefixes.is_empty()
+            && !suspect_empty_root;
+        if suspect_empty_root {
+            result.errors.push(ScanError {
+                path: canonical_root.clone(),
+                error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
+                    .to_owned(),
+            });
         }
 
-        // Process remaining files in last batch
-        if !files_to_insert.is_empty() {
-            info!("Inserting final batch of {} files", files_to_insert.len());
-            self.database_manager
-                .bulk_store_canonical_media_files(&files_to_insert)
-                .await?;
-            result.new += files_to_insert.len();
-        }
-
-        if !files_to_update.is_empty() {
-            info!("Updating final batch of {} files", files_to_update.len());
-            self.database_manager
-                .bulk_update_canonical_media_files(&files_to_update)
-                .await?;
-            result.updated += files_to_update.len();
-        }
-
-        // Find and remove deleted files
-        let files_to_remove: Vec<PathBuf> = existing_files_map
-            .iter()
-            .filter(|(path, _)| !current_paths.contains(*path))
-            .filter(|(path, _)| path.starts_with(&canonical_root)) // Only remove files under scanned directory
-            .filter(|(path, _)| {
-                traversal.root_complete
-                    && !suspect_empty_root
-                    && !traversal
+        // Whatever the walk never produced is gone from disk.
+        let reconcile_deletions =
+            traversal.root_complete && !suspect_empty_root && traversal.uncertain_prefixes.is_empty();
+        let files_to_remove: Vec<PathBuf> = if reconcile_deletions {
+            existing_files_map
+                .iter()
+                .filter(|(_, indexed)| !indexed.seen)
+                .map(|(path, _)| path.clone())
+                .collect()
+        } else {
+            // A partial walk cannot tell "absent" from "unreadable". Where only
+            // some prefixes are in doubt, everything outside them is still
+            // decidable.
+            existing_files_map
+                .iter()
+                .filter(|(_, indexed)| !indexed.seen)
+                .filter(|_| traversal.root_complete && !suspect_empty_root)
+                .filter(|(path, _)| {
+                    !traversal
                         .uncertain_prefixes
                         .iter()
                         .any(|prefix| path.starts_with(prefix))
-            })
-            .map(|(_, file)| file.path.clone())
-            .collect();
+                })
+                .map(|(path, _)| path.clone())
+                .collect()
+        };
 
         if !files_to_remove.is_empty() {
             info!(

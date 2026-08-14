@@ -1,7 +1,7 @@
 # VuIO Media Server
 
 A cross-platform media server written in Rust. Streams video, audio, and images to DLNA, Chromecast/Google TV, and compatible AirPlay video receivers.
-Less than 18Mb of RAM needed
+25Mb of RAM used for 5000 objects library
 
 Built with Tokio, Axum, and SQLite for high performance and reliability.
 
