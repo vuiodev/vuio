@@ -531,6 +531,65 @@ async fn overrides_hold_across_reloads_without_freezing_the_file() -> Result<()>
     Ok(())
 }
 
+/// A config file living inside the media tree it configures — `vuio --config
+/// ./vuio.toml` run from a library folder, which is the obvious thing to do. The
+/// watcher used to take its parent recursively with the debouncer's default file-id
+/// cache, so starting up walked and `stat`ed the entire library and then held a map
+/// entry per file for the lifetime of the process, to notice edits to one file it
+/// identifies by path equality. It watches one level now, without the id cache.
+#[tokio::test]
+async fn config_inside_a_media_tree_still_reloads() -> Result<()> {
+    let temp_dir = TempDir::new()?;
+    let root = std::fs::canonicalize(temp_dir.path())?;
+    let config_path = root.join("vuio.toml");
+
+    // The library the config is sitting in.
+    let nested = root.join("Artist").join("Album");
+    std::fs::create_dir_all(&nested)?;
+    for index in 0..64 {
+        std::fs::write(nested.join(format!("track_{index}.mp3")), b"x")?;
+    }
+
+    let mut config = AppConfig::default();
+    config.server.name = "In The Library".to_string();
+    config.media.directories = vec![MonitoredDirectoryConfig {
+        path: root.to_string_lossy().to_string(),
+        recursive: true,
+        case_sensitive: None,
+        extensions: None,
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Skip,
+    }];
+    config.save_to_file(&config_path)?;
+
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let tasks = tokio_util::task::TaskTracker::new();
+    let manager = ConfigManager::watching_with_overrides(
+        &config_path,
+        ConfigOverrides::default(),
+        cancellation.clone(),
+        tasks.clone(),
+    )
+    .await?;
+    assert!(manager.is_watched());
+
+    let mut edited = AppConfig::load_from_file(&config_path)?;
+    edited.server.name = "Renamed In The Library".to_string();
+    edited.save_to_file(&config_path)?;
+    tokio::time::sleep(std::time::Duration::from_millis(2000)).await;
+
+    assert_eq!(
+        manager.get_config().await.server.name,
+        "Renamed In The Library",
+        "an edit to a config inside the media tree must still be picked up"
+    );
+
+    cancellation.cancel();
+    tasks.close();
+    tasks.wait().await;
+    Ok(())
+}
+
 #[test]
 fn overrides_report_what_they_force() {
     assert!(ConfigOverrides::default().in_force().is_empty());

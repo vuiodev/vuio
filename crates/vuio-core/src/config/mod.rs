@@ -79,10 +79,7 @@ pub struct ConfigManager {
     change_sender: broadcast::Sender<ConfigChangeEvent>,
     /// Held so the watcher outlives this manager; dropping it stops reloads.
     debouncer: Option<
-        notify_debouncer_full::Debouncer<
-            notify::RecommendedWatcher,
-            notify_debouncer_full::FileIdMap,
-        >,
+        notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::NoCache>,
     >,
 }
 
@@ -197,30 +194,34 @@ impl ConfigManager {
         cancellation: tokio_util::sync::CancellationToken,
         background_tasks: tokio_util::task::TaskTracker,
     ) -> Result<
-        notify_debouncer_full::Debouncer<
-            notify::RecommendedWatcher,
-            notify_debouncer_full::FileIdMap,
-        >,
+        notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::NoCache>,
     > {
-        use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
+        use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, NoCache};
         use tokio::sync::mpsc;
 
         let (tx, mut rx) = mpsc::channel(100);
 
-        // Create debounced watcher with 500ms debounce duration
-        let mut debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap> = new_debouncer_opt(
+        // Create debounced watcher with 500ms debounce duration.
+        //
+        // `NoCache`, not the default file-id cache: that one stats every path under
+        // every watched root to keep rename ids, and the handler below cares about
+        // exactly one path compared by equality. Renames are never stitched here, so
+        // the ids would be built and never read.
+        let mut debouncer: Debouncer<notify::RecommendedWatcher, NoCache> = new_debouncer_opt(
             Duration::from_millis(500),
             None,
             move |result: DebounceEventResult| {
                 let _ = tx.try_send(result);
             },
-            FileIdMap::new(),
+            NoCache::new(),
             notify::Config::default(),
         )?;
 
-        // Watch the config file's parent directory
+        // Watch the config file's parent directory, one level only. The config file
+        // is a direct child of it, and watching recursively would follow whatever
+        // else happens to live there — a media tree, or a whole home directory.
         if let Some(parent) = config_path.parent() {
-            debouncer.watch(parent, notify::RecursiveMode::Recursive)?;
+            debouncer.watch(parent, notify::RecursiveMode::NonRecursive)?;
         }
 
         // Spawn task to handle debounced file events
