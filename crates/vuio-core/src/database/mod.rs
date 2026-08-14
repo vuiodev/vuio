@@ -796,6 +796,17 @@ pub trait MediaRepository: Send + Sync {
         canonical_prefix: &str,
     ) -> Result<Vec<FileFingerprint>>;
 
+    /// One page of fingerprints, ordered by id, starting after `after_id`.
+    ///
+    /// For the callers that genuinely have to examine every row — the index
+    /// cleanup has to consider records under no configured root at all — so that
+    /// doing so does not mean holding every row at once.
+    async fn load_file_fingerprints_after(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<FileFingerprint>>;
+
     async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>>;
 
     async fn list_root_availability(&self) -> Result<Vec<RootAvailability>>;

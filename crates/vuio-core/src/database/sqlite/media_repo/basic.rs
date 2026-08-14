@@ -105,6 +105,27 @@ impl SqliteDatabase {
         .await
     }
 
+    pub(in crate::database::sqlite) async fn load_file_fingerprints_after_impl(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<FileFingerprint>> {
+        self.execute_read(move |connection| {
+            let mut statement = connection.prepare_cached(&format!(
+                "SELECT {FINGERPRINT_COLUMNS} FROM media_files \
+                 WHERE id > ? ORDER BY id LIMIT ?"
+            ))?;
+            let fingerprints = statement
+                .query_map(
+                    rusqlite::params![after_id, limit as i64],
+                    schema::fingerprint_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(fingerprints)
+        })
+        .await
+    }
+
     pub(in crate::database::sqlite) async fn load_file_fingerprints_under_impl(
         &self,
         canonical_prefix: String,
