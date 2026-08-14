@@ -389,6 +389,44 @@ const WEB_UI_FIELDS: &[FieldSpec] = &[
     ),
 ];
 
+const MCP_FIELDS: &[FieldSpec] = &[
+    noted(
+        optional(
+            "mcp.enabled",
+            "Enable the MCP server",
+            FieldKind::Bool,
+            Impact::Restart,
+            "Serve the Model Context Protocol at /mcp, so an AI assistant can browse, search \
+             and cast your library.",
+        ),
+        "The endpoint is registered when the server starts, so turning this on or off takes \
+         effect after a restart.",
+    ),
+    noted(
+        optional(
+            "mcp.read_only",
+            "Read-only tools",
+            FieldKind::Bool,
+            Impact::Live,
+            "Offer only the browsing and searching tools, hiding everything that changes \
+             playlists or drives a device.",
+        ),
+        "The hidden tools are also refused if called by name, so an assistant that learned \
+         one elsewhere still cannot use it.",
+    ),
+    noted(
+        optional(
+            "mcp.require_auth",
+            "Require a token",
+            FieldKind::Bool,
+            Impact::Live,
+            "Demand the management token on /mcp even when the dashboard itself is open.",
+        ),
+        "Worth turning on whenever this server is reachable from more than loopback: the \
+         casting tools drive real devices on your network.",
+    ),
+];
+
 const MEDIAINFO_FIELDS: &[FieldSpec] = &[
     noted(
         optional(
@@ -508,6 +546,15 @@ const SECTIONS: &[SectionSpec] = &[
         title: "Access",
         blurb: "Who may reach the dashboard and the management API.",
         fields: MANAGEMENT_FIELDS,
+        directories: false,
+        panel: false,
+    },
+    SectionSpec {
+        id: "mcp",
+        title: "AI assistants",
+        blurb: "The Model Context Protocol endpoint, which lets an assistant such as Claude \
+                browse, search and cast this library.",
+        fields: MCP_FIELDS,
         directories: false,
         panel: false,
     },

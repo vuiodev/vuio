@@ -180,7 +180,6 @@ where
         browse_cache: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::BrowseResponseCache::new(),
         )),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(
             crate::runtime_state::ActiveCastRegistry::new(),
@@ -285,7 +284,36 @@ where
         )
     });
 
-    // Scan only after the watcher is active. This closes the startup blind
+    // The listener and the discovery advertisement are supervised rather than started,
+    // so a port, identity or discovery change can be applied by rebuilding them instead
+    // of by restarting the process. Both tasks run until shutdown; see `supervisor`.
+    let http_state = app_state.clone();
+    let http_cancellation = cancellation.clone();
+    let http_started = supervisor::bind_first_listener(&http_state).await?;
+    services.spawn(async move {
+        (
+            "HTTP",
+            supervisor::run_http_supervisor(http_state, http_cancellation, http_started).await,
+        )
+    });
+
+    // The browser interface answers on its own port, with the same router over
+    // the same state: a second front end rather than a second server. Supervised
+    // separately from the main listener because it can be turned off, and
+    // because a port it cannot take must not be able to stop the media server.
+    #[cfg(feature = "web-ui")]
+    {
+        let web_ui_state = app_state.clone();
+        let web_ui_cancellation = cancellation.clone();
+        services.spawn(async move {
+            (
+                "web UI",
+                supervisor::run_web_ui_supervisor(web_ui_state, web_ui_cancellation).await,
+            )
+        });
+    }
+
+    // Scan only after the watcher and listeners are active. This closes the startup blind
     // window: a download that lands while the scan is running is either found
     // by the scan or delivered by the watcher (and duplicate upserts are safe).
     if let Err(e) = perform_initial_media_scan(&config, &database).await {
@@ -329,35 +357,6 @@ where
             monitoring_handle.await.map_err(anyhow::Error::from),
         )
     });
-
-    // The listener and the discovery advertisement are supervised rather than started,
-    // so a port, identity or discovery change can be applied by rebuilding them instead
-    // of by restarting the process. Both tasks run until shutdown; see `supervisor`.
-    let http_state = app_state.clone();
-    let http_cancellation = cancellation.clone();
-    let http_started = supervisor::bind_first_listener(&http_state).await?;
-    services.spawn(async move {
-        (
-            "HTTP",
-            supervisor::run_http_supervisor(http_state, http_cancellation, http_started).await,
-        )
-    });
-
-    // The browser interface answers on its own port, with the same router over
-    // the same state: a second front end rather than a second server. Supervised
-    // separately from the main listener because it can be turned off, and
-    // because a port it cannot take must not be able to stop the media server.
-    #[cfg(feature = "web-ui")]
-    {
-        let web_ui_state = app_state.clone();
-        let web_ui_cancellation = cancellation.clone();
-        services.spawn(async move {
-            (
-                "web UI",
-                supervisor::run_web_ui_supervisor(web_ui_state, web_ui_cancellation).await,
-            )
-        });
-    }
 
     let discovery_state = app_state.clone();
     let discovery_cancellation = cancellation.clone();

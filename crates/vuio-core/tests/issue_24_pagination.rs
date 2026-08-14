@@ -137,7 +137,6 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
         ))),
         log_file_path: temp.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(BrowseResponseCache::new())),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         #[cfg(feature = "mediainfo")]
@@ -243,7 +242,6 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
         ))),
         log_file_path: temp.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(BrowseResponseCache::new())),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         #[cfg(feature = "mediainfo")]

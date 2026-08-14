@@ -37,6 +37,15 @@ session_ttl_hours = 12
 # Empty permits management only from loopback. Add explicit CIDRs for LAN administration.
 allowed_networks = []
 
+# Model Context Protocol server, at POST /mcp on the main port.
+# Lets an AI agent browse, search, build playlists and cast to your devices.
+[mcp]
+enabled = true
+# Hide every mutating and casting tool, leaving only the browsing half.
+read_only = false
+# Demand a bearer token for /mcp even when [management].enabled is false.
+require_auth = false
+
 # Media configuration
 # Default media directories for this platform: PLACEHOLDER_DEFAULT_MEDIA_DIRECTORIES
 [media]

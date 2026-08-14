@@ -41,3 +41,6 @@ Icon?
 /build/
 /ideas/
 /ext/
+
+# Built MCP bundle, produced by claude/mcpb/build.sh
+claude/mcpb/dist/

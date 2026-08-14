@@ -1,13 +1,18 @@
+//! End-to-end tests for the MCP endpoint.
+//!
+//! Everything here goes through the real router, because the transport is most
+//! of what changed: header validation, version rejection and Origin checking
+//! all happen before a handler sees anything, and none of them can be exercised
+//! by calling the dispatcher directly.
+
 use axum::{
     body::Body,
-    extract::{ConnectInfo, Json, Query, State},
+    extract::ConnectInfo,
     http::{Request, StatusCode},
-    response::IntoResponse,
 };
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tempfile::{tempdir, TempDir};
 use tower::ServiceExt;
 
@@ -16,46 +21,81 @@ use vuio_core::database::sqlite::SqliteDatabase;
 use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository};
 use vuio_core::platform::filesystem::create_platform_filesystem_manager;
 use vuio_core::platform::PlatformInfo;
-use vuio_core::state::{AppState, McpClient};
+use vuio_core::state::AppState;
 use vuio_core::web::diagnostics::WebHandlerMetrics;
-use vuio_core::web::{
-    create_router,
-    mcp::{message_handler, sse_handler, JsonRpcRequest, MessageQuery},
-    Surface,
-};
+use vuio_core::web::{create_router, Surface};
+
+const PROTOCOL_VERSION: &str = "2026-07-28";
+const TEST_TOKEN: &str = "Bearer test-management-token-which-is-long-enough";
 
 fn test_peer() -> SocketAddr {
     "127.0.0.1:43123".parse().unwrap()
 }
 
-fn test_mcp_client(sender: tokio::sync::mpsc::Sender<String>) -> McpClient {
-    McpClient {
-        sender,
-        peer: test_peer().ip(),
-        expires_at: Instant::now() + Duration::from_secs(60),
+/// A well-formed MCP POST: the mirrored headers are derived from the body, the
+/// way a conforming client derives them.
+fn mcp_request(body: serde_json::Value) -> Request<Body> {
+    let method = body["method"].as_str().unwrap_or_default().to_owned();
+    let mut builder = Request::post("/mcp")
+        .extension(ConnectInfo(test_peer()))
+        .header("authorization", TEST_TOKEN)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .header("mcp-protocol-version", PROTOCOL_VERSION)
+        .header("mcp-method", &method);
+    if method == "tools/call" {
+        if let Some(name) = body["params"]["name"].as_str() {
+            builder = builder.header("mcp-name", name);
+        }
     }
+    builder.body(Body::from(body.to_string())).unwrap()
 }
 
-async fn send_mcp_message(
-    state: AppState,
-    client_id: String,
-    request: serde_json::Value,
-) -> axum::response::Response {
-    let request: JsonRpcRequest = serde_json::from_value(request).unwrap();
-    message_handler(
-        State(state),
-        ConnectInfo(test_peer()),
-        Query(MessageQuery { client_id }),
-        Json(request),
-    )
-    .await
-    .into_response()
+fn call(id: i64, tool: &str, arguments: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION },
+            "name": tool,
+            "arguments": arguments
+        }
+    })
+}
+
+fn plain(id: i64, method: &str) -> serde_json::Value {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": {
+            "_meta": { "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION }
+        }
+    })
+}
+
+async fn body_json(response: axum::response::Response) -> serde_json::Value {
+    let bytes = axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+        .await
+        .expect("a body");
+    serde_json::from_slice(&bytes).expect("JSON")
+}
+
+/// The `structuredContent` of a successful tool call.
+fn tool_result(response: &serde_json::Value) -> &serde_json::Value {
+    assert_eq!(
+        response["result"]["isError"], false,
+        "tool failed: {}",
+        response["result"]["content"][0]["text"]
+    );
+    &response["result"]["structuredContent"]
 }
 
 async fn make_test_state() -> (TempDir, AppState) {
     let temp = tempdir().unwrap();
     let database = Arc::new(
-        SqliteDatabase::new(temp.path().join("security-tests.db"))
+        SqliteDatabase::new(temp.path().join("mcp-tests.db"))
             .await
             .unwrap(),
     );
@@ -88,7 +128,6 @@ async fn make_test_state() -> (TempDir, AppState) {
         browse_cache: Arc::new(tokio::sync::Mutex::new(
             vuio_core::runtime_state::BrowseResponseCache::new(),
         )),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(
             vuio_core::runtime_state::ActiveCastRegistry::new(),
@@ -102,6 +141,36 @@ async fn make_test_state() -> (TempDir, AppState) {
         background_tasks: tokio_util::task::TaskTracker::new(),
     };
     (temp, state)
+}
+
+fn sample_audio(path: &str, title: &str, artist: &str) -> MediaFile {
+    MediaFile {
+        id: None,
+        path: PathBuf::from(path),
+        filename: PathBuf::from(path)
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned(),
+        size: 5000,
+        modified: std::time::SystemTime::now(),
+        mime_type: "audio/mpeg".to_string(),
+        duration: None,
+        title: Some(title.to_string()),
+        artist: Some(artist.to_string()),
+        album: Some("Led Zeppelin IV".to_string()),
+        genre: Some("Rock".to_string()),
+        track_number: Some(4),
+        year: Some(1971),
+        album_artist: None,
+        tags: Default::default(),
+        stream: Default::default(),
+        extra_tags: Vec::new(),
+        tags_version: 0,
+        subtitle_available: false,
+        created_at: std::time::SystemTime::now(),
+        updated_at: std::time::SystemTime::now(),
+    }
 }
 
 #[tokio::test]
@@ -143,327 +212,612 @@ async fn content_publication_and_cache_only_invalidation_have_distinct_revisions
     state.background_tasks.wait().await;
 }
 
+/// The whole agent journey in one pass: discover the server, list its tools,
+/// search, then build and read back a playlist.
 #[tokio::test]
 #[cfg_attr(
     target_os = "freebsd",
     ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
 )]
-async fn test_mcp_initialize_and_tools_list() {
-    let temp_dir = tempdir().unwrap();
-    let db_path = temp_dir.path().join("test_mcp.db");
-
-    // 1. Initialize DB and insert some sample files
-    let db = Arc::new(SqliteDatabase::new(db_path).await.unwrap());
-    db.initialize().await.unwrap();
-
-    let audio_file = MediaFile {
-        id: None,
-        path: PathBuf::from("/media/music/song.mp3"),
-        filename: "song.mp3".to_string(),
-        size: 5000,
-        modified: std::time::SystemTime::now(),
-        mime_type: "audio/mpeg".to_string(),
-        duration: None,
-        title: Some("Stairway to Heaven".to_string()),
-        artist: Some("Led Zeppelin".to_string()),
-        album: Some("Led Zeppelin IV".to_string()),
-        genre: Some("Rock".to_string()),
-        track_number: Some(4),
-        year: Some(1971),
-        album_artist: None,
-        tags: Default::default(),
-        stream: Default::default(),
-        extra_tags: Vec::new(),
-        tags_version: 0,
-        subtitle_available: false,
-        created_at: std::time::SystemTime::now(),
-        updated_at: std::time::SystemTime::now(),
-    };
-    db.store_media_file(&audio_file).await.unwrap();
-
-    // 2. Setup mock AppState
-    let config = Arc::new(AppConfig::default());
-    let platform_info = Arc::new(PlatformInfo::detect().await.unwrap());
-    let filesystem_manager = Arc::from(create_platform_filesystem_manager());
-    let content_update_id = Arc::new(std::sync::atomic::AtomicU32::new(1));
-    let web_metrics = Arc::new(WebHandlerMetrics::new());
-
-    let app_state = AppState {
-        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
-        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
-        config: config.clone(),
-        config_source: std::sync::Arc::new(vuio_core::state::ConfigSource::default()),
-        http_binding: std::sync::Arc::new(vuio_core::state::HttpBinding::new(8080)),
-        live_config: Arc::new(vuio_core::state::LiveConfig::new(config)),
-        database: db,
-        auth: Arc::new(vuio_core::web::auth::AuthState::testing()),
-        platform_info,
-        filesystem_manager,
-        content_update_id,
-        web_metrics,
-        runtime_diagnostics: Arc::new(
-            vuio_core::platform::diagnostics::SystemDiagnosticsSampler::new(),
-        ),
-        lifecycle_stats: Arc::new(vuio_core::lifecycle::ApplicationStats::new()),
-        bookmarks: Arc::new(tokio::sync::Mutex::new(
-            vuio_core::runtime_state::BookmarkRegistry::new(
-                vuio_core::runtime_state::BOOKMARK_MAX_ENTRIES,
-            ),
-        )),
-        log_file_path: temp_dir.path().join("vuio.log"),
-        browse_cache: Arc::new(tokio::sync::Mutex::new(
-            vuio_core::runtime_state::BrowseResponseCache::new(),
-        )),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        active_casts: Arc::new(tokio::sync::Mutex::new(
-            vuio_core::runtime_state::ActiveCastRegistry::new(),
-        )),
-        #[cfg(feature = "mediainfo")]
-        mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
-        discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
-        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        radio_broadcast: Arc::new(Default::default()),
-        cancellation: tokio_util::sync::CancellationToken::new(),
-        background_tasks: tokio_util::task::TaskTracker::new(),
-    };
-
-    // Add a fake client channel so message handler can send back to the SSE receiver
-    let client_id = "test-client-123".to_string();
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(10);
-    app_state
-        .mcp_clients
-        .lock()
-        .await
-        .insert(client_id.clone(), test_mcp_client(tx));
-
-    // 3. Test `initialize` method
-    let init_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "initialize",
-        "id": 1
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), init_req).await;
-
-    // Check message sent through channel
-    let response_str = rx.recv().await.unwrap();
-    let init_res: serde_json::Value = serde_json::from_str(&response_str).unwrap();
-    assert_eq!(init_res["jsonrpc"], "2.0");
-    assert_eq!(init_res["id"], 1);
-    assert_eq!(init_res["result"]["protocolVersion"], "2025-03-26");
-
-    // 4. Test `tools/list` method
-    let list_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/list",
-        "id": 2
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), list_req).await;
-
-    let response_str2 = rx.recv().await.unwrap();
-    let list_res: serde_json::Value = serde_json::from_str(&response_str2).unwrap();
-    assert_eq!(list_res["id"], 2);
-    let tools = list_res["result"]["tools"].as_array().unwrap();
-    assert!(tools.iter().any(|t| t["name"] == "search_media"));
-    assert!(tools.iter().any(|t| t["name"] == "list_renderers"));
-
-    // 5. Test `tools/call` for `search_media`
-    let search_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 3,
-        "params": {
-            "name": "search_media",
-            "arguments": {
-                "query": "stairway"
-            }
-        }
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), search_req).await;
-
-    let response_str3 = rx.recv().await.unwrap();
-    let search_res: serde_json::Value = serde_json::from_str(&response_str3).unwrap();
-    assert_eq!(search_res["id"], 3);
-
-    // Parse the inner text block from tool response
-    let text = search_res["result"]["content"][0]["text"].as_str().unwrap();
-    let search_data: serde_json::Value = serde_json::from_str(text).unwrap();
-    assert_eq!(search_data["total_matches"], 1);
-    assert_eq!(search_data["files"][0]["title"], "Stairway to Heaven");
-    assert_eq!(search_data["files"][0]["artist"], "Led Zeppelin");
-
-    // 6. Test `tools/call` for `list_media`
-    let list_media_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 4,
-        "params": {
-            "name": "list_media",
-            "arguments": {
-                "category": "audio",
-                "limit": 10
-            }
-        }
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), list_media_req).await;
-
-    let response_str4 = rx.recv().await.unwrap();
-    let list_media_res: serde_json::Value = serde_json::from_str(&response_str4).unwrap();
-    assert_eq!(list_media_res["id"], 4);
-
-    let text_list = list_media_res["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap();
-    let list_data: serde_json::Value = serde_json::from_str(text_list).unwrap();
-    assert_eq!(list_data["total_files"], 1);
-    assert_eq!(list_data["files"][0]["filename"], "song.mp3");
-
-    // 7. Test playlist creation via MCP
-    let create_pl_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 5,
-        "params": {
-            "name": "create_playlist",
-            "arguments": {
-                "name": "My Favorites",
-                "description": "Best tracks"
-            }
-        }
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), create_pl_req).await;
-
-    let response_str5 = rx.recv().await.unwrap();
-    let create_pl_res: serde_json::Value = serde_json::from_str(&response_str5).unwrap();
-    assert_eq!(create_pl_res["id"], 5);
-
-    let create_text = create_pl_res["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap();
-    let create_data: serde_json::Value = serde_json::from_str(create_text).unwrap();
-    let playlist_id = create_data["playlist_id"].as_i64().unwrap();
-    assert!(playlist_id > 0);
-
-    // 8. Test adding a media file to the playlist in bulk
-    let add_track_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 6,
-        "params": {
-            "name": "add_to_playlist",
-            "arguments": {
-                "playlist_id": playlist_id,
-                "media_file_ids": [1] // The song we added has ID 1 (inserted into database)
-            }
-        }
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), add_track_req).await;
-
-    let response_str6 = rx.recv().await.unwrap();
-    let add_track_res: serde_json::Value = serde_json::from_str(&response_str6).unwrap();
-    assert_eq!(add_track_res["id"], 6);
-
-    // 9. Test getting tracks in the playlist
-    let get_tracks_req = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 7,
-        "params": {
-            "name": "get_playlist_tracks",
-            "arguments": {
-                "playlist_id": playlist_id
-            }
-        }
-    });
-
-    let _resp = send_mcp_message(app_state.clone(), client_id.clone(), get_tracks_req).await;
-
-    let response_str7 = rx.recv().await.unwrap();
-    let get_tracks_res: serde_json::Value = serde_json::from_str(&response_str7).unwrap();
-    assert_eq!(get_tracks_res["id"], 7);
-
-    let tracks_text = get_tracks_res["result"]["content"][0]["text"]
-        .as_str()
-        .unwrap();
-    let tracks_data: serde_json::Value = serde_json::from_str(tracks_text).unwrap();
-    assert_eq!(tracks_data["tracks_count"], 1);
-    assert_eq!(tracks_data["tracks"][0]["filename"], "song.mp3");
-}
-
-#[tokio::test]
-#[cfg_attr(
-    target_os = "freebsd",
-    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
-)]
-async fn sse_disconnect_removes_client_immediately() {
+async fn an_agent_can_discover_search_and_build_a_playlist() {
     let (_temp, state) = make_test_state().await;
-    let response = sse_handler(State(state.clone()), ConnectInfo(test_peer()))
-        .await
-        .into_response();
-    assert_eq!(state.mcp_clients.lock().await.len(), 1);
-
-    drop(response);
-    tokio::time::timeout(std::time::Duration::from_secs(1), async {
-        loop {
-            if state.mcp_clients.lock().await.is_empty() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .expect("disconnected SSE client was not removed");
-}
-
-#[tokio::test]
-#[cfg_attr(
-    target_os = "freebsd",
-    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
-)]
-async fn blocked_mcp_send_does_not_hold_clients_mutex() {
-    let (_temp, state) = make_test_state().await;
-    let (sender, receiver) = tokio::sync::mpsc::channel(1);
-    sender.send("occupied".to_string()).await.unwrap();
     state
-        .mcp_clients
-        .lock()
+        .database
+        .store_media_file(&sample_audio(
+            "/media/music/song.mp3",
+            "Stairway to Heaven",
+            "Led Zeppelin",
+        ))
         .await
-        .insert("blocked-client".to_string(), test_mcp_client(sender));
+        .unwrap();
+    let router = create_router(state, Surface::Primary);
 
-    let handler_state = state.clone();
-    let task = tokio::spawn(async move {
-        send_mcp_message(
-            handler_state,
-            "blocked-client".to_string(),
-            serde_json::json!({"jsonrpc":"2.0","method":"initialize","id":1}),
-        )
-        .await
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    assert!(
-        !task.is_finished(),
-        "MCP send did not block on the full channel"
+    // server/discover replaces the initialize handshake.
+    let discover = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(plain(1, "server/discover")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(discover["id"], 1);
+    assert_eq!(discover["result"]["protocolVersions"][0], PROTOCOL_VERSION);
+    assert_eq!(discover["result"]["resultType"], "complete");
+    assert_eq!(
+        discover["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["name"],
+        "vuio-media-server"
     );
 
-    let guard = tokio::time::timeout(
-        std::time::Duration::from_millis(200),
-        state.mcp_clients.lock(),
+    // tools/list carries the caching hints the current revision requires.
+    let list = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(plain(2, "tools/list")))
+            .await
+            .unwrap(),
     )
-    .await
-    .expect("MCP clients mutex was held across the channel send");
-    drop(guard);
+    .await;
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|t| t["name"] == "search_media"));
+    assert!(list["result"]["ttlMs"].as_u64().unwrap() > 0);
+    assert_eq!(list["result"]["cacheScope"], "private");
 
-    drop(receiver);
-    tokio::time::timeout(std::time::Duration::from_secs(1), task)
+    // A tool result carries structured content, not just a text blob.
+    let search = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(call(
+                3,
+                "search_media",
+                serde_json::json!({ "query": "stairway" }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let data = tool_result(&search);
+    assert_eq!(data["total_matches"], 1);
+    assert_eq!(data["files"][0]["title"], "Stairway to Heaven");
+    assert_eq!(data["files"][0]["artist"], "Led Zeppelin");
+    // The URL is the point: without it an agent can describe a file but cannot
+    // give anyone a way to play it. The host depends on the machine running the
+    // test, so only the parts this server decides are asserted.
+    let stream_url = data["files"][0]["stream_url"].as_str().unwrap();
+    assert!(stream_url.starts_with("http://"), "{stream_url}");
+    assert!(stream_url.ends_with(":8080/media/1.mp3"), "{stream_url}");
+    // The text block mirrors it, for clients that read only content.
+    let mirrored: serde_json::Value =
+        serde_json::from_str(search["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(mirrored, *data);
+
+    let listed = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(call(
+                4,
+                "list_media",
+                serde_json::json!({ "category": "audio", "limit": 10 }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(tool_result(&listed)["total_files"], 1);
+
+    let created = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(call(
+                5,
+                "create_playlist",
+                serde_json::json!({ "name": "My Favorites", "description": "Best tracks" }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let playlist_id = tool_result(&created)["playlist_id"].as_i64().unwrap();
+    assert!(playlist_id > 0);
+
+    let added = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(call(
+                6,
+                "add_to_playlist",
+                serde_json::json!({ "playlist_id": playlist_id, "media_file_ids": [1] }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(tool_result(&added)["tracks_added"], 1);
+
+    let tracks = body_json(
+        router
+            .oneshot(mcp_request(call(
+                7,
+                "get_playlist_tracks",
+                serde_json::json!({ "playlist_id": playlist_id }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let tracks = tool_result(&tracks);
+    assert_eq!(tracks["tracks_count"], 1);
+    assert_eq!(tracks["tracks"][0]["filename"], "song.mp3");
+}
+
+/// A load balancer routing on the header while this server executes the body is
+/// exactly the split the mirrored-header check exists to prevent.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn mirrored_headers_must_agree_with_the_body() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    // Mcp-Method says one thing, the body another.
+    let mismatch = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", PROTOCOL_VERSION)
+                .header("mcp-method", "tools/list")
+                .body(Body::from(plain(1, "server/discover").to_string()))
+                .unwrap(),
+        )
         .await
-        .expect("MCP handler remained blocked")
         .unwrap();
+    assert_eq!(mismatch.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(mismatch).await["error"]["code"], -32020);
+
+    // tools/call without the Mcp-Name header.
+    let missing_name = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", PROTOCOL_VERSION)
+                .header("mcp-method", "tools/call")
+                .body(Body::from(
+                    call(2, "search_media", serde_json::json!({"query": "x"})).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing_name.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(missing_name).await["error"]["code"], -32020);
+
+    // No MCP-Protocol-Version header at all.
+    let no_version = router
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-method", "tools/list")
+                .body(Body::from(plain(3, "tools/list").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(no_version.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(body_json(no_version).await["error"]["code"], -32020);
+}
+
+/// A client asking for a revision this server has never implemented has to be
+/// told what it does speak, not merely refused.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn an_unsupported_version_is_answered_with_the_supported_list() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    let response = router
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2024-11-05")
+                .header("mcp-method", "tools/list")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/list",
+                        "params": {
+                            "_meta": {
+                                "io.modelcontextprotocol/protocolVersion": "2024-11-05"
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = body_json(response).await;
+    assert_eq!(body["error"]["code"], -32022);
+    assert_eq!(body["error"]["data"]["supported"][0], PROTOCOL_VERSION);
+    let supported = body["error"]["data"]["supported"].as_array().unwrap();
+    assert!(supported.iter().any(|v| v == "2025-11-25"));
+}
+
+/// The client this integration exists for. Claude Code 2.1.x opens with an
+/// `initialize` at `2025-11-25`, sends no mirrored headers, and validates
+/// results against a schema that predates `resultType` — so the whole handshake
+/// is reproduced here byte for byte as it arrives on the wire.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn a_client_on_the_initialize_era_completes_the_handshake() {
+    let (_temp, state) = make_test_state().await;
+    state
+        .database
+        .store_media_file(&sample_audio(
+            "/media/music/song.mp3",
+            "Stairway to Heaven",
+            "Led Zeppelin",
+        ))
+        .await
+        .unwrap();
+    let router = create_router(state, Surface::Primary);
+
+    // 1. initialize — no MCP-Protocol-Version header at all, because the
+    //    revision that introduced it is newer than the one being asked for.
+    let init = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 0,
+                        "method": "initialize",
+                        "params": {
+                            "protocolVersion": "2025-11-25",
+                            "capabilities": { "roots": { "listChanged": true } },
+                            "clientInfo": { "name": "claude-code", "version": "2.1.231" }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(init.status(), StatusCode::OK);
+    let init = body_json(init).await;
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25");
+    assert_eq!(init["result"]["serverInfo"]["name"], "vuio-media-server");
+    assert!(
+        init["result"].get("resultType").is_none(),
+        "resultType is newer than this client's schema"
+    );
+
+    // 2. notifications/initialized — a notification, so 202 and no body.
+    let ack = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2025-11-25")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ack.status(), StatusCode::ACCEPTED);
+
+    // 3. tools/list — version header only, no Mcp-Method, no _meta.
+    let list = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2025-11-25")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(list.status(), StatusCode::OK);
+    let list = body_json(list).await;
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|t| t["name"] == "search_media"));
+    assert!(
+        list["result"].get("ttlMs").is_none(),
+        "CacheableResult is newer than this client's schema"
+    );
+
+    // 4. A tool call, likewise bare.
+    let search = router
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2025-11-25")
+                .body(Body::from(
+                    serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "search_media",
+                            "arguments": { "query": "stairway" }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(search.status(), StatusCode::OK);
+    let search = body_json(search).await;
+    assert_eq!(search["result"]["isError"], false);
+    let data: serde_json::Value =
+        serde_json::from_str(search["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(data["total_matches"], 1);
+}
+
+/// `ping` was removed by `2026-07-28` but is part of the older revisions, and a
+/// client old enough to send it is old enough to expect an answer.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn ping_answers_on_the_legacy_era_and_not_on_the_modern_one() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    let legacy = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", "2025-11-25")
+                .body(Body::from(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(legacy.status(), StatusCode::OK);
+
+    let modern = router.oneshot(mcp_request(plain(2, "ping"))).await.unwrap();
+    assert_eq!(modern.status(), StatusCode::NOT_FOUND);
+}
+
+/// An unimplemented RPC must be distinguishable from a proxy's 404, which is
+/// what the JSON-RPC error in the body is for.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn an_unknown_method_is_a_404_with_a_json_rpc_error() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    let response = router
+        .oneshot(mcp_request(plain(1, "resources/list")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(body_json(response).await["error"]["code"], -32601);
+}
+
+/// The session-based revisions used GET for a standalone stream and DELETE to
+/// end a session. Neither exists here, and 405 is how an older client is told.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn get_and_delete_on_the_endpoint_are_refused() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    for request in [Request::get("/mcp"), Request::delete("/mcp")] {
+        let response = router
+            .clone()
+            .oneshot(
+                request
+                    .extension(ConnectInfo(test_peer()))
+                    .header("authorization", TEST_TOKEN)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    }
+}
+
+/// A browser page on another origin must not be able to drive a media server on
+/// the LAN. A client that sends no Origin at all is not a browser and is fine.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn a_foreign_origin_is_refused_but_an_absent_one_is_not() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    let foreign = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", PROTOCOL_VERSION)
+                .header("mcp-method", "tools/list")
+                .header("host", "127.0.0.1:8080")
+                .header("origin", "http://evil.example")
+                .body(Body::from(plain(1, "tools/list").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(foreign.status(), StatusCode::FORBIDDEN);
+
+    let matching = router
+        .clone()
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", PROTOCOL_VERSION)
+                .header("mcp-method", "tools/list")
+                .header("host", "127.0.0.1:8080")
+                .header("origin", "http://127.0.0.1:8080")
+                .body(Body::from(plain(2, "tools/list").to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(matching.status(), StatusCode::OK);
+
+    let absent = router
+        .oneshot(mcp_request(plain(3, "tools/list")))
+        .await
+        .unwrap();
+    assert_eq!(absent.status(), StatusCode::OK);
+}
+
+/// A notification has no id, so there is nothing to answer it with.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn a_notification_is_accepted_without_a_response() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    let response = router
+        .oneshot(
+            Request::post("/mcp")
+                .extension(ConnectInfo(test_peer()))
+                .header("authorization", TEST_TOKEN)
+                .header("content-type", "application/json")
+                .header("mcp-protocol-version", PROTOCOL_VERSION)
+                .header("mcp-method", "notifications/progress")
+                .body(Body::from(
+                    r#"{"jsonrpc":"2.0","method":"notifications/progress"}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+}
+
+/// Hiding a tool from the catalog is not enough: a name learned elsewhere must
+/// not reach the handler either.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn read_only_mode_refuses_a_mutating_tool_by_name() {
+    let (_temp, mut state) = make_test_state().await;
+    let mut config = AppConfig::default();
+    config.mcp.read_only = true;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+    let router = create_router(state, Surface::Primary);
+
+    let list = body_json(
+        router
+            .clone()
+            .oneshot(mcp_request(plain(1, "tools/list")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    let tools = list["result"]["tools"].as_array().unwrap();
+    assert!(tools.iter().any(|t| t["name"] == "search_media"));
+    assert!(!tools.iter().any(|t| t["name"] == "create_playlist"));
+
+    let refused = body_json(
+        router
+            .oneshot(mcp_request(call(
+                2,
+                "create_playlist",
+                serde_json::json!({ "name": "sneaky" }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refused["error"]["code"], -32602);
+}
+
+/// A path outside every configured root must be refused, and the message has to
+/// say what to call instead — an agent cannot guess the roots.
+#[tokio::test]
+#[cfg_attr(
+    target_os = "freebsd",
+    ignore = "SIGSEGV in FreeBSD CI QEMU guest (mcp integration harness)"
+)]
+async fn browsing_outside_the_configured_roots_is_refused() {
+    let (_temp, state) = make_test_state().await;
+    let router = create_router(state, Surface::Primary);
+
+    let response = body_json(
+        router
+            .oneshot(mcp_request(call(
+                1,
+                "browse_folder",
+                serde_json::json!({ "path": "/etc" }),
+            )))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(response["result"]["isError"], true);
+    let message = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(message.contains("list_library_roots"), "{message}");
 }
 
 #[tokio::test]
@@ -487,17 +841,16 @@ async fn post_endpoints_enforce_tiered_body_limits() {
         .unwrap();
     assert_eq!(soap_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    for path in ["/mcp/message?client_id=test", "/api/cast/playlist"] {
+    for path in ["/mcp", "/api/cast/playlist"] {
         let response = router
             .clone()
             .oneshot(
                 Request::post(path)
                     .extension(ConnectInfo(test_peer()))
-                    .header(
-                        "authorization",
-                        "Bearer test-management-token-which-is-long-enough",
-                    )
+                    .header("authorization", TEST_TOKEN)
                     .header("content-type", "application/json")
+                    .header("mcp-protocol-version", PROTOCOL_VERSION)
+                    .header("mcp-method", "tools/list")
                     .body(Body::from(vec![b'x'; 256 * 1024 + 1]))
                     .unwrap(),
             )
@@ -508,19 +861,7 @@ async fn post_endpoints_enforce_tiered_body_limits() {
 
     let small_mcp = router
         .clone()
-        .oneshot(
-            Request::post("/mcp/message?client_id=missing")
-                .extension(ConnectInfo(test_peer()))
-                .header(
-                    "authorization",
-                    "Bearer test-management-token-which-is-long-enough",
-                )
-                .header("content-type", "application/json")
-                .body(Body::from(
-                    r#"{"jsonrpc":"2.0","method":"initialize","id":1}"#,
-                ))
-                .unwrap(),
-        )
+        .oneshot(mcp_request(plain(1, "tools/list")))
         .await
         .unwrap();
     assert_ne!(small_mcp.status(), StatusCode::PAYLOAD_TOO_LARGE);

@@ -115,7 +115,6 @@ async fn library() -> (TempDir, AppState, PathBuf) {
         browse_cache: Arc::new(tokio::sync::Mutex::new(
             vuio_core::runtime_state::BrowseResponseCache::new(),
         )),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(
             vuio_core::runtime_state::ActiveCastRegistry::new(),

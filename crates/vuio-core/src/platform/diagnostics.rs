@@ -67,6 +67,17 @@ struct DiagnosticsCollector {
 impl DiagnosticsCollector {
     fn new() -> Self {
         Self {
+            // `new_all()` walks the process table up front, which on FreeBSD
+            // means `kinfo_getfile` — the same class of sysinfo call as the
+            // disk enumeration below, and it faults the same way under QEMU.
+            // Every `AppState` builds one of these, including the ones in tests
+            // that never take a sample, so on FreeBSD the table is left to the
+            // `refresh_all()` in `refresh()` that would repeat it anyway. The
+            // cost is that the first sample reports no CPU usage, having no
+            // earlier reading to difference against.
+            #[cfg(target_os = "freebsd")]
+            system: sysinfo::System::new(),
+            #[cfg(not(target_os = "freebsd"))]
             system: sysinfo::System::new_all(),
             // sysinfo 0.39 FreeBSD disk enumeration calls getmntinfo and then
             // slice::from_raw_parts with a pointer that fails Rust's alignment

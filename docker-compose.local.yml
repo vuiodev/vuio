@@ -54,6 +54,11 @@ services:
       # Enable administrative authentication
       # - VUIO_AUTH=true
       
+      # MCP server, at POST /mcp — lets an AI assistant browse, search and cast.
+      # - VUIO_MCP_ENABLED=true
+      # - VUIO_MCP_READ_ONLY=false     # Hide every mutating and casting tool
+      # - VUIO_MCP_REQUIRE_AUTH=false  # Demand a bearer token even without VUIO_AUTH
+      
       # Media Configuration
       - VUIO_MEDIA_DIRS=/media  # Comma-separated for multiple dirs: /media/movies,/media/tv,/media/music
       - VUIO_SCAN_ON_STARTUP=true

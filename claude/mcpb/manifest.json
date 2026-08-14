@@ -1,0 +1,60 @@
+{
+  "manifest_version": "0.3",
+  "name": "vuio",
+  "display_name": "VuIO Media Server",
+  "version": "0.0.44",
+  "description": "Browse, search and cast your VuIO media library from Claude.",
+  "long_description": "Connects Claude to a VuIO media server on your network. Search the library, browse folders, build playlists, and cast to DLNA, Chromecast and AirPlay devices.\n\nThis bundle runs `vuio mcp`, which bridges Claude's stdio connection to a VuIO server that is already running. It does not start a server or open the library database itself — point it at the machine that does.",
+  "author": {
+    "name": "vyrti",
+    "url": "https://github.com/vuiodev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vuiodev/vuio.git"
+  },
+  "homepage": "https://github.com/vuiodev/vuio",
+  "documentation": "https://github.com/vuiodev/vuio#ai-agent--mcp-integration",
+  "support": "https://github.com/vuiodev/vuio/issues",
+  "license": "MIT OR Apache-2.0",
+  "keywords": ["dlna", "upnp", "chromecast", "airplay", "media-server", "casting"],
+  "server": {
+    "type": "binary",
+    "entry_point": "bin/vuio",
+    "mcp_config": {
+      "command": "${__dirname}/bin/vuio",
+      "args": [
+        "mcp",
+        "--url",
+        "${user_config.server_url}",
+        "--token-file",
+        "${user_config.token_file}"
+      ],
+      "platform_overrides": {
+        "win32": {
+          "command": "${__dirname}/bin/vuio.exe"
+        }
+      }
+    }
+  },
+  "user_config": {
+    "server_url": {
+      "type": "string",
+      "title": "Server address",
+      "description": "Where your VuIO server answers, for example http://nas.local:8080",
+      "required": true,
+      "default": "http://localhost:8080"
+    },
+    "token_file": {
+      "type": "file",
+      "title": "Management token file",
+      "description": "The admin.token file beside your server's config. Needed only if the server requires authentication.",
+      "required": false
+    }
+  },
+  "tools_generated": true,
+  "compatibility": {
+    "claude_desktop": ">=1.0.0",
+    "platforms": ["darwin", "win32", "linux"]
+  }
+}

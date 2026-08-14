@@ -262,7 +262,12 @@ impl AuthState {
         )
     }
 
-    fn bearer_valid(&self, headers: &HeaderMap) -> bool {
+    /// Whether the request carries the admin token as a bearer credential.
+    ///
+    /// Visible beyond this module because `[mcp].require_auth` gates one
+    /// endpoint on a token even when management auth as a whole is off, and it
+    /// must ask the same question this middleware does.
+    pub(crate) fn bearer_valid(&self, headers: &HeaderMap) -> bool {
         headers
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
@@ -783,7 +788,7 @@ pub async fn require_management<D: DatabaseManager>(
             && (path == "/"
                 || path == "/logs"
                 || (!path.starts_with("/api")
-                    && !path.starts_with("/sse")
+                    && !path.starts_with("/mcp")
                     && !path.starts_with("/assets")
                     && !path.starts_with("/_app")))
         {

@@ -1,7 +1,7 @@
 # VuIO Media Server
 
 A cross-platform media server written in Rust. Streams video, audio, and images to DLNA, Chromecast/Google TV, and compatible AirPlay video receivers.
-Less than 8Mb of RAM needed
+Less than 18Mb of RAM needed
 
 Built with Tokio, Axum, and SQLite for high performance and reliability.
 
@@ -601,53 +601,143 @@ To support instant directory listings for directories containing 1000+ files, Vu
 
 ## AI Agent & MCP Integration
 
-VuIO supports the **Model Context Protocol (MCP)**, allowing AI agents (like voice assistants, chatbots, and autonomous agents) to interact with your media library and control playback on discovered devices on the local network.
+VuIO speaks the **Model Context Protocol**, so an AI assistant can browse and
+search your library, build playlists, and cast to the TVs and speakers on your
+network — without you copying anything into a chat window.
 
-### Transport Protocols
+### Connect Claude
 
-The MCP server is served over **SSE (Server-Sent Events)** on the existing HTTP port:
-- **Establish SSE Session**: `GET http://localhost:8080/sse`
-  - When connected, the server will yield an initial `endpoint` event containing the POST message target, e.g. `data: /mcp/message?client_id=<uuid>`
-- **Post Messages**: `POST http://localhost:8080/mcp/message?client_id=<uuid>`
-  - Used to send standard MCP JSON-RPC 2.0 messages to the server.
+The quickest route is the plugin in this repository, which brings the server
+connection, a skill teaching the workflows, and `/cast`, `/playlist` and
+`/library` commands:
 
-### Available MCP Tools
+```bash
+claude plugin marketplace add vuiodev/vuio
+claude plugin install vuio@vuio
+```
 
-| Tool Name | Parameters | Description |
+Point it at your server with two environment variables — `VUIO_URL` (default
+`http://localhost:8080`) and `VUIO_TOKEN`, needed only if the server requires
+authentication.
+
+Or connect the endpoint directly, without the skill or commands:
+
+```bash
+claude mcp add --transport http vuio http://localhost:8080/mcp \
+  --header "Authorization: Bearer $(cat admin.token)"
+```
+
+**Claude Desktop** launches a local process rather than calling an endpoint, so
+it needs the bundle:
+
+```bash
+cargo build --release
+./claude/mcpb/build.sh          # writes claude/mcpb/dist/vuio.mcpb
+```
+
+Double-click the `.mcpb` to install it, then give it your server's address. It
+runs `vuio mcp`, which bridges stdio to a server that is already running — it
+does not open the library itself.
+
+Any other MCP client can use the same bridge:
+
+```bash
+vuio mcp --url http://nas.local:8080 --token-file ~/.vuio/admin.token
+```
+
+### The endpoint
+
+One endpoint, `POST /mcp`, on the main port, speaking MCP **2026-07-28**.
+Clients that still open with an `initialize` handshake are answered too, for
+protocol versions `2025-11-25`, `2025-06-18` and `2025-03-26`.
+
+Requests carry their protocol version twice — in `_meta` and in the
+`MCP-Protocol-Version` header — and the two must agree. `Mcp-Method` must match
+the body's `method`, and `Mcp-Name` the tool name on a `tools/call`. `GET` and
+`DELETE` on the endpoint return `405`: they belonged to the session-based
+revisions, and this transport has no sessions.
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: server/discover' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover",
+       "params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+```
+
+```bash
+curl -X POST http://localhost:8080/mcp \
+  -H 'Content-Type: application/json' \
+  -H 'MCP-Protocol-Version: 2026-07-28' \
+  -H 'Mcp-Method: tools/call' \
+  -H 'Mcp-Name: search_media' \
+  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
+       "params":{"name":"search_media","arguments":{"query":"blade runner"},
+                 "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
+```
+
+Add `-H "Authorization: Bearer $(cat admin.token)"` when the server requires it.
+
+### Configuration
+
+```toml
+[mcp]
+enabled = true        # VUIO_MCP_ENABLED
+read_only = false     # VUIO_MCP_READ_ONLY   — hide every mutating and casting tool
+require_auth = false  # VUIO_MCP_REQUIRE_AUTH — demand a token even when [management] is off
+```
+
+`read_only` leaves the browsing half and removes the rest, both from `tools/list`
+and from `tools/call`, so a tool name learned elsewhere cannot reach a handler.
+
+The tools delete playlists and start playback on real devices. On a server
+reachable beyond loopback, set `require_auth` (or turn on `[management]`); VuIO
+warns at startup when neither is set.
+
+### Available tools
+
+`mcp/reference.json` carries the full schemas, generated from the catalog.
+
+**Library**
+
+| Tool | Parameters | Description |
 | :--- | :--- | :--- |
-| `search_media` | `query` (string) | Search media files by keyword matching filenames or tags |
-| `browse_folder` | `path` (string), `category` (optional string) | Browse files and directories in a specific folder path |
-| `get_media_info` | `file_id` (integer) | Fetch detailed metadata for a file by its ID |
-| `get_server_stats` | None | Retrieve media counts, library size, and server URL info |
-| `list_renderers` | None | List DLNA, Chromecast, and compatible AirPlay renderers with stable IDs |
-| `cast_media_to_renderer` | `file_id` (integer), `renderer_id` (string) | Start playing a media file on a discovered renderer |
-| `control_renderer` | `renderer_id` (string), `action` ("play"\|"pause"\|"stop") | Send playback control commands to a renderer |
-| `list_media` | `category` (optional string), `limit` (optional integer) | Retrieve a flat list of indexed media files (all, audio, video, image) |
-| `list_playlists` | None | List all playlists stored on the server |
-| `create_playlist` | `name` (string), `description` (optional string) | Create a new media playlist |
-| `delete_playlist` | `playlist_id` (integer) | Delete a playlist by ID |
-| `add_to_playlist` | `playlist_id` (integer), `media_file_ids` (integer[]) | Add multiple tracks in bulk to a playlist |
-| `remove_from_playlist` | `playlist_id` (integer), `media_file_id` (integer) | Remove a specific track from a playlist |
-| `get_playlist_tracks` | `playlist_id` (integer) | Retrieve all media files/tracks in a specific playlist |
-| `cast_playlist_to_renderer` | `playlist_id` (integer), `renderer_id` (string) | Cast a playlist to a local renderer and start playing it |
+| `get_server_stats` | — | Counts by type, library size, playlist count, base URL |
+| `list_library_roots` | — | The configured media directories, and whether each is available |
+| `search_media` | `query`, `category?`, `limit?`, `cursor?` | Ranked full-text search across filenames, tags and fetched synopses |
+| `list_media` | `category?`, `limit?`, `cursor?` | Page through every indexed file |
+| `browse_folder` | `path`, `category?`, `offset?`, `limit?` | One directory's subfolders and files |
+| `get_media_info` | `file_id` | Full metadata, playable URLs, and any fetched synopsis and rating |
+| `list_music_categories` | `kind`, `artist?`, `genre?` | Distinct artists, albums, album artists, genres or years, with counts |
+| `find_music` | `artist?`, `album_artist?`, `album?`, `genre?`, `year?`, `limit?` | Tracks matching exact tag values |
 
-### Example Usage
+**Playlists**
 
-1. **Discover playback devices**:
-   ```bash
-   curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/call","id":1,"params":{"name":"list_renderers","arguments":{}}}'
-   ```
+| Tool | Parameters | Description |
+| :--- | :--- | :--- |
+| `list_playlists` | — | Every playlist, with track counts |
+| `get_playlist_tracks` | `playlist_id` | A playlist's tracks in playback order |
+| `create_playlist` | `name`, `description?` | Create an empty playlist |
+| `add_to_playlist` | `playlist_id`, `media_file_ids` | Append tracks, in the order given |
+| `reorder_playlist` | `playlist_id`, `media_file_ids` | Replace the running order |
+| `remove_from_playlist` | `playlist_id`, `media_file_id` | Remove one track |
+| `delete_playlist` | `playlist_id` | Delete a playlist and its entries |
 
-2. **Search for Media**:
-   ```bash
-   curl -X POST "http://localhost:8080/mcp/message?client_id=agent-1" \
-     -H "Content-Type: application/json" \
-     -d '{"jsonrpc":"2.0","method":"tools/call","id":2,"params":{"name":"search_media","arguments":{"query":"matrix"}}}'
-   ```
+**Devices** (requires the `casting` feature)
 
-    ```
+| Tool | Parameters | Description |
+| :--- | :--- | :--- |
+| `list_renderers` | — | DLNA, Chromecast and AirPlay devices, with stable ids |
+| `get_playback_status` | `renderer_id?` | What a renderer is playing, and what this server last sent it |
+| `cast_media_to_renderer` | `file_id`, `renderer_id` | Play one file on a device |
+| `cast_playlist_to_renderer` | `playlist_id`, `renderer_id`, `track_index?` | Play a playlist, advancing automatically |
+| `cast_folder_to_renderer` | `path`, `renderer_id`, `media?` | Play a folder without leaving a playlist behind |
+| `control_renderer` | `renderer_id`, `action` | `play`, `pause` or `stop` |
+
+Every result carries `stream_url`, `cover_url` and `subtitle_url`, so an
+assistant can hand you something playable rather than a path on the server's
+disk.
 
 ## Security & Authentication
 

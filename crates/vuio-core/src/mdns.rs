@@ -187,7 +187,12 @@ mod tests {
         let mut resolved = None;
         while let Ok(Ok(event)) = tokio::time::timeout_at(deadline, receiver.recv_async()).await {
             if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-                if info.get_fullname().contains("VuIO") {
+                // Match on this advertisement's own uuid, not on the name.
+                // Anything containing "VuIO" used to do, which meant a real
+                // VuIO running on the same network — a developer's own server,
+                // most often — was picked up instead and failed the assertions
+                // below against a uuid that was never ours.
+                if info.get_property_val_str("uuid") == Some(server.uuid.as_str()) {
                     resolved = Some(info);
                     break;
                 }

@@ -165,7 +165,6 @@ async fn samsungtv_state_with_video(temp: &tempfile::TempDir) -> AppState {
         ))),
         log_file_path: temp.path().join("vuio.log"),
         browse_cache: Arc::new(tokio::sync::Mutex::new(BrowseResponseCache::new())),
-        mcp_clients: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         #[cfg(feature = "mediainfo")]

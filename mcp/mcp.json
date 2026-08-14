@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "vuio": {
-      "type": "sse",
-      "url": "http://localhost:8080/sse"
+      "type": "http",
+      "url": "http://localhost:8080/mcp",
+      "headers": {
+        "Authorization": "Bearer REPLACE_WITH_YOUR_ADMIN_TOKEN"
+      }
     }
   }
 }

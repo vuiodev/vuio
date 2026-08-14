@@ -178,15 +178,12 @@ pub(in crate::lifecycle) async fn reconcile_unavailable_media_roots<D: DatabaseM
     roots: &[PathBuf],
     grace_hours: u64,
 ) -> anyhow::Result<usize> {
-    let fingerprints = database.load_file_fingerprints().await?;
     let now = unix_now_secs();
     let grace_secs = grace_hours.saturating_mul(3600);
     let mut removed = 0;
     for root in roots {
-        let indexed_count = fingerprints
-            .iter()
-            .filter(|file| file.path.starts_with(root))
-            .count() as u64;
+        let previous = database.get_root_availability(root).await?;
+        let indexed_count = previous.as_ref().map_or(0, |state| state.indexed_count);
         let probe = tokio::fs::read_dir(root).await;
         let reason = match probe {
             Ok(mut entries) => {
@@ -210,7 +207,6 @@ pub(in crate::lifecycle) async fn reconcile_unavailable_media_roots<D: DatabaseM
         let Some(reason) = reason else {
             continue;
         };
-        let previous = database.get_root_availability(root).await?;
         let unavailable_since = previous
             .as_ref()
             .and_then(|state| state.unavailable_since_secs)

@@ -1,46 +1,38 @@
+//! The Model Context Protocol server.
+//!
+//! One endpoint — `POST /mcp` — speaking revision `2026-07-28`. That revision
+//! is stateless: no handshake, no session id, no server-initiated requests. So
+//! there is nothing here but a request handler, a method table and the tools,
+//! and none of it holds state between calls.
+//!
+//! The tools themselves are transport-agnostic: they take `&AppState` and JSON
+//! arguments and return JSON, which is what lets `vuio mcp` proxy the same
+//! catalog over stdio.
+
 use axum::{
-    extract::{ConnectInfo, Json, Query, State},
-    http::StatusCode,
-    response::{
-        sse::{Event, KeepAlive, Sse},
-        IntoResponse,
-    },
+    body::Bytes,
+    extract::State,
+    http::{header, HeaderMap, StatusCode},
+    response::IntoResponse,
 };
-use futures_util::StreamExt;
-use serde::Deserialize;
-use std::{
-    convert::Infallible,
-    net::SocketAddr,
-    time::{Duration, Instant},
-};
-use tokio::sync::mpsc;
-use tokio_stream::wrappers::ReceiverStream;
-use tracing::{debug, info, warn};
-use uuid::Uuid;
+use tracing::debug;
 
 use crate::web::format::format_bytes;
 use crate::{
     database::{
         DatabaseManager, DatabaseReadSession, DirectoryView, MediaFileQuery, MediaFileView,
     },
-    state::{AppState, McpClient},
+    state::AppState,
 };
-
-const MCP_MAX_CLIENTS: usize = 64;
-const MCP_MAX_CLIENTS_PER_PEER: usize = 4;
-const MCP_CLIENT_TTL: Duration = Duration::from_secs(30 * 60);
-const MCP_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 mod protocol;
 pub use protocol::{JsonRpcRequest, JsonRpcResponse};
+use protocol::{
+    header_matches, negotiated_legacy_version, server_info, supported_versions, Era,
+    HEADER_MISMATCH, INVALID_PARAMS, INVALID_REQUEST, LEGACY_PROTOCOL_VERSIONS, METHOD_NOT_FOUND,
+    PARSE_ERROR, PROTOCOL_VERSION, TOOLS_LIST_TTL_MS, UNSUPPORTED_PROTOCOL_VERSION,
+};
 
-// ──────────────────────────────────────────
-// JSON-RPC 2.0 types
-// ──────────────────────────────────────────
-
-// ──────────────────────────────────────────
-// MCP tool definitions
-// ──────────────────────────────────────────
 mod catalog;
 mod dispatch;
 mod tools;
@@ -48,9 +40,11 @@ mod transport;
 
 use catalog::*;
 use dispatch::*;
-// MessageQuery is exercised by the MCP integration tests.
-#[allow(unused_imports)]
-pub use transport::{message_handler, sse_handler, MessageQuery};
+pub use transport::{mcp_handler, method_not_allowed};
+// The cast helpers live with casting and call back for path resolution, so the
+// containment check has one implementation rather than one per caller.
+#[cfg(feature = "casting")]
+pub(crate) use tools::canonical_media_path;
 
 #[cfg(test)]
 mod tests;

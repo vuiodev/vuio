@@ -195,13 +195,6 @@ pub struct UpnpSubscription {
     pub last_notification_at: std::time::Instant,
 }
 
-#[derive(Clone)]
-pub struct McpClient {
-    pub sender: tokio::sync::mpsc::Sender<String>,
-    pub peer: std::net::IpAddr,
-    pub expires_at: std::time::Instant,
-}
-
 pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
     pub config: Arc<AppConfig>,
     pub live_config: Arc<LiveConfig>,
@@ -224,7 +217,6 @@ pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
     pub bookmarks: Arc<tokio::sync::Mutex<crate::runtime_state::BookmarkRegistry>>,
     pub log_file_path: std::path::PathBuf,
     pub browse_cache: Arc<tokio::sync::Mutex<crate::runtime_state::BrowseResponseCache>>,
-    pub mcp_clients: Arc<tokio::sync::Mutex<std::collections::HashMap<String, McpClient>>>,
     pub active_monitors: Arc<
         tokio::sync::Mutex<
             std::collections::HashMap<
@@ -271,7 +263,6 @@ impl<D: DatabaseManager> Clone for AppState<D> {
             bookmarks: self.bookmarks.clone(),
             log_file_path: self.log_file_path.clone(),
             browse_cache: self.browse_cache.clone(),
-            mcp_clients: self.mcp_clients.clone(),
             active_monitors: self.active_monitors.clone(),
             active_casts: self.active_casts.clone(),
             #[cfg(feature = "mediainfo")]

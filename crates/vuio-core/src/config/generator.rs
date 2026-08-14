@@ -39,6 +39,8 @@ impl ConfigGenerator {
 
         self.update_web_ui_config(config)?;
 
+        self.update_mcp_config(config)?;
+
         // Replace platform-specific placeholders
         let mut content = self.template_doc.to_string();
         content = self.replace_platform_placeholders(content, &platform_config)?;
@@ -260,6 +262,16 @@ impl ConfigGenerator {
         Ok(())
     }
 
+    fn update_mcp_config(&mut self, config: &AppConfig) -> Result<()> {
+        let table = self.template_doc["mcp"]
+            .as_table_mut()
+            .context("MCP section not found in template")?;
+        table["enabled"] = value(config.mcp.enabled);
+        table["read_only"] = value(config.mcp.read_only);
+        table["require_auth"] = value(config.mcp.require_auth);
+        Ok(())
+    }
+
     /// Replace platform-specific placeholders in the generated content
     fn replace_platform_placeholders(
         &self,
@@ -436,7 +448,7 @@ mod tests {
     use super::*;
     use crate::config::validation::ConfigValidator;
     use crate::config::{
-        AppConfig, DatabaseConfig, ManagementConfig, MediaConfig, MediaInfoConfig,
+        AppConfig, DatabaseConfig, ManagementConfig, McpConfig, MediaConfig, MediaInfoConfig,
         MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
         ValidationMode, WebUiConfig,
     };
@@ -488,6 +500,7 @@ mod tests {
             management: ManagementConfig::default(),
             mediainfo: MediaInfoConfig::default(),
             web_ui: WebUiConfig::default(),
+            mcp: McpConfig::default(),
         };
 
         // Generate TOML
@@ -599,6 +612,7 @@ mod tests {
             management: ManagementConfig::default(),
             mediainfo: MediaInfoConfig::default(),
             web_ui: WebUiConfig::default(),
+            mcp: McpConfig::default(),
         };
 
         // Generate TOML

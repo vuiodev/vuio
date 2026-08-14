@@ -1,5 +1,19 @@
 use super::*;
 
+/// Read a boolean environment variable, or `None` when it is unset.
+///
+/// Deliberately not `== "true"`: an operator turning something off writes 0, no
+/// or off at least as often as false, and silently keeping it on is the worst
+/// way to answer that.
+fn env_flag(name: &str) -> Option<bool> {
+    std::env::var(name).ok().map(|value| {
+        !matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "no" | "off"
+        )
+    })
+}
+
 impl AppConfig {
     /// Parse and validate a complete VuIO TOML document without writing it.
     pub fn from_toml_str(content: &str) -> Result<Self> {
@@ -43,9 +57,7 @@ impl AppConfig {
                 .unwrap_or_else(|_| "30".to_string())
                 .parse()
                 .context("Invalid VUIO_ANNOUNCE_INTERVAL")?,
-            mdns_enabled: std::env::var("VUIO_MDNS")
-                .map(|value| !matches!(value.trim().to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off"))
-                .unwrap_or(true),
+            mdns_enabled: env_flag("VUIO_MDNS").unwrap_or(true),
             upnp_callback_allowed_networks: std::env::var("VUIO_UPNP_CALLBACK_ALLOWED_NETWORKS")
                 .unwrap_or_default()
                 .split(',')
@@ -197,23 +209,17 @@ impl AppConfig {
                     .unwrap_or_else(default_mediainfo_timeout_seconds),
             },
             web_ui: WebUiConfig {
-                // Parsed the way VUIO_MDNS is, rather than as `== "true"`: an
-                // operator turning something off writes 0, no or off at least
-                // as often as false, and silently keeping it on is the worst
-                // way to answer that.
-                enabled: std::env::var("VUIO_WEB_UI")
-                    .map(|value| {
-                        !matches!(
-                            value.trim().to_ascii_lowercase().as_str(),
-                            "0" | "false" | "no" | "off"
-                        )
-                    })
-                    .unwrap_or(true),
+                enabled: env_flag("VUIO_WEB_UI").unwrap_or(true),
                 port: std::env::var("VUIO_WEB_PORT")
                     .ok()
                     .map(|value| value.parse().context("Invalid VUIO_WEB_PORT"))
                     .transpose()?
                     .unwrap_or_else(default_web_ui_port),
+            },
+            mcp: McpConfig {
+                enabled: env_flag("VUIO_MCP_ENABLED").unwrap_or(true),
+                read_only: env_flag("VUIO_MCP_READ_ONLY").unwrap_or(false),
+                require_auth: env_flag("VUIO_MCP_REQUIRE_AUTH").unwrap_or(false),
             },
         })
     }
@@ -380,6 +386,7 @@ impl AppConfig {
             management: ManagementConfig::default(),
             mediainfo: MediaInfoConfig::default(),
             web_ui: WebUiConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 

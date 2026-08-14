@@ -902,6 +902,220 @@ pub async fn playlist_entry_counts_are_returned_together<B: DatabaseBackend>() {
     assert_eq!(counts.get(&empty), None);
 }
 
+/// Search has to reach every field a person would search by, fold accents, and
+/// rank the better match first — none of which the `LIKE` scan it replaces
+/// could do.
+pub async fn search_ranks_across_every_indexed_field<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "search-fields").await;
+
+    let mut by_title = audio("/music/a.mp3", 1);
+    by_title.title = Some("Needle In Title".to_string());
+    let mut by_artist = audio("/music/b.mp3", 1);
+    by_artist.artist = Some("needle artist".to_string());
+    let mut by_album = audio("/music/c.mp3", 1);
+    by_album.album = Some("NEEDLE album".to_string());
+    let mut by_genre = audio("/music/d.mp3", 1);
+    by_genre.genre = Some("Needlecore".to_string());
+    let mut by_composer = audio("/music/e.mp3", 1);
+    by_composer.tags.composer = Some("A. Needle".to_string());
+    let mut accented = audio("/music/f.mp3", 1);
+    accented.artist = Some("Björk".to_string());
+
+    database
+        .bulk_store_media_files(&[
+            by_title,
+            by_artist,
+            by_album,
+            by_genre,
+            by_composer,
+            accented,
+            audio("/music/needle-in-filename.mp3", 1),
+            audio("/music/unrelated.mp3", 1),
+            video("/media/needle.mkv", 1),
+        ])
+        .await
+        .unwrap();
+
+    let matched = search(&database, "needle", Some("audio/")).await;
+    assert_eq!(
+        matched.len(),
+        6,
+        "search covers filename, title, artist, album, genre and composer: {matched:?}"
+    );
+    assert!(
+        !matched.iter().any(|name| name == "unrelated.mp3"),
+        "a non-match must not be returned: {matched:?}"
+    );
+
+    // Diacritic folding is the difference between a search box that works on a
+    // real music library and one that does not.
+    let folded = search(&database, "bjork", None).await;
+    assert_eq!(folded, vec!["f.mp3".to_string()]);
+
+    // The last word matches as a prefix, so results narrow while typing.
+    let prefix = search(&database, "needl", Some("audio/")).await;
+    assert_eq!(prefix.len(), 6, "the final token matches as a prefix");
+}
+
+/// Every word has to match, so adding one narrows the result rather than
+/// widening it — which is what a person means by typing more.
+pub async fn search_requires_every_word_and_survives_punctuation<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "search-tokens").await;
+
+    let mut both = audio("/music/a.mp3", 1);
+    both.title = Some("Dark Side of the Moon".to_string());
+    let mut one = audio("/music/b.mp3", 1);
+    one.title = Some("Dark Star".to_string());
+    let mut punctuated = audio("/music/c.mp3", 1);
+    punctuated.artist = Some("AC/DC".to_string());
+    database
+        .bulk_store_media_files(&[both, one, punctuated])
+        .await
+        .unwrap();
+
+    assert_eq!(search(&database, "dark", None).await.len(), 2);
+    assert_eq!(
+        search(&database, "dark moon", None).await,
+        vec!["a.mp3".to_string()],
+        "a second word narrows rather than widens"
+    );
+
+    // These are all FTS5 operators. Reaching the engine unquoted, any of them
+    // would be a syntax error rather than a search.
+    for hostile in ["AC/DC", "\"quoted\"", "rock & roll", "NEAR", "a OR b", "-x", "col:val"] {
+        let _ = search(&database, hostile, None).await;
+    }
+    assert_eq!(
+        search(&database, "AC/DC", None).await,
+        vec!["c.mp3".to_string()],
+        "punctuation is part of the query, not syntax"
+    );
+
+    assert!(
+        search(&database, "!!!", None).await.is_empty(),
+        "a query with nothing searchable in it matches nothing, not everything"
+    );
+}
+
+/// The index is maintained by the database itself, so it has to stay correct
+/// across every path that writes a record — not merely the one the scanner
+/// happens to use today.
+pub async fn search_tracks_every_write_path<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "search-writes").await;
+
+    // store_media_file
+    let mut single = audio("/music/one.mp3", 1);
+    single.title = Some("Zaphod".to_string());
+    database.store_media_file(&single).await.unwrap();
+    assert_eq!(search(&database, "zaphod", None).await, vec!["one.mp3"]);
+
+    // bulk_store_media_files
+    let mut bulk = audio("/music/two.mp3", 1);
+    bulk.title = Some("Trillian".to_string());
+    database.bulk_store_media_files(&[bulk]).await.unwrap();
+    assert_eq!(search(&database, "trillian", None).await, vec!["two.mp3"]);
+
+    // bulk_update_media_files — the old text must stop matching, the new start.
+    let mut updated = database
+        .get_file_by_path(Path::new("/music/one.mp3"))
+        .await
+        .unwrap()
+        .expect("stored record");
+    updated.title = Some("Ford Prefect".to_string());
+    database.bulk_update_media_files(&[updated]).await.unwrap();
+    assert!(
+        search(&database, "zaphod", None).await.is_empty(),
+        "an overwritten title must stop matching"
+    );
+    assert_eq!(search(&database, "prefect", None).await, vec!["one.mp3"]);
+
+    // remove_media_file
+    database
+        .remove_media_file(Path::new("/music/two.mp3"))
+        .await
+        .unwrap();
+    assert!(search(&database, "trillian", None).await.is_empty());
+
+    // remove_media_under_path
+    let mut nested = audio("/music/deep/three.mp3", 1);
+    nested.title = Some("Marvin".to_string());
+    database.bulk_store_media_files(&[nested]).await.unwrap();
+    assert_eq!(search(&database, "marvin", None).await, vec!["three.mp3"]);
+    database
+        .remove_media_under_path(Path::new("/music/deep"))
+        .await
+        .unwrap();
+    assert!(
+        search(&database, "marvin", None).await.is_empty(),
+        "subtree removal must clear the index too"
+    );
+
+    // cleanup_missing_files
+    let mut orphan = audio("/music/four.mp3", 1);
+    orphan.title = Some("Slartibartfast".to_string());
+    database.bulk_store_media_files(&[orphan]).await.unwrap();
+    database
+        .cleanup_missing_files(&[PathBuf::from("/music/one.mp3")])
+        .await
+        .unwrap();
+    assert!(
+        search(&database, "slartibartfast", None).await.is_empty(),
+        "cleanup must clear the index too"
+    );
+    assert_eq!(
+        search(&database, "prefect", None).await,
+        vec!["one.mp3"],
+        "a record that survived cleanup must still be findable"
+    );
+}
+
+/// The index is derived state, so there has to be a way back from a bad one
+/// that is cheaper than rescanning the library.
+pub async fn rebuilding_derived_indexes_restores_search<B: DatabaseBackend>() {
+    let temp = tempfile::tempdir().unwrap();
+    let database = open::<B>(&temp, "search-rebuild").await;
+
+    let mut file = audio("/music/one.mp3", 1);
+    file.title = Some("Hoopy Frood".to_string());
+    database.bulk_store_media_files(&[file]).await.unwrap();
+    assert_eq!(search(&database, "hoopy", None).await, vec!["one.mp3"]);
+
+    let health = database.rebuild_derived_indexes().await.unwrap();
+    assert!(health.is_healthy, "a rebuild of a sound index must succeed");
+    assert_eq!(
+        search(&database, "hoopy", None).await,
+        vec!["one.mp3"],
+        "a rebuild must leave search exactly as it was"
+    );
+}
+
+/// Run a search and return the matching filenames, in rank order.
+async fn search<B: DatabaseBackend>(
+    database: &Arc<B>,
+    text: &str,
+    mime_family: Option<&str>,
+) -> Vec<String> {
+    let query = MediaFileQuery::Search {
+        text: text.to_string(),
+        mime_family: mime_family.map(str::to_owned),
+    };
+    database
+        .clone()
+        .read(move |session| {
+            let mut names = Vec::new();
+            session.visit_files(&query, 0, 100, |file| {
+                names.push(file.filename().to_string());
+                Ok(())
+            })?;
+            Ok(names)
+        })
+        .await
+        .unwrap()
+}
+
 pub async fn filtered_query_searches_text_and_pages_by_cursor<B: DatabaseBackend>() {
     let temp = tempfile::tempdir().unwrap();
     let database = open::<B>(&temp, "filtered").await;
@@ -1559,6 +1773,10 @@ macro_rules! backend_conformance_tests {
         conformance_case!(radio_records_do_not_become_music_categories);
         conformance_case!(playlist_entry_counts_are_returned_together);
         conformance_case!(filtered_query_searches_text_and_pages_by_cursor);
+        conformance_case!(search_ranks_across_every_indexed_field);
+        conformance_case!(search_requires_every_word_and_survives_punctuation);
+        conformance_case!(search_tracks_every_write_path);
+        conformance_case!(rebuilding_derived_indexes_restores_search);
         conformance_case!(read_session_finds_records_by_id_and_path);
         conformance_case!(playlist_lifecycle);
         conformance_case!(playlist_batch_add_and_reorder);

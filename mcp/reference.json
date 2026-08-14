@@ -1,237 +1,1885 @@
 {
-  "protocol": "Model Context Protocol (MCP) 2025-03-26",
-  "transport": "SSE (Server-Sent Events) + HTTP POST",
-  "endpoints": {
-    "sse": "GET /sse (Establishes the session stream, returns a unique client_id)",
-    "message": "POST /mcp/message?client_id=<uuid> (Sends JSON-RPC requests)"
-  },
-  "available_tools": [
+  "endpoint": "POST /mcp",
+  "notes": [
+    "Every request carries its version in `_meta` as `io.modelcontextprotocol/protocolVersion`, mirrored in the `MCP-Protocol-Version` header.",
+    "`Mcp-Method` must equal the body's `method`; for `tools/call`, `Mcp-Name` must equal `params.name`.",
+    "Clients that open with an `initialize` handshake are answered too, for protocol versions 2025-11-25, 2025-06-18, 2025-03-26.",
+    "Set `Authorization: Bearer <admin token>` when the server requires it.",
+    "Generated from the tool catalog — edit `catalog.rs`, not this file."
+  ],
+  "protocol": "Model Context Protocol (MCP) 2026-07-28",
+  "tools": [
     {
-      "name": "search_media",
-      "description": "Search media files (video, audio, images) by keyword in filename or title.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 1,
-        "params": {
-          "name": "search_media",
-          "arguments": {
-            "query": "matrix"
-          }
-        }
-      }
-    },
-    {
-      "name": "browse_folder",
-      "description": "Browse files and subdirectories in a specific folder path.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 2,
-        "params": {
-          "name": "browse_folder",
-          "arguments": {
-            "path": "/movies",
-            "category": "video"
-          }
-        }
-      }
-    },
-    {
-      "name": "get_media_info",
-      "description": "Get detailed metadata for a specific media file by its numeric ID.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 3,
-        "params": {
-          "name": "get_media_info",
-          "arguments": {
-            "file_id": 123
-          }
-        }
-      }
-    },
-    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Get server name, base URL, and totals for the indexed library: file counts by type, total size, playlist count and database size. A good first call to learn what this server holds.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
       "name": "get_server_stats",
-      "description": "Get server statistics including total media file counts by type.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 4,
-        "params": {
-          "name": "get_server_stats",
-          "arguments": {}
-        }
-      }
-    },
-    {
-      "name": "list_tvs",
-      "description": "Discover UPnP/DLNA MediaRenderer devices on the local network.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 5,
-        "params": {
-          "name": "list_tvs",
-          "arguments": {}
-        }
-      }
-    },
-    {
-      "name": "cast_media_to_tv",
-      "description": "Cast a media file to a smart TV or media renderer by name.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 6,
-        "params": {
-          "name": "cast_media_to_tv",
-          "arguments": {
-            "file_id": 123,
-            "tv_name": "Living Room TV"
+      "outputSchema": {
+        "properties": {
+          "audio_files": {
+            "type": "integer"
+          },
+          "database_size_bytes": {
+            "type": "integer"
+          },
+          "image_files": {
+            "type": "integer"
+          },
+          "playlists": {
+            "type": "integer"
+          },
+          "server_name": {
+            "type": "string"
+          },
+          "server_url": {
+            "type": "string"
+          },
+          "total_files": {
+            "type": "integer"
+          },
+          "total_size_bytes": {
+            "type": "integer"
+          },
+          "total_size_human": {
+            "type": "string"
+          },
+          "video_files": {
+            "type": "integer"
           }
-        }
-      }
+        },
+        "type": "object"
+      },
+      "title": "Server statistics"
     },
     {
-      "name": "control_tv",
-      "description": "Send a playback control command (play, pause, stop) to a smart TV.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 7,
-        "params": {
-          "name": "control_tv",
-          "arguments": {
-            "tv_name": "Living Room TV",
-            "action": "pause"
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List the configured media directories this server indexes. Call this before browse_folder: the roots are the only paths guaranteed to be browsable, and they cannot be guessed.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "list_library_roots",
+      "outputSchema": {
+        "properties": {
+          "roots": {
+            "items": {
+              "properties": {
+                "available": {
+                  "description": "False when the root is missing — an unplugged drive, usually. Its files stay indexed but cannot be played.",
+                  "type": "boolean"
+                },
+                "indexed_at_last_scan": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "name": {
+                  "type": "string"
+                },
+                "path": {
+                  "description": "Pass to browse_folder to list this root",
+                  "type": "string"
+                },
+                "recursive": {
+                  "type": "boolean"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
           }
-        }
-      }
+        },
+        "type": "object"
+      },
+      "title": "List library roots"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Full-text search across filenames, titles, artists, albums, genres, composers and — where available — fetched synopses. Results are ranked by relevance. Multi-word queries match all words; the last word also matches as a prefix, so \"beethov sym\" finds \"Beethoven Symphony\". This is the right tool when you know roughly what you are looking for.",
+      "inputSchema": {
+        "properties": {
+          "category": {
+            "description": "Restrict to one media type. Defaults to 'all'.",
+            "enum": [
+              "all",
+              "audio",
+              "video",
+              "image",
+              "radio"
+            ],
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Opaque cursor returned by the previous page",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Page size (defaults to 50, maximum 500)",
+            "type": "integer"
+          },
+          "query": {
+            "description": "Words to search for. Punctuation is ignored.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "search_media",
+      "outputSchema": {
+        "properties": {
+          "files": {
+            "items": {
+              "properties": {
+                "album": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "album_artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "bit_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "bits_per_sample": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channels": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "codec": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "composer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "disc_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "duration_seconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "genre": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "sample_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "size_bytes": {
+                  "type": "integer"
+                },
+                "size_human": {
+                  "type": "string"
+                },
+                "stream_url": {
+                  "description": "Direct HTTP URL for playback, with range support",
+                  "type": "string"
+                },
+                "subtitle_available": {
+                  "type": "boolean"
+                },
+                "subtitle_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "track_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "year": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "filename",
+                "path",
+                "mime_type",
+                "stream_url"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Pass back as `cursor` for the next page; null when exhausted",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_matches": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_matches",
+          "files"
+        ],
+        "type": "object"
+      },
+      "title": "Search the library"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Page through every indexed file, optionally filtered by category. Use search_media when you know what you want; this is for surveying the whole library.",
+      "inputSchema": {
+        "properties": {
+          "category": {
+            "description": "Restrict to one media type. Defaults to 'all'.",
+            "enum": [
+              "all",
+              "audio",
+              "video",
+              "image",
+              "radio"
+            ],
+            "type": "string"
+          },
+          "cursor": {
+            "description": "Opaque cursor returned by the previous page",
+            "type": "string"
+          },
+          "limit": {
+            "description": "Page size (defaults to 100, maximum 500)",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "name": "list_media",
-      "description": "List all media files indexed on the server, optionally filtered by category (video, audio, image).",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 8,
-        "params": {
-          "name": "list_media",
-          "arguments": {
-            "category": "video",
-            "limit": 50
+      "outputSchema": {
+        "properties": {
+          "files": {
+            "items": {
+              "properties": {
+                "album": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "album_artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "bit_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "bits_per_sample": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channels": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "codec": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "composer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "disc_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "duration_seconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "genre": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "sample_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "size_bytes": {
+                  "type": "integer"
+                },
+                "size_human": {
+                  "type": "string"
+                },
+                "stream_url": {
+                  "description": "Direct HTTP URL for playback, with range support",
+                  "type": "string"
+                },
+                "subtitle_available": {
+                  "type": "boolean"
+                },
+                "subtitle_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "track_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "year": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "filename",
+                "path",
+                "mime_type",
+                "stream_url"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Pass back as `cursor` for the next page; null when exhausted",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_files": {
+            "type": "integer"
           }
-        }
-      }
+        },
+        "required": [
+          "total_files",
+          "files"
+        ],
+        "type": "object"
+      },
+      "title": "List library files"
     },
     {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List one directory's immediate subfolders and files. Call list_library_roots first to get a valid starting path. Results are paged: a folder with thousands of files returns them a page at a time.",
+      "inputSchema": {
+        "properties": {
+          "category": {
+            "description": "Restrict files to one media type. Defaults to 'all'.",
+            "enum": [
+              "all",
+              "audio",
+              "video",
+              "image",
+              "radio"
+            ],
+            "type": "string"
+          },
+          "limit": {
+            "description": "Page size (defaults to 200, maximum 500)",
+            "type": "integer"
+          },
+          "offset": {
+            "description": "Files to skip (defaults to 0)",
+            "type": "integer"
+          },
+          "path": {
+            "description": "Absolute folder path, from list_library_roots or from the `path` of a folder in a previous result",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "browse_folder",
+      "outputSchema": {
+        "properties": {
+          "directories": {
+            "items": {
+              "properties": {
+                "file_count": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "files": {
+            "items": {
+              "properties": {
+                "album": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "album_artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "bit_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "bits_per_sample": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channels": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "codec": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "composer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "disc_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "duration_seconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "genre": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "sample_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "size_bytes": {
+                  "type": "integer"
+                },
+                "size_human": {
+                  "type": "string"
+                },
+                "stream_url": {
+                  "description": "Direct HTTP URL for playback, with range support",
+                  "type": "string"
+                },
+                "subtitle_available": {
+                  "type": "boolean"
+                },
+                "subtitle_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "track_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "year": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "filename",
+                "path",
+                "mime_type",
+                "stream_url"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "offset": {
+            "type": "integer"
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Browse a folder"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Full metadata for one file: tags, audio stream properties, playable URLs, and any synopsis, rating or artwork fetched from an online metadata provider.",
+      "inputSchema": {
+        "properties": {
+          "file_id": {
+            "description": "Numeric id from any listing or search result",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "file_id"
+        ],
+        "type": "object"
+      },
+      "name": "get_media_info",
+      "outputSchema": {
+        "properties": {
+          "album": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "album_artist": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "artist": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "bit_rate": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "bits_per_sample": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "channels": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "codec": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "composer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "cover_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "disc_number": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "duration_seconds": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "filename": {
+            "type": "string"
+          },
+          "genre": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer"
+          },
+          "mime_type": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "sample_rate": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "size_bytes": {
+            "type": "integer"
+          },
+          "size_human": {
+            "type": "string"
+          },
+          "stream_url": {
+            "description": "Direct HTTP URL for playback, with range support",
+            "type": "string"
+          },
+          "subtitle_available": {
+            "type": "boolean"
+          },
+          "subtitle_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "track_number": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "year": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "path",
+          "mime_type",
+          "stream_url"
+        ],
+        "type": "object"
+      },
+      "title": "Media file details"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List the distinct artists, albums, album artists, genres or years in the music library, each with a track count. Answered from an index, so it is cheap on a large library — prefer it over listing every file and grouping them yourself.",
+      "inputSchema": {
+        "properties": {
+          "artist": {
+            "description": "With kind='album', list only this artist's albums",
+            "type": "string"
+          },
+          "genre": {
+            "description": "Restrict the results to one genre",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Which category to enumerate",
+            "enum": [
+              "artist",
+              "album",
+              "album_artist",
+              "genre",
+              "year"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "type": "object"
+      },
+      "name": "list_music_categories",
+      "outputSchema": {
+        "properties": {
+          "categories": {
+            "items": {
+              "properties": {
+                "child_count": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "track_count": {
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "kind": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "title": "List music categories"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "Find tracks by exact tag values, combining any of artist, album artist, album, genre and year. Use list_music_categories first to learn the exact spellings — these match exactly, unlike search_media.",
+      "inputSchema": {
+        "properties": {
+          "album": {
+            "type": "string"
+          },
+          "album_artist": {
+            "type": "string"
+          },
+          "artist": {
+            "type": "string"
+          },
+          "genre": {
+            "type": "string"
+          },
+          "limit": {
+            "description": "Maximum tracks to return (defaults to 200, maximum 500)",
+            "type": "integer"
+          },
+          "year": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "name": "find_music",
+      "outputSchema": {
+        "properties": {
+          "files": {
+            "items": {
+              "properties": {
+                "album": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "album_artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "bit_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "bits_per_sample": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channels": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "codec": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "composer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "disc_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "duration_seconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "genre": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "sample_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "size_bytes": {
+                  "type": "integer"
+                },
+                "size_human": {
+                  "type": "string"
+                },
+                "stream_url": {
+                  "description": "Direct HTTP URL for playback, with range support",
+                  "type": "string"
+                },
+                "subtitle_available": {
+                  "type": "boolean"
+                },
+                "subtitle_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "track_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "year": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "filename",
+                "path",
+                "mime_type",
+                "stream_url"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "next_cursor": {
+            "description": "Pass back as `cursor` for the next page; null when exhausted",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "total_matches": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "total_matches",
+          "files"
+        ],
+        "type": "object"
+      },
+      "title": "Find music by tag"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List every playlist on the server with its id, name and description.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
       "name": "list_playlists",
-      "description": "List all playlists currently stored on the server.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 9,
-        "params": {
-          "name": "list_playlists",
-          "arguments": {}
-        }
-      }
-    },
-    {
-      "name": "create_playlist",
-      "description": "Create a new media playlist.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 10,
-        "params": {
-          "name": "create_playlist",
-          "arguments": {
-            "name": "My Series Playlist",
-            "description": "Season 1 episodes"
+      "outputSchema": {
+        "properties": {
+          "playlists": {
+            "items": {
+              "properties": {
+                "created_at": {
+                  "type": "integer"
+                },
+                "description": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "updated_at": {
+                  "type": "integer"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
           }
-        }
-      }
+        },
+        "type": "object"
+      },
+      "title": "List playlists"
     },
     {
-      "name": "delete_playlist",
-      "description": "Delete a playlist by its ID.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 11,
-        "params": {
-          "name": "delete_playlist",
-          "arguments": {
-            "playlist_id": 42
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": true
+      },
+      "description": "List a playlist's tracks in playback order.",
+      "inputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
           }
-        }
-      }
-    },
-    {
-      "name": "add_to_playlist",
-      "description": "Add multiple media file IDs to a playlist in bulk.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 12,
-        "params": {
-          "name": "add_to_playlist",
-          "arguments": {
-            "playlist_id": 42,
-            "media_file_ids": [286, 287, 288]
-          }
-        }
-      }
-    },
-    {
-      "name": "remove_from_playlist",
-      "description": "Remove a specific media file from a playlist.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 13,
-        "params": {
-          "name": "remove_from_playlist",
-          "arguments": {
-            "playlist_id": 42,
-            "media_file_id": 287
-          }
-        }
-      }
-    },
-    {
+        },
+        "required": [
+          "playlist_id"
+        ],
+        "type": "object"
+      },
       "name": "get_playlist_tracks",
-      "description": "Get all media files/tracks in a specific playlist.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 14,
-        "params": {
-          "name": "get_playlist_tracks",
-          "arguments": {
-            "playlist_id": 42
+      "outputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
+          },
+          "tracks": {
+            "items": {
+              "properties": {
+                "album": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "album_artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "artist": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "bit_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "bits_per_sample": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "channels": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "codec": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "composer": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "cover_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "disc_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "duration_seconds": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                },
+                "filename": {
+                  "type": "string"
+                },
+                "genre": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "id": {
+                  "type": "integer"
+                },
+                "mime_type": {
+                  "type": "string"
+                },
+                "path": {
+                  "type": "string"
+                },
+                "sample_rate": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "size_bytes": {
+                  "type": "integer"
+                },
+                "size_human": {
+                  "type": "string"
+                },
+                "stream_url": {
+                  "description": "Direct HTTP URL for playback, with range support",
+                  "type": "string"
+                },
+                "subtitle_available": {
+                  "type": "boolean"
+                },
+                "subtitle_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "track_number": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "year": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "id",
+                "filename",
+                "path",
+                "mime_type",
+                "stream_url"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "tracks_count": {
+            "type": "integer"
           }
-        }
-      }
+        },
+        "type": "object"
+      },
+      "title": "Playlist tracks"
     },
     {
-      "name": "cast_playlist_to_tv",
-      "description": "Cast a playlist to a smart TV by name. Starts playing the first item.",
-      "request_example": {
-        "jsonrpc": "2.0",
-        "method": "tools/call",
-        "id": 15,
-        "params": {
-          "name": "cast_playlist_to_tv",
-          "arguments": {
-            "playlist_id": 42,
-            "tv_name": "Living Room TV"
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Create an empty playlist and return its id. Add tracks with add_to_playlist.",
+      "inputSchema": {
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
           }
-        }
-      }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "create_playlist",
+      "outputSchema": {
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "playlist_id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Create a playlist"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Append media files to a playlist, in the order given. Pass every id in one call rather than calling repeatedly.",
+      "inputSchema": {
+        "properties": {
+          "media_file_ids": {
+            "description": "File ids, in the order they should play",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "playlist_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "playlist_id",
+          "media_file_ids"
+        ],
+        "type": "object"
+      },
+      "name": "add_to_playlist",
+      "outputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tracks_added": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Add tracks to a playlist"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Replace a playlist's running order. The ids given become positions 0, 1, 2 and so on.",
+      "inputSchema": {
+        "properties": {
+          "media_file_ids": {
+            "description": "Every track id, in the new order",
+            "items": {
+              "type": "integer"
+            },
+            "type": "array"
+          },
+          "playlist_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "playlist_id",
+          "media_file_ids"
+        ],
+        "type": "object"
+      },
+      "name": "reorder_playlist",
+      "outputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tracks": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Reorder a playlist"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Remove one media file from a playlist. The file itself is untouched.",
+      "inputSchema": {
+        "properties": {
+          "media_file_id": {
+            "type": "integer"
+          },
+          "playlist_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "playlist_id",
+          "media_file_id"
+        ],
+        "type": "object"
+      },
+      "name": "remove_from_playlist",
+      "outputSchema": {
+        "properties": {
+          "media_file_id": {
+            "type": "integer"
+          },
+          "playlist_id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Remove a track from a playlist"
+    },
+    {
+      "annotations": {
+        "destructiveHint": true,
+        "idempotentHint": true,
+        "openWorldHint": false,
+        "readOnlyHint": false
+      },
+      "description": "Delete a playlist and all of its entries. The media files themselves are untouched. This cannot be undone.",
+      "inputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "playlist_id"
+        ],
+        "type": "object"
+      },
+      "name": "delete_playlist",
+      "outputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Delete a playlist"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "List the DLNA, Chromecast and AirPlay devices discovered on the local network. Use the `id` for every other renderer tool — friendly names are not unique and can change, ids do not.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "type": "object"
+      },
+      "name": "list_renderers",
+      "outputSchema": {
+        "properties": {
+          "renderers": {
+            "items": {
+              "properties": {
+                "capabilities": {
+                  "type": "object"
+                },
+                "friendly_name": {
+                  "type": "string"
+                },
+                "id": {
+                  "type": "string"
+                },
+                "location": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "model": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "protocol": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "renderers_found": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "title": "List playback devices"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Ask a renderer what it is currently playing, and report what this server last sent it. Call this after casting to confirm playback actually started.",
+      "inputSchema": {
+        "properties": {
+          "renderer_id": {
+            "description": "Stable id from list_renderers. Omit to report every renderer this server has an active cast on.",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "name": "get_playback_status",
+      "outputSchema": {
+        "properties": {
+          "renderers": {
+            "items": {
+              "properties": {
+                "current_file": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                },
+                "current_url": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "friendly_name": {
+                  "type": "string"
+                },
+                "queue_length": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "queue_position": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "renderer_id": {
+                  "type": "string"
+                },
+                "state": {
+                  "enum": [
+                    "playing",
+                    "paused",
+                    "stopped",
+                    "finished",
+                    "error",
+                    "unknown"
+                  ],
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "title": "What is playing"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Start playing one media file on a renderer. Get `file_id` from a search or listing and `renderer_id` from list_renderers.",
+      "inputSchema": {
+        "properties": {
+          "file_id": {
+            "type": "integer"
+          },
+          "renderer_id": {
+            "description": "Stable renderer id from list_renderers",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_id",
+          "renderer_id"
+        ],
+        "type": "object"
+      },
+      "name": "cast_media_to_renderer",
+      "outputSchema": {
+        "properties": {
+          "media_url": {
+            "type": "string"
+          },
+          "renderer": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Cast a file to a device"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Play a playlist on a renderer, starting at `track_index` and advancing automatically as each track finishes.",
+      "inputSchema": {
+        "properties": {
+          "playlist_id": {
+            "type": "integer"
+          },
+          "renderer_id": {
+            "type": "string"
+          },
+          "track_index": {
+            "description": "0-based track to start from (defaults to 0)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "playlist_id",
+          "renderer_id"
+        ],
+        "type": "object"
+      },
+      "name": "cast_playlist_to_renderer",
+      "outputSchema": {
+        "properties": {
+          "current_index": {
+            "type": "integer"
+          },
+          "renderer": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tracks_count": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Cast a playlist to a device"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Play everything in a folder on a renderer, in natural filename order, without creating a permanent playlist.",
+      "inputSchema": {
+        "properties": {
+          "media": {
+            "description": "Restrict to one kind. Omit to cast everything castable.",
+            "enum": [
+              "audio",
+              "video"
+            ],
+            "type": "string"
+          },
+          "path": {
+            "description": "Folder path, as returned by browse_folder",
+            "type": "string"
+          },
+          "renderer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "renderer_id"
+        ],
+        "type": "object"
+      },
+      "name": "cast_folder_to_renderer",
+      "outputSchema": {
+        "properties": {
+          "renderer": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "tracks_count": {
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Cast a folder to a device"
+    },
+    {
+      "annotations": {
+        "destructiveHint": false,
+        "idempotentHint": false,
+        "openWorldHint": true,
+        "readOnlyHint": false
+      },
+      "description": "Play, pause or stop what is already on a renderer. Stopping tears the session down, which is what a push protocol like AirPlay audio needs.",
+      "inputSchema": {
+        "properties": {
+          "action": {
+            "enum": [
+              "play",
+              "pause",
+              "stop"
+            ],
+            "type": "string"
+          },
+          "renderer_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "renderer_id",
+          "action"
+        ],
+        "type": "object"
+      },
+      "name": "control_renderer",
+      "outputSchema": {
+        "properties": {
+          "action": {
+            "type": "string"
+          },
+          "renderer": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "title": "Control playback"
     }
-  ]
+  ],
+  "transport": "Streamable HTTP — a single POST /mcp on the server's main port"
 }

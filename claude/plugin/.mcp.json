@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "vuio": {
+      "type": "http",
+      "url": "${VUIO_URL:-http://localhost:8080}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${VUIO_TOKEN:-no-token-configured}"
+      }
+    }
+  }
+}
