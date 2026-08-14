@@ -18,7 +18,7 @@ use crate::database::{AudioTags, FileFingerprint, FileLocation, MediaFile, Playl
 /// [`migrations`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -100,7 +100,6 @@ CREATE INDEX IF NOT EXISTS idx_media_genre        ON media_files(genre);
 CREATE INDEX IF NOT EXISTS idx_media_year         ON media_files(year);
 CREATE INDEX IF NOT EXISTS idx_media_album_artist ON media_files(album_artist);
 CREATE INDEX IF NOT EXISTS idx_media_family       ON media_files(mime_family);
-CREATE INDEX IF NOT EXISTS idx_media_tags_version ON media_files(tags_version);
 
 -- Directories exist only by implication from the paths of files, so unlike the
 -- music indexes they cannot be recomputed by a query at browse time.
@@ -169,7 +168,6 @@ CREATE TABLE IF NOT EXISTS media_tags (
     PRIMARY KEY (media_file_id, key, value)
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS idx_media_tags_key ON media_tags(key, value);
 
 -- What a public metadata service said about a file: title, synopsis, rating and
 -- a pointer into the artwork cache.
@@ -320,6 +318,7 @@ fn migrations() -> Vec<(i64, String)> {
         (2, MIGRATION_V2.to_owned()),
         (3, MIGRATION_V3.to_owned()),
         (4, migration_v4()),
+        (5, MIGRATION_V5.to_owned()),
     ]
 }
 
@@ -396,6 +395,20 @@ CREATE TABLE IF NOT EXISTS mediainfo (
 fn migration_v4() -> String {
     format!("{FTS_DDL}{FTS_REBUILD}")
 }
+
+/// v4 → v5: drop two indexes nothing queries.
+///
+/// `tags_version` never appears in a `WHERE` or `ORDER BY` — it is compared in
+/// Rust, against a value the scanner already holds — and `media_tags` is only
+/// ever read by `media_file_id`, which its primary key already serves. Both were
+/// pure write cost: two more b-tree insertions for every row indexed.
+///
+/// Dropping an index is not the destructive kind of migration the rule above
+/// guards against. An index holds nothing that is not derivable from the table.
+const MIGRATION_V5: &str = r#"
+DROP INDEX IF EXISTS idx_media_tags_version;
+DROP INDEX IF EXISTS idx_media_tags_key;
+"#;
 
 /// Columns of `media_files`, qualified so the list can be used inside joins.
 pub(super) const MEDIA_COLUMNS: &str = "\

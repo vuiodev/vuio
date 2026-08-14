@@ -97,23 +97,27 @@ pub(in crate::database::sqlite) fn bind_media_file(file: &MediaFile) -> Vec<Valu
 
 /// Replace the long tail of tags for one record.
 ///
-/// Unconditional, so that a record's tag state is always internally consistent:
-/// the same write that clears the promoted columns clears the side table with
-/// them. Guarding this on `tags_version` would leave a file whose tags became
-/// unreadable — a truncated download, a corrupted re-encode — with empty
-/// columns but its old `media_tags` rows still answering `get_media_tags`.
+/// For an existing record the clear is unconditional, so that its tag state stays
+/// internally consistent: the same write that empties the promoted columns empties
+/// the side table with them. Guarding that on `tags_version` would leave a file
+/// whose tags became unreadable — a truncated download, a corrupted re-encode —
+/// with empty columns but its old `media_tags` rows still answering
+/// `get_media_tags`.
 ///
-/// This costs nothing for records that did not change, because the scanner only
-/// reaches a write when the fingerprint says the file itself moved on.
+/// A row that was just inserted has no tags to clear, and saying so saves an index
+/// lookup and a statement per file on a first scan of a large library.
 fn write_extra_tags(
     transaction: &Transaction<'_>,
     media_file_id: i64,
     file: &MediaFile,
+    row_existed: bool,
 ) -> Result<()> {
-    transaction.execute(
-        "DELETE FROM media_tags WHERE media_file_id = ?",
-        [media_file_id],
-    )?;
+    if row_existed {
+        transaction.execute(
+            "DELETE FROM media_tags WHERE media_file_id = ?",
+            [media_file_id],
+        )?;
+    }
     if file.extra_tags.is_empty() {
         return Ok(());
     }
@@ -193,7 +197,7 @@ pub(in crate::database::sqlite) fn upsert_media_file(
             transaction
                 .prepare_cached(UPDATE_MEDIA)?
                 .execute(rusqlite::params_from_iter(params.iter()))?;
-            write_extra_tags(transaction, id, file)?;
+            write_extra_tags(transaction, id, file, true)?;
             Ok(id)
         }
         None => {
@@ -206,7 +210,7 @@ pub(in crate::database::sqlite) fn upsert_media_file(
                 .prepare_cached(INSERT_MEDIA)?
                 .execute(rusqlite::params_from_iter(params.iter()))?;
             let id = transaction.last_insert_rowid();
-            write_extra_tags(transaction, id, file)?;
+            write_extra_tags(transaction, id, file, false)?;
             Ok(id)
         }
     }

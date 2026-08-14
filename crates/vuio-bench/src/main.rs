@@ -64,12 +64,18 @@ struct Args {
     files: Option<usize>,
 }
 
-/// The 18 bytes that make a file a plausible MP3 to a tag reader.
-const STUB_MP3: &[u8] = b"ID3\x04\x00\x00\x00\x00\x00\x00\xFF\xFB\x90\x44\x00\x00\x00";
+/// A real, silent MP3 — the same fixture `generate_test_media` uses.
+///
+/// Deliberately not a handful of bytes that merely look like a header. The tag
+/// reader has to actually parse these, or a cold scan measures the database
+/// write path and nothing else, and the cost that dominates a real library —
+/// opening and probing every file — never appears in the numbers.
+const STUB_MP3_BASE64: &str = "SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU2LjM2LjEwMAAAAAAAAAAAAAAA//OEAAAAAAAAAAAAAAAAAAAAAAAASW5mbwAAAA8AAAAEAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDV1dXV1dXV1dXV1dXV1dXV1dXV1dXV1dXV6urq6urq6urq6urq6urq6urq6urq6urq6v////////////////////////////////8AAAAATGF2YzU2LjQxAAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA//MUZAAAAAGkAAAAAAAAA0gAAAAATEFN//MUZAMAAAGkAAAAAAAAA0gAAAAARTMu//MUZAYAAAGkAAAAAAAAA0gAAAAAOTku//MUZAkAAAGkAAAAAAAAA0gAAAAANVVV";
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+    let stub = decode_base64(STUB_MP3_BASE64).context("the embedded MP3 fixture is malformed")?;
     let files_to_write = args.files.unwrap_or(args.objects).min(args.objects);
 
     let root = args.out.clone();
@@ -93,7 +99,7 @@ async fn main() -> Result<()> {
     //    file reads as changed, and the first scan would re-read and rewrite the
     //    entire library from stubs that carry no tags.
     let started = Instant::now();
-    let mtimes = write_stub_files(&root, files_to_write)?;
+    let mtimes = write_stub_files(&root, files_to_write, &stub)?;
     println!(
         "  wrote {files_to_write} files in {:.1}s",
         started.elapsed().as_secs_f64()
@@ -120,7 +126,7 @@ async fn main() -> Result<()> {
 
     // 3. The rows, as fast as SQLite will take them.
     let started = Instant::now();
-    insert_rows(&db_path, &root, args.objects, &mtimes)?;
+    insert_rows(&db_path, &root, args.objects, &mtimes, stub.len() as i64)?;
     let inserted = started.elapsed();
     println!(
         "  inserted {} rows in {:.1}s ({:.0} rows/s)",
@@ -206,7 +212,7 @@ fn relative_path(index: usize) -> (String, String) {
 }
 
 /// Write the stubs and return each one's modification time, in row order.
-fn write_stub_files(root: &Path, count: usize) -> Result<Vec<i64>> {
+fn write_stub_files(root: &Path, count: usize, stub: &[u8]) -> Result<Vec<i64>> {
     let mut mtimes = Vec::with_capacity(count);
     let mut last_dir = String::new();
     for index in 0..count {
@@ -216,7 +222,7 @@ fn write_stub_files(root: &Path, count: usize) -> Result<Vec<i64>> {
             last_dir = directory.clone();
         }
         let path = root.join(&directory).join(&filename);
-        std::fs::write(&path, STUB_MP3)?;
+        std::fs::write(&path, stub)?;
         mtimes.push(
             std::fs::metadata(&path)?
                 .modified()?
@@ -228,7 +234,13 @@ fn write_stub_files(root: &Path, count: usize) -> Result<Vec<i64>> {
     Ok(mtimes)
 }
 
-fn insert_rows(db_path: &Path, root: &Path, total: usize, mtimes: &[i64]) -> Result<()> {
+fn insert_rows(
+    db_path: &Path,
+    root: &Path,
+    total: usize,
+    mtimes: &[i64],
+    file_size: i64,
+) -> Result<()> {
     let mut connection = rusqlite::Connection::open(db_path)?;
     // Two of the browse indexes are declared `COLLATE natural_order`, so this
     // connection has to know the collation before it can maintain them.
@@ -265,7 +277,7 @@ fn insert_rows(db_path: &Path, root: &Path, total: usize, mtimes: &[i64]) -> Res
                     path,
                     parent,
                     filename,
-                    STUB_MP3.len() as i64,
+                    file_size,
                     stamp,
                     "audio/mpeg",
                     "audio",
@@ -362,4 +374,33 @@ fn report(db_path: &Path) -> Result<()> {
         "the search index covers {searchable} of {files} rows"
     );
     Ok(())
+}
+
+/// Minimal base64 decoder, so the fixture can be embedded as text without a
+/// dependency for one constant.
+fn decode_base64(input: &str) -> Option<Vec<u8>> {
+    fn value(byte: u8) -> Option<u32> {
+        Some(match byte {
+            b'A'..=b'Z' => u32::from(byte - b'A'),
+            b'a'..=b'z' => u32::from(byte - b'a') + 26,
+            b'0'..=b'9' => u32::from(byte - b'0') + 52,
+            b'+' => 62,
+            b'/' => 63,
+            _ => return None,
+        })
+    }
+
+    let bytes: Vec<u8> = input.bytes().filter(|byte| *byte != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut bits = 0u32;
+        for (index, byte) in chunk.iter().enumerate() {
+            bits |= value(*byte)? << (18 - 6 * index);
+        }
+        let produced = chunk.len() - 1;
+        for index in 0..produced {
+            out.push(((bits >> (16 - 8 * index)) & 0xff) as u8);
+        }
+    }
+    Some(out)
 }
