@@ -1,2 +1,0 @@
-cargo test test_memory_optimized_million_files --release --ignored -- --no
-cargo test --release --test million_file_stress_test -- --ignored --nocapture

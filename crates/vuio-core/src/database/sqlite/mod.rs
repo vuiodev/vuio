@@ -38,6 +38,18 @@ mod tests;
 
 pub use session::SqliteReadSession;
 
+/// Register the natural-order collation on a caller-supplied connection.
+///
+/// Two of the browse indexes are declared `COLLATE natural_order`, so any
+/// connection that writes `media_files` has to know it — including one opened
+/// outside this crate. Exposed for the benchmark generator, which bulk-loads a
+/// library over a direct handle; without this it would need its own copy of
+/// `natural_cmp`, and a copy is a thing that drifts.
+#[cfg(feature = "unstable-internals")]
+pub fn register_collations(connection: &rusqlite::Connection) -> anyhow::Result<()> {
+    schema::register_collations(connection)
+}
+
 /// Readers held open for reuse.
 ///
 /// Reads run on Tokio's blocking pool, which is unbounded by design; without a
