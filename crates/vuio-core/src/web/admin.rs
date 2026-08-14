@@ -338,10 +338,12 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
             Impact::Restart,
             "Megabytes of memory the index keeps cached, per database connection.",
         ),
-        "Applied to each connection separately — one writer plus two to four readers, \
-         depending on the machine — so the server's resident memory settles at several \
-         times this figure. Lower it on a small box; raise it only if browsing a large \
-         library reads from disk more than it should.",
+        "A budget per connection — one writer plus two to four readers — but only a \
+         connection running a large query fills its share, so resident memory grows by \
+         roughly this much rather than a multiple of it. Folder browsing does not depend \
+         on it. Search does, and as a step rather than a slope: on a very large library \
+         it stays slow until the search index fits and then roughly halves, so raising \
+         this helps only once it is high enough to cross that line.",
     ),
 ];
 

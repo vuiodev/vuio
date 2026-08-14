@@ -62,8 +62,12 @@ vacuum_on_startup = false
 backup_enabled = false
 # Omit to use the platform-appropriate default location.
 path = "./config/media.db"
-# Megabytes of index cached *per connection* — one writer plus two to four
-# readers — so resident memory settles at several times this figure.
+# Megabytes of index cached, as a budget *per connection* — one writer plus two
+# to four readers. Only a connection that runs a large query fills its share, so
+# in practice resident memory grows by about this much, not a multiple of it.
+# Folder browsing is served from indexes and does not care. Full-text search does:
+# on a very large library it stays slow until the whole search index fits, then
+# roughly halves. Measured at 500,000 files, that threshold was near 192.
 # cache_mb = 128
 
 # The modern browser interface, served on a second port beside the built-in

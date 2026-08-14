@@ -40,8 +40,16 @@ pub(super) fn default_unavailable_root_grace_hours() -> u64 {
 
 /// Page cache per connection, in mebibytes.
 ///
-/// Applied to each connection separately — one writer and two to four readers —
-/// so the process settles at several times this number.
+/// The budget is per connection — one writer and two to four readers — but a
+/// connection only allocates pages it actually reads, and on a normal workload
+/// one reader does the heavy queries. Measured on a 500,000-file library, going
+/// from 8 to 128 moved resident memory by about 160 MB, not by five times the
+/// difference.
+///
+/// Folder browsing is index-served and flat across every setting. Full-text
+/// search is the one thing that responds, and as a step rather than a curve: it
+/// stays slow until the search index fits, then roughly halves. At 500,000 files
+/// that step fell between 160 and 192.
 pub(super) fn default_cache_mb() -> usize {
     128
 }
