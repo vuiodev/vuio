@@ -13,10 +13,10 @@ pub mod mcp;
 pub mod mediainfo;
 #[cfg(feature = "casting")]
 pub mod remux_streaming;
+pub mod radio;
 pub mod soap;
 pub mod streaming;
 pub mod subtitles;
-pub mod radio_broadcast;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
@@ -126,9 +126,26 @@ pub fn create_router<D: DatabaseManager + 'static>(
         json_routes = json_routes
             .route("/api/admin/config", post(admin::put_config::<D>))
             .route("/api/admin/restart", post(admin::restart::<D>))
+            .route("/api/radio/admin/stations", post(radio::create_station::<D>))
             .route(
-                "/api/radio/broadcast/control",
-                post(radio_broadcast::post_broadcast_control::<D>),
+                "/api/radio/admin/stations/{id}",
+                post(radio::update_station::<D>),
+            )
+            .route(
+                "/api/radio/admin/stations/{id}/start",
+                post(radio::start_station::<D>),
+            )
+            .route(
+                "/api/radio/admin/stations/{id}/stop",
+                post(radio::stop_station::<D>),
+            )
+            .route(
+                "/api/radio/admin/stations/{id}/skip",
+                post(radio::skip_track::<D>),
+            )
+            .route(
+                "/api/radio/admin/stations/{id}/delete",
+                post(radio::delete_station::<D>),
             );
     }
     #[cfg(all(feature = "dashboard", feature = "mediainfo"))]
@@ -149,14 +166,8 @@ pub fn create_router<D: DatabaseManager + 'static>(
         .route("/metrics/json", get(diagnostics::get_web_metrics::<D>))
         .route("/logs", get(diagnostics::get_logs_handler::<D>))
         .route("/logout", post(auth::logout::<D>))
-        .route(
-            "/api/radio/broadcast/status",
-            get(radio_broadcast::get_broadcast_status::<D>),
-        )
-        .route(
-            "/api/radio/broadcast/stream",
-            get(radio_broadcast::serve_icy_broadcast_stream::<D>),
-        );
+        .route("/api/radio/admin/stations", get(radio::list_stations::<D>))
+        .route("/api/radio/peers", get(radio::list_peers::<D>));
     #[cfg(feature = "dashboard")]
     {
         management_routes = management_routes
@@ -209,6 +220,19 @@ pub fn create_router<D: DatabaseManager + 'static>(
         .route(
             "/media/{id}",
             get(streaming::serve_media::<D>).head(streaming::serve_media::<D>),
+        )
+        // A station's audio and the list of what is on the air are public, for
+        // the same reason `/media/{id}` is: the things that play a stream — a
+        // hi-fi, VLC, another VuIO server building its local-stations list —
+        // have nowhere to put a login. Running the stations stays behind one.
+        .route("/api/radio/stations", get(radio::list_public_stations::<D>))
+        .route(
+            "/api/radio/stations/{id}/stream",
+            get(radio::serve_stream::<D>),
+        )
+        .route(
+            "/api/radio/stations/{id}/stream.{extension}",
+            get(radio::serve_stream_with_extension::<D>),
         );
 
     #[cfg(feature = "casting")]

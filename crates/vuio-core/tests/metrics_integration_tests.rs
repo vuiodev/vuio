@@ -110,7 +110,7 @@ async fn test_metrics_endpoints_data() {
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        radio_broadcast: Arc::new(Default::default()),
+        radio: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     };

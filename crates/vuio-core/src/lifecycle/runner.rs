@@ -146,10 +146,6 @@ where
     #[cfg(feature = "mediainfo")]
     crate::mediainfo::env_keys::set_config_dir(config_manager.get_config_path());
 
-    let radio_broadcast = Arc::new(
-        crate::web::radio_broadcast::RadioBroadcastState::load_from_database(database.as_ref()).await,
-    );
-
     let app_state = AppState {
         config: config.clone(),
         live_config: Arc::new(crate::state::LiveConfig::new(config.clone())),
@@ -189,7 +185,7 @@ where
         #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        radio_broadcast,
+        radio: Arc::new(crate::radio::RadioManager::new()),
         cancellation: cancellation.clone(),
         background_tasks: background_tasks.clone(),
     };
@@ -211,6 +207,17 @@ where
     };
 
     let mut services = tokio::task::JoinSet::<(&'static str, anyhow::Result<()>)>::new();
+
+    // Put back on the air whatever was broadcasting when the process last
+    // stopped. A station is only off when an operator turned it off, so a
+    // restart — a crash, a reboot, an upgrade — is not something its listeners
+    // should have to notice.
+    {
+        let radio_state = app_state.clone();
+        app_state.background_tasks.clone().spawn(async move {
+            crate::radio::RadioManager::restore(&radio_state).await;
+        });
+    }
 
     // Always spawned, gated per tick. Spawning only when backups were on at boot made
     // the setting one-way: turning it off worked, turning it on did nothing until a

@@ -30,6 +30,7 @@ mod root_repo;
 mod schema;
 mod secret_repo;
 mod session;
+mod station_repo;
 mod stats;
 mod traits;
 

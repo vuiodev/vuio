@@ -123,7 +123,7 @@ async fn library() -> (TempDir, AppState, PathBuf) {
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-        radio_broadcast: Arc::new(Default::default()),
+        radio: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     };
@@ -666,4 +666,135 @@ async fn provider_status_says_where_each_credential_comes_from() {
         .find(|p| p.get("id").and_then(Value::as_str) == Some("tmdb"))
         .expect("tmdb is a known provider");
     assert_eq!(field(tmdb, "enabled").as_bool(), Some(true));
+}
+
+/// A station's audio has to be reachable by things that cannot log in.
+///
+/// This is the whole reason the stream and the public station list sit outside
+/// the management middleware: a hi-fi, VLC, or another VuIO server building its
+/// local-stations list has nowhere to put a bearer token. Everything that
+/// *runs* a station stays behind the login.
+#[tokio::test]
+async fn radio_listening_is_public_and_running_a_station_is_not() {
+    let (_temp, state, _root) = library().await;
+
+    let public = [
+        "/api/radio/stations",
+        "/api/radio/stations/1/stream",
+        "/api/radio/stations/1/stream.mp3",
+    ];
+    for uri in public {
+        let response = create_router(state.clone(), Surface::Primary)
+            .oneshot(anonymous(uri))
+            .await
+            .unwrap();
+        assert_ne!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} must not require a login"
+        );
+        assert_ne!(
+            response.status(),
+            StatusCode::FOUND,
+            "{uri} must not redirect a player to a login page"
+        );
+    }
+
+    // No station is on the air in this fixture, so the stream is a 404 while
+    // the list is an empty array.
+    let (status, body, content_type) = get(&state, Surface::Primary, "/api/radio/stations").await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        content_type.starts_with("application/json"),
+        "{content_type}"
+    );
+    let stations: Value = serde_json::from_slice(&body).expect("the station list is JSON");
+    assert_eq!(stations.as_array().map(Vec::len), Some(0));
+
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(anonymous("/api/radio/stations/1/stream"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+    for uri in ["/api/radio/admin/stations", "/api/radio/peers"] {
+        let response = create_router(state.clone(), Surface::Primary)
+            .oneshot(anonymous(uri))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "{uri} is administration and must require a login"
+        );
+    }
+
+    // Both listeners serve the radio API: the browser app lives on the second
+    // one and calls exactly these endpoints.
+    let (status, _, _) = get(&state, Surface::WebUi, "/api/radio/admin/stations").await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+/// A station is created stopped, starts, and comes back enabled — which is what
+/// makes a restart resume it.
+#[tokio::test]
+async fn a_station_is_created_stopped_and_remembers_being_started() {
+    let (_temp, state, root) = library().await;
+
+    let create = Request::post("/api/radio/admin/stations")
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 51234))))
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "name": "Test Station",
+                "genre": "Test",
+                "folders": [root.to_string_lossy()],
+                "mode": "linear",
+            })
+            .to_string(),
+        ))
+        .unwrap();
+
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(create)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let station: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(station["name"], "Test Station");
+    assert_eq!(
+        station["enabled"], false,
+        "creating a station must not put it on the air"
+    );
+    assert_eq!(station["is_live"], false);
+
+    // The fixture library holds no audio that can be broadcast, so starting
+    // fails with a reason rather than leaving a silent station "live".
+    let id = station["id"].as_i64().unwrap();
+    let start = Request::post(format!("/api/radio/admin/stations/{id}/start"))
+        .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 51234))))
+        .header("authorization", format!("Bearer {TEST_TOKEN}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(start)
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "a station with nothing broadcastable must say so"
+    );
+    let message = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let message = String::from_utf8_lossy(&message);
+    assert!(
+        message.contains("folders"),
+        "the reason must point at the folders, which is what the operator can fix: {message}"
+    );
 }

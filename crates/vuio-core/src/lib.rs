@@ -88,6 +88,7 @@ internal_modules!(
     media,
     mediainfo,
     platform,
+    radio,
     runtime,
     runtime_state,
     state,

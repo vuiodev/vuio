@@ -10,7 +10,10 @@ use rusqlite::{Connection, OpenFlags, Row};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::database::{AudioTags, FileFingerprint, FileLocation, MediaFile, Playlist, StreamInfo};
+use crate::database::{
+    AudioTags, BroadcastMode, FileFingerprint, FileLocation, MediaFile, Playlist, RadioStation,
+    StreamInfo,
+};
 
 /// The schema version this build writes and expects.
 ///
@@ -18,7 +21,7 @@ use crate::database::{AudioTags, FileFingerprint, FileLocation, MediaFile, Playl
 /// [`migrations`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -155,6 +158,27 @@ CREATE TABLE IF NOT EXISTS root_availability (
 CREATE TABLE IF NOT EXISTS secrets (
     key   TEXT PRIMARY KEY,
     value BLOB NOT NULL
+) STRICT;
+
+-- A station the server broadcasts: which folders feed it, in what order, and
+-- whether it should be on the air.
+--
+-- `enabled` is desired state rather than a record of what happened. It is what
+-- makes a restart resume the stations an operator left running, and why only an
+-- explicit stop takes one off the air. `seed` fixes a shuffled station's order
+-- so that resuming continues the same sequence instead of drawing a new one,
+-- and `cursor_path` is where in that sequence to pick up.
+CREATE TABLE IF NOT EXISTS radio_stations (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    genre           TEXT    NOT NULL,
+    folders         TEXT    NOT NULL,
+    mode            TEXT    NOT NULL,
+    enabled         INTEGER NOT NULL,
+    seed            INTEGER NOT NULL,
+    cursor_path     TEXT,
+    created_at_secs INTEGER NOT NULL,
+    updated_at_secs INTEGER NOT NULL
 ) STRICT;
 
 -- Every tag the reader found that has no column of its own, kept verbatim so
@@ -319,6 +343,7 @@ fn migrations() -> Vec<(i64, String)> {
         (3, MIGRATION_V3.to_owned()),
         (4, migration_v4()),
         (5, MIGRATION_V5.to_owned()),
+        (6, MIGRATION_V6.to_owned()),
     ]
 }
 
@@ -408,6 +433,30 @@ fn migration_v4() -> String {
 const MIGRATION_V5: &str = r#"
 DROP INDEX IF EXISTS idx_media_tags_version;
 DROP INDEX IF EXISTS idx_media_tags_key;
+"#;
+
+/// v5 → v6: radio stations the server broadcasts itself.
+///
+/// The one station that came before this lived as a JSON blob under the
+/// `radio_broadcast_state` key in `secrets`, and described a feature that was
+/// really driven from a browser tab. Nothing in it is worth carrying forward —
+/// not the folder list, whose meaning changes now that a station is a queue the
+/// server plays — so the key is dropped and stations start empty.
+const MIGRATION_V6: &str = r#"
+CREATE TABLE IF NOT EXISTS radio_stations (
+    id              INTEGER PRIMARY KEY,
+    name            TEXT    NOT NULL,
+    genre           TEXT    NOT NULL,
+    folders         TEXT    NOT NULL,
+    mode            TEXT    NOT NULL,
+    enabled         INTEGER NOT NULL,
+    seed            INTEGER NOT NULL,
+    cursor_path     TEXT,
+    created_at_secs INTEGER NOT NULL,
+    updated_at_secs INTEGER NOT NULL
+) STRICT;
+
+DELETE FROM secrets WHERE key = 'radio_broadcast_state';
 "#;
 
 /// Columns of `media_files`, qualified so the list can be used inside joins.
@@ -739,6 +788,31 @@ pub(super) fn fingerprint_from_row(row: &Row<'_>) -> rusqlite::Result<FileFinger
 pub(super) const PLAYLIST_COLUMNS: &str =
     "playlists.id, playlists.name, playlists.description, playlists.created_at_secs, \
      playlists.updated_at_secs";
+
+pub(super) const RADIO_STATION_COLUMNS: &str =
+    "radio_stations.id, radio_stations.name, radio_stations.genre, radio_stations.folders, \
+     radio_stations.mode, radio_stations.enabled, radio_stations.seed, \
+     radio_stations.cursor_path, radio_stations.created_at_secs, radio_stations.updated_at_secs";
+
+pub(super) fn radio_station_from_row(row: &Row<'_>) -> rusqlite::Result<RadioStation> {
+    let folders: String = row.get(3)?;
+    let mode: String = row.get(4)?;
+    Ok(RadioStation {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        genre: row.get(2)?,
+        // A folder list that will not parse leaves a station with no sources,
+        // which surfaces as "nothing to broadcast" rather than a failed read of
+        // every other station beside it.
+        folders: serde_json::from_str(&folders).unwrap_or_default(),
+        mode: BroadcastMode::parse(&mode).unwrap_or_default(),
+        enabled: row.get::<_, i64>(5)? != 0,
+        seed: row.get::<_, i64>(6)? as u64,
+        cursor_path: row.get(7)?,
+        created_at: seconds_to_time(row.get(8)?),
+        updated_at: seconds_to_time(row.get(9)?),
+    })
+}
 
 pub(super) fn playlist_from_row(row: &Row<'_>) -> rusqlite::Result<Playlist> {
     Ok(Playlist {
