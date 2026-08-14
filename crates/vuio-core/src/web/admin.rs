@@ -279,6 +279,19 @@ const MEDIA_FIELDS: &[FieldSpec] = &[
         Impact::Live,
         "How long a library that has gone offline keeps its indexed content before it is dropped.",
     ),
+    noted(
+        optional(
+            "media.full_rescan_interval_hours",
+            "Full rescan interval",
+            FieldKind::Int { min: 0, max: 8_760 },
+            Impact::Live,
+            "How often every library is swept from scratch, in hours. 0 leaves discovery \
+             entirely to the file watcher.",
+        ),
+        "Changes are normally picked up by the watcher within seconds. This sweep exists for \
+         what the watcher cannot see — a network share that drops events, most often — so it \
+         costs a full walk of every library each time it runs.",
+    ),
     field(
         "media.supported_extensions",
         "File extensions",

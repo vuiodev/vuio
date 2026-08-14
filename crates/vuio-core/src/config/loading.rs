@@ -105,6 +105,10 @@ impl AppConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_else(default_unavailable_root_grace_hours),
+            full_rescan_interval_hours: std::env::var("VUIO_FULL_RESCAN_INTERVAL_HOURS")
+                .ok()
+                .and_then(|value| value.parse().ok())
+                .unwrap_or_else(default_full_rescan_interval_hours),
             supported_extensions: vec![
                 "mp4".to_string(),
                 "mkv".to_string(),
@@ -370,6 +374,7 @@ impl AppConfig {
                 autoplay_enabled: true,
                 scan_playlists: true,
                 unavailable_root_grace_hours: default_unavailable_root_grace_hours(),
+                full_rescan_interval_hours: default_full_rescan_interval_hours(),
                 supported_extensions: platform_config.get_default_media_extensions(),
             },
             database: DatabaseConfig {

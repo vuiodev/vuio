@@ -24,6 +24,16 @@ pub(super) fn default_scan_playlists() -> bool {
     true
 }
 
+/// How often to sweep every root regardless of what the watcher reported.
+///
+/// The watcher is authoritative almost all of the time; this exists for the
+/// cases where it is not — a network filesystem that drops events, or a backend
+/// queue that overflowed. Daily, because the cost is a full re-walk and the
+/// thing it guards against is rare.
+pub(super) fn default_full_rescan_interval_hours() -> u64 {
+    24
+}
+
 pub(super) fn default_unavailable_root_grace_hours() -> u64 {
     168
 }
@@ -323,6 +333,10 @@ pub struct MediaConfig {
     pub scan_playlists: bool,
     #[serde(default = "default_unavailable_root_grace_hours")]
     pub unavailable_root_grace_hours: u64,
+    /// Hours between full sweeps of every root. `0` disables them, leaving
+    /// discovery entirely to the watcher.
+    #[serde(default = "default_full_rescan_interval_hours")]
+    pub full_rescan_interval_hours: u64,
     pub supported_extensions: Vec<String>,
 }
 

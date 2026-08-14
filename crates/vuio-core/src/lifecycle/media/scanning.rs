@@ -12,7 +12,7 @@ fn canonical_root(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The configured library a stored path belongs to, or `None` if it belongs to none.
+/// Which configured library a stored path belongs to, or `None` if it belongs to none.
 ///
 /// Matched against the root both as the config writes it and in the form the index
 /// stores paths in, because those routinely differ: a library reached through a symlink
@@ -21,11 +21,13 @@ fn canonical_root(path: &Path) -> PathBuf {
 /// every file in such a library as belonging to no library at all — and for a deletion
 /// pass, that means discarding the entire library's index. Matching either form can only
 /// keep files, never remove more.
-fn owning_root(path: &Path, raw: &[PathBuf], canonical: &[PathBuf]) -> Option<PathBuf> {
+///
+/// Returns the root's *index* rather than the root itself, so a caller can look up
+/// whatever it has already worked out per root instead of re-deriving it per file.
+fn owning_root_index(path: &Path, raw: &[PathBuf], canonical: &[PathBuf]) -> Option<usize> {
     raw.iter()
-        .chain(canonical.iter())
-        .find(|root| path.starts_with(root))
-        .cloned()
+        .position(|root| path.starts_with(root))
+        .or_else(|| canonical.iter().position(|root| path.starts_with(root)))
 }
 
 /// Validate cached files and remove the ones that no longer belong in the index:
@@ -81,11 +83,21 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
         .map(|root| canonical_root(root))
         .collect::<Vec<_>>();
 
+    // Whether each root is currently mounted, asked once. This used to be a
+    // `stat` of the same handful of directories once per indexed file, so a
+    // library of a million files made a million syscalls to answer a question
+    // with one answer per root.
+    let root_is_present = monitored_roots
+        .iter()
+        .map(|root| root.is_dir())
+        .collect::<Vec<_>>();
+
     {
         for media_file in database.load_file_fingerprints().await? {
             total_checked += 1;
 
-            let Some(configured_root) = owning_root(&media_file.path, monitored_roots, &canonical_roots)
+            let Some(root_index) =
+                owning_root_index(&media_file.path, monitored_roots, &canonical_roots)
             else {
                 if prune_orphans {
                     orphaned_count += 1;
@@ -97,7 +109,7 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
             // A configured library that is offline keeps its content: the files are
             // unreachable rather than gone. That grace only applies to a library the
             // configuration still lists, which is why it is checked after the above.
-            let unavailable_root = !configured_root.is_dir()
+            let unavailable_root = !root_is_present[root_index]
                 || unavailable_roots
                     .iter()
                     .any(|root| media_file.path.starts_with(root));
@@ -107,7 +119,7 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
 
             // Log progress every 1000 files
             if total_checked % 1000 == 0 {
-                info!("Validated {} files so far...", total_checked);
+                debug!("Validated {} files so far...", total_checked);
             }
         }
     } // Stream dropped here, read lock released
@@ -642,23 +654,23 @@ mod tests {
 
         // Stored under the canonical form: matched via the canonical root.
         assert_eq!(
-            owning_root(&canonical.join("a.mkv"), &raw, &canonicalised),
-            Some(canonical.clone())
+            owning_root_index(&canonical.join("a.mkv"), &raw, &canonicalised),
+            Some(0)
         );
         // Stored under the written form, as an older index would be: still matched.
         assert_eq!(
-            owning_root(&written.join("a.mkv"), &raw, &canonicalised),
-            Some(written)
+            owning_root_index(&written.join("a.mkv"), &raw, &canonicalised),
+            Some(0)
         );
         // A file under neither is an orphan, which is the only case that deletes.
         assert_eq!(
-            owning_root(Path::new("/elsewhere/a.mkv"), &raw, &canonicalised),
+            owning_root_index(Path::new("/elsewhere/a.mkv"), &raw, &canonicalised),
             None
         );
         // Prefix matching is by component, so a sibling with a shared prefix is not a
         // child: /media/films-old must not be swept up by the /media/films root.
         assert_eq!(
-            owning_root(Path::new("/private/media/films-old/a.mkv"), &raw, &canonicalised),
+            owning_root_index(Path::new("/private/media/films-old/a.mkv"), &raw, &canonicalised),
             None
         );
     }

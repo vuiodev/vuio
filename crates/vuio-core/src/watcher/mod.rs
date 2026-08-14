@@ -203,6 +203,11 @@ impl CrossPlatformWatcher {
         is_media_file(path)
     }
 
+    /// Roots that have lost watcher events since the last call, as configured.
+    ///
+    /// Returned in the form the configuration uses rather than the normalized
+    /// key the watch is registered under, because the caller's next move is to
+    /// match these against `media.directories`.
     pub fn take_dirty_roots(&self) -> Vec<PathBuf> {
         let mut roots = self.dirty_roots.lock().unwrap_or_else(|e| e.into_inner());
         roots.drain().collect()
@@ -459,10 +464,15 @@ impl CrossPlatformWatcher {
                                         watched_paths.lock().unwrap_or_else(|p| p.into_inner());
                                     let mut dirty =
                                         dirty_roots.lock().unwrap_or_else(|p| p.into_inner());
-                                    if let Some(root) =
-                                        watched.keys().find(|root| failed_path.starts_with(root))
+                                    // Matched on the normalized key, but recorded
+                                    // as the configured path: the caller compares
+                                    // this against the roots in the config.
+                                    if let Some(registration) = watched
+                                        .iter()
+                                        .find(|(root, _)| failed_path.starts_with(root))
+                                        .map(|(_, registration)| registration)
                                     {
-                                        dirty.insert(root.clone());
+                                        dirty.insert(registration.path.clone());
                                     }
                                 }
                             }
@@ -476,7 +486,7 @@ impl CrossPlatformWatcher {
                         dirty_roots
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .extend(watched.keys().cloned());
+                            .extend(watched.values().map(|registration| registration.path.clone()));
                     }
                 }
             },
