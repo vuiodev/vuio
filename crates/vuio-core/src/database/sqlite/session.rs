@@ -306,6 +306,34 @@ impl DatabaseReadSession for SqliteReadSession {
         Ok(summary)
     }
 
+    fn visit_files_page<F>(
+        &mut self,
+        query: &MediaFileQuery,
+        offset: usize,
+        limit: usize,
+        mut visitor: F,
+    ) -> Result<usize>
+    where
+        F: for<'a> FnMut(Self::File<'a>) -> Result<()>,
+    {
+        if limit == 0 {
+            return Ok(0);
+        }
+        let plan = query::plan(query);
+        let mut page_params = plan.params.clone();
+        page_params.push(rusqlite::types::Value::Integer(limit as i64));
+        page_params.push(rusqlite::types::Value::Integer(offset as i64));
+
+        let mut visited = 0;
+        let mut statement = self.connection.prepare_cached(&plan.page_sql())?;
+        let mut rows = statement.query(rusqlite::params_from_iter(page_params.iter()))?;
+        while let Some(row) = rows.next()? {
+            visitor(SqliteMediaFileView { row })?;
+            visited += 1;
+        }
+        Ok(visited)
+    }
+
     fn visit_direct_subdirectories<F>(
         &mut self,
         canonical_parent: &str,

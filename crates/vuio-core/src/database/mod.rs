@@ -618,6 +618,31 @@ pub trait DatabaseReadSession {
     where
         F: for<'a> FnMut(Self::File<'a>) -> Result<()>;
 
+    /// One page, without counting the whole result.
+    ///
+    /// [`Self::visit_files`] reports `matched`, the size of the entire result,
+    /// because DLNA's `TotalMatches` requires it — and computing it means
+    /// evaluating the query a second time. For a ranked search that is the
+    /// expensive half: the engine has to find and rank every hit to count them,
+    /// so a page of twenty costs the same as a page of one.
+    ///
+    /// Callers that page by cursor never look at `matched`. Defaulted so a
+    /// backend need not implement it; overriding it is what makes the saving
+    /// real.
+    fn visit_files_page<F>(
+        &mut self,
+        query: &MediaFileQuery,
+        offset: usize,
+        limit: usize,
+        visitor: F,
+    ) -> Result<usize>
+    where
+        F: for<'a> FnMut(Self::File<'a>) -> Result<()>,
+    {
+        self.visit_files(query, offset, limit, visitor)
+            .map(|summary| summary.visited)
+    }
+
     fn visit_direct_subdirectories<F>(
         &mut self,
         canonical_parent: &str,

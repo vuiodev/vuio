@@ -288,8 +288,12 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
             let mut last_id = None;
             // Fetched titles and synopses, collected up front because the writer
             // cannot query the session while the session is lending it a row.
+            // `visit_files_page`, not `visit_files`: this listing pages by
+            // cursor and never reads the total, and computing that total means
+            // evaluating the query again — which for a ranked search is the
+            // expensive half.
             let mut ids = Vec::with_capacity(fetch_limit);
-            session.visit_files(&query, offset, fetch_limit, |file| {
+            session.visit_files_page(&query, offset, fetch_limit, |file| {
                 if let Some(id) = file.id().filter(|id| *id > 0) {
                     ids.push(id);
                 }
@@ -299,7 +303,7 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
                 .mediainfo_overlays(&ids, min_confidence)
                 .unwrap_or_default();
 
-            let summary = session.visit_files(&query, offset, fetch_limit, |file| {
+            let visited = session.visit_files_page(&query, offset, fetch_limit, |file| {
                 if emitted >= limit {
                     return Ok(());
                 }
@@ -313,7 +317,7 @@ pub async fn media_page_handler<D: DatabaseManager + 'static>(
                 Ok(())
             })?;
             output.extend_from_slice(b"],\"next_cursor\":");
-            let next = (summary.visited > limit).then(|| {
+            let next = (visited > limit).then(|| {
                 if searching {
                     Some((offset + emitted).to_string())
                 } else {
