@@ -75,7 +75,6 @@ sudo apk update
 sudo apk add --allow-untrusted vuio
 ```
 
-
 ---
 
 ### Direct DEB & RPM Downloads
@@ -115,7 +114,6 @@ wget https://vuiodev.github.io/vuio/packages/vuio_latest_aarch64.apk
 sudo apk add --allow-untrusted vuio_latest_aarch64.apk
 ```
 
-
 ---
 
 ### Arch Linux (Pacman Repository)
@@ -152,7 +150,6 @@ cd vuio/packaging/linux
 sudo pacman -U vuio-*.pkg.tar.zst
 ```
 
-
 ---
 
 ### Generic & Legacy Linux (Musl Static Binaries)
@@ -188,7 +185,7 @@ vuio /path/to/media
 
 Official multi-architecture Docker images are published to GitHub Container Registry (`ghcr.io/vuiodev/vuio`) for `linux/amd64` and `linux/arm64`.
 
-> **Note**: Docker host networking is recommended for SSDP/UPnP LAN discovery to function properly.
+> **Note**: Docker host networking is recommended for SSDP/UPnP LAN discovery to function properly. For full Docker configuration and environment variable details, see [Docker Guide](docker.md).
 
 ### Quick Start with Docker CLI
 
@@ -237,30 +234,15 @@ Run with:
 docker-compose up -d
 ```
 
-### Key Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `VUIO_IP` | - | **Required for Docker**. Host IP address for SSDP/DLNA announcements |
-| `VUIO_PORT` | `8080` | HTTP server port |
-| `VUIO_WEB_PORT` | `8090` | Port for the Svelte web interface |
-| `VUIO_WEB_UI` | `true` | Serve the web interface at all |
-| `VUIO_SERVER_NAME` | `VuIO` | Server name shown on DLNA & AirPlay devices |
-| `VUIO_MEDIA_DIRS` | `/media` | Comma-separated media paths |
-| `VUIO_SCAN_ON_STARTUP` | `true` | Automatically scan media directories at startup |
-| `VUIO_WATCH_CHANGES` | `true` | Monitor file system changes in real time |
-| `VUIO_AUTH` | `false` | Enable web dashboard administrative authentication |
-| `VUIO_ADMIN_TOKEN` | - | Pre-configured admin password token |
-
 ---
 
 ## Kubernetes (Helm 3)
 
-Deploy VuIO to a Kubernetes cluster using the official Helm chart from GHCR:
+Deploy VuIO to a Kubernetes cluster using the official Helm chart from GHCR. For comprehensive cluster setup, see [Kubernetes Guide](kubernetes.md).
 
 ```bash
 # Install directly from GitHub Container Registry
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.43
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.44
 ```
 
 Or install from local source:
@@ -275,7 +257,7 @@ helm install vuio ./helm/vuio
 ### Option 1: MSI Installer
 Download the latest `.msi` installer from GitHub Releases and double-click to install, or run:
 ```powershell
-msiexec /i vuio_0.0.43_x64.msi
+msiexec /i vuio_latest_x64.msi
 ```
 
 ### Option 2: Standalone Executable
@@ -339,5 +321,3 @@ VuIO features a built-in self-updater. To update an existing installed binary to
 ```bash
 vuio --update
 ```
-
----

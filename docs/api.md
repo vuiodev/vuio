@@ -306,7 +306,7 @@ Endpoints for health monitoring, log scraping, and metrics.
 ## 4. Model Context Protocol (MCP) API
 
 One endpoint, on the main port, letting an AI assistant browse, search and cast
-the library. See the [MCP section of the README](../README.md#ai-agent--mcp-integration)
+the library. See the [MCP Integration Guide](mcp.md)
 for how to connect a client, and `mcp/reference.json` for the tool schemas.
 
 ### MCP endpoint

@@ -1,65 +1,35 @@
 # VuIO Media Server
 
-A cross-platform media server written in Rust. Streams video, audio, and images to DLNA, Chromecast/Google TV, and compatible AirPlay video receivers.
-25Mb of RAM used for 5000 objects library
+A lightweight, high-performance, cross-platform media server written in Rust. Streams video, audio, and images to **DLNA / UPnP**, **Chromecast / Google TV**, and compatible **AirPlay** video receivers.
 
-Built with Tokio, Axum, and SQLite for high performance and reliability.
+- **Ultra-low footprint**: Uses only ~25 MB of RAM for a 5,000-object media library. and Less then 100Mb for 100000 objects.
+- **Modern asynchronous core**: Built with Tokio, Axum, and SQLite for maximum concurrency and stability.
+- **Cross-platform**: Native binaries for Linux (x86_64, ARM64), macOS (Apple Silicon & Intel), Windows (x64), Freebsd (x64) Docker, and Kubernetes.
 
-**Supported platforms:** Windows, Linux, macOS, Docker (x64 and ARM64)
+---
 
 ## Features
 
-- **DLNA/UPnP Media Server** - Stream to any DLNA device with SSDP discovery
-- **Multi-protocol Casting** - Play directly on DLNA, Chromecast/Google TV, and compatible AirPlay video receivers
-- **Web Interface** - Modern dashboard showing server status, scanned files, and directories
-- **AI Agent & MCP Integration** - AI agents (voice assistants, chatbots, and autonomous agents) can interact with your media library and control playback on discovered devices on the local network.
-- **Global Search** - Instant search across all indexed filenames and paths
-- **HTTP Range Streaming** - Seek support for large media files
-- **Multi-format Support** - MKV, MP4, AVI, MP3, FLAC, WAV, AAC, OGG, JPEG, PNG, and more
-- **Audio Metadata** - Automatic extraction of artist, album, genre, year from tags
-- **Music Browsing** - Browse by Artists, Albums, Genres, Years via DLNA
-- **Playlist Support** - Auto-imports M3U/PLS playlists from media directories
-- **Real-time Monitoring** - Detects file changes and updates database automatically
-- **Cross-platform** - Native integration for Windows, macOS, Linux
-- **SQLite Database** - Embedded ACID-compliant database with crash recovery
+- **DLNA/UPnP Media Server** – Stream to any Smart TV or DLNA renderer with SSDP and mDNS (Bonjour) discovery.
+- **Multi-Protocol Casting** – Play directly to DLNA, Chromecast/Google TV, and AirPlay video receivers from the web UI or API.
+- **Dual Web Interfaces** – Modern Svelte web interface (`:8090`) alongside a lightweight built-in dashboard (`:8080`).
+- **AI Agent & MCP Integration** – Native Model Context Protocol (MCP 2026-07-28) support for AI assistants (Claude, ChatGPT, autonomous agents) to browse, search, and cast.
+- **Instant Search & Fast Indexing** – High-performance SQLite engine with parent-directory indexing and sub-millisecond SOAP browse cache.
+- **HTTP Range Streaming** – Full seek support for massive 4K/UHD media files.
+- **Broad Format Support** – MKV, MP4, AVI, WebM, MP3, FLAC, WAV, AAC, OGG, JPEG, PNG, and more.
+- **Audio Tagging & Playlists** – Automatic extraction of artist, album, genre, and year tags; auto-imports M3U/M3U8 and PLS playlists.
+- **Live File Monitoring** – Real-time filesystem watcher updates the library dynamically as files change.
+- **Live Configuration** – 21 of 25 settings apply dynamically in place without restarting the server.
+- **Live Radio Broadcasting & P2P Tuner** – Broadcast continuous radio stations from folder selections with synchronous playout clock and P2P peer station discovery across local VuIO instances.
+- **Multi-Provider Metadata Scraping (MediaInfo)** – Automatic metadata, poster artwork, ratings, and synopsis enrichment via TMDb, OMDb, TVmaze, MusicBrainz, Discogs, Last.fm, Genius, AniList, Jikan, and Kitsu.
+- **On-the-Fly WebVTT Subtitle Conversion** – Auto-detects sidecar SRT subtitles and transforms them dynamically to WebVTT for browser and cast playback with zero disk writes.
+- **HLS Video Streaming & In-Browser Player** – Master playlist generation with segmented HLS streaming (`/media/{id}/hls/master.m3u8`), Plyr video player, and sticky audio player.
+- **Observability & Log Streaming** – Native Kubernetes HA probes (`/healthz`, `/readyz`), Prometheus exposition metrics (`/metrics`), and HTTP log streaming (`/logs`) for Grafana Loki/Alloy.
+- **Granular Security & Admin Management** – Optional administrative token protection, secure session management, and CIDR subnet access restrictions (`allowed_networks`).
 
+---
 
-📖 **Complete Setup Guide**: For full installation options across all operating systems and package managers, see the [Installation Guide (install.md)](install.md).
-
-## Installation
-
-### Ubuntu / Debian (APT Repository)
-
-```bash
-echo "deb [trusted=yes] https://vuiodev.github.io/vuio/apt stable main" | sudo tee /etc/apt/sources.list.d/vuio.list
-sudo apt update && sudo apt install vuio
-```
-
-### Fedora / RHEL / CentOS (RPM Repository)
-
-```bash
-sudo dnf config-manager --add-repo https://vuiodev.github.io/vuio/rpm/vuio.repo
-sudo dnf install vuio
-```
-
-### Alpine Linux (APK Repository)
-
-```bash
-echo "https://vuiodev.github.io/vuio/alpine/stable/main" | sudo tee -a /etc/apk/repositories
-sudo apk update && sudo apk add --allow-untrusted vuio
-```
-
-### Arch Linux (Pacman Repository)
-
-Add `[vuio]` section to `/etc/pacman.conf`:
-```ini
-[vuio]
-SigLevel = Optional TrustAll
-Server = https://vuiodev.github.io/vuio/arch/os/$arch
-```
-Then run: `sudo pacman -Sy vuio`
-
-
+## Quick Start
 
 ### Homebrew (macOS & Linux)
 
@@ -68,62 +38,51 @@ brew tap vuiodev/vuio
 brew install vuio
 ```
 
-### Docker (Multi-Architecture Image)
+### Docker
 
 ```bash
-docker run -d --name vuio-server --restart unless-stopped --network host -v /path/to/media:/media:ro ghcr.io/vuiodev/vuio:latest
+docker run -d \
+  --name vuio-server \
+  --restart unless-stopped \
+  --network host \
+  -v /path/to/media:/media:ro \
+  -v ./vuio-config:/config \
+  -e VUIO_IP=192.168.1.100 \
+  ghcr.io/vuiodev/vuio:latest
 ```
 
-For detailed guides on all HTTP, REST, UPnP, and MCP endpoints, see the [API Reference](docs/api.md). For all installation options (Windows, Arch, FreeBSD, Helm, Systemd), visit [install.md](install.md).
-
-
-## Web Interface & Search
-
-VuIO serves two browser interfaces from one server. They are two front ends, not two
-servers: both are the same routes over the same state and the same in-process database
-handle, so nothing is proxied and nothing is duplicated but the socket.
-
-| | Address | What it is |
-|---|---|---|
-| **Web interface** | `http://<server-ip>:8090` | The modern Svelte interface: folder browsing, video and audio players, casting, admin. Developed in its own repository, [vuiodev/vuio-web](https://github.com/vuiodev/vuio-web); this one carries the built bundle. |
-| **Dashboard** | `http://<server-ip>:8080` | The original built-in dashboard, on the same port as DLNA and streaming. |
-
-The web interface is on by default and can be moved or turned off under `[web_ui]` in
-`config.toml`, from the dashboard's Admin tab, or with `VUIO_WEB_PORT` / `VUIO_WEB_UI`
-in Docker. It binds the same interface as the main server, so restricting that
-restricts both, and it sits behind the same `[management]` authentication.
-
-Folder browsing is answered by the server from an index on the parent directory
-(`/api/browse`), so opening a folder costs the same on a library of ten million files as
-on one of ten.
-
-The dashboard at `http://<server-ip>:<port>` (default: `http://localhost:8080`) offers:
-- **Sleek Dashboard**: Real-time server status, monitored directories, and database statistics.
-- **Media Explorer**: Browse all scanned videos, music, and pictures directly in your web browser.
-- **Instant Search**: Quick client-side filtering/searching across all files and paths as you type.
-- **Admin Tab**: Every setting `config.toml` accepts, editable in the browser and written
-  back to the file. Options you have not configured are still listed, showing the default
-  in force, so nothing is hidden behind a key you would have to know to type. Almost
-  everything applies without a restart — including the HTTP port, which the server moves
-  to while running. It requires a token only if authentication is on.
-
-## Quick Start
+### Ubuntu / Debian
 
 ```bash
-# Run with default settings (scans ~/Videos, ~/Music, ~/Pictures)
-./vuio
-
-# Specify media directory
-./vuio /path/to/media
-
-# Custom port and name
-./vuio -p 9090 -n "My Media Server" /path/to/media
-
-# Multiple directories (using -m or --media-dir)
-./vuio /movies -m /music -m /photos
+echo "deb [trusted=yes] https://vuiodev.github.io/vuio/apt stable main" | sudo tee /etc/apt/sources.list.d/vuio.list
+sudo apt update && sudo apt install vuio
 ```
 
-### Command Line Options
+---
+
+## Documentation Index
+
+Explore the detailed documentation guides for full installation, configuration, and integration instructions:
+
+| Guide | Description |
+|---|---|
+| 📖 **[Installation Guide](docs/install.md)** | Complete installation instructions for Linux (APT, DNF, APK, Pacman, musl), macOS, Windows, Docker, Kubernetes, FreeBSD, and Systemd. |
+| 🖥️ **[Web Interface & Dashboard](docs/web-ui.md)** | Modern Svelte web UI (`:8090`), built-in dashboard (`:8080`), media players, casting controls, and in-browser settings admin. |
+| ⚙️ **[Configuration Guide](docs/configuration.md)** | Full TOML configuration reference (`config.toml`), live hot-reload vs restart behavior, and metadata provider API keys. |
+| 🐳 **[Docker Deployment](docs/docker.md)** | Docker Compose setups, single/multi/NFS volume mounting, network modes, and full environment variables table. |
+| ☸️ **[Kubernetes & Helm](docs/kubernetes.md)** | Helm 3 chart deployment, host networking for SSDP multicast discovery, and persistent storage. |
+| 🤖 **[AI Agent & MCP Integration](docs/mcp.md)** | Model Context Protocol setup, Claude integration (plugin, stdio, Desktop), and full tools reference catalog. |
+| 🔒 **[Security & Authentication](docs/security.md)** | Administrative authentication, secure sign-in tokens, session lifetimes, and CIDR network restriction filters. |
+| 📊 **[Monitoring & Observability](docs/monitoring.md)** | High-availability probes (`/healthz`, `/readyz`), Prometheus metrics (`/metrics`), JSON telemetry, and DLNA browse caching. |
+| 📝 **[Logging & Diagnostics](docs/logging.md)** | Rolling background log files, `--debug` console tracing, custom log destinations, and log streaming endpoint (`/logs`). |
+| 🎵 **[Audio & Media Features](docs/audio.md)** | Music metadata extraction, supported lossless/lossy formats, playlist discovery, and recommended directory organization. |
+| 🔌 **[API Reference](docs/api.md)** | Comprehensive REST, UPnP/DLNA SOAP, and MCP endpoint specifications with request/response examples. |
+| 🏗️ **[Architecture Overview](docs/architecture.md)** | Core system components, concurrency model, multi-protocol casting pipeline, and platform layer. |
+| 🛠️ **[Development Guide](docs/DEV.md)** | Building from source, multi-architecture Docker image builds, and local development workflows. |
+
+---
+
+## Command Line Usage
 
 ```
 Usage: vuio [OPTIONS] [MEDIA_DIR]
@@ -133,660 +92,46 @@ Arguments:
 
 Options:
   -p, --port <PORT>        Port to listen on [default: 8080]
-  -n, --name <NAME>        DLNA server name
-  -c, --config <CONFIG>    Path to config file
-  -m, --media-dir <DIR>    Additional media directories
-      --debug              Enable debug logging
+  -n, --name <NAME>        DLNA / AirPlay server friendly name
+  -c, --config <CONFIG>    Path to configuration file
+  -m, --media-dir <DIR>    Additional media directories to scan
+      --debug              Enable verbose console debug logging
       --log-file <PATH>    Path to custom log file
       --log-level <LEVEL>  Set log level (off, error, warn, info, debug, trace)
-      --update             Update binary to the latest version from GitHub
+      --update             Update binary to the latest release from GitHub
       --auth               Enable administrative authentication
-  -h, --help               Print help
-  -V, --version            Print version
+  -h, --help               Print help information
+  -V, --version            Print version information
 ```
 
 ### Self-Updater
 
-You can automatically update your installed binary to the latest release on GitHub at any time:
+Update an installed binary to the latest GitHub release:
 
 ```bash
 vuio --update
-```
-
-## Docker
-
-> Docker does not work on macOS due to multicast limitations.
-
-### Quick Start
-
-```bash
-git clone https://github.com/vuiodev/vuio.git
-cd vuio
-docker-compose -f docker-compose.yml up
-```
-
-### Docker Volume Mounting
-
-**Single directory:**
-```yaml
-volumes:
-  - ./vuio-config:/config
-  - /path/to/media:/media:ro
-```
-
-**Multiple directories:**
-```yaml
-volumes:
-  - ./vuio-config:/config
-  - /home/user/Movies:/media/movies:ro
-  - /home/user/Music:/media/music:ro
-  - /home/user/Pictures:/media/pictures:ro
-  - /mnt/nas/media:/media/nas:ro
-environment:
-  - VUIO_MEDIA_DIRS=/media/movies,/media/music,/media/pictures,/media/nas
-```
-
-**Network storage (NFS/SMB):**
-```yaml
-volumes:
-  - type: bind
-    source: /mnt/nas/media
-    target: /media
-    read_only: true
-```
-
-### Docker Run
-
-```bash
-docker run -d \
-  --name vuio-server \
-  --restart unless-stopped \
-  --network host \
-  --cap-add NET_ADMIN \
-  --cap-add NET_RAW \
-  -v /path/to/media:/media:ro \
-  -v ./vuio-config:/config \
-  -e VUIO_IP=192.168.1.100 \
-  -e VUIO_PORT=8080 \
-  -e VUIO_MEDIA_DIRS=/media \
-  -e VUIO_DB_PATH=/data/vuio.db \
-  vuio:latest
-```
-
-### Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `VUIO_IP` | - | **Required.** Host IP for DLNA announcements |
-| `VUIO_PORT` | 8080 | HTTP server port |
-| `VUIO_WEB_PORT` | 8090 | Port for the Svelte web interface |
-| `VUIO_WEB_UI` | true | Serve the web interface at all (`0`/`false`/`no`/`off` to disable) |
-| `VUIO_INTERFACE` | 0.0.0.0 | Address the HTTP server binds |
-| `VUIO_SERVER_NAME` | VuIO | DLNA server name |
-| `VUIO_UUID` | random | Device UUID (set for persistence) |
-| `VUIO_MEDIA_DIRS` | /media | Comma-separated media paths |
-| `VUIO_SCAN_ON_STARTUP` | true | Scan media on startup |
-| `VUIO_WATCH_CHANGES` | true | Monitor for file changes |
-| `VUIO_CLEANUP_DELETED` | true | Remove deleted files from DB |
-| `VUIO_SCAN_PLAYLISTS` | true | Import M3U/PLS playlists |
-| `VUIO_DB_PATH` | /data/vuio.db | Database file path |
-| `VUIO_MULTICAST_TTL` | 4 | Multicast TTL |
-| `VUIO_ANNOUNCE_INTERVAL` | 30 | SSDP announce interval (seconds) |
-| `VUIO_AUTH` | false | Enable administrative/management authentication |
-| `VUIO_TMDB_API_KEY` | - | TheMovieDB API key. See `.env.example` for every provider variable |
-| `VUIO_MANAGEMENT_ENABLED` | false | Same thing; either one is enough to require the token |
-| `VUIO_ADMIN_TOKEN` | - | Pre-configured admin password token for sign in |
-| `VUIO_ADMIN_TOKEN_FILE` | - | Read the token from this file instead of `admin.token` |
-| `VUIO_ADMIN_SESSION_TTL_HOURS` | 12 | How long a browser stays signed in |
-| `VUIO_MANAGEMENT_ALLOWED_NETWORKS` | - | Comma-separated CIDRs allowed to manage the server |
-| `VUIO_MDNS` | true | Advertise over Bonjour/DNS-SD as well as SSDP |
-| `VUIO_AUTOPLAY` | true | Let renderers continue to the next item in a folder |
-| `VUIO_UNAVAILABLE_ROOT_GRACE_HOURS` | 168 | How long an offline library keeps its content |
-| `VUIO_DB_VACUUM` | false | Compact the index at startup |
-| `VUIO_DB_BACKUP` | false | Back up the index at startup, daily, and at shutdown |
-| `VUIO_DB_CACHE_MB` | 128 | Megabytes of the index kept cached |
-| `VUIO_UPNP_CALLBACK_ALLOWED_NETWORKS` | - | Extra CIDRs allowed as UPnP event callbacks |
-
-A container is configured entirely by these variables, so the dashboard's Admin tab is
-read-only there — it tells you as much rather than silently discarding an edit.
-
-**Find your host IP:**
-```bash
-# Linux
-ip route get 1.1.1.1 | grep -oP 'src \K[0-9.]+'
-
-# macOS
-ipconfig getifaddr en0
-
-# Windows
-ipconfig | findstr "IPv4"
-```
-
-**Generate UUID for multiple instances:**
-```bash
-uuidgen  # Linux/macOS
-[System.Guid]::NewGuid()  # Windows PowerShell
-```
-
-## Kubernetes (Helm 3)
-
-You can deploy VuIO to a Kubernetes cluster using the provided Helm chart. 
-
-### Quick Start
-
-#### Remote Installation (OCI Registry)
-
-You can install the chart directly from GitHub Container Registry without cloning the repository:
-
-```bash
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.44
-```
-
-#### Local Installation
-
-If you have cloned the repository, you can install the chart locally:
-
-```bash
-# From the repository root directory
-helm install vuio ./helm/vuio
-```
-
-### Networking & SSDP Discovery
-
-For SSDP/UPnP multicast auto-discovery to work natively on your local area network (LAN), the container needs to bind directly to the host's networking. The Helm chart is configured to use host networking by default:
-
-```yaml
-hostNetwork: true
-```
-
-*Note: On platforms like macOS, multicast routing restrictions in the hypervisor layer prevent SSDP from working. If you are deploying locally on macOS Kubernetes or do not require LAN discovery, you should disable host networking in your `values.yaml` or overrides:*
-
-```bash
-helm install vuio ./helm/vuio --set hostNetwork=false
-```
-
-### Configuration and Persistence
-
-The Helm chart supports configuring a Persistent Volume Claim (PVC) to retain the database and generated configuration across restarts. Additionally, you can configure your media volume mounts directly under `media` values:
-
-```yaml
-# Mount your local media library directory into the container
-media:
-  volumeMounts:
-    - name: media
-      mountPath: /media
-      readOnly: true
-  volumes:
-    - name: media
-      hostPath:
-        path: /Users/random/test-media  # Path to media on your host machine
-        type: Directory
-```
-
-Refer to the default [values.yaml](helm/vuio/values.yaml) file for a complete list of parameters, including resource constraints, service configurations, and Ingress routing rules.
-
-## Configuration
-
-### Native (TOML Config)
-
-VuIO uses TOML configuration files on native platforms. Config location: `./config/config.toml`
-
-Everything below can also be edited from the dashboard's **Admin** tab, which writes back
-to this file in place, preserving your comments. A container configured by environment
-variables shows the tab read-only, since its configuration comes from those variables and
-a file edit would be discarded.
-
-Command-line options (`--port`, `--name`, `-m`) are layered on top of the file rather than
-replacing it. They win for the run they were given in; the file stays editable, hot reload
-keeps working, and the Admin tab marks any setting the command line is currently forcing,
-so a value you save there is understood to take effect at the next start without that
-option.
-
-### What needs a restart
-
-Almost nothing. Of the 25 settings, 21 apply to the running server: editing the file, or
-saving from the Admin tab, moves the HTTP listener, re-announces the server over SSDP and
-mDNS, swaps the authentication settings, and starts or stops file monitoring, all in place.
-
-Two describe what happens at startup and so have nothing to apply now — `scan_on_startup`
-and `vacuum_on_startup`. They are marked **next start** rather than "restart required",
-because restarting on their account achieves nothing.
-
-Two genuinely need a restart: `database.path` and `database.cache_mb`, since the index
-cannot be reopened underneath a running server. The Admin tab marks those and offers a
-restart button.
-
-Changing `server.port` or `server.interface` moves the listener while the server runs. The
-new address is bound before the old one is released, so a port that is already in use
-leaves the server exactly where it was with an error rather than taking it offline.
-Connections open at the time — a stream in progress to a TV — are given a short grace
-period and then dropped, because the address they are using has gone.
-
-### Configuration Options
-
-**Server:**
-- `port` - HTTP server port
-- `interface` - Network interface to bind (0.0.0.0 for all)
-- `name` - DLNA server friendly name
-- `uuid` - Device UUID (auto-generated if not set)
-- `ip` - Specific IP for DLNA announcements (optional)
-
-**Network:**
-- `interface_selection` - "Auto", "All", or specific interface name. Selects the address
-  advertised in media URLs; it does not choose which interface SSDP binds to
-- `multicast_ttl` - Multicast time-to-live. Not currently applied: the SSDP socket TTL is fixed at 4
-- `announce_interval_seconds` - SSDP announcement interval
-- `mdns_enabled` - Also advertise over Bonjour/DNS-SD (default: true)
-- `upnp_callback_allowed_networks` - Extra CIDRs allowed as UPnP event callback destinations
-
-**Web interface (`[web_ui]`):**
-- `enabled` - Serve the Svelte web interface on its own listener (default: true)
-- `port` - Port it answers on (default: 8090). Must differ from `server.port`; it follows
-  `server.interface`, so binding the server to one interface binds this to the same one
-
-**Provider API keys:**
-
-Metadata providers that need an account read their key from the environment —
-`VUIO_TMDB_API_KEY`, `VUIO_OMDB_API_KEY`, and so on, always
-`VUIO_<PROVIDER ID>_API_KEY`. Copy `.env.example` to `.env` beside your config
-and fill in what you have; a real environment variable (systemd, `docker -e`, a
-shell export) wins over the file. Keys are never compiled into the binary, and
-`.env` is gitignored.
-
-A key can also be saved per-server from the MediaInfo tab in either web
-interface, which takes precedence; clearing it there falls back to the
-environment. A provider with no key is skipped rather than failing.
-
-**Media:**
-- `scan_on_startup` - Scan directories on startup
-- `watch_for_changes` - Real-time file monitoring
-- `cleanup_deleted_files` - Auto-remove deleted files from database
-- `autoplay_enabled` - Let renderers continue to the next item in a folder (default: true)
-- `scan_playlists` - Import M3U/PLS playlist files
-- `unavailable_root_grace_hours` - How long an offline library keeps its indexed content (default: 168)
-- `supported_extensions` - Global list of media extensions
-
-**Media Directories:**
-- `path` - Directory path
-- `recursive` - Scan subdirectories
-- `extensions` - Override extensions for this directory
-- `exclude_patterns` - Patterns to exclude (e.g., "*.tmp", ".*")
-- `validation_mode` - Path validation: "Strict" (fail if missing), "Warn" (log warning), "Skip" (no validation)
-- `case_sensitive` - Optional per-root override; omit it to detect the filesystem behavior automatically
-
-**Database:**
-- `path` - Database file location
-- `vacuum_on_startup` - Compact database on startup
-- `backup_enabled` - Enable automatic backups. Only starts the daily backup task if it
-  was already on at boot
-- `cache_mb` - Megabytes of the index kept cached (default: 128)
-
-**Management (`[management]`):**
-- `enabled` - Require the admin token for the dashboard and every management endpoint
-  (default: false). `--auth` and `VUIO_AUTH=1` also turn it on; any of the three is enough
-- `token_file` - Where the admin token is read from. Omit for `admin.token` beside the
-  config file; `VUIO_ADMIN_TOKEN` overrides both
-- `session_ttl_hours` - How long a browser stays signed in (default: 12)
-- `allowed_networks` - CIDRs allowed to reach management endpoints. Empty permits
-  loopback and private/link-local addresses only
-
-## Audio Features (ALPHA)
-
-### Metadata Extraction
-
-VuIO automatically extracts metadata from audio files:
-- Title, Artist, Album, Album Artist
-- Genre, Year, Track Number
-- Duration
-- Falls back to filename parsing when tags are missing
-
-### Supported Audio Formats
-
-- **Lossless:** FLAC, WAV, AIFF
-- **Lossy:** MP3, AAC, OGG, WMA, OPUS, M4A
-
-### Playlist Support
-
-VuIO automatically discovers and imports playlist files:
-- **M3U/M3U8** - Most common format
-- **PLS** - WinAmp/iTunes compatible
-
-Playlists are scanned from media directories on startup and made available to DLNA clients.
-
-Configure: `scan_playlists = true` or `VUIO_SCAN_PLAYLISTS=true`
-
-### Music Organization
-
-Recommended directory structure:
-```
-/music/
-├── Artist Name/
-│   └── Album Name (Year)/
-│       ├── 01 - Track.flac
-│       └── folder.jpg
-└── playlists/
-    ├── favorites.m3u
-    └── workout.pls
-```
-
-## Database
-
-VuIO uses SQLite, an embedded ACID-compliant database.
-
-### Database Location
-
-| Platform | Default Path |
-|----------|--------------|
-| **Windows** | `[exe dir]\config\database\media.db` |
-| **Linux** | `~/.local/share/vuio/media.db` |
-| **macOS** | `~/Library/Application Support/vuio/media.db` |
-| **Docker** | `/data/vuio.db` (or `VUIO_DB_PATH`) |
-
-## Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Web Server    │    │  SSDP Service   │    │ File Watcher    │
-│   (Axum/HTTP)   │    │  (Discovery)    │    │ (Real-time)     │
-└────────┬────────┘    └────────┬────────┘    └────────┬────────┘
-         │                      │                      │
-         └──────────────────────┼──────────────────────┘
-                                │
-         ┌──────────────────────┴──────────────────────┐
-         │              Application Core               │
-         │  ┌─────────┐  ┌─────────┐  ┌─────────────┐  │
-         │  │ Config  │  │ Database│  │  Platform   │  │
-         │  │ Manager │  │ (SQLite)│  │ Abstraction │  │
-         │  └─────────┘  └─────────┘  └─────────────┘  │
-         └──────────────────────┬──────────────────────┘
-                                │
-         ┌──────────────────────┴──────────────────────┐
-         │            Platform Layer                   │
-         │  ┌─────────┐  ┌─────────┐  ┌─────────┐      │
-         │  │ Windows │  │  macOS  │  │  Linux  │      │
-         │  └─────────┘  └─────────┘  └─────────┘      │
-         └─────────────────────────────────────────────┘
-```
-
-## Logging & Diagnostics
-
-VuIO is designed to run cleanly by default. Standard startup displays a clean, visual card containing crucial server information, while silencing verbose background execution traces.
-
-### Default Log File
-
-By default, all detailed logs (`INFO` level and below) are automatically recorded to a rolling background log file so that troubleshooting info is always preserved.
-
-**Default Log Path:**
-- **Windows**: `[exe dir]\config\logs\vuio.log`
-- **macOS**: `[exe dir]/config/logs/vuio.log` (Native) or platform cache path
-- **Linux**: `[exe dir]/config/logs/vuio.log`
-- **Docker**: `/data/logs/vuio.log`
-
-### Detailed Console Logs
-
-If you want to view verbose background logs directly on the console, you can use either of the following approaches:
-
-1. **Command Line Flag**:
-   Run with `--debug` to enable verbose debug logs on the terminal:
-   ```bash
-   ./vuio --debug
-   ```
-
-2. **Environment Variable**:
-   Set `RUST_LOG` env variable:
-   ```bash
-   RUST_LOG=info ./vuio
-   RUST_LOG=debug ./vuio
-   ```
-
-### Custom Log Destinations and Levels
-
-You can fully control where logs are written and their severity level using command line options:
-
-- **Specify Custom Log File**:
-  ```bash
-  ./vuio --log-file /path/to/my-custom.log
-  ```
-- **Set Log Level**:
-  ```bash
-  ./vuio --log-level debug
-  ./vuio --log-level warn
-  ```
-
----
-
-## Monitoring & Probes (HA & Kubernetes Native)
-
-VuIO contains built-in endpoints optimized for Kubernetes orchestration and observability via Grafana, Prometheus, and Loki.
-
-### Kubernetes Probes
-- **Liveness Probe (`/healthz`)**: A lightweight endpoint indicating that the web server is running.
-  - Returns: `200 OK` with JSON `{"status": "healthy"}`
-- **Readiness Probe (`/readyz`)**: Verifies database connectivity and readiness to serve requests.
-  - Returns: `200 OK` with JSON `{"status": "ready"}` if healthy, or `503 Service Unavailable` if database access fails.
-
-### Metrics & Monitoring
-To monitor the server health, cache efficiency, and indexing status, you can query the metrics endpoints:
-- **Prometheus Exposition Format (`/metrics`)**: Returns raw metrics formatted for Prometheus.
-  - Query: `curl http://localhost:8080/metrics`
-  - Returns: `200 OK` with `text/plain` Prometheus exposition format.
-- **JSON Format (`/metrics/json`)**: Returns JSON telemetry.
-  - Query: `curl http://localhost:8080/metrics/json`
-  - Returns: `200 OK` with JSON structure like:
-    ```json
-    {
-      "web_handler_metrics": {
-        "browse_requests": 12,
-        "cache_hits": 9,
-        "cache_misses": 3,
-        "cache_hit_rate_percent": 75.0,
-        "average_response_time_ms": 12,
-        "gigabytes_transferred": 0.25,
-        "database_backend": "sqlite"
-      }
-    }
-    ```
-
-### DLNA Browse Caching
-To support instant directory listings for directories containing 1000+ files, VuIO implements an automatic, thread-safe SOAP response cache:
-- **How it works**: The cache stores the fully rendered XML response mapped to a unique signature of `(ObjectID, StartingIndex, RequestedCount, ClientProfile, UpdateID)`. Subsequent scrolls or refreshes from the TV/client are served in sub-milliseconds without hitting the database, resolving paths, or performing memory cloning.
-- **Cache Invalidation**: The cache is automatically and immediately cleared whenever a filesystem change or directory scan increments the `UpdateID` counter, ensuring no stale data is ever served.
-
-### Log Streaming (Grafana / Loki / Alloy)
-- **Log Scraper Endpoint (`/logs`)**: Stream the last N log entries (default `100`, max `5000`) dynamically over HTTP. Useful for pull-based logs scraping.
-  - Query: `curl http://localhost:8080/logs?limit=50`
-  - Returns: `200 OK` with raw plaintext log lines.
-
----
-
-## AI Agent & MCP Integration
-
-VuIO speaks the **Model Context Protocol**, so an AI assistant can browse and
-search your library, build playlists, and cast to the TVs and speakers on your
-network — without you copying anything into a chat window.
-
-### Connect Claude
-
-The quickest route is the plugin in this repository, which brings the server
-connection, a skill teaching the workflows, and `/cast`, `/playlist` and
-`/library` commands:
-
-```bash
-claude plugin marketplace add vuiodev/vuio
-claude plugin install vuio@vuio
-```
-
-Point it at your server with two environment variables — `VUIO_URL` (default
-`http://localhost:8080`) and `VUIO_TOKEN`, needed only if the server requires
-authentication.
-
-Or connect the endpoint directly, without the skill or commands:
-
-```bash
-claude mcp add --transport http vuio http://localhost:8080/mcp \
-  --header "Authorization: Bearer $(cat admin.token)"
-```
-
-**Claude Desktop** launches a local process rather than calling an endpoint, so
-it needs the bundle:
-
-```bash
-cargo build --release
-./claude/mcpb/build.sh          # writes claude/mcpb/dist/vuio.mcpb
-```
-
-Double-click the `.mcpb` to install it, then give it your server's address. It
-runs `vuio mcp`, which bridges stdio to a server that is already running — it
-does not open the library itself.
-
-Any other MCP client can use the same bridge:
-
-```bash
-vuio mcp --url http://nas.local:8080 --token-file ~/.vuio/admin.token
-```
-
-### The endpoint
-
-One endpoint, `POST /mcp`, on the main port, speaking MCP **2026-07-28**.
-Clients that still open with an `initialize` handshake are answered too, for
-protocol versions `2025-11-25`, `2025-06-18` and `2025-03-26`.
-
-Requests carry their protocol version twice — in `_meta` and in the
-`MCP-Protocol-Version` header — and the two must agree. `Mcp-Method` must match
-the body's `method`, and `Mcp-Name` the tool name on a `tools/call`. `GET` and
-`DELETE` on the endpoint return `405`: they belonged to the session-based
-revisions, and this transport has no sessions.
-
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: server/discover' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"server/discover",
-       "params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
-```
-
-```bash
-curl -X POST http://localhost:8080/mcp \
-  -H 'Content-Type: application/json' \
-  -H 'MCP-Protocol-Version: 2026-07-28' \
-  -H 'Mcp-Method: tools/call' \
-  -H 'Mcp-Name: search_media' \
-  -d '{"jsonrpc":"2.0","id":2,"method":"tools/call",
-       "params":{"name":"search_media","arguments":{"query":"blade runner"},
-                 "_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}'
-```
-
-Add `-H "Authorization: Bearer $(cat admin.token)"` when the server requires it.
-
-### Configuration
-
-```toml
-[mcp]
-enabled = true        # VUIO_MCP_ENABLED
-read_only = false     # VUIO_MCP_READ_ONLY   — hide every mutating and casting tool
-require_auth = false  # VUIO_MCP_REQUIRE_AUTH — demand a token even when [management] is off
-```
-
-`read_only` leaves the browsing half and removes the rest, both from `tools/list`
-and from `tools/call`, so a tool name learned elsewhere cannot reach a handler.
-
-The tools delete playlists and start playback on real devices. On a server
-reachable beyond loopback, set `require_auth` (or turn on `[management]`); VuIO
-warns at startup when neither is set.
-
-### Available tools
-
-`mcp/reference.json` carries the full schemas, generated from the catalog.
-
-**Library**
-
-| Tool | Parameters | Description |
-| :--- | :--- | :--- |
-| `get_server_stats` | — | Counts by type, library size, playlist count, base URL |
-| `list_library_roots` | — | The configured media directories, and whether each is available |
-| `search_media` | `query`, `category?`, `limit?`, `cursor?` | Ranked full-text search across filenames, tags and fetched synopses |
-| `list_media` | `category?`, `limit?`, `cursor?` | Page through every indexed file |
-| `browse_folder` | `path`, `category?`, `offset?`, `limit?` | One directory's subfolders and files |
-| `get_media_info` | `file_id` | Full metadata, playable URLs, and any fetched synopsis and rating |
-| `list_music_categories` | `kind`, `artist?`, `genre?` | Distinct artists, albums, album artists, genres or years, with counts |
-| `find_music` | `artist?`, `album_artist?`, `album?`, `genre?`, `year?`, `limit?` | Tracks matching exact tag values |
-
-**Playlists**
-
-| Tool | Parameters | Description |
-| :--- | :--- | :--- |
-| `list_playlists` | — | Every playlist, with track counts |
-| `get_playlist_tracks` | `playlist_id` | A playlist's tracks in playback order |
-| `create_playlist` | `name`, `description?` | Create an empty playlist |
-| `add_to_playlist` | `playlist_id`, `media_file_ids` | Append tracks, in the order given |
-| `reorder_playlist` | `playlist_id`, `media_file_ids` | Replace the running order |
-| `remove_from_playlist` | `playlist_id`, `media_file_id` | Remove one track |
-| `delete_playlist` | `playlist_id` | Delete a playlist and its entries |
-
-**Devices** (requires the `casting` feature)
-
-| Tool | Parameters | Description |
-| :--- | :--- | :--- |
-| `list_renderers` | — | DLNA, Chromecast and AirPlay devices, with stable ids |
-| `get_playback_status` | `renderer_id?` | What a renderer is playing, and what this server last sent it |
-| `cast_media_to_renderer` | `file_id`, `renderer_id` | Play one file on a device |
-| `cast_playlist_to_renderer` | `playlist_id`, `renderer_id`, `track_index?` | Play a playlist, advancing automatically |
-| `cast_folder_to_renderer` | `path`, `renderer_id`, `media?` | Play a folder without leaving a playlist behind |
-| `control_renderer` | `renderer_id`, `action` | `play`, `pause` or `stop` |
-
-Every result carries `stream_url`, `cover_url` and `subtitle_url`, so an
-assistant can hand you something playable rather than a path on the server's
-disk.
-
-## Security & Authentication
-
-By default, the web interface and management endpoints run without authentication for easy local usage.
-
-### Enabling Authentication
-
-To enable administrative/management authentication, start VuIO with either:
-- The `--auth` command-line option
-- The `VUIO_AUTH=true` environment variable
-
-When enabled:
-- Visits to the dashboard in the browser will be redirected to a secure sign-in page.
-- You must sign in using the administration token.
-- API endpoints (excluding DLNA/UPnP SOAP endpoints) will require a session cookie or bearer token.
-
-### Setting the Admin Token
-
-On startup, if no pre-defined token is found, VuIO generates a random cryptographically secure token and writes it to a file named `admin.token` in the configuration directory (e.g. `./admin.token`). Keep this file private.
-
-You can also set a pre-defined administration token via the `VUIO_ADMIN_TOKEN` environment variable:
-```bash
-export VUIO_ADMIN_TOKEN="your-custom-secure-token"
 ```
 
 ---
 
 ## Contributing
 
-Contributions welcome! Please ensure cross-platform compatibility is maintained.
-Input license = output license
+Contributions are welcome! Please ensure cross-platform compatibility is maintained across Linux, macOS, and Windows.
 
-**Working on the web interface?** It has its own repository —
-[vuiodev/vuio-web](https://github.com/vuiodev/vuio-web) — with its own toolchain. Clone
-it, `npm run dev`, and point it at any running VuIO server; you need no Rust and no
-checkout of this repository. This one carries only the built bundle
-(`crates/vuio-web/dist`), refreshed with `./scripts/build-web.sh`.
+- **Backend & Core**: Rust workspace (`crates/vuio-core`, `crates/vuio-cli`, `crates/vuio-cast`).
+- **Web Interface**: Developed in its own repository at [vuiodev/vuio-web](https://github.com/vuiodev/vuio-web). The built bundle (`crates/vuio-web/dist`) is refreshed via `./scripts/build-web.sh`.
+
+---
 
 ## Credits & Third-Party Code
 
-This project includes modified code from the following open-source library:
+* **[oxicast](https://github.com/denniskribl/oxicast)**: Async Google Cast (Chromecast) client for Rust by Dennis Kribl (MIT / Apache-2.0). Maintained locally in `crates/vuio-cast` with `ring` TLS.
 
-* **oxicast**: Async Google Cast (Chromecast) client for Rust
-  * **Original Author:** Dennis Kribl (https://github.com/denniskribl/oxicast)
-  * **License:** Dual-licensed under MIT / Apache-2.0
-  * **Local fork:** `crates/vuio-cast` (ring TLS; no aws-lc)
+---
 
 ## License
 
+Dual-licensed under either of:
+
 - [MIT License](LICENSE-MIT)
-or
 - [Apache License 2.0](LICENSE-APACHE)
