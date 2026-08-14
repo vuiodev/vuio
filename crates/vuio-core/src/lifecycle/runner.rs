@@ -313,6 +313,21 @@ where
         });
     }
 
+    // Announce before scanning, not after. SSDP and mDNS are how a TV finds the
+    // server at all, and the scan below walks the whole library — so starting
+    // discovery afterwards meant that on a large library nothing on the network
+    // could see the server until the walk finished. A client that connects
+    // mid-scan browses whatever is indexed so far, which is strictly better than
+    // being unable to find it.
+    let discovery_state = app_state.clone();
+    let discovery_cancellation = cancellation.clone();
+    services.spawn(async move {
+        (
+            "discovery",
+            supervisor::run_advertisement_supervisor(discovery_state, discovery_cancellation).await,
+        )
+    });
+
     // Scan only after the watcher and listeners are active. This closes the startup blind
     // window: a download that lands while the scan is running is either found
     // by the scan or delivered by the watcher (and duplicate upserts are safe).
@@ -355,15 +370,6 @@ where
         (
             "maintenance",
             monitoring_handle.await.map_err(anyhow::Error::from),
-        )
-    });
-
-    let discovery_state = app_state.clone();
-    let discovery_cancellation = cancellation.clone();
-    services.spawn(async move {
-        (
-            "discovery",
-            supervisor::run_advertisement_supervisor(discovery_state, discovery_cancellation).await,
         )
     });
 
