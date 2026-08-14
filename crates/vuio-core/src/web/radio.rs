@@ -416,9 +416,10 @@ async fn admin_view<D: DatabaseManager + 'static>(
                 started_at_epoch_secs: playing.started_at_epoch_secs,
             })
         }),
-        stream_url: snapshot
-            .as_ref()
-            .map(|snapshot| format!("{origin}{}", stream_path(snapshot.id, snapshot.codec))),
+        stream_url: Some(snapshot.as_ref().map_or_else(
+            || format!("{origin}/api/radio/stations/{}/stream", station.id),
+            |snapshot| format!("{origin}{}", stream_path(snapshot.id, snapshot.codec)),
+        )),
     }
 }
 
