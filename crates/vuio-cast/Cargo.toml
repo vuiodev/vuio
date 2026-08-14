@@ -32,7 +32,7 @@ tokio = { version = "1", features = ["net", "rt", "sync", "time", "macros", "io-
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12", "ring"] }
 tokio-util = { version = "0.7", features = ["rt", "io"] }
 tracing = "0.1"
-mdns-sd = { version = "0.20", optional = true }
+mdns-sd = { version = "0.21", optional = true }
 axum = { version = "0.8", optional = true, default-features = false, features = ["tokio", "http1"] }
 
 [dev-dependencies]
