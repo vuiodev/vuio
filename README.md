@@ -2,11 +2,11 @@
 
 A lightweight, high-performance, cross-platform media server written in Rust. Streams video, audio, and images to **DLNA / UPnP**, **Chromecast / Google TV**, and compatible **AirPlay** video receivers.
 
-- **Ultra-low footprint**: Uses only ~25 MB of RAM for a 5,000-object media library. and Less then 100Mb for 100000 objects.
-- **Modern asynchronous core**: Built with Tokio, Axum, and SQLite for maximum concurrency and stability.
-- **Cross-platform**: Native binaries for Linux (x86_64, ARM64), macOS (Apple Silicon & Intel), Windows (x64), Freebsd (x64) Docker, and Kubernetes.
-
----
+- **Low resource usage**: Uses only ~25 MB of RAM for a 5,000-object media library. For all functions listed below.
+And Less then 100Mb for 100000 objects.
+- **Modern asynchronous core**: Built with Rust, Tokio, Axum, and SQLite for maximum concurrency and stability.
+- **Cross-platform**: Native binaries for Linux, macOS,  Windows (x64 and arm), Freebsd (x64), Docker, and Kubernetes. Repo with setup packages for all linux flows, DEB, RPM, APK, Pacman, musl and tar.gz.
+- **Single binary, no dependencies**, All is included in the binary, no need to install anything else,  just download and run.
 
 ## Features
 
