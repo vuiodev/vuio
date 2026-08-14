@@ -330,12 +330,18 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
         ),
         "Applies from the next daily tick; the startup and shutdown backups need a restart.",
     ),
-    optional(
-        "database.cache_mb",
-        "Index cache",
-        FieldKind::Int { min: 1, max: 4_096 },
-        Impact::Restart,
-        "Megabytes of memory the index keeps cached.",
+    noted(
+        optional(
+            "database.cache_mb",
+            "Index cache",
+            FieldKind::Int { min: 1, max: 4_096 },
+            Impact::Restart,
+            "Megabytes of memory the index keeps cached, per database connection.",
+        ),
+        "Applied to each connection separately — one writer plus two to four readers, \
+         depending on the machine — so the server's resident memory settles at several \
+         times this figure. Lower it on a small box; raise it only if browsing a large \
+         library reads from disk more than it should.",
     ),
 ];
 

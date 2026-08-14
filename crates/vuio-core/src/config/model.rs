@@ -38,6 +38,10 @@ pub(super) fn default_unavailable_root_grace_hours() -> u64 {
     168
 }
 
+/// Page cache per connection, in mebibytes.
+///
+/// Applied to each connection separately — one writer and two to four readers —
+/// so the process settles at several times this number.
 pub(super) fn default_cache_mb() -> usize {
     128
 }

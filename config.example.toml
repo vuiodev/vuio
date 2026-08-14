@@ -62,7 +62,9 @@ vacuum_on_startup = false
 backup_enabled = false
 # Omit to use the platform-appropriate default location.
 path = "./config/media.db"
-# cache_mb = 128                        # Megabytes of index kept cached
+# Megabytes of index cached *per connection* — one writer plus two to four
+# readers — so resident memory settles at several times this figure.
+# cache_mb = 128
 
 # The modern browser interface, served on a second port beside the built-in
 # dashboard. It is a second front end, not a second server: the same API, the
