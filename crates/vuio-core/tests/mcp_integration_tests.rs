@@ -619,10 +619,7 @@ async fn ping_answers_on_the_legacy_era_and_not_on_the_modern_one() {
         .unwrap();
     assert_eq!(legacy.status(), StatusCode::OK);
 
-    let modern = router
-        .oneshot(mcp_request(plain(2, "ping")))
-        .await
-        .unwrap();
+    let modern = router.oneshot(mcp_request(plain(2, "ping"))).await.unwrap();
     assert_eq!(modern.status(), StatusCode::NOT_FOUND);
 }
 
@@ -656,10 +653,7 @@ async fn get_and_delete_on_the_endpoint_are_refused() {
     let (_temp, state) = make_test_state().await;
     let router = create_router(state, Surface::Primary);
 
-    for request in [
-        Request::get("/mcp"),
-        Request::delete("/mcp"),
-    ] {
+    for request in [Request::get("/mcp"), Request::delete("/mcp")] {
         let response = router
             .clone()
             .oneshot(

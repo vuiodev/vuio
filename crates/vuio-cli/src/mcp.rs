@@ -203,9 +203,9 @@ async fn forward(
         // tells the client what was wrong with its request.
         Ok(value) => Ok(Some(value)),
         Err(_) if status.is_success() => Ok(None),
-        Err(_) if status == reqwest::StatusCode::UNAUTHORIZED => anyhow::bail!(
-            "{endpoint} requires a management token. Pass --token or --token-file."
-        ),
+        Err(_) if status == reqwest::StatusCode::UNAUTHORIZED => {
+            anyhow::bail!("{endpoint} requires a management token. Pass --token or --token-file.")
+        }
         Err(_) => anyhow::bail!("{status} from {endpoint}: {}", text.trim()),
     }
 }
@@ -252,8 +252,7 @@ fn encode_header_value(value: &str) -> String {
 }
 
 fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let bytes = [
@@ -261,8 +260,7 @@ fn base64_encode(input: &[u8]) -> String {
             chunk.get(1).copied().unwrap_or(0),
             chunk.get(2).copied().unwrap_or(0),
         ];
-        let bits =
-            (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
+        let bits = (u32::from(bytes[0]) << 16) | (u32::from(bytes[1]) << 8) | u32::from(bytes[2]);
         out.push(ALPHABET[(bits >> 18) as usize & 0x3f] as char);
         out.push(ALPHABET[(bits >> 12) as usize & 0x3f] as char);
         out.push(if chunk.len() > 1 {

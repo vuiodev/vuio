@@ -191,7 +191,14 @@ mod tests {
         // Two ways to give the same secret is a configuration error, not a
         // precedence puzzle.
         assert!(Args::try_parse_from([
-            "vuio", "mcp", "--url", "http://x", "--token", "a", "--token-file", "b"
+            "vuio",
+            "mcp",
+            "--url",
+            "http://x",
+            "--token",
+            "a",
+            "--token-file",
+            "b"
         ])
         .is_err());
     }

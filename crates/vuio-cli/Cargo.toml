@@ -8,6 +8,11 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
 readme = "../../README.md"
+# Every binary is declared below. Without this, cargo also auto-discovers
+# `src/bin/*.rs`, and an auto-discovered target carries no `required-features` —
+# which is how `generate_test_media` came to be built in every configuration,
+# including the ones without the `audiotags` dependency it needs.
+autobins = false
 
 [[bin]]
 name = "vuio"
@@ -16,6 +21,11 @@ path = "src/main.rs"
 [[bin]]
 name = "benchmark_media"
 path = "src/bin/benchmark_media.rs"
+
+[[bin]]
+name = "generate_test_media"
+path = "src/bin/generate_test_media.rs"
+required-features = ["testdata"]
 
 [features]
 default = []

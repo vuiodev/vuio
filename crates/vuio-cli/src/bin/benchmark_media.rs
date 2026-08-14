@@ -209,7 +209,10 @@ fn main() -> Result<()> {
     println!();
 
     // 1. Create physical test media directory and sample files
-    println!("1. Creating physical test files in {}...", test_media_dir.display());
+    println!(
+        "1. Creating physical test files in {}...",
+        test_media_dir.display()
+    );
     fs::create_dir_all(&test_media_dir)?;
 
     let silent_mp3 = b"ID3\x04\x00\x00\x00\x00\x00\x00\x00\xFF\xFB\x90\x44\x00\x00\x00\x00";
@@ -220,7 +223,8 @@ fn main() -> Result<()> {
             let album_dir = artist_dir.join(format!("Album_{:02}", album_idx));
             fs::create_dir_all(&album_dir)?;
             for track_idx in 1..=10 {
-                let track_file = album_dir.join(format!("{:02} - Track_{}.mp3", track_idx, track_idx));
+                let track_file =
+                    album_dir.join(format!("{:02} - Track_{}.mp3", track_idx, track_idx));
                 if !track_file.exists() {
                     fs::write(&track_file, silent_mp3)?;
                     physical_files_created += 1;
@@ -228,10 +232,16 @@ fn main() -> Result<()> {
             }
         }
     }
-    println!("   Created {} physical files in test-media.\n", physical_files_created);
+    println!(
+        "   Created {} physical files in test-media.\n",
+        physical_files_created
+    );
 
     // 2. Prepare SQLite Database
-    println!("2. Initializing SQLite database schema at {}...", db_path.display());
+    println!(
+        "2. Initializing SQLite database schema at {}...",
+        db_path.display()
+    );
     fs::create_dir_all(&db_dir)?;
 
     // Remove existing database files
@@ -246,9 +256,7 @@ fn main() -> Result<()> {
         .with_context(|| format!("Failed to open {}", db_path.display()))?;
 
     // Register natural_order collation
-    conn.create_collation("natural_order", |a: &str, b: &str| {
-        natural_cmp(a, b)
-    })?;
+    conn.create_collation("natural_order", |a: &str, b: &str| natural_cmp(a, b))?;
 
     // Pragmas for fast bulk load
     conn.execute_batch(
@@ -256,7 +264,7 @@ fn main() -> Result<()> {
          PRAGMA journal_mode = OFF;
          PRAGMA page_size = 4096;
          PRAGMA cache_size = -131072;
-         PRAGMA temp_store = MEMORY;"
+         PRAGMA temp_store = MEMORY;",
     )?;
 
     // Create DDL schema
@@ -267,7 +275,9 @@ fn main() -> Result<()> {
 
     // 3. Pre-populate directories table
     println!("3. Populating directory hierarchy in database...");
-    let canonical_root = test_media_dir.canonicalize().unwrap_or_else(|_| test_media_dir.clone());
+    let canonical_root = test_media_dir
+        .canonicalize()
+        .unwrap_or_else(|_| test_media_dir.clone());
     let root_str = canonical_root.to_string_lossy().to_string();
     let root_parent = canonical_root
         .parent()
@@ -319,12 +329,24 @@ fn main() -> Result<()> {
     println!("   Directory hierarchy populated.\n");
 
     // 4. Bulk insert media files in transaction chunks
-    println!("4. Inserting {} media files in chunks of 50,000...", total_objects);
+    println!(
+        "4. Inserting {} media files in chunks of 50,000...",
+        total_objects
+    );
     let start_insert = Instant::now();
     let chunk_size = 50_000;
-    let num_artists = 10_000.max(1);
-    let num_albums = 100_000.max(1);
-    let genres = ["Rock", "Pop", "Jazz", "Classical", "Electronic", "Metal", "Hip Hop", "Ambient"];
+    let num_artists = 10_000;
+    let num_albums = 100_000;
+    let genres = [
+        "Rock",
+        "Pop",
+        "Jazz",
+        "Classical",
+        "Electronic",
+        "Metal",
+        "Hip Hop",
+        "Ambient",
+    ];
 
     let insert_sql = "
         INSERT INTO media_files (
@@ -418,20 +440,27 @@ fn main() -> Result<()> {
     }
 
     let insert_duration = start_insert.elapsed();
-    println!("   Inserted {} rows in {:.1}s.\n", total_objects, insert_duration.as_secs_f64());
+    println!(
+        "   Inserted {} rows in {:.1}s.\n",
+        total_objects,
+        insert_duration.as_secs_f64()
+    );
 
     // 5. Create B-Tree Indexes
     println!("5. Creating B-Tree indexes on 10M records in SQLite...");
     let start_idx = Instant::now();
     conn.execute_batch(INDEXES_SQL)?;
-    println!("   Indexes created in {:.1}s.\n", start_idx.elapsed().as_secs_f64());
+    println!(
+        "   Indexes created in {:.1}s.\n",
+        start_idx.elapsed().as_secs_f64()
+    );
 
     // 6. Finalize WAL and stats
     println!("6. Finalizing SQLite database settings...");
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
-         PRAGMA optimize;"
+         PRAGMA optimize;",
     )?;
 
     drop(conn);
