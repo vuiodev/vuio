@@ -17,8 +17,9 @@ const WALK_QUEUE: usize = 4096;
 ///
 /// Only files that actually changed reach this, so on an unchanged library it
 /// never fills. On a first scan it is what keeps peak memory flat instead of
-/// proportional to the library.
-const READ_WINDOW: usize = 4096;
+/// proportional to the library. Matched to [`BATCH_SIZE`] so one window is one
+/// write.
+const READ_WINDOW: usize = BATCH_SIZE;
 
 /// What a scan needs to know about a file it may already have indexed.
 ///
@@ -116,17 +117,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
         Ok(())
     }
 
-    /// Write out whichever batch has reached `threshold`.
-    ///
-    /// Pass a threshold of 1 to flush whatever is left.
+    /// Write out whatever a window produced.
     async fn flush_batches(
         &self,
         files_to_insert: &mut Vec<MediaFile>,
         files_to_update: &mut Vec<MediaFile>,
         result: &mut ScanResult,
-        threshold: usize,
     ) -> Result<()> {
-        if files_to_insert.len() >= threshold && !files_to_insert.is_empty() {
+        if !files_to_insert.is_empty() {
             info!("Inserting batch of {} files", files_to_insert.len());
             self.database_manager
                 .bulk_store_canonical_media_files(files_to_insert)
@@ -135,7 +133,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             files_to_insert.clear();
         }
 
-        if files_to_update.len() >= threshold && !files_to_update.is_empty() {
+        if !files_to_update.is_empty() {
             info!("Updating batch of {} files", files_to_update.len());
             self.database_manager
                 .bulk_update_canonical_media_files(files_to_update)
@@ -588,7 +586,6 @@ impl<D: DatabaseManager> MediaScanner<D> {
                             &mut files_to_insert,
                             &mut files_to_update,
                             &mut result,
-                            BATCH_SIZE,
                         )
                         .await?;
                     }
@@ -611,7 +608,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             )
             .await?;
         }
-        self.flush_batches(&mut files_to_insert, &mut files_to_update, &mut result, 1)
+        self.flush_batches(&mut files_to_insert, &mut files_to_update, &mut result)
             .await?;
 
         // The walker's own findings — which prefixes it could not read — only
