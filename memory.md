@@ -87,33 +87,33 @@ A 10,000,000-object test library was generated using the native Rust benchmark t
 * **Index Creation Time:** 83.4 seconds (covering 10 B-tree & natural collation indexes)
 * **Final Database File Size on Disk (`media.db`):** **7.82 GB** (8,007.7 MB)
 
-### Measured Live Process Metrics at 10M Scale
+### Measured Live Process Metrics at 10M Scale (Optimized)
 
-| Metric | 351 Files (Baseline) | 10,000,000 Objects (Measured) | Description |
+| Metric | 351 Files (Baseline) | 10,000,000 Objects (Optimized Measured) | Description |
 | :--- | :--- | :--- | :--- |
-| **Resident Set Size (RSS)** | **~17.6 MB** | **172.1 MB** (172,160 KB) | Physical pages mapped into process RAM |
-| **Physical Footprint (`phys_footprint`)** | **12.0 MB** | **164.0 MB** | Real unshared dirty memory |
-| **Clean / Shared Memory (`__TEXT`)** | **~7.5 MB** | **~3.9 MB** | Read-only machine code pages paged on demand |
+| **Resident Set Size (RSS)** | **~17.6 MB** | **22.2 MB** | Physical pages mapped into process RAM |
+| **Physical Footprint (`phys_footprint`)** | **12.0 MB** | **14.0 MB** | Real unshared dirty memory |
+| **Clean / Shared Memory (`__TEXT`)** | **~7.5 MB** | **~3.8 MB** | Read-only machine code pages paged on demand |
 | **Virtual Memory Size (VSZ)** | **~425 MB** | **435 MB** | Reserved address space |
-| **SQLite Page Cache (`MALLOC_SMALL`)** | **~2.6 MB** | **161.0 MB** (31,733 pages) | Governed by `database.cache_mb = 128` |
+| **Startup Time on 10M DB** | ~100 ms | **~3.5 seconds** (down from 2+ minutes) | Instant HTTP/Web UI response |
 
 ### Detailed Footprint Breakdown at 10,000,000 Objects
 
 ```
   Dirty Memory Category       Measured Size    Notes
   -------------------------   -------------    --------------------------------------------------
-  MALLOC_SMALL                161.0 MB         SQLite B-tree page cache (31,733 x 5KB page nodes)
-  MALLOC metadata             912 KB           libsystem_malloc zone headers & freelists
+  MALLOC_SMALL                11.0 MB          SQLite working page cache & query buffers
   __DATA_DIRTY                396 KB           Global mutable variables & atomic counters
-  page table                  385 KB           Kernel virtual memory translation table
+  stack                       384 KB           Active thread stack frames across worker threads
   __DATA_CONST                352 KB           Read-only relocations & constants
-  stack                       336 KB           Active thread stack frames across worker threads
+  MALLOC metadata             320 KB           libsystem_malloc zone headers & freelists
+  page table                  273 KB           Kernel virtual memory translation table
   __DATA                      202 KB           Static segments
-  MALLOC_TINY                 144 KB           Small allocations (< 128 B)
+  MALLOC_TINY                 160 KB           Small allocations (< 128 B)
   untagged (VM_ALLOCATE)      112 KB           Async runtime work buffers
   mapped file                 112 KB           SQLite coordination files (.db-shm, .db-wal)
   -------------------------   -------------    --------------------------------------------------
-  TOTAL DIRTY FOOTPRINT       164.0 MB         Total exclusive physical RAM consumed
+  TOTAL DIRTY FOOTPRINT       14.0 MB          Total exclusive physical RAM consumed
 ```
 
 ### Why RAM Remains Constrained at 10M Scale

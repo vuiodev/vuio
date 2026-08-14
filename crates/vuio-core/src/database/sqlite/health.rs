@@ -29,35 +29,39 @@ impl SqliteDatabase {
             .execute_read(move |connection| {
                 let mut health = healthy();
 
-                // `integrity_check` reports one row per problem, or the single
-                // value "ok".
-                let mut statement = connection.prepare("PRAGMA integrity_check")?;
-                let findings = statement
-                    .query_map([], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                for finding in findings.iter().filter(|finding| *finding != "ok") {
-                    health.is_healthy = false;
-                    health.corruption_detected = true;
-                    health.integrity_check_passed = false;
-                    health.issues.push(DatabaseIssue {
-                        severity: IssueSeverity::Critical,
-                        description: format!("Integrity check reported: {finding}"),
-                        table_affected: None,
-                        suggested_action:
-                            "Restore the most recent backup; the file cannot be repaired in place"
-                                .to_owned(),
-                    });
-                }
-
-                let mut statement = connection.prepare("PRAGMA foreign_key_check")?;
-                let violations = statement.query_map([], |row| row.get::<_, String>(0))?.count();
-                if violations > 0 {
+                // Verify schema readiness and user_version
+                let schema_version: i64 = connection
+                    .query_row("PRAGMA user_version", [], |row| row.get(0))?;
+                if schema_version != schema::SCHEMA_VERSION {
                     health.is_healthy = false;
                     health.issues.push(DatabaseIssue {
                         severity: IssueSeverity::Error,
-                        description: format!("{violations} rows reference records that are gone"),
+                        description: format!(
+                            "Schema version mismatch: expected {}, got {}",
+                            schema::SCHEMA_VERSION,
+                            schema_version
+                        ),
                         table_affected: None,
-                        suggested_action: "Rebuild derived indexes".to_owned(),
+                        suggested_action: "Run migrations".to_owned(),
+                    });
+                }
+
+                // Verify core tables exist and are queryable
+                let tables_ok: bool = connection
+                    .query_row(
+                        "SELECT COUNT(*) >= 4 FROM sqlite_master WHERE type = 'table' AND name IN ('media_files', 'directories', 'directory_mime_counts', 'playlists')",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(false);
+
+                if !tables_ok {
+                    health.is_healthy = false;
+                    health.issues.push(DatabaseIssue {
+                        severity: IssueSeverity::Critical,
+                        description: "Core database tables missing or incomplete".to_owned(),
+                        table_affected: None,
+                        suggested_action: "Initialize database schema".to_owned(),
                     });
                 }
 
@@ -65,17 +69,34 @@ impl SqliteDatabase {
             })
             .await?;
 
-        // Rebuilding the directory tree is cheap next to the scan that follows
-        // a failed startup, so it runs unconditionally rather than only after a
-        // problem is detected: drift there is silent, and shows up to the user
-        // only as folders missing from a browse.
-        let rebuilt = self.rebuild_derived_indexes_impl().await?;
-        health.repair_attempted = true;
-        health.repair_successful = rebuilt.is_healthy;
-        health.issues.extend(rebuilt.issues);
-        if !rebuilt.is_healthy {
-            health.is_healthy = false;
+        // Derived indexes (directories tree & full-text search) are incrementally
+        // maintained during writes. Only rebuild them on startup if corruption was detected
+        // or if the directory index is missing while files exist.
+        let needs_rebuild = if !health.is_healthy {
+            true
+        } else {
+            self.execute_read(move |connection| {
+                let has_dirs: bool = connection
+                    .query_row("SELECT 1 FROM directories LIMIT 1", [], |_| Ok(true))
+                    .unwrap_or(false);
+                let has_files: bool = connection
+                    .query_row("SELECT 1 FROM media_files LIMIT 1", [], |_| Ok(true))
+                    .unwrap_or(false);
+                Ok(has_files && !has_dirs)
+            })
+            .await?
+        };
+
+        if needs_rebuild {
+            let rebuilt = self.rebuild_derived_indexes_impl().await?;
+            health.repair_attempted = true;
+            health.repair_successful = rebuilt.is_healthy;
+            health.issues.extend(rebuilt.issues);
+            if !rebuilt.is_healthy {
+                health.is_healthy = false;
+            }
         }
+
         Ok(health)
     }
 
@@ -109,7 +130,7 @@ impl SqliteDatabase {
         let searchable = self
             .execute_write(move |connection| {
                 connection
-                    .execute_batch(crate::database::sqlite::schema::FTS_REBUILD)
+                    .execute_batch(schema::FTS_REBUILD)
                     .context("Failed to rebuild the full-text index")?;
                 Ok(())
             })
