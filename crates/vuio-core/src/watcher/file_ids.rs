@@ -236,7 +236,7 @@ mod tests {
         for index in 0..6 {
             cache.add_path(&nested.join(format!("file_{index}.mp3")), RecursiveMode::NonRecursive);
         }
-        assert!(cache.len() > 0);
+        assert!(!cache.is_empty());
 
         cache.remove_path(&nested);
         assert_eq!(cache.len(), 0);

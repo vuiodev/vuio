@@ -42,6 +42,15 @@ pub struct ScanResult {
     pub complete: bool,
 }
 
+impl Default for ScanResult {
+    /// Not derived: every count starts at zero, but `complete` starts *true* and
+    /// is cleared by anything that could not be enumerated. Deriving would start
+    /// it false and quietly mark every scan incomplete.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScanResult {
     /// Create a new empty scan result
     pub fn new() -> Self {

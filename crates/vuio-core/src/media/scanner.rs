@@ -591,7 +591,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     }
                 }
 
-                if processed % 10_000 == 0 {
+                if processed.is_multiple_of(10_000) {
                     debug!("Examined {processed} files");
                 }
             }
