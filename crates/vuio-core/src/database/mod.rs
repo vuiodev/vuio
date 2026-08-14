@@ -43,6 +43,67 @@ pub struct RootAvailability {
     pub reason: String,
 }
 
+/// The order a station plays its queue in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BroadcastMode {
+    /// Alphabetical by path, then stop at the end.
+    Linear,
+    /// Shuffled once from the station's seed, then reshuffled each time round.
+    #[default]
+    Shuffle,
+    /// Alphabetical by path, starting over at the end.
+    Loop,
+}
+
+impl BroadcastMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Linear => "linear",
+            Self::Shuffle => "shuffle",
+            Self::Loop => "loop",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "linear" => Some(Self::Linear),
+            "shuffle" => Some(Self::Shuffle),
+            "loop" => Some(Self::Loop),
+            _ => None,
+        }
+    }
+}
+
+/// A station this server broadcasts.
+///
+/// `enabled` is desired state, not observed state: it says whether the operator
+/// wants this station on the air, which is what a restart reads to decide what
+/// to resume. `cursor_path` is the last track that played, so a resumed station
+/// continues its queue rather than starting it again.
+#[derive(Clone, Debug)]
+pub struct RadioStation {
+    pub id: i64,
+    pub name: String,
+    pub genre: String,
+    pub folders: Vec<String>,
+    pub mode: BroadcastMode,
+    pub enabled: bool,
+    pub seed: u64,
+    pub cursor_path: Option<String>,
+    pub created_at: SystemTime,
+    pub updated_at: SystemTime,
+}
+
+/// The parts of a station an operator can set.
+#[derive(Clone, Debug)]
+pub struct RadioStationInput {
+    pub name: String,
+    pub genre: String,
+    pub folders: Vec<String>,
+    pub mode: BroadcastMode,
+}
+
 /// Represents a playlist
 #[derive(Clone, Debug)]
 pub struct Playlist {
@@ -994,6 +1055,33 @@ pub trait PlaylistRepository: Send + Sync {
     ) -> Result<()>;
 }
 
+/// Stations this server broadcasts.
+#[async_trait]
+pub trait RadioStationRepository: Send + Sync {
+    /// Every station, oldest first.
+    async fn list_radio_stations(&self) -> Result<Vec<RadioStation>>;
+
+    async fn get_radio_station(&self, id: i64) -> Result<Option<RadioStation>>;
+
+    /// Create a station. It starts stopped, with a fresh shuffle seed.
+    async fn create_radio_station(&self, input: &RadioStationInput) -> Result<RadioStation>;
+
+    /// Replace a station's settings, leaving its enabled state and cursor alone.
+    async fn update_radio_station(
+        &self,
+        id: i64,
+        input: &RadioStationInput,
+    ) -> Result<Option<RadioStation>>;
+
+    /// Record whether the station should be on the air.
+    async fn set_radio_station_enabled(&self, id: i64, enabled: bool) -> Result<bool>;
+
+    /// Remember where the queue got to, so a restart can carry on from there.
+    async fn set_radio_station_cursor(&self, id: i64, cursor_path: Option<&str>) -> Result<()>;
+
+    async fn delete_radio_station(&self, id: i64) -> Result<bool>;
+}
+
 /// Integrity, recovery, backup, and maintenance operations.
 #[async_trait]
 pub trait HealthRepository: Send + Sync {
@@ -1094,6 +1182,7 @@ pub trait MediaInfoRepository: Send + Sync {
 pub trait DatabaseManager:
     MediaRepository
     + PlaylistRepository
+    + RadioStationRepository
     + HealthRepository
     + StatsRepository
     + SecretStore

@@ -226,6 +226,44 @@ impl MediaRepository for SqliteDatabase {
 }
 
 #[async_trait]
+impl crate::database::RadioStationRepository for SqliteDatabase {
+    async fn list_radio_stations(&self) -> Result<Vec<crate::database::RadioStation>> {
+        SqliteDatabase::list_radio_stations_impl(self).await
+    }
+
+    async fn get_radio_station(&self, id: i64) -> Result<Option<crate::database::RadioStation>> {
+        SqliteDatabase::get_radio_station_impl(self, id).await
+    }
+
+    async fn create_radio_station(
+        &self,
+        input: &crate::database::RadioStationInput,
+    ) -> Result<crate::database::RadioStation> {
+        SqliteDatabase::create_radio_station_impl(self, input).await
+    }
+
+    async fn update_radio_station(
+        &self,
+        id: i64,
+        input: &crate::database::RadioStationInput,
+    ) -> Result<Option<crate::database::RadioStation>> {
+        SqliteDatabase::update_radio_station_impl(self, id, input).await
+    }
+
+    async fn set_radio_station_enabled(&self, id: i64, enabled: bool) -> Result<bool> {
+        SqliteDatabase::set_radio_station_enabled_impl(self, id, enabled).await
+    }
+
+    async fn set_radio_station_cursor(&self, id: i64, cursor_path: Option<&str>) -> Result<()> {
+        SqliteDatabase::set_radio_station_cursor_impl(self, id, cursor_path).await
+    }
+
+    async fn delete_radio_station(&self, id: i64) -> Result<bool> {
+        SqliteDatabase::delete_radio_station_impl(self, id).await
+    }
+}
+
+#[async_trait]
 impl PlaylistRepository for SqliteDatabase {
     async fn create_playlist(&self, name: &str, description: Option<&str>) -> Result<i64> {
         SqliteDatabase::create_playlist_impl(self, name, description).await

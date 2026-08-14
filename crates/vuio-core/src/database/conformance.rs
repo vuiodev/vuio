@@ -1397,6 +1397,143 @@ pub async fn deleting_a_file_removes_it_from_playlists<B: DatabaseBackend>() {
     assert_eq!(tracks[0].filename, "b.mp3");
 }
 
+pub async fn radio_station_lifecycle<B: DatabaseBackend>() {
+    use super::{BroadcastMode, RadioStationInput};
+
+    let temp = TempDir::new().unwrap();
+    let database = open::<B>(&temp, "radio-stations").await;
+
+    assert!(database.list_radio_stations().await.unwrap().is_empty());
+
+    let station = database
+        .create_radio_station(&RadioStationInput {
+            name: "Night Shift".to_owned(),
+            genre: "Ambient".to_owned(),
+            folders: vec!["/music/ambient".to_owned(), "/music/drone".to_owned()],
+            mode: BroadcastMode::Shuffle,
+        })
+        .await
+        .unwrap();
+
+    assert_eq!(station.name, "Night Shift");
+    assert_eq!(station.folders.len(), 2);
+    assert_eq!(station.mode, BroadcastMode::Shuffle);
+    assert!(
+        !station.enabled,
+        "a new station must not put itself on the air"
+    );
+    assert!(station.cursor_path.is_none());
+
+    // The settings an operator changes, without disturbing the running state.
+    let updated = database
+        .update_radio_station(
+            station.id,
+            &RadioStationInput {
+                name: "Night Shift FM".to_owned(),
+                genre: "Drone".to_owned(),
+                folders: vec!["/music/drone".to_owned()],
+                mode: BroadcastMode::Linear,
+            },
+        )
+        .await
+        .unwrap()
+        .expect("the station exists");
+    assert_eq!(updated.name, "Night Shift FM");
+    assert_eq!(updated.folders, vec!["/music/drone".to_owned()]);
+    assert_eq!(updated.mode, BroadcastMode::Linear);
+    assert_eq!(
+        updated.seed, station.seed,
+        "editing a station must not reshuffle it"
+    );
+
+    assert!(database
+        .set_radio_station_enabled(station.id, true)
+        .await
+        .unwrap());
+    database
+        .set_radio_station_cursor(station.id, Some("/music/drone/b.mp3"))
+        .await
+        .unwrap();
+
+    let reloaded = database
+        .get_radio_station(station.id)
+        .await
+        .unwrap()
+        .expect("the station exists");
+    assert!(reloaded.enabled, "desired state must be what was recorded");
+    assert_eq!(reloaded.cursor_path.as_deref(), Some("/music/drone/b.mp3"));
+
+    assert!(database.delete_radio_station(station.id).await.unwrap());
+    assert!(database
+        .get_radio_station(station.id)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        !database.delete_radio_station(station.id).await.unwrap(),
+        "deleting twice must report that there was nothing to delete"
+    );
+    assert!(
+        !database.set_radio_station_enabled(9_999, true).await.unwrap(),
+        "a station that does not exist cannot be enabled"
+    );
+}
+
+/// A station left broadcasting must still be broadcasting after a restart.
+pub async fn enabled_stations_survive_reopening<B: DatabaseBackend>() {
+    use super::{BroadcastMode, RadioStationInput};
+
+    let temp = TempDir::new().unwrap();
+    let (running, stopped) = {
+        let database = open::<B>(&temp, "radio-restart").await;
+        let running = database
+            .create_radio_station(&RadioStationInput {
+                name: "Kitchen".to_owned(),
+                genre: "Pop".to_owned(),
+                folders: vec!["/music/pop".to_owned()],
+                mode: BroadcastMode::Shuffle,
+            })
+            .await
+            .unwrap();
+        let stopped = database
+            .create_radio_station(&RadioStationInput {
+                name: "Garage".to_owned(),
+                genre: "Rock".to_owned(),
+                folders: vec!["/music/rock".to_owned()],
+                mode: BroadcastMode::Loop,
+            })
+            .await
+            .unwrap();
+        database
+            .set_radio_station_enabled(running.id, true)
+            .await
+            .unwrap();
+        database
+            .set_radio_station_cursor(running.id, Some("/music/pop/c.mp3"))
+            .await
+            .unwrap();
+        (running, stopped)
+    };
+
+    let reopened = open::<B>(&temp, "radio-restart").await;
+    let stations = reopened.list_radio_stations().await.unwrap();
+    assert_eq!(stations.len(), 2);
+
+    let resumed = stations
+        .iter()
+        .find(|station| station.id == running.id)
+        .expect("the station that was on the air");
+    assert!(resumed.enabled, "a live station must come back live");
+    assert_eq!(resumed.cursor_path.as_deref(), Some("/music/pop/c.mp3"));
+    assert_eq!(resumed.seed, running.seed, "its order must not be redrawn");
+
+    let quiet = stations
+        .iter()
+        .find(|station| station.id == stopped.id)
+        .expect("the station that was stopped");
+    assert!(!quiet.enabled, "a stopped station must stay stopped");
+}
+
 pub async fn source_derived_content_is_replaced_and_removed<B: DatabaseBackend>() {
     let temp = tempfile::tempdir().unwrap();
     let database = open::<B>(&temp, "playlist-source").await;
@@ -1783,6 +1920,8 @@ macro_rules! backend_conformance_tests {
         conformance_case!(deleting_a_file_removes_it_from_playlists);
         conformance_case!(source_derived_content_is_replaced_and_removed);
         conformance_case!(root_availability_round_trip);
+        conformance_case!(radio_station_lifecycle);
+        conformance_case!(enabled_stations_survive_reopening);
         conformance_case!(secrets_round_trip);
         conformance_case!(records_survive_reopening);
         conformance_case!(health_check_reports_a_clean_database);

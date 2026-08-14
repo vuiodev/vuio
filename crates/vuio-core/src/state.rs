@@ -238,7 +238,7 @@ pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
     pub discovered_tvs: Arc<crate::runtime_state::RendererCache>,
     pub upnp_subscriptions:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
-    pub radio_broadcast: Arc<crate::web::radio_broadcast::RadioBroadcastState>,
+    pub radio: Arc<crate::radio::RadioManager>,
     pub cancellation: tokio_util::sync::CancellationToken,
     pub background_tasks: tokio_util::task::TaskTracker,
 }
@@ -270,7 +270,7 @@ impl<D: DatabaseManager> Clone for AppState<D> {
             #[cfg(feature = "casting")]
             discovered_tvs: self.discovered_tvs.clone(),
             upnp_subscriptions: self.upnp_subscriptions.clone(),
-            radio_broadcast: self.radio_broadcast.clone(),
+            radio: self.radio.clone(),
             cancellation: self.cancellation.clone(),
             background_tasks: self.background_tasks.clone(),
         }
