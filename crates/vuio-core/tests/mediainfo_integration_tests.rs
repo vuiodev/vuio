@@ -682,4 +682,3 @@ async fn dlna_browse_shows_filename_not_mediainfo_title_or_description() {
     // DLNA should not contain fetched overview / description
     assert!(!body.contains("A tale."));
 }
-
