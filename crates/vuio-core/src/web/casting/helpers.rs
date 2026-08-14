@@ -4,7 +4,11 @@
 //! API is their other caller, which made `casting` unbuildable without `mcp`.
 //! They live with casting now, and MCP re-exports them.
 
-use crate::casting::{PlaybackAction, PlaybackItem, PlaybackState};
+use crate::casting::{PlaybackItem, PlaybackState};
+// Only the MCP control tool turns a string into an action; the HTTP casting API
+// parses its own in `web::casting`.
+#[cfg(feature = "mcp")]
+use crate::casting::PlaybackAction;
 use crate::database::{
     DatabaseManager, DatabaseReadSession, FileLocation, MediaFileQuery, MediaFileView,
 };
@@ -82,6 +86,7 @@ pub async fn cast_file_helper<D: DatabaseManager + 'static>(
     }))
 }
 
+#[cfg(feature = "mcp")]
 pub(crate) async fn tool_control_renderer<D: DatabaseManager>(
     state: &AppState<D>,
     args: &serde_json::Value,
@@ -491,6 +496,7 @@ pub(crate) async fn queue_following_item<D: DatabaseManager>(
     }
 }
 
+#[cfg(feature = "mcp")]
 pub(crate) async fn tool_cast_playlist_to_renderer<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     args: &serde_json::Value,
@@ -520,6 +526,7 @@ pub(crate) async fn tool_cast_playlist_to_renderer<D: DatabaseManager + 'static>
 /// the browser's folder view already holds. An agent has a whole path instead —
 /// it got one from `browse_folder` — so this resolves by path prefix, which the
 /// index answers directly.
+#[cfg(feature = "mcp")]
 pub(crate) async fn tool_cast_folder_to_renderer<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     args: &serde_json::Value,
@@ -570,6 +577,7 @@ pub(crate) async fn tool_cast_folder_to_renderer<D: DatabaseManager + 'static>(
 /// Both halves are needed and neither is sufficient. The renderer knows its own
 /// transport state but not which library file the URL it is playing belongs to;
 /// `active_casts` knows what was sent but not whether it is still playing.
+#[cfg(feature = "mcp")]
 pub(crate) async fn tool_get_playback_status<D: DatabaseManager>(
     state: &AppState<D>,
     args: &serde_json::Value,
@@ -624,6 +632,7 @@ pub(crate) async fn tool_get_playback_status<D: DatabaseManager>(
     Ok(serde_json::json!({ "renderers": reports }))
 }
 
+#[cfg(feature = "mcp")]
 fn playback_state_name(state: PlaybackState) -> &'static str {
     match state {
         PlaybackState::Playing => "playing",
