@@ -24,12 +24,39 @@ pub(super) fn default_scan_playlists() -> bool {
     true
 }
 
+/// How often to sweep every root regardless of what the watcher reported.
+///
+/// The watcher is authoritative almost all of the time; this exists for the
+/// cases where it is not — a network filesystem that drops events, or a backend
+/// queue that overflowed. Daily, because the cost is a full re-walk and the
+/// thing it guards against is rare.
+pub(super) fn default_full_rescan_interval_hours() -> u64 {
+    24
+}
+
 pub(super) fn default_unavailable_root_grace_hours() -> u64 {
     168
 }
 
+/// Page cache per connection, in mebibytes.
+///
+/// The budget is per connection — one writer and two to four readers — but a
+/// connection only allocates pages it actually reads, and on a normal workload
+/// one reader does the heavy queries. Measured on a 500,000-file library, going
+/// from 8 to 128 moved resident memory by about 160 MB, not by five times the
+/// difference.
+///
+/// Folder browsing is index-served and flat across every setting. Full-text
+/// search is the one thing that responds, and as a step rather than a curve: it
+/// stays slow until the search index fits, then roughly halves. At 500,000 files
+/// that step fell between 160 and 192.
+///
+/// So the default is small. A larger one bought nothing measurable below the
+/// step — at 500,000 files, 128 cost 170 MB more than 8 and left search exactly
+/// as slow — and a server that wants the faster search has to be raised past the
+/// step, not merely raised.
 pub(super) fn default_cache_mb() -> usize {
-    128
+    8
 }
 
 pub(super) fn default_true() -> bool {
@@ -323,6 +350,10 @@ pub struct MediaConfig {
     pub scan_playlists: bool,
     #[serde(default = "default_unavailable_root_grace_hours")]
     pub unavailable_root_grace_hours: u64,
+    /// Hours between full sweeps of every root. `0` disables them, leaving
+    /// discovery entirely to the watcher.
+    #[serde(default = "default_full_rescan_interval_hours")]
+    pub full_rescan_interval_hours: u64,
     pub supported_extensions: Vec<String>,
 }
 

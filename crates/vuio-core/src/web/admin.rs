@@ -279,6 +279,19 @@ const MEDIA_FIELDS: &[FieldSpec] = &[
         Impact::Live,
         "How long a library that has gone offline keeps its indexed content before it is dropped.",
     ),
+    noted(
+        optional(
+            "media.full_rescan_interval_hours",
+            "Full rescan interval",
+            FieldKind::Int { min: 0, max: 8_760 },
+            Impact::Live,
+            "How often every library is swept from scratch, in hours. 0 leaves discovery \
+             entirely to the file watcher.",
+        ),
+        "Changes are normally picked up by the watcher within seconds. This sweep exists for \
+         what the watcher cannot see — a network share that drops events, most often — so it \
+         costs a full walk of every library each time it runs.",
+    ),
     field(
         "media.supported_extensions",
         "File extensions",
@@ -296,12 +309,16 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
         Impact::Restart,
         "Where the media index lives. Leave unset for the platform default location.",
     ),
-    field(
-        "database.vacuum_on_startup",
-        "Compact at startup",
-        FieldKind::Bool,
-        Impact::NextStart,
-        "Reclaim space in the index file at boot. Slows startup on a large library.",
+    noted(
+        field(
+            "database.vacuum_on_startup",
+            "Compact the index",
+            FieldKind::Bool,
+            Impact::NextStart,
+            "Reclaim free space in the index file when the server starts and stops.",
+        ),
+        "Compaction rewrites the whole file, so on a large library it adds time to both. \
+         It is not needed for durability — only to give back space left by deletions.",
     ),
     noted(
         field(
@@ -313,12 +330,21 @@ const DATABASE_FIELDS: &[FieldSpec] = &[
         ),
         "Applies from the next daily tick; the startup and shutdown backups need a restart.",
     ),
-    optional(
-        "database.cache_mb",
-        "Index cache",
-        FieldKind::Int { min: 1, max: 4_096 },
-        Impact::Restart,
-        "Megabytes of memory the index keeps cached.",
+    noted(
+        optional(
+            "database.cache_mb",
+            "Index cache",
+            FieldKind::Int { min: 1, max: 4_096 },
+            Impact::Restart,
+            "Megabytes of memory the index keeps cached, per database connection.",
+        ),
+        "A budget per connection — one writer plus two to four readers — but only a \
+         connection running a large query fills its share, so resident memory grows by \
+         roughly this much rather than a multiple of it. Folder browsing does not depend \
+         on it. Search does, and as a step rather than a slope: on a very large library \
+         it stays slow until the search index fits and then roughly halves. Raising this \
+         is worth it only if it goes past that line — below it, the memory is spent and \
+         nothing gets faster.",
     ),
 ];
 

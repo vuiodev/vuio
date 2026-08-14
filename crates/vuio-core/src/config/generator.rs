@@ -112,6 +112,8 @@ impl ConfigGenerator {
         media_table["scan_playlists"] = value(config.media.scan_playlists);
         media_table["unavailable_root_grace_hours"] =
             value(config.media.unavailable_root_grace_hours as i64);
+        media_table["full_rescan_interval_hours"] =
+            value(config.media.full_rescan_interval_hours as i64);
 
         // Update supported extensions array
         let mut extensions_array = Array::new();
@@ -489,6 +491,7 @@ mod tests {
                 autoplay_enabled: false,
                 scan_playlists: false,
                 unavailable_root_grace_hours: 168,
+                full_rescan_interval_hours: 24,
                 supported_extensions: vec!["mp4".to_string(), "avi".to_string()],
             },
             database: DatabaseConfig {
@@ -601,6 +604,7 @@ mod tests {
                 autoplay_enabled: true,
                 scan_playlists: true,
                 unavailable_root_grace_hours: 168,
+                full_rescan_interval_hours: 24,
                 supported_extensions: vec!["mp4".to_string()],
             },
             database: DatabaseConfig {

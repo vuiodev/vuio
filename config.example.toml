@@ -57,11 +57,20 @@ recursive = true
 # extensions = ["mp3", "flac", "wav"]
 
 [database]
+# Reclaim free space in the index at startup and shutdown; rewrites the whole file.
 vacuum_on_startup = false
 backup_enabled = false
 # Omit to use the platform-appropriate default location.
 path = "./config/media.db"
-# cache_mb = 128                        # Megabytes of index kept cached
+# Megabytes of index cached, as a budget *per connection* — one writer plus two
+# to four readers. Only a connection that runs a large query fills its share, so
+# in practice resident memory grows by about this much, not a multiple of it.
+# Folder browsing is served from indexes and does not care. Full-text search does:
+# on a very large library it stays slow until the whole search index fits, then
+# roughly halves. Measured at 500,000 files that threshold was near 192, and
+# anything below it cost memory without making search faster — which is why the
+# default is small. Raise it past the threshold, or not at all.
+# cache_mb = 8
 
 # The modern browser interface, served on a second port beside the built-in
 # dashboard. It is a second front end, not a second server: the same API, the

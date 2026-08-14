@@ -1,5 +1,25 @@
 [workspace]
-members = ["crates/vuio-cast", "crates/vuio-core", "crates/vuio-cli", "crates/vuio-web"]
+members = [
+    "crates/vuio-cast",
+    "crates/vuio-core",
+    "crates/vuio-cli",
+    "crates/vuio-web",
+    # Development tool, `publish = false`. Kept out of `vuio-cli` so the crate that
+    # ships the binary does not carry its dependencies.
+    "crates/vuio-bench",
+]
+
+# `vuio-bench` is deliberately not a default member. Cargo unifies features across
+# everything it builds in one go, so leaving it in would mean a plain
+# `cargo build` — which is what the release pipeline runs — compiling `vuio-core`
+# with `unstable-internals` on, for the benefit of a tool that never ships.
+# Build it explicitly: `cargo run -p vuio-bench`.
+default-members = [
+    "crates/vuio-cast",
+    "crates/vuio-core",
+    "crates/vuio-cli",
+    "crates/vuio-web",
+]
 resolver = "2"
 
 [profile.release]

@@ -66,19 +66,20 @@ struct DiagnosticsCollector {
 #[cfg(feature = "diagnostics")]
 impl DiagnosticsCollector {
     fn new() -> Self {
+        // `System::new()`, never `new_all()`: that walks the whole process table,
+        // and the only process this reports on is our own. On FreeBSD it also
+        // means `kinfo_getfile` — the same class of sysinfo call as the disk
+        // enumeration below, which faults the same way under QEMU. Every
+        // `AppState` builds one of these, including the ones in tests that never
+        // take a sample. The cost is that the first sample reports no CPU usage,
+        // having no earlier reading to difference against.
+        let mut system = sysinfo::System::new();
+        // The CPU list is fixed for the life of the process and is not refreshed
+        // by `refresh_cpu_usage`, so take it once here.
+        system.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing().with_cpu_usage());
+
         Self {
-            // `new_all()` walks the process table up front, which on FreeBSD
-            // means `kinfo_getfile` — the same class of sysinfo call as the
-            // disk enumeration below, and it faults the same way under QEMU.
-            // Every `AppState` builds one of these, including the ones in tests
-            // that never take a sample, so on FreeBSD the table is left to the
-            // `refresh_all()` in `refresh()` that would repeat it anyway. The
-            // cost is that the first sample reports no CPU usage, having no
-            // earlier reading to difference against.
-            #[cfg(target_os = "freebsd")]
-            system: sysinfo::System::new(),
-            #[cfg(not(target_os = "freebsd"))]
-            system: sysinfo::System::new_all(),
+            system,
             // sysinfo 0.39 FreeBSD disk enumeration calls getmntinfo and then
             // slice::from_raw_parts with a pointer that fails Rust's alignment
             // UB checks (abort in debug; real UB risk in release). Skip disks
@@ -92,13 +93,29 @@ impl DiagnosticsCollector {
     }
 
     fn refresh(&mut self) -> RuntimeDiagnostics {
-        self.system.refresh_all();
+        let pid = sysinfo::get_current_pid().ok();
+
+        // Refresh what is actually read below, rather than `refresh_all()`. That
+        // walked and stored every process on the host — a couple of megabytes
+        // rebuilt on every sample, and `/metrics/json` samples every five seconds
+        // while a dashboard is open — to answer questions about one pid.
+        self.system.refresh_memory();
+        self.system.refresh_cpu_usage();
+        if let Some(pid) = pid {
+            self.system.refresh_processes_specifics(
+                sysinfo::ProcessesToUpdate::Some(&[pid]),
+                true,
+                sysinfo::ProcessRefreshKind::nothing()
+                    .with_memory()
+                    .with_cpu()
+                    .with_tasks(),
+            );
+        }
         #[cfg(not(target_os = "freebsd"))]
         self.disks.refresh(true);
         self.networks.refresh(true);
 
         let load = sysinfo::System::load_average();
-        let pid = sysinfo::get_current_pid().ok();
         let process = pid.and_then(|pid| self.system.process(pid));
 
         let disk_total = self
@@ -221,5 +238,25 @@ mod tests {
         assert_eq!(second.process.pid, std::process::id());
         assert!(second.system.available_memory_bytes <= second.system.total_memory_bytes);
         assert!(second.disks.available_bytes <= second.disks.total_bytes);
+
+        // The sampler refreshes only the specifics these fields need, rather than
+        // everything sysinfo can collect, so each one is a thing that silently
+        // becomes zero or `None` if the wrong refresh is dropped.
+        assert!(
+            second.system.cpu_count > 0,
+            "the CPU list must be populated: refresh_cpu_usage does not build it"
+        );
+        assert!(
+            second.system.total_memory_bytes > 0,
+            "system memory must be refreshed"
+        );
+        assert!(
+            second.process.memory_bytes.is_some_and(|bytes| bytes > 0),
+            "our own process must still be in the table after a targeted refresh"
+        );
+        assert!(
+            second.process.runtime_seconds.is_some(),
+            "our own process must still be in the table after a targeted refresh"
+        );
     }
 }

@@ -13,7 +13,8 @@ mod model;
 pub mod validation;
 
 use model::{
-    default_cache_mb, default_mediainfo_providers, default_mediainfo_timeout_seconds,
+    default_cache_mb, default_full_rescan_interval_hours, default_mediainfo_providers,
+    default_mediainfo_timeout_seconds,
     default_min_confidence, default_session_ttl_hours, default_unavailable_root_grace_hours,
     default_web_ui_port,
 };
@@ -78,10 +79,7 @@ pub struct ConfigManager {
     change_sender: broadcast::Sender<ConfigChangeEvent>,
     /// Held so the watcher outlives this manager; dropping it stops reloads.
     debouncer: Option<
-        notify_debouncer_full::Debouncer<
-            notify::RecommendedWatcher,
-            notify_debouncer_full::FileIdMap,
-        >,
+        notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::NoCache>,
     >,
 }
 
@@ -196,30 +194,52 @@ impl ConfigManager {
         cancellation: tokio_util::sync::CancellationToken,
         background_tasks: tokio_util::task::TaskTracker,
     ) -> Result<
-        notify_debouncer_full::Debouncer<
-            notify::RecommendedWatcher,
-            notify_debouncer_full::FileIdMap,
-        >,
+        notify_debouncer_full::Debouncer<notify::RecommendedWatcher, notify_debouncer_full::NoCache>,
     > {
-        use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, FileIdMap};
+        use notify_debouncer_full::{new_debouncer_opt, DebounceEventResult, Debouncer, NoCache};
         use tokio::sync::mpsc;
 
         let (tx, mut rx) = mpsc::channel(100);
 
-        // Create debounced watcher with 500ms debounce duration
-        let mut debouncer: Debouncer<notify::RecommendedWatcher, FileIdMap> = new_debouncer_opt(
+        // Create debounced watcher with 500ms debounce duration.
+        //
+        // `NoCache`, not the default file-id cache: that one stats every path under
+        // every watched root to keep rename ids, and the handler below cares about
+        // exactly one path compared by equality. Renames are never stitched here, so
+        // the ids would be built and never read.
+        let mut debouncer: Debouncer<notify::RecommendedWatcher, NoCache> = new_debouncer_opt(
             Duration::from_millis(500),
             None,
             move |result: DebounceEventResult| {
                 let _ = tx.try_send(result);
             },
-            FileIdMap::new(),
+            NoCache::new(),
             notify::Config::default(),
         )?;
 
-        // Watch the config file's parent directory
+        // Two watches, both one level deep.
+        //
+        // The parent, because saving a config usually replaces it — write a
+        // temporary file, rename it over the old one — which destroys the inode a
+        // watch on the file was holding. Only the directory sees that.
+        //
+        // The file itself, because a directory watch is not enough to see a write
+        // *into* an existing file on every backend. kqueue reports per file
+        // descriptor: a watch on a directory reports that the directory changed and
+        // names the directory, so an edit that rewrites the config in place is
+        // invisible unless its own descriptor is registered. It used to be
+        // registered by accident, because the parent was watched recursively and
+        // the kqueue backend walks the tree registering every entry it finds — the
+        // same walk that made a config living beside a media library index the
+        // library.
+        //
+        // Neither watch is recursive. That is the point: whatever else lives in
+        // that directory is not our business.
         if let Some(parent) = config_path.parent() {
-            debouncer.watch(parent, notify::RecursiveMode::Recursive)?;
+            debouncer.watch(parent, notify::RecursiveMode::NonRecursive)?;
+        }
+        if config_path.is_file() {
+            debouncer.watch(&config_path, notify::RecursiveMode::NonRecursive)?;
         }
 
         // Spawn task to handle debounced file events

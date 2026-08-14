@@ -91,7 +91,7 @@ async fn test_audio_implementation_and_features() {
     // 3. Scan the directory with MediaScanner
     let scanner = MediaScanner::with_database(db.clone());
     let scan_result = scanner.scan_directory_recursive(&media_dir).await.unwrap();
-    assert_eq!(scan_result.new_files.len(), 4);
+    assert_eq!(scan_result.new, 4);
 
     // 4. Verify tag metadata is correctly populated in DB
     // Check AC/DC
@@ -295,7 +295,7 @@ async fn test_cover_art_retrieval_and_xml() {
     // 4. Scan the directory with MediaScanner
     let scanner = MediaScanner::with_database(db.clone());
     let scan_result = scanner.scan_directory_recursive(&media_dir).await.unwrap();
-    assert_eq!(scan_result.new_files.len(), 2);
+    assert_eq!(scan_result.new, 2);
 
     // 5. Get file from DB to find its assigned ID
     let db_file = db.get_file_by_path(&audio_path).await.unwrap().unwrap();

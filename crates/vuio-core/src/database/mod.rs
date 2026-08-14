@@ -618,6 +618,31 @@ pub trait DatabaseReadSession {
     where
         F: for<'a> FnMut(Self::File<'a>) -> Result<()>;
 
+    /// One page, without counting the whole result.
+    ///
+    /// [`Self::visit_files`] reports `matched`, the size of the entire result,
+    /// because DLNA's `TotalMatches` requires it — and computing it means
+    /// evaluating the query a second time. For a ranked search that is the
+    /// expensive half: the engine has to find and rank every hit to count them,
+    /// so a page of twenty costs the same as a page of one.
+    ///
+    /// Callers that page by cursor never look at `matched`. Defaulted so a
+    /// backend need not implement it; overriding it is what makes the saving
+    /// real.
+    fn visit_files_page<F>(
+        &mut self,
+        query: &MediaFileQuery,
+        offset: usize,
+        limit: usize,
+        visitor: F,
+    ) -> Result<usize>
+    where
+        F: for<'a> FnMut(Self::File<'a>) -> Result<()>,
+    {
+        self.visit_files(query, offset, limit, visitor)
+            .map(|summary| summary.visited)
+    }
+
     fn visit_direct_subdirectories<F>(
         &mut self,
         canonical_parent: &str,
@@ -759,6 +784,28 @@ pub trait MediaRepository: Send + Sync {
 
     /// Load compact scanner comparison records instead of complete media metadata.
     async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>>;
+
+    /// The same, for one subtree.
+    ///
+    /// A scan compares what is on disk against what is indexed, and it only ever
+    /// scans one root — so loading the whole table means every other library's
+    /// rows are held in memory for nothing. That is most of the cost when a
+    /// watcher event rescans a single folder.
+    async fn load_file_fingerprints_under(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileFingerprint>>;
+
+    /// One page of fingerprints, ordered by id, starting after `after_id`.
+    ///
+    /// For the callers that genuinely have to examine every row — the index
+    /// cleanup has to consider records under no configured root at all — so that
+    /// doing so does not mean holding every row at once.
+    async fn load_file_fingerprints_after(
+        &self,
+        after_id: i64,
+        limit: usize,
+    ) -> Result<Vec<FileFingerprint>>;
 
     async fn get_root_availability(&self, path: &Path) -> Result<Option<RootAvailability>>;
 
@@ -1129,7 +1176,7 @@ pub trait DatabaseBackend: DatabaseManager + Sized + 'static {
     async fn restore_backup_file(backup: &Path, destination: &Path) -> Result<()>;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DatabaseStats {
     pub total_files: usize,
     pub total_size: u64,

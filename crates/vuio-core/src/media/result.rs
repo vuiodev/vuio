@@ -1,22 +1,39 @@
 use super::*;
 
 /// Result of a media scanning operation
+///
+/// Every outcome is a count. The records themselves live in the database by the
+/// time a scan returns, and nothing has ever read them back off this struct —
+/// `.len()` and `.is_empty()` were the only consumers. Retaining them meant a
+/// whole [`MediaFile`] per added file, which on a large library is most of the
+/// index built and dropped for a log line, and worse on real music where
+/// `extra_tags` is populated.
+///
+/// [`MediaFile`]: crate::database::MediaFile
 #[derive(Debug, Clone)]
 pub struct ScanResult {
-    /// Files that were newly added to the database
-    pub new_files: Vec<MediaFile>,
+    /// How many files were newly added to the database.
+    pub new: usize,
 
-    /// Files that were updated in the database
-    pub updated_files: Vec<MediaFile>,
+    /// How many files were updated in the database.
+    pub updated: usize,
 
-    /// Files that were removed from the database
-    pub removed_files: Vec<FileFingerprint>,
+    /// How many files were removed from the database.
+    pub removed: usize,
 
-    /// Files that were unchanged
-    pub unchanged_files: Vec<FileFingerprint>,
+    /// How many files were found to be unchanged.
+    pub unchanged: usize,
 
     /// Total number of files scanned from the file system
     pub total_scanned: usize,
+
+    /// How many files this scan actually opened and read.
+    ///
+    /// Distinct from `total_scanned`, which counts everything the walk saw. A
+    /// scan of a library that has not changed should read nothing: each file
+    /// costs one `stat`, and the difference between the two numbers is the work
+    /// avoided.
+    pub files_read: usize,
 
     /// Errors encountered during scanning
     pub errors: Vec<ScanError>,
@@ -25,54 +42,59 @@ pub struct ScanResult {
     pub complete: bool,
 }
 
+impl Default for ScanResult {
+    /// Not derived: every count starts at zero, but `complete` starts *true* and
+    /// is cleared by anything that could not be enumerated. Deriving would start
+    /// it false and quietly mark every scan incomplete.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScanResult {
-    /// Create a new empty scan result with pre-allocated capacity
+    /// Create a new empty scan result
     pub fn new() -> Self {
         Self {
-            new_files: Vec::with_capacity(100),
-            updated_files: Vec::with_capacity(50),
-            removed_files: Vec::with_capacity(50),
-            unchanged_files: Vec::with_capacity(1000),
+            new: 0,
+            updated: 0,
+            removed: 0,
+            unchanged: 0,
             total_scanned: 0,
-            errors: Vec::with_capacity(10),
+            files_read: 0,
+            errors: Vec::new(),
             complete: true,
         }
     }
 
     /// Merge another scan result into this one
     pub fn merge(&mut self, other: ScanResult) {
-        self.new_files.extend(other.new_files);
-        self.updated_files.extend(other.updated_files);
-        self.removed_files.extend(other.removed_files);
-        self.unchanged_files.extend(other.unchanged_files);
+        self.new += other.new;
+        self.updated += other.updated;
+        self.removed += other.removed;
+        self.unchanged += other.unchanged;
         self.total_scanned += other.total_scanned;
+        self.files_read += other.files_read;
         self.errors.extend(other.errors);
         self.complete &= other.complete;
     }
 
     /// Get the total number of changes (new + updated + removed)
     pub fn total_changes(&self) -> usize {
-        self.new_files.len() + self.updated_files.len() + self.removed_files.len()
+        self.new + self.updated + self.removed
     }
-
 
     /// Get a summary string of the scan results
     pub fn summary(&self) -> String {
         format!(
-            "Scanned {} files: {} new, {} updated, {} removed, {} unchanged, {} errors",
+            "Scanned {} files ({} read): {} new, {} updated, {} removed, {} unchanged, {} errors",
             self.total_scanned,
-            self.new_files.len(),
-            self.updated_files.len(),
-            self.removed_files.len(),
-            self.unchanged_files.len(),
+            self.files_read,
+            self.new,
+            self.updated,
+            self.removed,
+            self.unchanged,
             self.errors.len()
         )
-    }
-}
-
-impl Default for ScanResult {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

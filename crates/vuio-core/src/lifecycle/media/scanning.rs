@@ -12,7 +12,7 @@ fn canonical_root(path: &Path) -> PathBuf {
         .unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The configured library a stored path belongs to, or `None` if it belongs to none.
+/// Which configured library a stored path belongs to, or `None` if it belongs to none.
 ///
 /// Matched against the root both as the config writes it and in the form the index
 /// stores paths in, because those routinely differ: a library reached through a symlink
@@ -21,11 +21,13 @@ fn canonical_root(path: &Path) -> PathBuf {
 /// every file in such a library as belonging to no library at all — and for a deletion
 /// pass, that means discarding the entire library's index. Matching either form can only
 /// keep files, never remove more.
-fn owning_root(path: &Path, raw: &[PathBuf], canonical: &[PathBuf]) -> Option<PathBuf> {
+///
+/// Returns the root's *index* rather than the root itself, so a caller can look up
+/// whatever it has already worked out per root instead of re-deriving it per file.
+fn owning_root_index(path: &Path, raw: &[PathBuf], canonical: &[PathBuf]) -> Option<usize> {
     raw.iter()
-        .chain(canonical.iter())
-        .find(|root| path.starts_with(root))
-        .cloned()
+        .position(|root| path.starts_with(root))
+        .or_else(|| canonical.iter().position(|root| path.starts_with(root)))
 }
 
 /// Validate cached files and remove the ones that no longer belong in the index:
@@ -81,15 +83,41 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
         .map(|root| canonical_root(root))
         .collect::<Vec<_>>();
 
-    {
-        for media_file in database.load_file_fingerprints().await? {
+    // Whether each root is currently mounted, asked once. This used to be a
+    // `stat` of the same handful of directories once per indexed file, so a
+    // library of a million files made a million syscalls to answer a question
+    // with one answer per root.
+    let root_is_present = monitored_roots
+        .iter()
+        .map(|root| root.is_dir())
+        .collect::<Vec<_>>();
+
+    // Walk the index a page at a time. Every row has to be considered — a record
+    // under no configured root at all is exactly what this prunes — but holding
+    // the whole table to do it made the check cost as much memory as the library.
+    const CLEANUP_PAGE: usize = 4096;
+    let mut after_id = 0_i64;
+    loop {
+        let page = database
+            .load_file_fingerprints_after(after_id, CLEANUP_PAGE)
+            .await?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after_id = last.id;
+
+        // Sort the page without touching the disk first, so the syscalls that do
+        // have to happen are the only ones that happen.
+        let mut to_probe: Vec<PathBuf> = Vec::new();
+        for media_file in page {
             total_checked += 1;
 
-            let Some(configured_root) = owning_root(&media_file.path, monitored_roots, &canonical_roots)
+            let Some(root_index) =
+                owning_root_index(&media_file.path, monitored_roots, &canonical_roots)
             else {
                 if prune_orphans {
                     orphaned_count += 1;
-                    paths_to_delete.push(media_file.path.clone());
+                    paths_to_delete.push(media_file.path);
                 }
                 continue;
             };
@@ -97,20 +125,28 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
             // A configured library that is offline keeps its content: the files are
             // unreachable rather than gone. That grace only applies to a library the
             // configuration still lists, which is why it is checked after the above.
-            let unavailable_root = !configured_root.is_dir()
+            let unavailable_root = !root_is_present[root_index]
                 || unavailable_roots
                     .iter()
                     .any(|root| media_file.path.starts_with(root));
-            if !unavailable_root && !media_file.path.exists() {
-                paths_to_delete.push(media_file.path.clone());
-            }
-
-            // Log progress every 1000 files
-            if total_checked % 1000 == 0 {
-                info!("Validated {} files so far...", total_checked);
+            if !unavailable_root {
+                to_probe.push(media_file.path);
             }
         }
-    } // Stream dropped here, read lock released
+
+        // `exists()` blocks. One hop to the blocking pool per page beats one per
+        // file on an async worker, which is what a library-sized index used to do.
+        if !to_probe.is_empty() {
+            let missing = tokio::task::spawn_blocking(move || {
+                to_probe.retain(|path| !path.exists());
+                to_probe
+            })
+            .await?;
+            paths_to_delete.extend(missing);
+        }
+
+        debug!("Validated {} files so far...", total_checked);
+    }
 
     if orphaned_count > 0 {
         info!(
@@ -607,6 +643,61 @@ mod tests {
         assert_eq!(indexed_paths(&database).await, vec![canonical_root(&present)]);
     }
 
+    /// The cleanup reads the index a page at a time rather than holding all of it, so
+    /// an index larger than one page is the case where a paging mistake shows: rows
+    /// past the first page silently never get checked, and deleted files stay indexed
+    /// forever. Sized past `CLEANUP_PAGE` deliberately.
+    #[tokio::test]
+    async fn every_page_of_a_large_index_is_checked() {
+        let root = tempfile::TempDir::new().expect("root");
+
+        // A handful that exist, and several pages' worth that do not.
+        let mut survivors = Vec::new();
+        for index in 0..3 {
+            let path = root.path().join(format!("present_{index}.mp4"));
+            std::fs::write(&path, b"x").expect("write");
+            survivors.push(canonical_root(&path));
+        }
+        survivors.sort();
+
+        let missing = 5_000;
+        let mut rows: Vec<MediaFile> = Vec::with_capacity(survivors.len() + missing);
+        for index in 0..3 {
+            rows.push(MediaFile::new(
+                root.path().join(format!("present_{index}.mp4")),
+                1024,
+                "video/mp4".to_string(),
+            ));
+        }
+        for index in 0..missing {
+            rows.push(MediaFile::new(
+                root.path().join(format!("gone_{index}.mp4")),
+                1024,
+                "video/mp4".to_string(),
+            ));
+        }
+
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let database = Arc::new(
+            SqliteDatabase::new(temp.path().join("paged.db"))
+                .await
+                .expect("database"),
+        );
+        database.initialize().await.expect("schema");
+        database.bulk_store_media_files(&rows).await.expect("store");
+
+        let removed =
+            validate_and_cleanup_deleted_files(database.clone(), &[root.path().to_path_buf()], true)
+                .await
+                .expect("cleanup");
+
+        assert_eq!(
+            removed, missing,
+            "a row on the second page and beyond must still be checked"
+        );
+        assert_eq!(indexed_paths(&database).await, survivors);
+    }
+
     /// Nothing configured means nothing to compare against. Treating every file as an
     /// orphan would discard the whole index over what is almost certainly a misload.
     #[tokio::test]
@@ -642,23 +733,23 @@ mod tests {
 
         // Stored under the canonical form: matched via the canonical root.
         assert_eq!(
-            owning_root(&canonical.join("a.mkv"), &raw, &canonicalised),
-            Some(canonical.clone())
+            owning_root_index(&canonical.join("a.mkv"), &raw, &canonicalised),
+            Some(0)
         );
         // Stored under the written form, as an older index would be: still matched.
         assert_eq!(
-            owning_root(&written.join("a.mkv"), &raw, &canonicalised),
-            Some(written)
+            owning_root_index(&written.join("a.mkv"), &raw, &canonicalised),
+            Some(0)
         );
         // A file under neither is an orphan, which is the only case that deletes.
         assert_eq!(
-            owning_root(Path::new("/elsewhere/a.mkv"), &raw, &canonicalised),
+            owning_root_index(Path::new("/elsewhere/a.mkv"), &raw, &canonicalised),
             None
         );
         // Prefix matching is by component, so a sibling with a shared prefix is not a
         // child: /media/films-old must not be swept up by the /media/films root.
         assert_eq!(
-            owning_root(Path::new("/private/media/films-old/a.mkv"), &raw, &canonicalised),
+            owning_root_index(Path::new("/private/media/films-old/a.mkv"), &raw, &canonicalised),
             None
         );
     }

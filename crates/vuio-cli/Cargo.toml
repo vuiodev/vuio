@@ -19,10 +19,6 @@ name = "vuio"
 path = "src/main.rs"
 
 [[bin]]
-name = "benchmark_media"
-path = "src/bin/benchmark_media.rs"
-
-[[bin]]
 name = "generate_test_media"
 path = "src/bin/generate_test_media.rs"
 required-features = ["testdata"]
@@ -38,7 +34,6 @@ testdata = ["dep:audiotags"]
 anyhow = "1.0"
 audiotags = { version = "0.5", optional = true }
 clap = { version = "4.6", features = ["derive"] }
-rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
 serde = { version = "1.0", features = ["derive"] }
@@ -46,5 +41,5 @@ serde_json = "1.0"
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "signal", "io-std", "io-util"] }
 tracing = "0.1"
 uuid = { version = "1.24", features = ["v4"] }
-vuio-core = { path = "../vuio-core", version = "0.0.44", features = ["unstable-internals"] }
+vuio-core = { path = "../vuio-core", version = "0.0.44" }
 

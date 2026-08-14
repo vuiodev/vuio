@@ -61,6 +61,9 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
 
         let mut reconciliation = tokio::time::interval(std::time::Duration::from_secs(300));
         reconciliation.tick().await;
+        // The initial scan has just walked everything, so the first periodic
+        // sweep is due one interval from now rather than immediately.
+        let mut last_full_sweep = tokio::time::Instant::now();
         loop {
             tokio::select! {
                 _ = cancellation.cancelled() => {
@@ -142,15 +145,33 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                         );
                     }
 
-                    // Watchers are advisory: some network filesystems and backend
-                    // overflows can lose every event for a download. Sweep every
-                    // configured root so any supported file is eventually found
-                    // even when no Create/Rename/Modify event reaches the app.
+                    // Watchers are advisory: a network filesystem or an overflowing
+                    // backend queue can lose every event for a download. But the
+                    // watcher says which roots that happened to, so sweeping all of
+                    // them every five minutes re-walks the entire library 288 times
+                    // a day to find, almost always, nothing. Sweep what is known to
+                    // be stale, and everything only on the much slower cadence
+                    // `media.full_rescan_interval_hours` sets.
+                    let full_rescan_interval = app_state_clone
+                        .current_config()
+                        .media
+                        .full_rescan_interval_hours;
+                    let full_sweep_due = full_rescan_interval > 0
+                        && last_full_sweep.elapsed()
+                            >= std::time::Duration::from_secs(full_rescan_interval * 3600);
+                    if full_sweep_due {
+                        last_full_sweep = tokio::time::Instant::now();
+                        info!("Sweeping every library root (full rescan interval reached)");
+                    }
+
                     let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
                     for root in &configured_roots {
                         let path = PathBuf::from(&root.path);
                         let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
                         if !path.is_dir() {
+                            continue;
+                        }
+                        if !full_sweep_due && !dirty_roots.iter().any(|dirty| dirty == &path) {
                             continue;
                         }
                         let result = if root.recursive {
@@ -183,20 +204,30 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                     if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
                         error!("Failed to refresh unavailable-root visibility: {}", error);
                     }
-                    // Gated, and read live so the setting can be changed without a restart.
-                    // Ungated, `cleanup_deleted_files = false` did not prevent deletions at
-                    // all — the startup scan honoured it and this tick then removed the same
-                    // files up to five minutes later.
-                    match validate_and_cleanup_deleted_files(
-                        app_state_clone.database.clone(),
-                        &configured_directories,
-                        app_state_clone.current_config().media.cleanup_deleted_files,
-                    )
-                    .await
-                    {
-                        Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
-                        Ok(_) => {}
-                        Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
+                    // Only alongside a sweep. This walks the whole index and asks
+                    // the filesystem about every path in it, which on a large
+                    // library is the most expensive thing the tick can do — and
+                    // a deletion inside a watched root already arrives as an
+                    // event and is handled per-path. Like the sweep above, this
+                    // is the backstop for what the watcher missed, so it runs on
+                    // the backstop's cadence rather than every five minutes.
+                    //
+                    // Gated on the setting, and read live so it can be changed
+                    // without a restart. Ungated, `cleanup_deleted_files = false`
+                    // did not prevent deletions at all — the startup scan honoured
+                    // it and this tick then removed the same files five minutes later.
+                    if full_sweep_due || !dirty_roots.is_empty() {
+                        match validate_and_cleanup_deleted_files(
+                            app_state_clone.database.clone(),
+                            &configured_directories,
+                            app_state_clone.current_config().media.cleanup_deleted_files,
+                        )
+                        .await
+                        {
+                            Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
+                            Ok(_) => {}
+                            Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
+                        }
                     }
                 }
             }

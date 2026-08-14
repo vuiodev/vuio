@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use notify::{Config, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::AppResult as Result;
 use crate::media::ScanPolicy;
+
+mod file_ids;
+pub use file_ids::BoundedFileIdCache;
 
 /// Events that can occur in the file system for media files
 #[derive(Debug, Clone)]
@@ -73,7 +76,7 @@ pub trait FileSystemWatcher: Send + Sync {
 
 /// Cross-platform file system watcher implementation
 pub struct CrossPlatformWatcher {
-    debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, FileIdMap>>>>,
+    debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, BoundedFileIdCache>>>>,
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
     watched_paths: Arc<std::sync::Mutex<HashMap<PathBuf, WatchRegistration>>>,
@@ -203,6 +206,11 @@ impl CrossPlatformWatcher {
         is_media_file(path)
     }
 
+    /// Roots that have lost watcher events since the last call, as configured.
+    ///
+    /// Returned in the form the configuration uses rather than the normalized
+    /// key the watch is registered under, because the caller's next move is to
+    /// match these against `media.directories`.
     pub fn take_dirty_roots(&self) -> Vec<PathBuf> {
         let mut roots = self.dirty_roots.lock().unwrap_or_else(|e| e.into_inner());
         roots.drain().collect()
@@ -459,10 +467,15 @@ impl CrossPlatformWatcher {
                                         watched_paths.lock().unwrap_or_else(|p| p.into_inner());
                                     let mut dirty =
                                         dirty_roots.lock().unwrap_or_else(|p| p.into_inner());
-                                    if let Some(root) =
-                                        watched.keys().find(|root| failed_path.starts_with(root))
+                                    // Matched on the normalized key, but recorded
+                                    // as the configured path: the caller compares
+                                    // this against the roots in the config.
+                                    if let Some(registration) = watched
+                                        .iter()
+                                        .find(|(root, _)| failed_path.starts_with(root))
+                                        .map(|(_, registration)| registration)
                                     {
-                                        dirty.insert(root.clone());
+                                        dirty.insert(registration.path.clone());
                                     }
                                 }
                             }
@@ -476,11 +489,11 @@ impl CrossPlatformWatcher {
                         dirty_roots
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .extend(watched.keys().cloned());
+                            .extend(watched.values().map(|registration| registration.path.clone()));
                     }
                 }
             },
-            FileIdMap::new(),
+            BoundedFileIdCache::new(),
             Config::default(),
         )?;
 
