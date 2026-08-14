@@ -8,17 +8,6 @@ pub struct MediaScanner<D: DatabaseManager = ActiveDatabase> {
 }
 
 impl<D: DatabaseManager> MediaScanner<D> {
-    fn fingerprint(file: &MediaFile) -> FileFingerprint {
-        FileFingerprint {
-            id: file.id.unwrap_or_default(),
-            path: file.path.clone(),
-            size: file.size,
-            modified: file.modified,
-            created_at: file.created_at,
-            tags_version: file.tags_version,
-        }
-    }
-
     /// Create a new media scanner with database manager
     pub fn with_database(database_manager: Arc<D>) -> Self {
         Self {
@@ -152,7 +141,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             if !current_paths.contains(&normalized_existing_path) {
                 // File was removed from file system, add to bulk removal list
                 files_to_remove.push(existing_file.path.clone());
-                result.removed_files.push(Self::fingerprint(&existing_file));
+                result.removed += 1;
             }
         }
 
@@ -172,18 +161,10 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     file.size
                 );
             }
-            let insert_ids = self
-                .database_manager
+            self.database_manager
                 .bulk_store_canonical_media_files(&files_to_insert)
                 .await?;
-
-            // Update result with inserted files and their IDs
-            for (i, mut file) in files_to_insert.into_iter().enumerate() {
-                if let Some(id) = insert_ids.get(i) {
-                    file.id = Some(*id);
-                }
-                result.new_files.push(file);
-            }
+            result.new += files_to_insert.len();
         }
 
         // Bulk update changed files
@@ -195,7 +176,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             self.database_manager
                 .bulk_update_canonical_media_files(&files_to_update)
                 .await?;
-            result.updated_files.extend(files_to_update);
+            result.updated += files_to_update.len();
         }
 
         // Bulk remove deleted files
@@ -220,9 +201,9 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // Log bulk operation summary
         tracing::info!(
             "bulk operations completed: {} inserted, {} updated, {} removed, {} unchanged",
-            result.new_files.len(),
-            result.updated_files.len(),
-            result.removed_files.len(),
+            result.new,
+            result.updated,
+            result.removed,
             result.unchanged
         );
 
@@ -528,16 +509,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     processed,
                     total_files
                 );
-                let ids = self
-                    .database_manager
+                self.database_manager
                     .bulk_store_canonical_media_files(&files_to_insert)
                     .await?;
-                for (i, mut file) in files_to_insert.drain(..).enumerate() {
-                    if let Some(id) = ids.get(i) {
-                        file.id = Some(*id);
-                    }
-                    result.new_files.push(file);
-                }
+                result.new += files_to_insert.len();
+                files_to_insert.clear();
             }
 
             if files_to_update.len() >= BATCH_SIZE {
@@ -550,7 +526,8 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 self.database_manager
                     .bulk_update_canonical_media_files(&files_to_update)
                     .await?;
-                result.updated_files.append(&mut files_to_update);
+                result.updated += files_to_update.len();
+                files_to_update.clear();
             }
 
             // Progress logging every 1000 files
@@ -562,16 +539,10 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // Process remaining files in last batch
         if !files_to_insert.is_empty() {
             info!("Inserting final batch of {} files", files_to_insert.len());
-            let ids = self
-                .database_manager
+            self.database_manager
                 .bulk_store_canonical_media_files(&files_to_insert)
                 .await?;
-            for (i, mut file) in files_to_insert.into_iter().enumerate() {
-                if let Some(id) = ids.get(i) {
-                    file.id = Some(*id);
-                }
-                result.new_files.push(file);
-            }
+            result.new += files_to_insert.len();
         }
 
         if !files_to_update.is_empty() {
@@ -579,7 +550,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             self.database_manager
                 .bulk_update_canonical_media_files(&files_to_update)
                 .await?;
-            result.updated_files.extend(files_to_update);
+            result.updated += files_to_update.len();
         }
 
         // Find and remove deleted files
@@ -606,21 +577,16 @@ impl<D: DatabaseManager> MediaScanner<D> {
             self.database_manager
                 .bulk_remove_media_files(&files_to_remove)
                 .await?;
-            let removed_paths = files_to_remove.iter().collect::<HashSet<_>>();
-            for (path, file) in existing_files_map.iter() {
-                if removed_paths.contains(path) {
-                    result.removed_files.push(file.clone());
-                }
-            }
+            result.removed += files_to_remove.len();
         }
 
         result.total_scanned = total_files;
 
         info!(
             "Scan completed: {} new, {} updated, {} removed, {} unchanged, {} files read",
-            result.new_files.len(),
-            result.updated_files.len(),
-            result.removed_files.len(),
+            result.new,
+            result.updated,
+            result.removed,
             result.unchanged,
             result.files_read
         );

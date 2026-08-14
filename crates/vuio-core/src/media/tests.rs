@@ -72,20 +72,20 @@ async fn test_media_scanner_path_normalization() {
     let result = scanner.scan_directory(&temp_path).await.unwrap();
 
     // Verify that files were found and processed
-    assert_eq!(result.new_files.len(), 1);
-    let scanned_file = &result.new_files[0];
+    assert_eq!(result.new, 1);
 
-    // Verify that the path was normalized (should be canonical format)
+    // Verify that the path was normalized (should be canonical format). The scan
+    // reports counts, so the record itself is read back from the database — which
+    // is where the normalization has to have landed for it to matter.
     let expected_canonical = scanner
         .filesystem_manager()
         .get_canonical_path(&test_file_path)
         .unwrap();
-    assert_eq!(scanned_file.path.to_string_lossy(), expected_canonical);
-
-    // Verify the file was stored in the database with canonical path
-    let stored_file = db.get_file_by_path(&scanned_file.path).await.unwrap();
-    assert!(stored_file.is_some());
-    let stored_file = stored_file.unwrap();
+    let stored_file = db
+        .get_file_by_path(Path::new(&expected_canonical))
+        .await
+        .unwrap()
+        .expect("the scanned file must be stored under its canonical path");
     assert_eq!(stored_file.path.to_string_lossy(), expected_canonical);
 
     // temp_dir dropped here, auto-cleanup
@@ -95,67 +95,37 @@ async fn test_media_scanner_path_normalization() {
 async fn test_scan_result_operations() {
     let mut result1 = ScanResult::new();
     result1.total_scanned = 5;
-    result1.new_files.push(MediaFile {
-        id: Some(1),
-        path: PathBuf::from("/test1.mp4"),
-        filename: "test1.mp4".to_string(),
-        size: 1024,
-        modified: SystemTime::now(),
-        mime_type: "video/mp4".to_string(),
-        duration: None,
-        title: None,
-        artist: None,
-        album: None,
-        genre: None,
-        track_number: None,
-        year: None,
-        album_artist: None,
-        tags: Default::default(),
-        stream: Default::default(),
-        extra_tags: Vec::new(),
-        tags_version: 0,
-        subtitle_available: false,
-        created_at: SystemTime::now(),
-        updated_at: SystemTime::now(),
-    });
+    result1.new = 1;
+    result1.files_read = 1;
 
     let mut result2 = ScanResult::new();
     result2.total_scanned = 3;
-    result2.updated_files.push(MediaFile {
-        id: Some(2),
-        path: PathBuf::from("/test2.mp4"),
-        filename: "test2.mp4".to_string(),
-        size: 2048,
-        modified: SystemTime::now(),
-        mime_type: "video/mp4".to_string(),
-        duration: None,
-        title: None,
-        artist: None,
-        album: None,
-        genre: None,
-        track_number: None,
-        year: None,
-        album_artist: None,
-        tags: Default::default(),
-        stream: Default::default(),
-        extra_tags: Vec::new(),
-        tags_version: 0,
-        subtitle_available: false,
-        created_at: SystemTime::now(),
-        updated_at: SystemTime::now(),
-    });
+    result2.updated = 1;
+    result2.removed = 2;
+    result2.unchanged = 2;
+    result2.files_read = 1;
+    result2.complete = false;
 
     // Test merge
     result1.merge(result2);
     assert_eq!(result1.total_scanned, 8);
-    assert_eq!(result1.new_files.len(), 1);
-    assert_eq!(result1.updated_files.len(), 1);
+    assert_eq!(result1.new, 1);
+    assert_eq!(result1.updated, 1);
+    assert_eq!(result1.removed, 2);
+    assert_eq!(result1.unchanged, 2);
+    assert_eq!(result1.files_read, 2);
+    assert_eq!(result1.total_changes(), 4);
+    assert!(
+        !result1.complete,
+        "one incomplete half must make the whole incomplete"
+    );
 
     // Test summary
     let summary = result1.summary();
     assert!(summary.contains("8 files"));
     assert!(summary.contains("1 new"));
     assert!(summary.contains("1 updated"));
+    assert!(summary.contains("2 removed"));
 }
 
 #[tokio::test]
@@ -196,7 +166,7 @@ async fn test_recursive_scan_optimization() {
 
     // First scan to populate database
     let initial_result = scanner.scan_directory_recursive(&root_dir).await.unwrap();
-    assert_eq!(initial_result.new_files.len(), 4);
+    assert_eq!(initial_result.new, 4);
     assert_eq!(initial_result.total_changes(), 4);
 
     // Verify all files were stored in database
@@ -209,8 +179,8 @@ async fn test_recursive_scan_optimization() {
 
     // Second scan should find no changes (tests that optimization works correctly)
     let second_result = scanner.scan_directory_recursive(&root_dir).await.unwrap();
-    assert_eq!(second_result.new_files.len(), 0);
-    assert_eq!(second_result.updated_files.len(), 0);
+    assert_eq!(second_result.new, 0);
+    assert_eq!(second_result.updated, 0);
     assert_eq!(second_result.unchanged, 4);
     assert_eq!(second_result.total_changes(), 0);
     // The point of the second scan: it still visited all four files, and opened
@@ -248,13 +218,23 @@ async fn direct_scan_resolves_only_symlinked_media_entries() {
             .unwrap(),
     );
     database.initialize().await.unwrap();
-    let scanner =
-        MediaScanner::with_filesystem_manager(Box::new(BaseFileSystemManager::new(true)), database);
+    let scanner = MediaScanner::with_filesystem_manager(
+        Box::new(BaseFileSystemManager::new(true)),
+        database.clone(),
+    );
 
     let result = scanner.scan_directory(&media_root).await.unwrap();
-    assert_eq!(result.new_files.len(), 1);
-    assert_eq!(result.new_files[0].filename, "visible-name.mp4");
-    assert_eq!(result.new_files[0].path, target.canonicalize().unwrap());
+    assert_eq!(result.new, 1);
+
+    // Indexed under the link's target, but named for the link the user sees.
+    let resolved = target.canonicalize().unwrap();
+    let stored = database
+        .get_file_by_path(&resolved)
+        .await
+        .unwrap()
+        .expect("the symlinked entry must be indexed under its resolved target");
+    assert_eq!(stored.filename, "visible-name.mp4");
+    assert_eq!(stored.path, resolved);
 }
 #[test]
 fn case_policy_compares_path_components_without_changing_boundaries() {

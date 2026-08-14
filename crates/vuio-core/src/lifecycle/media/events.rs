@@ -196,13 +196,13 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
 
                         // Record atomic statistics
                         stats.record_directory_scanned();
-                        stats.record_files_processed(scan_result.new_files.len() as u64);
+                        stats.record_files_processed(scan_result.new as u64);
 
                         info!("Added {} media files from new directory using bulk operations: {}",
-                              scan_result.new_files.len(), path.display());
+                              scan_result.new, path.display());
 
                         // Increment update ID to notify DLNA clients
-                        if !scan_result.new_files.is_empty() {
+                        if scan_result.new > 0 {
                             increment_content_update_id(app_state).await;
                         }
                     }
