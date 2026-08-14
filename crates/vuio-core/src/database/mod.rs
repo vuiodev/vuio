@@ -1129,7 +1129,7 @@ pub trait DatabaseBackend: DatabaseManager + Sized + 'static {
     async fn restore_backup_file(backup: &Path, destination: &Path) -> Result<()>;
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct DatabaseStats {
     pub total_files: usize,
     pub total_size: u64,

@@ -90,7 +90,15 @@ impl DirectoryDelta {
             }
         }
 
-        prune(transaction)?;
+        // Only when something was taken away. Neither prune statement is
+        // index-served — one scans the counters, the other scans `directories`
+        // with a probe per row — and they run once per transaction, which during
+        // a scan means once per thousand files. An insert-only scan cannot drive
+        // any count to zero, so on a large library that was millions of row
+        // visits looking for deletions that could not have happened.
+        if self.counts.values().any(|delta| *delta < 0) {
+            prune(transaction)?;
+        }
         Ok(())
     }
 }

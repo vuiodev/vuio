@@ -130,6 +130,17 @@ pub struct SqliteDatabase {
     /// Held for the duration of a write so writers queue in async code rather
     /// than piling up as blocked threads inside the blocking pool.
     mutation_lock: tokio::sync::Mutex<()>,
+    /// Bumped by every write. Read-side caches compare against it to know
+    /// whether what they hold can still be true.
+    write_generation: std::sync::atomic::AtomicU64,
+    /// Library totals, and the generation they were computed at.
+    ///
+    /// `get_stats` aggregates the whole of `media_files` — it needs both `size`
+    /// and `mime_family`, which no index covers together — and it is asked for
+    /// by `/metrics`, `/metrics/json`, `/readyz` and the dashboard's five-second
+    /// poll. On a large library that is a multi-gigabyte scan several times a
+    /// minute to produce an answer that only changes when something is written.
+    stats_cache: Mutex<Option<(u64, DatabaseStats)>>,
 }
 
 impl std::fmt::Debug for SqliteDatabase {
@@ -210,6 +221,8 @@ impl SqliteDatabase {
             )),
             db_path: path,
             mutation_lock: tokio::sync::Mutex::new(()),
+            write_generation: std::sync::atomic::AtomicU64::new(0),
+            stats_cache: Mutex::new(None),
         })
     }
 
@@ -244,6 +257,11 @@ impl SqliteDatabase {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let _guard = self.mutation_lock.lock().await;
+        // Before the write, not after: a reader that samples the generation
+        // mid-write must not be able to cache a result taken from the old state
+        // under the new number.
+        self.write_generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let write = Arc::clone(&self.write);
         tokio::task::spawn_blocking(move || {
             let mut connection = write
