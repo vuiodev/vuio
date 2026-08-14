@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use notify::{Config, RecommendedWatcher, RecursiveMode};
 use notify_debouncer_full::{
-    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer, FileIdMap,
+    new_debouncer_opt, DebounceEventResult, DebouncedEvent, Debouncer,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -12,6 +12,9 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::AppResult as Result;
 use crate::media::ScanPolicy;
+
+mod file_ids;
+pub use file_ids::BoundedFileIdCache;
 
 /// Events that can occur in the file system for media files
 #[derive(Debug, Clone)]
@@ -73,7 +76,7 @@ pub trait FileSystemWatcher: Send + Sync {
 
 /// Cross-platform file system watcher implementation
 pub struct CrossPlatformWatcher {
-    debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, FileIdMap>>>>,
+    debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, BoundedFileIdCache>>>>,
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
     watched_paths: Arc<std::sync::Mutex<HashMap<PathBuf, WatchRegistration>>>,
@@ -490,7 +493,7 @@ impl CrossPlatformWatcher {
                     }
                 }
             },
-            FileIdMap::new(),
+            BoundedFileIdCache::new(),
             Config::default(),
         )?;
 
