@@ -1,0 +1,11 @@
+How VuIO Autodetects TVs (via User-Agent & Client Profiles)
+VuIO inspects the client's UPnP headers and User-Agent:
+
+Samsung Tizen TV: SEC_HHP_[TV] Samsung ...
+LG webOS TV: LGE_DLNA_SDK ... or LG Player / webOS
+Sony Bravia: X-AV-Client-Info: ... BRAVIA ...
+We can make client profile handling automatic in rendering.rs:
+
+For Sony / PC / VLC: Keep the original MKV 1st (direct lossless DTS passthrough without using server CPU).
+For Samsung & LG webOS (known no-DTS): Automatically promote the transcoded MP4 to 1st only when the media file contains DTS.
+Would you like VuIO to automatically promote the transcoded stream to 1st for LG and Samsung client profiles while keeping the original file 1st for Sony and standard DLNA clients?
