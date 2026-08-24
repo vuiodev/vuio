@@ -790,7 +790,7 @@ jobs:
 
   update_homebrew_formula:
     name: Update Homebrew Formula
-    needs: create_github_release
+    needs: [build_release_artifacts, create_github_release]
     if: |
       (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')) ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'release')
@@ -805,6 +805,11 @@ jobs:
             echo "TAG=${{ github.ref_name }}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Download all release artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
       - name: Checkout Homebrew Tap Repo
         uses: actions/checkout@v6
         with:
@@ -817,15 +822,24 @@ jobs:
           TAG_NAME="${{ steps.get_tag.outputs.TAG }}"
           VERSION=${TAG_NAME#v}
           
-          echo "Fetching checksums for release $TAG_NAME..."
+          echo "Calculating checksums for release $TAG_NAME..."
           
-          # Helper function to download and get SHA256 of an asset
+          # Helper function to find downloaded artifact and get SHA256
           get_sha256() {
             local asset_name=$1
-            local url="https://github.com/${{ github.repository }}/releases/download/${TAG_NAME}/${asset_name}"
-            curl -sSL -o temp_asset "$url"
-            sha256sum temp_asset | cut -d' ' -f1
-            rm temp_asset
+            local file_path
+            file_path=$(find release-artifacts -name "$asset_name" -type f | head -n 1)
+            if [ -z "$file_path" ] || [ ! -f "$file_path" ]; then
+              echo "Error: Release asset $asset_name not found in downloaded artifacts!" >&2
+              exit 1
+            fi
+            local sha
+            sha=$(sha256sum "$file_path" | cut -d' ' -f1)
+            if [ ${#sha} -ne 64 ] || [[ ! "$sha" =~ ^[0-9a-f]{64}$ ]] || [ "$sha" = "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5" ]; then
+              echo "Error: Invalid sha256 ($sha) for $asset_name!" >&2
+              exit 1
+            fi
+            echo "$sha"
           }
           
           MAC_ARM_SHA=$(get_sha256 "vuio-macos-arm64.tar.gz")
@@ -833,6 +847,12 @@ jobs:
           LINUX_ARM64_SHA=$(get_sha256 "vuio-linux-arm64.tar.gz")
           LINUX_ARMV7_SHA=$(get_sha256 "vuio-linux-armv7.tar.gz")
           LINUX_INTEL_SHA=$(get_sha256 "vuio-linux-x86_64.tar.gz")
+          
+          echo "MAC_ARM_SHA: $MAC_ARM_SHA"
+          echo "MAC_INTEL_SHA: $MAC_INTEL_SHA"
+          echo "LINUX_ARM64_SHA: $LINUX_ARM64_SHA"
+          echo "LINUX_ARMV7_SHA: $LINUX_ARMV7_SHA"
+          echo "LINUX_INTEL_SHA: $LINUX_INTEL_SHA"
           
           echo "Updating Formula/vuio.rb..."
           FORMULA_FILE="homebrew-vuio/Formula/vuio.rb"
@@ -845,7 +865,7 @@ jobs:
           
           # Use python to safely update the checksum strings in Formula/vuio.rb
           python3 -c "
-          import re
+          import re, sys
           
           mac_arm = '$MAC_ARM_SHA'
           mac_intel = '$MAC_INTEL_SHA'
@@ -856,37 +876,20 @@ jobs:
           with open('$FORMULA_FILE', 'r') as f:
               content = f.read()
               
-          # We search for the specific blocks and replace their SHA256
-          # 1. Mac ARM:
-          content = re.sub(
-              r'(vuio-macos-arm64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>' + mac_arm + r'\g<2>',
-              content
-          )
-          # 2. Mac Intel (x86_64):
-          content = re.sub(
-              r'(vuio-macos-x86_64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>' + mac_intel + r'\g<2>',
-              content
-          )
-          # 3. Linux ARM64:
-          content = re.sub(
-              r'(vuio-linux-arm64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>' + linux_arm64 + r'\g<2>',
-              content
-          )
-          # 4. Linux ARMv7:
-          content = re.sub(
-              r'(vuio-linux-armv7.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>' + linux_armv7 + r'\g<2>',
-              content
-          )
-          # 5. Linux Intel (x86_64):
-          content = re.sub(
-              r'(vuio-linux-x86_64.tar.gz\"\s+sha256\s+\")[^\"]+(\")',
-              r'\g<1>' + linux_intel + r'\g<2>',
-              content
-          )
+          patterns = [
+              (r'(vuio-macos-arm64\.tar\.gz\"\s+sha256\s+\")[^\"]+(\")', mac_arm),
+              (r'(vuio-macos-x86_64\.tar\.gz\"\s+sha256\s+\")[^\"]+(\")', mac_intel),
+              (r'(vuio-linux-arm64\.tar\.gz\"\s+sha256\s+\")[^\"]+(\")', linux_arm64),
+              (r'(vuio-linux-armv7\.tar\.gz\"\s+sha256\s+\")[^\"]+(\")', linux_armv7),
+              (r'(vuio-linux-x86_64\.tar\.gz\"\s+sha256\s+\")[^\"]+(\")', linux_intel),
+          ]
+          
+          for pattern, sha in patterns:
+              new_content, count = re.subn(pattern, r'\g<1>' + sha + r'\g<2>', content)
+              if count != 1:
+                  print(f'Error: Expected 1 match for pattern {pattern}, found {count}', file=sys.stderr)
+                  sys.exit(1)
+              content = new_content
           
           with open('$FORMULA_FILE', 'w') as f:
               f.write(content)
