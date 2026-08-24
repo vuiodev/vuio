@@ -138,6 +138,40 @@ session_ttl_hours = 12     # Browser authentication session lifetime
 allowed_networks = []      # Allowed CIDR blocks (empty restricts to private/loopback)
 ```
 
+### `[transcode]`
+
+Audio for renderers that cannot decode AC-3, Dolby Digital Plus or DTS. Those
+codecs are licensed, and a television sold without the licence plays the picture
+and nothing else.
+
+When this is on, an item whose audio is one of the three is listed **twice** in
+the browse response — the file as stored, and a decoded alternative at
+`/media/{id}/transcode/audio.wav`. Both are offered and the renderer picks the
+one it can play. A renderer that was already fine is unaffected.
+
+```toml
+[transcode]
+enabled = true         # Offer the decoded alternative
+audio_format = "lpcm"  # "lpcm" or "aac"
+prefer = "original"    # Which resource is listed first: "original" or "transcoded"
+max_concurrent = 2     # Simultaneous decodes; further requests are refused, not queued
+```
+
+| Key | Effect |
+| --- | --- |
+| `enabled` | Live. Off leaves the browse response exactly as it was. |
+| `audio_format` | `lpcm` is uncompressed, carries an exact `Content-Length` and supports byte-range seeking, and costs about 1.5 Mbps. `aac` is roughly a tenth of that, at the price of a lossy re-encode, no `Content-Length` and no scrubbing. |
+| `prefer` | Some renderers take the first resource without checking whether they can decode it. The default keeps the original first, which cannot make anything worse. Switch to `transcoded` if a set still plays silently. |
+| `max_concurrent` | Decoding is the only CPU-bound work this server does. Past this ceiling a request gets `503` with `Retry-After` rather than joining a queue that would starve the streams already playing. |
+
+Environment variables: `VUIO_TRANSCODE_ENABLED`, `VUIO_TRANSCODE_AUDIO_FORMAT`,
+`VUIO_TRANSCODE_PREFER`, `VUIO_TRANSCODE_MAX_CONCURRENT`.
+
+The section is read in every build, including one compiled without the decoders,
+so a config file moved between builds is never rejected by the leaner one. A
+build without them simply never advertises the alternative — see the feature
+table in `crates/vuio-core/README.md`.
+
 ---
 
 ## Related Documentation

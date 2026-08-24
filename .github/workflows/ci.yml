@@ -233,11 +233,21 @@ jobs:
         run: cargo check -p vuio-core --no-default-features
       - name: Build each feature alone
         run: |
-          for feature in casting dashboard diagnostics mcp metadata web-ui; do
+          for feature in casting dashboard diagnostics mcp mediainfo metadata web-ui \
+                         transcode transcode-ac3 transcode-dts transcode-aac; do
             echo "::group::$feature"
             cargo check -p vuio-core --no-default-features --features "$feature"
             echo "::endgroup::"
           done
+      # The transcode features are on by default, which makes their *absence*
+      # the path that rots unnoticed. Everything else here proves a feature
+      # builds; this proves the server still builds and behaves without one.
+      - name: Build with the decoders dropped
+        run: |
+          cargo check -p vuio-core --no-default-features \
+            --features casting,dashboard,diagnostics,mcp,mediainfo,metadata,web-ui
+          cargo test -p vuio-core --lib --no-default-features \
+            --features casting,dashboard,diagnostics,mcp,mediainfo,metadata,web-ui,unstable-internals
       - name: Build with everything
         run: cargo check -p vuio-core --all-features
 

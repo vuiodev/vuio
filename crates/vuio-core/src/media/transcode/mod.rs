@@ -23,10 +23,18 @@ mod wav;
 
 #[cfg(feature = "transcode-aac")]
 pub use aac::AacEncoder;
+// These are the vocabulary of this module's public surface — the element type
+// of `FrameIndex::frames`, the result of `AudioPlan::seek`, the header length a
+// caller subtracts from an offset. Nothing inside the crate spells some of them
+// (field access needs no import), which reads as unused in a build where these
+// modules are only `pub(crate)` rather than `pub`.
+#[allow(unused_imports)]
 pub use frames::{FrameIndex, IndexedFrame};
 pub use pcm::PcmDecoder;
+#[allow(unused_imports)]
 pub use plan::{AudioPlan, Seeked};
 pub use session::{IndexKey, TranscodeState};
+#[allow(unused_imports)]
 pub use wav::{wav_header, WAV_HEADER_LEN};
 
 /// An audio codec VuIO can decode but many renderers cannot play.
