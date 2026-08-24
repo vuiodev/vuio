@@ -1,0 +1,9 @@
+# Written by scripts/vendor-oxideav.sh. Do not edit, and do not
+# hand-edit the vendored sources beside it — change them upstream
+# and re-run the script.
+source = "https://github.com/OxideAV/oxideav-aac"
+commit = "719f1f594aef3465ecf2d718685bc27f8e797423"
+describe = "v0.1.6-77-g719f1f5"
+version = "0.1.6"
+vendored_at = "2026-08-24T08:53:00Z"
+patches = []

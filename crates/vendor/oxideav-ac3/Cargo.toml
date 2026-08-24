@@ -1,0 +1,27 @@
+[package]
+name = "oxideav-ac3"
+publish = false
+version = "0.0.10"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-ac3"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust AC-3 (Dolby Digital) audio decoder"
+
+readme = "README.md"
+homepage = "https://github.com/OxideAV/oxideav-ac3"
+keywords = ["multimedia", "audio", "ac3", "dolby", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = { path = "../oxideav-core" }
+
+# Vendored verbatim — see scripts/vendor-oxideav.sh. Upstream does not build
+# under this repository's `-D warnings`, and making it would mean carrying a
+# patch set across every refresh.
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"
