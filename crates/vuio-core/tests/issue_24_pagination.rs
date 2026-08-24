@@ -144,6 +144,8 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
         discovered_tvs: Arc::new(RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
+        #[cfg(feature = "transcode")]
+        transcode: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     };
@@ -249,6 +251,8 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
         discovered_tvs: Arc::new(RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
+        #[cfg(feature = "transcode")]
+        transcode: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     };

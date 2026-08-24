@@ -172,6 +172,8 @@ async fn samsungtv_state_with_video(temp: &tempfile::TempDir) -> AppState {
         discovered_tvs: Arc::new(RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
+        #[cfg(feature = "transcode")]
+        transcode: Arc::new(Default::default()),
         cancellation: tokio_util::sync::CancellationToken::new(),
         background_tasks: tokio_util::task::TaskTracker::new(),
     }

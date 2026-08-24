@@ -415,6 +415,64 @@ const WEB_UI_FIELDS: &[FieldSpec] = &[
     ),
 ];
 
+const TRANSCODE_FIELDS: &[FieldSpec] = &[
+    noted(
+        optional(
+            "transcode.enabled",
+            "Offer decoded audio",
+            FieldKind::Bool,
+            Impact::Live,
+            "For films whose audio is AC-3, Dolby Digital Plus or DTS, list a second, \
+             already-decoded version beside the original so a TV without those licences \
+             can play it with sound.",
+        ),
+        "Both versions are offered and the TV picks. One that can already play the original \
+         is unaffected.",
+    ),
+    noted(
+        optional(
+            "transcode.audio_format",
+            "Decoded audio format",
+            FieldKind::Enum {
+                options: &["lpcm", "aac"],
+                free_form: false,
+            },
+            Impact::Live,
+            "LPCM is uncompressed and seekable but costs about 1.5 Mbps. AAC is roughly a \
+             tenth of that, at the price of a lossy re-encode and no scrubbing.",
+        ),
+        "LPCM is the better choice on a wired or 5 GHz network, which is where most of these \
+         devices sit.",
+    ),
+    noted(
+        optional(
+            "transcode.prefer",
+            "List first",
+            FieldKind::Enum {
+                options: &["original", "transcoded"],
+                free_form: false,
+            },
+            Impact::Live,
+            "Which of the two versions is listed first for a TV that takes whichever it is \
+             given rather than choosing.",
+        ),
+        "Leave on \u{201c}original\u{201d} unless a TV plays these films silently: that is the \
+         symptom of one that takes the first version without checking whether it can decode it.",
+    ),
+    noted(
+        optional(
+            "transcode.max_concurrent",
+            "Simultaneous decodes",
+            FieldKind::Int { min: 1, max: 32 },
+            Impact::Live,
+            "How many decodes may run at once. Beyond this, a further request is refused \
+             rather than queued.",
+        ),
+        "Decoding is the only CPU-heavy work this server does. Raising it on a small box \
+         trades stutter on the streams already playing for the chance to start another.",
+    ),
+];
+
 const MCP_FIELDS: &[FieldSpec] = &[
     noted(
         optional(
@@ -572,6 +630,16 @@ const SECTIONS: &[SectionSpec] = &[
         title: "Access",
         blurb: "Who may reach the dashboard and the management API.",
         fields: MANAGEMENT_FIELDS,
+        directories: false,
+        panel: false,
+    },
+    SectionSpec {
+        id: "transcode",
+        title: "Audio for older TVs",
+        blurb: "Films often carry AC-3, Dolby Digital Plus or DTS audio, and a TV sold without \
+                those licences plays the picture and nothing else. VuIO can decode them and \
+                offer a second, playable version beside the original.",
+        fields: TRANSCODE_FIELDS,
         directories: false,
         panel: false,
     },

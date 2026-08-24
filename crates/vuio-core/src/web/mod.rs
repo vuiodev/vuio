@@ -17,6 +17,8 @@ pub mod radio;
 pub mod soap;
 pub mod streaming;
 pub mod subtitles;
+#[cfg(feature = "transcode")]
+pub mod transcode_streaming;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
@@ -234,6 +236,15 @@ pub fn create_router<D: DatabaseManager + 'static>(
             "/api/radio/stations/{id}/stream.{extension}",
             get(radio::serve_stream_with_extension::<D>),
         );
+
+    // Public for the same reason `/media/{id}` is: a TV playing the decoded
+    // version of a film has nowhere to put a login either.
+    #[cfg(feature = "transcode")]
+    let router = router.route(
+        "/media/{id}/transcode/audio.wav",
+        get(transcode_streaming::serve_transcoded_wav::<D>)
+            .head(transcode_streaming::serve_transcoded_wav::<D>),
+    );
 
     #[cfg(feature = "casting")]
     let router = router

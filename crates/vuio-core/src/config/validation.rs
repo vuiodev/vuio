@@ -18,7 +18,25 @@ impl ConfigValidator {
         Self::validate_media_config(config)?;
         Self::validate_database_config(config)?;
         Self::validate_management(config)?;
+        Self::validate_transcode(config)?;
         Self::validate_platform_specific(config)?;
+        Ok(())
+    }
+
+    /// Validate the transcoding section.
+    ///
+    /// Only `max_concurrent` can be wrong in a way worth catching: the two enums
+    /// are rejected by serde before they reach here, and `enabled` on a build
+    /// with no decoder is not an error — it is a config file that outlives the
+    /// binary it was written for, which is exactly what the section is defaulted
+    /// for.
+    pub fn validate_transcode(config: &AppConfig) -> Result<()> {
+        if config.transcode.enabled && config.transcode.max_concurrent == 0 {
+            return Err(anyhow!(
+                "[transcode] max_concurrent is 0, so every transcode would be refused. \
+                 Set it to at least 1, or set enabled = false to turn the feature off."
+            ));
+        }
         Ok(())
     }
 
@@ -440,6 +458,7 @@ impl ConfigValidator {
         Self::validate_media_config_flexible(config)?;
         Self::validate_database_config(config)?;
         Self::validate_management(config)?;
+        Self::validate_transcode(config)?;
         Self::validate_platform_specific(config)?;
         Ok(())
     }

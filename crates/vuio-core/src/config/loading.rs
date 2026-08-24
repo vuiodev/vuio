@@ -225,6 +225,25 @@ impl AppConfig {
                 read_only: env_flag("VUIO_MCP_READ_ONLY").unwrap_or(false),
                 require_auth: env_flag("VUIO_MCP_REQUIRE_AUTH").unwrap_or(false),
             },
+            transcode: TranscodeConfig {
+                enabled: env_flag("VUIO_TRANSCODE_ENABLED").unwrap_or(true),
+                // An unrecognised value falls back to the default rather than
+                // refusing to start: this is a container that may have been
+                // handed a typo through a compose file, and a media server that
+                // will not boot is worse than one that plays LPCM.
+                audio_format: std::env::var("VUIO_TRANSCODE_AUDIO_FORMAT")
+                    .ok()
+                    .and_then(|v| TranscodeAudioFormat::parse(&v))
+                    .unwrap_or_default(),
+                prefer: std::env::var("VUIO_TRANSCODE_PREFER")
+                    .ok()
+                    .and_then(|v| TranscodePreference::parse(&v))
+                    .unwrap_or_default(),
+                max_concurrent: std::env::var("VUIO_TRANSCODE_MAX_CONCURRENT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(default_transcode_max_concurrent),
+            },
         })
     }
 
@@ -346,6 +365,7 @@ impl AppConfig {
         };
 
         Self {
+            transcode: TranscodeConfig::default(),
             server: ServerConfig {
                 port: platform_config
                     .preferred_ports

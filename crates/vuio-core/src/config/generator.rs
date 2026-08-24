@@ -452,7 +452,7 @@ mod tests {
     use crate::config::{
         AppConfig, DatabaseConfig, ManagementConfig, McpConfig, MediaConfig, MediaInfoConfig,
         MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
-        ValidationMode, WebUiConfig,
+        TranscodeConfig, ValidationMode, WebUiConfig,
     };
     use uuid::Uuid;
 
@@ -504,6 +504,7 @@ mod tests {
             mediainfo: MediaInfoConfig::default(),
             web_ui: WebUiConfig::default(),
             mcp: McpConfig::default(),
+            transcode: TranscodeConfig::default(),
         };
 
         // Generate TOML
@@ -617,6 +618,7 @@ mod tests {
             mediainfo: MediaInfoConfig::default(),
             web_ui: WebUiConfig::default(),
             mcp: McpConfig::default(),
+            transcode: TranscodeConfig::default(),
         };
 
         // Generate TOML

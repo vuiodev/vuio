@@ -15,10 +15,14 @@
 
 mod frames;
 mod pcm;
+mod plan;
+mod session;
 mod wav;
 
 pub use frames::{FrameIndex, IndexedFrame};
 pub use pcm::PcmDecoder;
+pub use plan::{AudioPlan, Seeked};
+pub use session::{IndexKey, TranscodeState};
 pub use wav::{wav_header, WAV_HEADER_LEN};
 
 /// An audio codec VuIO can decode but many renderers cannot play.

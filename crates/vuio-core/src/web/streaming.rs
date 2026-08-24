@@ -316,7 +316,7 @@ pub(crate) fn media_id_from_path_segment(segment: &str) -> Option<i64> {
 }
 
 // Helper function to parse range header manually
-fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
+pub(crate) fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
     if file_size == 0 {
         return Err(AppError::InvalidRange);
     }

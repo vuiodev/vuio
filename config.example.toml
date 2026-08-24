@@ -121,3 +121,21 @@ port = 8090                             # Must differ from server.port
 # Whether a fetched title outranks the one read from the file's own tags.
 # prefer_online_titles = true
 # request_timeout_seconds = 15
+
+# Audio for TVs that cannot decode AC-3, Dolby Digital Plus or DTS.
+# Those codecs are licensed, and a set sold without the licence plays the
+# picture and nothing else. When this is on, such a film is offered twice — the
+# original and an already-decoded version — and the TV plays whichever it can.
+# A TV that was already fine is unaffected.
+[transcode]
+enabled = true
+# What the decoded version is delivered as.
+#   lpcm  uncompressed, seekable, about 1.5 Mbps
+#   aac   about a tenth of that, lossy, and cannot be scrubbed
+audio_format = "lpcm"
+# Which version is listed first, for a TV that takes what it is given rather
+# than choosing. Switch to "transcoded" only if a TV still plays silently.
+prefer = "original"
+# Decodes allowed at once. Past this a further request is refused rather than
+# queued, so the streams already playing keep up.
+max_concurrent = 2

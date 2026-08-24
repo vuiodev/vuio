@@ -63,6 +63,13 @@ pub(super) fn default_true() -> bool {
     true
 }
 
+/// Two at once: enough that a second TV starting a film does not get a refusal,
+/// low enough that a small box is not asked to run four decoders and serve the
+/// library at the same time.
+pub(super) fn default_transcode_max_concurrent() -> usize {
+    2
+}
+
 pub(super) fn default_web_ui_port() -> u16 {
     8090
 }
@@ -170,6 +177,8 @@ pub struct AppConfig {
     pub web_ui: WebUiConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub transcode: TranscodeConfig,
 }
 
 /// The Model Context Protocol server, which lets an AI agent browse, search and
@@ -204,6 +213,131 @@ impl Default for McpConfig {
             enabled: true,
             read_only: false,
             require_auth: false,
+        }
+    }
+}
+
+/// Decoding AC-3, E-AC-3 and DTS for renderers that cannot play them.
+///
+/// Defaulted as a whole, like `[mcp]` and `[web_ui]`: a config file written
+/// before this existed has no `[transcode]` table and must keep loading.
+///
+/// Parsed in every build, including one compiled without any decoder — the same
+/// rule `[mediainfo]` follows. A server that cannot decode still reads the
+/// section, still reports it to the dashboard, and simply never advertises a
+/// transcoded resource; an operator moving a config file between builds should
+/// not have it rejected by the leaner one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscodeConfig {
+    /// Offer a decoded resource beside the original for AC-3/E-AC-3/DTS items.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// What the decoded resource is delivered as.
+    #[serde(default)]
+    pub audio_format: TranscodeAudioFormat,
+    /// Which resource is listed first in the DIDL response.
+    #[serde(default)]
+    pub prefer: TranscodePreference,
+    /// Ceiling on simultaneous transcode sessions.
+    ///
+    /// Decoding is the only CPU-bound work this server does, and a shared folder
+    /// can be opened by every TV in the house at once. Past this, a request is
+    /// refused rather than joining a queue that would starve the ones already
+    /// playing.
+    #[serde(default = "default_transcode_max_concurrent")]
+    pub max_concurrent: usize,
+}
+
+impl Default for TranscodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            audio_format: TranscodeAudioFormat::default(),
+            prefer: TranscodePreference::default(),
+            max_concurrent: default_transcode_max_concurrent(),
+        }
+    }
+}
+
+/// What a transcoded audio resource is delivered as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscodeAudioFormat {
+    /// Linear PCM in a WAV container.
+    ///
+    /// The default, and the better resource where bandwidth allows: PCM is
+    /// constant-bitrate, so the response carries an exact `Content-Length` and
+    /// supports byte-range seeking, and every renderer that accepts LPCM at all
+    /// accepts 16-bit stereo. It costs about 1.5 Mbps, which is nothing on the
+    /// wired or 5 GHz LAN these devices sit on and noticeable over 2.4 GHz.
+    #[default]
+    Lpcm,
+    /// AAC-LC in ADTS framing.
+    ///
+    /// A tenth of the bitrate, at the price of a lossy re-encode and a
+    /// non-seekable response — the encoder's output size is not known ahead of
+    /// time, so the resource is streamed without a `Content-Length` and a
+    /// renderer cannot scrub within it.
+    Aac,
+}
+
+impl TranscodeAudioFormat {
+    /// Parse an environment-variable or TOML value, case- and space-insensitively.
+    ///
+    /// `None` for anything unrecognised, so the caller decides between falling
+    /// back and refusing — Docker falls back, a config file refuses.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "lpcm" | "pcm" | "wav" => Some(Self::Lpcm),
+            "aac" => Some(Self::Aac),
+            _ => None,
+        }
+    }
+
+    /// The value as it is written in a config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Lpcm => "lpcm",
+            Self::Aac => "aac",
+        }
+    }
+}
+
+/// Which of an item's two resources is listed first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscodePreference {
+    /// The original file first, the decoded resource second.
+    ///
+    /// The default, because it is the choice that cannot make anything worse. A
+    /// renderer that matches on protocolInfo picks whichever it can actually
+    /// play; one that blindly takes the first resource behaves exactly as it did
+    /// before this feature existed.
+    #[default]
+    Original,
+    /// The decoded resource first.
+    ///
+    /// For a renderer that takes the first resource without checking and cannot
+    /// play the original — it plays silently otherwise, and no amount of correct
+    /// protocolInfo will change its mind.
+    Transcoded,
+}
+
+impl TranscodePreference {
+    /// Parse an environment-variable or TOML value, case- and space-insensitively.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "original" | "source" => Some(Self::Original),
+            "transcoded" | "decoded" => Some(Self::Transcoded),
+            _ => None,
+        }
+    }
+
+    /// The value as it is written in a config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Original => "original",
+            Self::Transcoded => "transcoded",
         }
     }
 }
