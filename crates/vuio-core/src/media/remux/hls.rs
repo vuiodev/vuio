@@ -33,10 +33,7 @@ impl HlsGenerator {
 
         if !audio_tracks.is_empty() {
             for (idx, track) in audio_tracks.iter().enumerate() {
-                let name = track
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| format!("Audio Track {}", idx + 1));
+                let name = format_audio_track_name(track, idx);
                 let lang = track.language.as_deref().unwrap_or("und");
                 let is_default = if idx == 0 { "YES" } else { "NO" };
 
@@ -131,6 +128,92 @@ fn aac_codec_string(extra_data: &[u8]) -> String {
         .filter(|&t| t != 0)
         .unwrap_or(2); // 2 == AAC-LC, the common/safe default.
     format!("mp4a.40.{}", audio_object_type)
+}
+
+fn language_name(code: &str) -> &'static str {
+    match code.to_ascii_lowercase().as_str() {
+        "eng" | "en" => "English",
+        "spa" | "es" => "Spanish",
+        "fra" | "fre" | "fr" => "French",
+        "deu" | "ger" | "de" => "German",
+        "ita" | "it" => "Italian",
+        "jpn" | "ja" => "Japanese",
+        "rus" | "ru" => "Russian",
+        "zho" | "chi" | "zh" => "Chinese",
+        "kor" | "ko" => "Korean",
+        "por" | "pt" => "Portuguese",
+        "hin" | "hi" => "Hindi",
+        "ara" | "ar" => "Arabic",
+        "pol" | "pl" => "Polish",
+        "ukr" | "uk" => "Ukrainian",
+        "vie" | "vi" => "Vietnamese",
+        "tur" | "tr" => "Turkish",
+        "nld" | "dut" | "nl" => "Dutch",
+        "swe" | "sv" => "Swedish",
+        "nor" | "no" => "Norwegian",
+        "dan" | "da" => "Danish",
+        "fin" | "fi" => "Finnish",
+        "ces" | "cze" | "cs" => "Czech",
+        "hun" | "hu" => "Hungarian",
+        "ron" | "rum" | "ro" => "Romanian",
+        "ell" | "gre" | "el" => "Greek",
+        "heb" | "he" => "Hebrew",
+        "tha" | "th" => "Thai",
+        _ => "",
+    }
+}
+
+pub fn format_audio_track_name(track: &TrackInfo, idx: usize) -> String {
+    if let Some(ref name) = track.name {
+        let trimmed = name.trim();
+        if !trimmed.is_empty()
+            && !trimmed.eq_ignore_ascii_case("und")
+            && !trimmed.starts_with("Audio Track")
+        {
+            return trimmed.to_string();
+        }
+    }
+
+    let lang_code = track.language.as_deref().unwrap_or("");
+    let lang_display = if !lang_code.is_empty() && lang_code != "und" {
+        let name = language_name(lang_code);
+        if !name.is_empty() {
+            name
+        } else {
+            lang_code
+        }
+    } else {
+        ""
+    };
+
+    let channels_str = match track.channels {
+        Some(6) => "5.1",
+        Some(8) => "7.1",
+        Some(2) => "Stereo",
+        Some(1) => "Mono",
+        Some(c) if c > 2 => return format!("Track {} ({}ch {})", idx + 1, c, track.codec),
+        _ => "",
+    };
+
+    let main_label = if !lang_display.is_empty() {
+        lang_display.to_string()
+    } else {
+        format!("Audio Track {}", idx + 1)
+    };
+
+    let mut details = Vec::new();
+    if !channels_str.is_empty() {
+        details.push(channels_str);
+    }
+    if !track.codec.is_empty() {
+        details.push(&track.codec);
+    }
+
+    if !details.is_empty() {
+        format!("{} ({})", main_label, details.join(" "))
+    } else {
+        main_label
+    }
 }
 
 #[cfg(test)]

@@ -322,11 +322,15 @@ impl MkvDemuxer {
             hint.with_extension(ext);
         }
 
+        let mut meta_opts = MetadataOptions::default();
+        meta_opts.limit_tag_bytes = symphonia::core::common::Limit::Maximum(0);
+        meta_opts.limit_visual_bytes = symphonia::core::common::Limit::Maximum(0);
+
         let mut format = symphonia::default::get_probe().probe(
             &hint,
             stream,
             FormatOptions::default(),
-            MetadataOptions::default(),
+            meta_opts,
         )?;
 
         let track_time_base = format

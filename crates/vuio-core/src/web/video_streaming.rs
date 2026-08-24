@@ -38,7 +38,7 @@ use axum::{
 };
 use tracing::{debug, warn};
 
-use crate::media::remux::{browser_video_track, FileInfo, MkvDemuxer, TrackInfo, TrackKind};
+use crate::media::remux::{browser_audio_tracks, browser_video_track, FileInfo, MkvDemuxer, TrackInfo, TrackKind};
 use crate::media::transcode::ProgressiveStream;
 use crate::{database::DatabaseManager, error::AppError, state::AppState};
 
@@ -57,10 +57,11 @@ const PIPELINE_DEPTH: usize = 2;
 /// seeked and is therefore set per resource rather than shared.
 const DLNA_FLAGS: &str = "DLNA.ORG_FLAGS=01700000000000000000000000000000";
 
-/// `?t=<seconds>` — the same seek, for callers with no DLNA header to send.
+/// `?t=<seconds>` for seeking, `?audio_track=<index>` for selecting audio track.
 #[derive(serde::Deserialize, Default)]
 pub struct VideoQuery {
     t: Option<f64>,
+    audio_track: Option<usize>,
 }
 
 /// `GET`/`HEAD /media/{id}/transcode/video.mp4`.
@@ -75,7 +76,16 @@ pub async fn serve_transcoded_video<D: DatabaseManager>(
     let video = browser_video_track(&info.tracks)
         .ok_or(AppError::NotFound)?
         .clone();
-    let audio = default_audio_track(&info.tracks).cloned();
+    let audio = if let Some(idx) = query.audio_track {
+        let playable = browser_audio_tracks(&info.tracks);
+        playable
+            .get(idx)
+            .copied()
+            .cloned()
+            .or_else(|| default_audio_track(&info.tracks).cloned())
+    } else {
+        default_audio_track(&info.tracks).cloned()
+    };
 
     let duration = info.duration_secs.filter(|d| *d > 0.0);
     let requested = headers

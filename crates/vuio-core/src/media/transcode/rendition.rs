@@ -43,6 +43,7 @@ pub fn reencode_to_aac(
     sample_rate: u32,
     channels: u16,
     track_id: u32,
+    nominal_start_pts: Option<u64>,
 ) -> Result<Vec<MediaPacket>> {
     let Some(first) = packets.first() else {
         return Ok(Vec::new());
@@ -65,7 +66,8 @@ pub fn reencode_to_aac(
     // that already starts at the beginning of the film, where there is no
     // earlier timeline to move onto — the residual lag there is one frame,
     // twenty-one milliseconds at 48 kHz.
-    let mut dts = first.pts.saturating_sub(AAC_FRAME_SAMPLES);
+    let base = nominal_start_pts.unwrap_or(first.pts);
+    let mut dts = base.saturating_sub(AAC_FRAME_SAMPLES);
     let mut out = Vec::new();
     for payload in super::adts_payloads(&adts) {
         out.push(MediaPacket {

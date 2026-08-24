@@ -201,6 +201,7 @@ fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> V
     let out_track = rendition_track(track);
     let timescale = Fmp4Writer::timescale_for(&out_track);
     let start_secs = seq as f64 * SEGMENT_DURATION_SECS as f64;
+    let nominal_decode_time = (start_secs * timescale as f64).round() as u64;
 
     let packets = MkvDemuxer::extract_track_packets(
         path,
@@ -220,6 +221,7 @@ fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> V
             out_track.sample_rate.unwrap_or(48_000),
             DECODED_CHANNELS,
             out_track.id,
+            Some(nominal_decode_time),
         )
         .unwrap_or_default(),
         None => packets,
@@ -229,7 +231,6 @@ fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> V
     // base decode time comes from the packets themselves (`build_segment` takes it from
     // the first one's decode timestamp). The nominal `seq`-derived position is only a
     // fallback for a segment that came back empty.
-    let nominal_decode_time = (start_secs * timescale as f64).round() as u64;
     Fmp4Writer::build_segment(seq + 1, &out_track, nominal_decode_time, &packets)
 }
 
