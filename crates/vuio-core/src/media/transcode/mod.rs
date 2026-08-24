@@ -15,6 +15,8 @@
 
 #[cfg(feature = "transcode-aac")]
 mod aac;
+#[cfg(feature = "transcode-dts")]
+mod dts;
 mod frames;
 mod pcm;
 mod plan;
@@ -40,7 +42,9 @@ pub use pcm::PcmDecoder;
 pub use plan::{AudioPlan, Seeked};
 #[cfg(all(feature = "transcode-aac", feature = "demux"))]
 #[allow(unused_imports)]
-pub use rendition::{fit_channels, reencode_to_aac, AAC_FRAME_SAMPLES};
+pub use rendition::{
+    fit_channels, reencode_to_aac, run_anchor, AacWindow, AAC_FRAME_SAMPLES, ENCODER_DELAY,
+};
 pub use session::{IndexKey, SegmentKey, TranscodeState};
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
 pub use video::ProgressiveStream;
@@ -105,23 +109,24 @@ impl TranscodeCodec {
     }
 }
 
-/// Build a decoder for `codec`, or `None` when this build cannot decode it.
+/// Build a trait-object decoder for `codec`.
 ///
-/// `want_channels` is passed through to the decoder rather than applied
-/// afterwards: AC-3 carries the §7.8 downmix coefficients in the bitstream, so
-/// asking the decoder for two channels produces the mix the encoder intended,
-/// which a naive channel-summing downmix outside the decoder would not.
+/// AC-3 and E-AC-3 only. `want_channels` is passed through to the decoder
+/// rather than applied afterwards: AC-3 carries the §7.8 downmix coefficients
+/// in the bitstream, so asking the decoder for two channels produces the mix
+/// the encoder intended, which a naive channel-summing downmix outside the
+/// decoder would not. DTS does not come through here at all — the vendored
+/// decoder's trait impl scales its output by an `rScale` that saturates `i32`
+/// on most real films, so [`dts`] drives the reconstruction underneath it
+/// instead.
 #[cfg(feature = "transcode")]
-#[cfg_attr(
-    not(any(feature = "transcode-ac3", feature = "transcode-dts")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(feature = "transcode-ac3"), allow(unused_variables))]
 pub(crate) fn make_decoder(
     codec: TranscodeCodec,
     sample_rate: u32,
     want_channels: Option<u16>,
 ) -> anyhow::Result<Box<dyn oxideav_core::Decoder>> {
-    #[cfg(any(feature = "transcode-ac3", feature = "transcode-dts"))]
+    #[cfg(feature = "transcode-ac3")]
     use oxideav_core::{CodecId, CodecParameters, SampleFormat};
 
     match codec {
@@ -140,14 +145,6 @@ pub(crate) fn make_decoder(
                 _ => oxideav_ac3::decoder::make_decoder(&params),
             }
             .map_err(|e| anyhow::anyhow!("AC-3 decoder: {e}"))
-        }
-        #[cfg(feature = "transcode-dts")]
-        TranscodeCodec::Dts => {
-            let mut params = CodecParameters::audio(CodecId::new("dts"));
-            params.sample_rate = Some(sample_rate);
-            params.channels = want_channels;
-            params.sample_format = Some(SampleFormat::S16);
-            oxideav_dts::make_decoder(&params).map_err(|e| anyhow::anyhow!("DTS decoder: {e}"))
         }
         #[allow(unreachable_patterns)]
         other => anyhow::bail!(

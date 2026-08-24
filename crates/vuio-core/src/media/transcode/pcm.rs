@@ -1,12 +1,21 @@
 //! Turning compressed frames into interleaved little-endian S16.
 //!
-//! The vendored decoders emit exactly that layout in `AudioFrame::data[0]` when
-//! asked for [`SampleFormat::S16`], so this is a thin driver over the push/pull
-//! `Decoder` trait rather than any DSP of its own — the one substantive choice
-//! is asking the decoder for the channel count we want instead of mixing down
-//! afterwards. AC-3 carries the §7.8 downmix coefficients in the bitstream, so
-//! the decoder's own two-channel output is the mix the encoder intended; summing
-//! channels outside it would throw that away and clip besides.
+//! The AC-3 decoder emits exactly that layout in `AudioFrame::data[0]` when
+//! asked for [`SampleFormat::S16`], so for those two codecs this is a thin
+//! driver over the push/pull `Decoder` trait rather than any DSP of its own —
+//! the one substantive choice is asking the decoder for the channel count we
+//! want instead of mixing down afterwards. AC-3 carries the §7.8 downmix
+//! coefficients in the bitstream, so the decoder's own two-channel output is
+//! the mix the encoder intended; summing channels outside it would throw that
+//! away and clip besides.
+//!
+//! DTS does not offer that, and the vendored decoder's `Decoder` impl cannot be
+//! used at all — see [`super::dts`], which is the driver for it. What both
+//! paths share is this type's contract: one compressed frame in, interleaved
+//! S16 at a fixed channel count out, and a frame that fails costing exactly its
+//! own duration in silence.
+//!
+//! [`SampleFormat::S16`]: oxideav_core::SampleFormat::S16
 
 use anyhow::{bail, Context, Result};
 
@@ -17,10 +26,21 @@ const BYTES_PER_SAMPLE: usize = 2;
 
 /// A decoder bound to one stream, with its output shape resolved.
 pub struct PcmDecoder {
-    inner: Box<dyn oxideav_core::Decoder>,
+    inner: Inner,
     codec: TranscodeCodec,
     sample_rate: u32,
     channels: u16,
+}
+
+/// The two shapes a decode takes.
+enum Inner {
+    /// AC-3 and E-AC-3, through the vendored `Decoder` trait, which hands back
+    /// interleaved S16 already folded to the channel count it was asked for.
+    Trait(Box<dyn oxideav_core::Decoder>),
+    /// DTS, through [`super::dts`] — the trait impl for it cannot be driven at
+    /// a scale `i32` holds, so this crate drives the reconstruction itself.
+    #[cfg(feature = "transcode-dts")]
+    Dts(super::dts::DtsDecoder),
 }
 
 impl PcmDecoder {
@@ -37,7 +57,11 @@ impl PcmDecoder {
         want_channels: Option<u16>,
         first_frame: &[u8],
     ) -> Result<(Self, Vec<u8>)> {
-        let inner = super::make_decoder(codec, sample_rate, want_channels)?;
+        let inner = match codec {
+            #[cfg(feature = "transcode-dts")]
+            TranscodeCodec::Dts => Inner::Dts(super::dts::DtsDecoder::new(want_channels)),
+            _ => Inner::Trait(super::make_decoder(codec, sample_rate, want_channels)?),
+        };
         let mut me = Self {
             inner,
             codec,
@@ -102,27 +126,34 @@ impl PcmDecoder {
 
     /// Feed one frame and collect everything it produces.
     fn decode_measured(&mut self, frame: &[u8]) -> Result<(Vec<u8>, u32)> {
-        use oxideav_core::{Frame, Packet, TimeBase};
+        match &mut self.inner {
+            #[cfg(feature = "transcode-dts")]
+            Inner::Dts(decoder) => decoder.decode(frame),
+            Inner::Trait(inner) => {
+                use oxideav_core::{Frame, Packet, TimeBase};
 
-        let packet = Packet::new(0, TimeBase::new(1, self.sample_rate as i64), frame.to_vec());
-        self.inner
-            .send_packet(&packet)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", self.codec.as_str()))
-            .context("feeding a frame to the decoder")?;
+                let packet =
+                    Packet::new(0, TimeBase::new(1, self.sample_rate as i64), frame.to_vec());
+                inner
+                    .send_packet(&packet)
+                    .map_err(|e| anyhow::anyhow!("{}: {e}", self.codec.as_str()))
+                    .context("feeding a frame to the decoder")?;
 
-        let mut out = Vec::new();
-        let mut samples = 0u32;
-        // `receive_frame` returns `NeedMore` once the packet is drained, which is
-        // the normal exit, not an error.
-        while let Ok(frame) = self.inner.receive_frame() {
-            if let Frame::Audio(af) = frame {
-                if let Some(plane) = af.data.first() {
-                    out.extend_from_slice(plane);
+                let mut out = Vec::new();
+                let mut samples = 0u32;
+                // `receive_frame` returns `NeedMore` once the packet is drained,
+                // which is the normal exit, not an error.
+                while let Ok(frame) = inner.receive_frame() {
+                    if let Frame::Audio(af) = frame {
+                        if let Some(plane) = af.data.first() {
+                            out.extend_from_slice(plane);
+                        }
+                        samples += af.samples;
+                    }
                 }
-                samples += af.samples;
+                Ok((out, samples))
             }
         }
-        Ok((out, samples))
     }
 }
 
@@ -207,11 +238,27 @@ mod tests {
         );
     }
 
+    /// Both ways a DTS decode goes wrong, in one assertion.
+    ///
+    /// Below the floor it is silence, which is what a decoder that refused
+    /// every frame produces. At the ceiling it is the square wave the vendored
+    /// decoder's own `rScale` derivation produces on any real film — the whole
+    /// reason [`super::super::dts`] exists — and which a bare "is it louder
+    /// than silence" check waves through.
     #[cfg(feature = "transcode-dts")]
     #[test]
-    fn dts_decodes_to_audible_audio() {
+    fn dts_decodes_to_audible_audio_rather_than_to_a_railed_one() {
         let (pcm, _, _) = decode_all(TranscodeCodec::Dts, DTS_FIXTURE);
-        assert!(rms(&pcm) > 10.0, "decoded RMS {} is silence", rms(&pcm));
+        let level = rms(&pcm);
+        assert!(level > 10.0, "decoded RMS {level} is silence");
+        assert!(level < 16_000.0, "decoded RMS {level} is a saturated decode");
+        let railed = pcm
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .filter(|c| i16::from_le_bytes(**c).unsigned_abs() >= 32_767)
+            .count();
+        assert_eq!(railed, 0, "{railed} samples came back clipped to full scale");
     }
 
     /// A corrupt frame must cost its own duration in silence and nothing more,

@@ -401,7 +401,11 @@ impl MkvDemuxer {
                         // the container's cue index is sparse enough that the seek above
                         // landed mid-GOP. Dropping these leading frames loses nothing: they
                         // depend on references the player would not have when starting here,
-                        // and the previous segment already covers their span.
+                        // and the previous segment already covers their span. Refusing the
+                        // frames *before* `start_ticks` instead would be the opposite
+                        // trade: on a film whose keyframes are further apart than a
+                        // segment, the segment would open at the next one and leave a hole
+                        // where the picture should be.
                         if packets.is_empty() && !is_keyframe {
                             continue;
                         }
@@ -418,9 +422,13 @@ impl MkvDemuxer {
                             break;
                         }
                     } else {
-                        // For audio tracks: discard packets that belong before this segment's start time
-                        // so coarse seeking does not replay packets from the previous segment.
-                        if (dur > 0 && pts + dur <= start_ticks) || (dur == 0 && pts < start_ticks) {
+                        // Audio is partitioned strictly by the packet's own start, so
+                        // every packet lands in exactly one segment and consecutive
+                        // segments meet without overlapping. A caller that needs samples
+                        // from before its segment — the re-encode does, to prime an
+                        // encoder — asks for an earlier `start_secs` rather than being
+                        // handed a packet twice.
+                        if pts < start_ticks {
                             continue;
                         }
                         if pts >= start_ticks + target_ticks && !packets.is_empty() {

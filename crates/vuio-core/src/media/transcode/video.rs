@@ -82,9 +82,28 @@ struct AudioDecode {
     decoder: PcmDecoder,
     encoder: AacEncoder,
     decoded_channels: u16,
-    /// Decode time of the next AAC frame, in samples.
+    /// Decode time of the next AAC frame, in samples. `None` until enough of
+    /// the track has been seen to say where the run belongs.
     next_dts: Option<u64>,
+    /// Each packet's own account of where the run starts. Read once, by
+    /// [`super::run_anchor`], and then dropped.
+    anchors: Vec<i64>,
+    /// Samples decoded so far, which is what each estimate is measured against.
+    decoded: u64,
+    /// Frames encoded before the run could be placed.
+    held: Vec<Vec<u8>>,
 }
+
+/// Packets to hear from before placing the run.
+///
+/// A single Matroska timestamp is only good to a millisecond, and on a track
+/// whose frames are not a whole number of them it can be seventy-five out —
+/// enough to lose lip-sync for the length of the film, because a progressive
+/// stream anchors once and never again. A hundred of them settle it. Two
+/// seconds of video accumulate before the first fragment is written, which is
+/// more audio packets than this for every codec here, so nothing is delayed by
+/// the wait.
+const ANCHOR_PACKETS: usize = 96;
 
 impl ProgressiveStream {
     /// Open `path` positioned at `start_secs`, ready to emit fragments.
@@ -240,33 +259,35 @@ impl ProgressiveStream {
         let decode = match audio.decode.as_mut() {
             Some(decode) => decode,
             None => {
-                let (decoder, primed) =
+                let (decoder, mut primed) =
                     PcmDecoder::open(codec, sample_rate, Some(DECODED_CHANNELS), data)?;
                 let decoded_channels = decoder.channels();
                 let encoder = AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
+                // The probe frame contributes the sample count its own header
+                // declared, like every frame after it, so the running position
+                // the estimates are measured against stays true.
+                if let Some(samples) = super::frames::frame_samples(codec, data) {
+                    primed.resize(samples as usize * decoded_channels as usize * 2, 0);
+                }
                 audio.decode = Some(AudioDecode {
                     codec,
                     decoder,
                     encoder,
                     decoded_channels,
-                    // One frame early, cancelling the encoder's delay: its MDCT
-                    // window spans the previous hop and this one, so a decoder's
-                    // output trails its input by exactly one frame.
-                    next_dts: Some(ticks.saturating_sub(super::AAC_FRAME_SAMPLES)),
+                    next_dts: None,
+                    anchors: Vec::new(),
+                    decoded: 0,
+                    held: Vec::new(),
                 });
                 let decode = audio.decode.as_mut().unwrap();
-                let pcm = super::fit_channels(&primed, decoded_channels, DECODED_CHANNELS);
-                let adts = decode.encoder.push(&pcm)?;
-                push_aac(&mut audio.sink, decode, &adts);
+                decode.take(&mut audio.sink, ticks, primed)?;
                 return Ok(());
             }
         };
 
         let expect = super::frames::frame_samples(decode.codec, data);
         let pcm = decode.decoder.decode_or_silence(data, expect);
-        let pcm = super::fit_channels(&pcm, decode.decoded_channels, DECODED_CHANNELS);
-        let adts = decode.encoder.push(&pcm)?;
-        push_aac(&mut audio.sink, decode, &adts);
+        decode.take(&mut audio.sink, ticks, pcm)?;
         Ok(())
     }
 
@@ -278,11 +299,19 @@ impl ProgressiveStream {
             return;
         };
         let tail = decode.encoder.finish();
-        push_aac(&mut audio.sink, decode, &tail);
+        push_aac(&mut audio.sink, decode, &tail, true);
     }
 
     /// Wrap whatever both tracks hold into one fragment.
     fn emit(&mut self) -> Option<Vec<u8>> {
+        // A fragment about to be written cannot wait for more packets before
+        // deciding where the audio run sits, so this is where the decision is
+        // forced if it has not been made already.
+        if let Some(audio) = self.audio.as_mut() {
+            if let Some(decode) = audio.decode.as_mut() {
+                push_aac(&mut audio.sink, decode, &[], true);
+            }
+        }
         let video_packets = self.video.take();
         let audio_packets = self
             .audio
@@ -313,19 +342,56 @@ impl ProgressiveStream {
     }
 }
 
-/// Append the AAC frames in `adts` to the audio track's pending run.
-fn push_aac(sink: &mut TrackSink, decode: &mut AudioDecode, adts: &[u8]) {
+/// Hold the AAC frames in `adts`, and hand over everything held once the run's
+/// place on the film's timeline is settled.
+///
+/// `settle` decides that with however many packets have been seen so far,
+/// because the caller is about to write a fragment and cannot wait.
+fn push_aac(sink: &mut TrackSink, decode: &mut AudioDecode, adts: &[u8], settle: bool) {
     for payload in super::adts_payloads(adts) {
-        let dts = decode.next_dts.unwrap_or(0);
+        decode.held.push(payload.to_vec());
+    }
+    if decode.next_dts.is_none() {
+        if !settle && decode.anchors.len() < ANCHOR_PACKETS {
+            return;
+        }
+        if decode.anchors.is_empty() {
+            return;
+        }
+        let mut anchors = std::mem::take(&mut decode.anchors);
+        // Placed early by exactly the encoder's delay, which is what a decoder's
+        // output trails its input by. Nothing here has to land on a frame
+        // boundary — this is one continuous run, not a tile of a grid other
+        // requests also write to — so the shift is the measured sample count
+        // rather than a rounded number of frames.
+        let anchor = super::run_anchor(&mut anchors).saturating_sub(super::ENCODER_DELAY as i64);
+        decode.next_dts = Some(anchor.max(0) as u64);
+    }
+    let mut dts = decode.next_dts.unwrap_or(0);
+    for payload in decode.held.drain(..) {
         sink.pending.push(MediaPacket {
             track_id: sink.track.id,
             pts: dts,
             dts,
             duration: super::AAC_FRAME_SAMPLES,
             is_keyframe: true,
-            data: payload.to_vec(),
+            data: payload,
         });
-        decode.next_dts = Some(dts + super::AAC_FRAME_SAMPLES);
+        dts += super::AAC_FRAME_SAMPLES;
+    }
+    decode.next_dts = Some(dts);
+}
+
+impl AudioDecode {
+    /// Take one frame's decoded PCM: note where the packet says the run starts,
+    /// widen the samples to the output's channel count, and encode them.
+    fn take(&mut self, sink: &mut TrackSink, ticks: u64, pcm: Vec<u8>) -> Result<()> {
+        self.anchors.push(ticks as i64 - self.decoded as i64);
+        self.decoded += (pcm.len() / (self.decoded_channels as usize * 2)) as u64;
+        let pcm = super::fit_channels(&pcm, self.decoded_channels, DECODED_CHANNELS);
+        let adts = self.encoder.push(&pcm)?;
+        push_aac(sink, self, &adts, false);
+        Ok(())
     }
 }
 

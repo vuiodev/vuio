@@ -200,24 +200,13 @@ pub async fn serve_hls_audio_init_segment<D: DatabaseManager>(
 fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> Vec<u8> {
     let out_track = rendition_track(track);
     let timescale = Fmp4Writer::timescale_for(&out_track);
-    let is_reencoded_audio = track.codec_kind.transcode_codec().is_some();
+    let start_secs = seq as f64 * SEGMENT_DURATION_SECS as f64;
+    let nominal_decode_time = (start_secs * timescale as f64).round() as u64;
 
-    // For re-encoded audio (AC-3/DTS -> AAC), align segment durations to integer AAC frames (1024 samples)
-    // so no segment ends on a fractional frame or requires zero-padding silence.
-    let (start_secs, target_duration_secs, nominal_decode_time) = if is_reencoded_audio {
-        let sample_rate = out_track.sample_rate.unwrap_or(48_000);
-        let frames_per_seg =
-            ((SEGMENT_DURATION_SECS as f64 * sample_rate as f64) / 1024.0).round() as u64;
-        let seg_samples = frames_per_seg * 1024;
-        let start_sample = seq as u64 * seg_samples;
-        let start_s = start_sample as f64 / sample_rate as f64;
-        let dur_s = seg_samples as f64 / sample_rate as f64;
-        (start_s, dur_s, start_sample)
-    } else {
-        let start_s = seq as f64 * SEGMENT_DURATION_SECS as f64;
-        let nominal = (start_s * timescale as f64).round() as u64;
-        (start_s, SEGMENT_DURATION_SECS as f64, nominal)
-    };
+    #[cfg(all(feature = "transcode-aac", feature = "demux"))]
+    if let Some(codec) = track.codec_kind.transcode_codec() {
+        return build_reencoded_segment(path, track, &out_track, codec, seq, timescale);
+    }
 
     let packets = MkvDemuxer::extract_track_packets(
         path,
@@ -225,25 +214,71 @@ fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> V
         track.codec_kind,
         timescale,
         start_secs,
-        target_duration_secs,
+        SEGMENT_DURATION_SECS as f64,
     )
     .unwrap_or_default();
 
-    #[cfg(all(feature = "transcode-aac", feature = "demux"))]
-    let packets = match track.codec_kind.transcode_codec() {
-        Some(codec) => crate::media::transcode::reencode_to_aac(
-            codec,
-            &packets,
-            out_track.sample_rate.unwrap_or(48_000),
-            DECODED_CHANNELS,
-            out_track.id,
-            Some(nominal_decode_time),
-        )
-        .unwrap_or_default(),
-        None => packets,
-    };
-
     Fmp4Writer::build_segment(seq + 1, &out_track, nominal_decode_time, &packets)
+}
+
+/// The longest a source frame of any codec this decodes can be, in samples.
+///
+/// DTS Core's `NBLKS` tops out at 127, for `(127 + 1) * 32` samples; AC-3 and
+/// E-AC-3 are 1536. Only used as a guard band on the demuxer request below, so
+/// generous is free and short is a lost frame of pre-roll.
+#[cfg(all(feature = "transcode-aac", feature = "demux"))]
+const LONGEST_SOURCE_FRAME: i64 = 4096;
+
+/// One segment of an audio track that has to be decoded and re-encoded.
+///
+/// Different from the passthrough path in what it asks the demuxer for: not
+/// this segment's four seconds, but the span the encoder has to be *fed* to
+/// produce this segment's frames — which reaches back before the segment
+/// begins, to cancel the encoder's delay and to warm its MDCT window up on real
+/// audio, and forward past where it ends, because that same delay means the
+/// last frame is not finished until samples beyond it have been seen. The
+/// re-encode positions what it gets by absolute sample index, so the guard band
+/// on the request costs a little decoding and nothing else.
+#[cfg(all(feature = "transcode-aac", feature = "demux"))]
+fn build_reencoded_segment(
+    path: &std::path::Path,
+    track: &TrackInfo,
+    out_track: &TrackInfo,
+    codec: crate::media::transcode::TranscodeCodec,
+    seq: u32,
+    timescale: u32,
+) -> Vec<u8> {
+    use crate::media::transcode::AacWindow;
+
+    let rate = out_track.sample_rate.unwrap_or(48_000) as u64;
+    let segment_samples = SEGMENT_DURATION_SECS as u64 * rate;
+    let window = AacWindow::covering(seq as u64 * segment_samples, (seq as u64 + 1) * segment_samples);
+
+    let (from, len) = window.source_span();
+    let request_from = (from - LONGEST_SOURCE_FRAME).max(0);
+    let request_len = (from + len as i64 - request_from).max(0);
+
+    let packets = MkvDemuxer::extract_track_packets(
+        path,
+        track.id,
+        track.codec_kind,
+        timescale,
+        request_from as f64 / timescale as f64,
+        request_len as f64 / timescale as f64,
+    )
+    .unwrap_or_default();
+
+    let packets = crate::media::transcode::reencode_to_aac(
+        codec,
+        &packets,
+        rate as u32,
+        DECODED_CHANNELS,
+        out_track.id,
+        window,
+    )
+    .unwrap_or_default();
+
+    Fmp4Writer::build_segment(seq + 1, out_track, window.start_sample(), &packets)
 }
 
 /// Build (or recall) one segment and wrap it in a response.

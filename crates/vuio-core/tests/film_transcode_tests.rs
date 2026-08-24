@@ -481,10 +481,65 @@ async fn an_audio_segment_carries_real_re_encoded_aac() {
         "ADTS framing leaked into an MP4 sample"
     );
 
-    // The second segment begins four seconds in, matching the AAC frame-aligned decode time.
+    // Not at its nominal four seconds: an AAC frame is 1024 samples, four
+    // seconds of 48 kHz is 187.5 of them, and a segment opens on the film-wide
+    // frame grid rather than half way through a frame.
     let tfdt = find_box(&segment, "tfdt").expect("a tfdt");
     let base = u64::from_be_bytes(tfdt[4..12].try_into().unwrap());
-    assert_eq!(base, 188 * 1024, "the run sits at the segment boundary");
+    assert_eq!(base, 188 * 1024, "the run opens on the frame grid");
+}
+
+/// The defect a browser hears as a tick every four seconds.
+///
+/// Each segment is built by its own request, on its own thread, from nothing
+/// but its sequence number — so if they disagree by even one frame about where
+/// they sit, the player's source buffer resolves the collision by throwing
+/// samples away. What is asserted is the only thing that rules that out: each
+/// segment opens exactly where the previous one's last sample ended, and the
+/// run of them keeps time with the wall clock rather than drifting a fraction
+/// of a frame per segment.
+#[tokio::test]
+async fn consecutive_audio_segments_meet_without_a_gap_or_an_overlap() {
+    const FRAME: u64 = 1024;
+    let (_temp, state, id) = scanned_film(24.0).await;
+
+    let mut opens_at: Option<u64> = None;
+    let mut first_open = 0u64;
+    let segments = 5u32;
+    for seq in 0..segments {
+        let (status, _, segment) = get(
+            &state,
+            &format!("/media/{id}/hls/audio/0/segment/{seq}"),
+            Method::GET,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "segment {seq}");
+
+        let tfdt = find_box(&segment, "tfdt").expect("a tfdt");
+        let base = u64::from_be_bytes(tfdt[4..12].try_into().unwrap());
+        let trun = find_box(&segment, "trun").expect("a trun");
+        let samples = u64::from(u32::from_be_bytes(trun[4..8].try_into().unwrap()));
+
+        match opens_at {
+            None => first_open = base,
+            Some(expected) => assert_eq!(
+                base,
+                expected,
+                "segment {seq} opens at {base}, but segment {} ended at {expected}",
+                seq - 1
+            ),
+        }
+        opens_at = Some(base + samples * FRAME);
+    }
+
+    // Four seconds a segment on average, to within the frame the grid rounds by.
+    let covered = opens_at.unwrap() - first_open;
+    let nominal = u64::from(segments) * 4 * 48_000;
+    assert!(
+        covered.abs_diff(nominal) < FRAME,
+        "{segments} segments covered {covered} samples where four seconds each is {nominal}"
+    );
 }
 
 #[tokio::test]
