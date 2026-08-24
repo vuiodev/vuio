@@ -17,7 +17,6 @@ members = [
     "crates/vendor/oxideav-core",
     "crates/vendor/oxideav-ac3",
     "crates/vendor/oxideav-dts",
-    "crates/vendor/oxideav-aac",
 ]
 
 # `vuio-bench` is deliberately not a default member. Cargo unifies features across
@@ -33,17 +32,13 @@ default-members = [
 ]
 resolver = "2"
 
-# The vendored codecs are the only CPU-bound code in the tree, and an
-# unoptimized AAC encoder turns a four-second test segment into a minute of
-# wall clock. Optimizing those four packages alone leaves `cargo build` on the
-# code actually being worked on as fast as it was.
+# The vendored codecs are the only CPU-bound code in the tree. Optimizing those
+# packages alone leaves `cargo build` on the code actually being worked on as fast as it was.
 [profile.dev.package.oxideav-core]
 opt-level = 2
 [profile.dev.package.oxideav-ac3]
 opt-level = 2
 [profile.dev.package.oxideav-dts]
-opt-level = 2
-[profile.dev.package.oxideav-aac]
 opt-level = 2
 
 [profile.release]

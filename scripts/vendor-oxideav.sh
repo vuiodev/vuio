@@ -37,9 +37,8 @@ SELF="$ROOT/scripts/vendor-oxideav.sh"
 PIN_oxideav_core=defa866dffdd224424d75ac7a38be868723395a5
 PIN_oxideav_ac3=8acf106d50d58f359946c086d1b393a060eaf5f6
 PIN_oxideav_dts=528203ed608223c5137843009054e05920af5c50
-PIN_oxideav_aac=719f1f594aef3465ecf2d718685bc27f8e797423
 
-CRATES="oxideav-core oxideav-ac3 oxideav-dts oxideav-aac"
+CRATES="oxideav-core oxideav-ac3 oxideav-dts"
 
 UPDATE=0
 [ "${1:-}" = "--update" ] && UPDATE=1

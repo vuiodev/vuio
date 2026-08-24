@@ -15,7 +15,9 @@ use anyhow::{Context, Result};
 
 /// One AAC-LC encoder bound to a stream's shape.
 pub struct AacEncoder {
-    inner: Box<dyn oxideav_core::Encoder>,
+    inner: xaac_rs::Encoder,
+    frame_bytes: usize,
+    buffer: Vec<u8>,
     channels: u16,
     sample_rate: u32,
 }
@@ -23,25 +25,31 @@ pub struct AacEncoder {
 impl AacEncoder {
     /// Build an encoder producing `channels` at `sample_rate`.
     ///
-    /// The bitrate is the vendored encoder's default of 64 kbps per channel —
-    /// the conventional AAC-LC "good quality" operating point, and around a
-    /// tenth of the LPCM the same audio would cost. Left unconfigurable
-    /// deliberately: it is one more knob whose wrong setting is audible, and
-    /// nothing about this path benefits from tuning it.
+    /// The bitrate is 64 kbps per channel — the conventional AAC-LC "good quality"
+    /// operating point, and around a tenth of the LPCM the same audio would cost.
     pub fn new(sample_rate: u32, channels: u16) -> Result<Self> {
-        use oxideav_core::{CodecId, CodecParameters, SampleFormat};
+        if !matches!(channels, 1 | 2 | 3 | 4 | 5 | 6 | 8) {
+            anyhow::bail!("unsupported channel count for AAC: {channels}");
+        }
 
-        let mut params = CodecParameters::audio(CodecId::new("aac"));
-        params.sample_rate = Some(sample_rate);
-        params.channels = Some(channels);
-        params.sample_format = Some(SampleFormat::S16);
+        let config = xaac_rs::EncoderConfig {
+            profile: xaac_rs::Profile::AacLc,
+            sample_rate,
+            channels,
+            bitrate: 64_000 * u32::from(channels),
+            output_format: xaac_rs::OutputFormat::Adts,
+            ..Default::default()
+        };
 
-        let inner = oxideav_aac::codec_encoder::make_encoder(&params)
-            .map_err(|e| anyhow::anyhow!("AAC encoder: {e}"))
+        let inner = xaac_rs::Encoder::new(config)
+            .map_err(|e| anyhow::anyhow!("AAC encoder: {e:?}"))
             .context("configuring the AAC encoder")?;
+        let frame_bytes = inner.input_frame_bytes();
 
         Ok(Self {
             inner,
+            frame_bytes,
+            buffer: Vec::with_capacity(frame_bytes * 2),
             channels,
             sample_rate,
         })
@@ -49,32 +57,32 @@ impl AacEncoder {
 
     /// Feed interleaved S16 and collect whatever ADTS frames come out.
     ///
-    /// The encoder buffers to its own 1024-sample frame length, so a call may
-    /// well produce nothing; that is normal, not an error.
+    /// The encoder buffers to its own frame length (typically 1024 samples per channel),
+    /// so a call may well produce nothing; that is normal, not an error.
     pub fn push(&mut self, pcm: &[u8]) -> Result<Vec<u8>> {
-        use oxideav_core::{AudioFrame, Frame};
-
-        let samples = pcm.len() / (self.channels as usize * 2);
-        if samples == 0 {
-            return Ok(Vec::new());
+        self.buffer.extend_from_slice(pcm);
+        let mut out = Vec::new();
+        while self.buffer.len() >= self.frame_bytes {
+            let chunk: Vec<u8> = self.buffer.drain(..self.frame_bytes).collect();
+            let encoded = self
+                .inner
+                .encode_pcm_bytes(&chunk)
+                .map_err(|e| anyhow::anyhow!("AAC encode: {e:?}"))?;
+            out.extend_from_slice(&encoded.data);
         }
-        let frame = Frame::Audio(AudioFrame {
-            samples: samples as u32,
-            pts: None,
-            data: vec![pcm.to_vec()],
-        });
-        self.inner
-            .send_frame(&frame)
-            .map_err(|e| anyhow::anyhow!("AAC encode: {e}"))?;
-        Ok(self.drain())
+        Ok(out)
     }
 
-    /// Flush the encoder's lookahead and overlap, ending the stream cleanly.
+    /// Flush the encoder's lookahead and trailing buffer, ending the stream cleanly.
     pub fn finish(&mut self) -> Vec<u8> {
-        if self.inner.flush().is_err() {
-            return Vec::new();
+        let mut out = Vec::new();
+        if !self.buffer.is_empty() {
+            let chunk = std::mem::take(&mut self.buffer);
+            if let Ok(encoded) = self.inner.encode_pcm_bytes_with_padding(&chunk) {
+                out.extend_from_slice(&encoded.packet.data);
+            }
         }
-        self.drain()
+        out
     }
 
     /// Sample rate the encoder was configured for.
@@ -82,14 +90,9 @@ impl AacEncoder {
         self.sample_rate
     }
 
-    fn drain(&mut self) -> Vec<u8> {
-        let mut out = Vec::new();
-        // `receive_packet` returns `NeedMore` once drained, which is the normal
-        // exit rather than a failure.
-        while let Ok(packet) = self.inner.receive_packet() {
-            out.extend_from_slice(&packet.data);
-        }
-        out
+    /// Number of channels the encoder was configured for.
+    pub fn channels(&self) -> u16 {
+        self.channels
     }
 }
 

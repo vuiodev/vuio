@@ -130,7 +130,7 @@ transcode-dts = ["transcode", "dep:oxideav-dts"]
 # The AAC-LC encoder, for `[transcode] audio_format = "aac"`. LPCM is the
 # default output and needs no encoder, so this is separable — but it is also
 # what the HLS audio path will re-encode into, so it ships on.
-transcode-aac = ["transcode", "dep:oxideav-aac"]
+transcode-aac = ["transcode", "dep:xaac-rs"]
 unstable-internals = []
 
 [dependencies]
@@ -193,7 +193,7 @@ hex = { version = "0.4", optional = true }
 oxideav-core = { path = "../vendor/oxideav-core", optional = true }
 oxideav-ac3 = { path = "../vendor/oxideav-ac3", optional = true }
 oxideav-dts = { path = "../vendor/oxideav-dts", optional = true }
-oxideav-aac = { path = "../vendor/oxideav-aac", optional = true }
+xaac-rs = { version = "0.2", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
 # over TLS. `rustls-no-provider` rather than a provider-selecting feature because
