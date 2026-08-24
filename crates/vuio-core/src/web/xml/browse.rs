@@ -251,7 +251,7 @@ pub async fn generate_browse_response(
             if let Some(advert) = transcoded.filter(|a| a.first) {
                 let _ = advert.write_didl(
                     &mut didl,
-                    &server_ip,
+                    server_ip,
                     state.http_binding.port(),
                     file_id,
                     duration_secs,
@@ -294,7 +294,7 @@ pub async fn generate_browse_response(
             if let Some(advert) = transcoded.filter(|a| !a.first) {
                 let _ = advert.write_didl(
                     &mut didl,
-                    &server_ip,
+                    server_ip,
                     state.http_binding.port(),
                     file_id,
                     duration_secs,

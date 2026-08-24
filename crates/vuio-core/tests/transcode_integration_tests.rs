@@ -257,7 +257,10 @@ async fn head_promises_the_length_that_get_delivers() {
         header_u64(&head_headers, header::CONTENT_LENGTH),
         header_u64(&get_headers, header::CONTENT_LENGTH),
     );
-    assert_eq!(get_body.len() as u64, header_u64(&head_headers, header::CONTENT_LENGTH));
+    assert_eq!(
+        get_body.len() as u64,
+        header_u64(&head_headers, header::CONTENT_LENGTH)
+    );
 }
 
 #[tokio::test]
@@ -269,8 +272,13 @@ async fn a_byte_range_returns_exactly_that_slice_of_the_full_decode() {
     // so the seek has to land mid-frame and discard the right number of samples.
     let start = 44 + 1536 * 2 * 2 + 5000;
     let end = start + 20_000;
-    let (status, headers, part) =
-        request(&state, id, Method::GET, Some(&format!("bytes={start}-{end}"))).await;
+    let (status, headers, part) = request(
+        &state,
+        id,
+        Method::GET,
+        Some(&format!("bytes={start}-{end}")),
+    )
+    .await;
 
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(
@@ -300,11 +308,24 @@ async fn a_deep_seek_matches_the_sequential_decode_frame_for_frame() {
     for frame in [2usize, 5, 8] {
         let start = 44 + frame * 1536 * 2 * 2 + 777;
         let end = start + 8_000;
-        assert!(end < whole.len(), "fixture is long enough for frame {frame}");
-        let (status, _, part) =
-            request(&state, id, Method::GET, Some(&format!("bytes={start}-{end}"))).await;
+        assert!(
+            end < whole.len(),
+            "fixture is long enough for frame {frame}"
+        );
+        let (status, _, part) = request(
+            &state,
+            id,
+            Method::GET,
+            Some(&format!("bytes={start}-{end}")),
+        )
+        .await;
         assert_eq!(status, StatusCode::PARTIAL_CONTENT);
-        assert_same_audio(&part, &whole[start..=end], start, &format!("range into frame {frame}"));
+        assert_same_audio(
+            &part,
+            &whole[start..=end],
+            start,
+            &format!("range into frame {frame}"),
+        );
     }
 }
 
@@ -328,8 +349,7 @@ async fn a_range_past_the_end_is_refused_rather_than_truncated() {
     let (_temp, state, id) = library().await;
     let (_, _, whole) = request(&state, id, Method::GET, None).await;
     let past = whole.len() + 10;
-    let (status, _, _) =
-        request(&state, id, Method::GET, Some(&format!("bytes={past}-"))).await;
+    let (status, _, _) = request(&state, id, Method::GET, Some(&format!("bytes={past}-"))).await;
     assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
 }
 
@@ -455,7 +475,8 @@ async fn browse_audio(state: &AppState) -> String {
         HeaderValue::from_static("DLNADOC/1.50 SEC_HHP_[TV]UE40D7000/1.0"),
     );
     let response =
-        content_directory_control(State(state.clone()), headers, browse_request("audio/!all")).await;
+        content_directory_control(State(state.clone()), headers, browse_request("audio/!all"))
+            .await;
     assert_eq!(response.status(), StatusCode::OK);
     // DIDL is double-escaped inside the SOAP body; unescape enough to read it.
     String::from_utf8(
@@ -495,7 +516,10 @@ async fn an_ac3_item_is_offered_both_the_original_and_a_decoded_resource() {
     );
     // The original must survive untouched — a TV that can play AC-3 should see
     // exactly what it saw before.
-    assert!(didl.contains(&format!(">http://127.0.0.1:8080/media/{id}</res>")) || didl.contains(&format!("/media/{id}</res>")));
+    assert!(
+        didl.contains(&format!(">http://127.0.0.1:8080/media/{id}</res>"))
+            || didl.contains(&format!("/media/{id}</res>"))
+    );
 }
 
 #[tokio::test]
@@ -575,7 +599,10 @@ async fn the_aac_resource_streams_adts_without_claiming_to_be_seekable() {
         .to_str()
         .unwrap()
         .to_owned();
-    assert!(features.contains("DLNA.ORG_OP=00"), "no seeking: {features}");
+    assert!(
+        features.contains("DLNA.ORG_OP=00"),
+        "no seeking: {features}"
+    );
     assert!(features.contains("DLNA.ORG_CI=1"), "converted: {features}");
 
     let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)

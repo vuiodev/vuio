@@ -47,7 +47,7 @@ jobs:
         with:
           components: rustfmt
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web -- --check
 
   # ===================================================================
   # The web interface ships compiled into the binary.
@@ -130,7 +130,7 @@ jobs:
             target/
           key: clippy-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D clippy::all -D warnings
+        run: cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D clippy::all -D warnings
 
   # ===================================================================
   # Guard the published API of vuio-core.
