@@ -18,7 +18,7 @@ pub use browse::*;
 pub use descriptions::*;
 pub use rendering::{
     container_class, generate_indexed_browse_response, generate_indexed_items_response,
-    BrowseRenderContext, ContainerSpec,
+    BrowseRenderContext, TranscodeAdvert, ContainerSpec,
 };
 
 #[cfg(test)]

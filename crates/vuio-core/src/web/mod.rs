@@ -24,6 +24,66 @@ pub mod ui;
 pub mod xml;
 
 use crate::{database::DatabaseManager, state::AppState};
+
+/// Whether this item is one a renderer may be unable to play unaided.
+///
+/// True only when the codec is AC-3, E-AC-3 or DTS *and* this build can decode
+/// it — advertising a resource we cannot produce would turn a silent film into
+/// a broken one. The recorded codec is consulted first because it is what a
+/// container's audio track will be identified by; the MIME type and filename
+/// cover an elementary stream, including one indexed before those MIME types
+/// existed.
+#[cfg_attr(not(feature = "transcode"), allow(unused_variables))]
+pub(crate) fn item_needs_transcode(codec: Option<&str>, mime: &str, filename: &str) -> bool {
+    #[cfg(not(feature = "transcode"))]
+    {
+        false
+    }
+    #[cfg(feature = "transcode")]
+    {
+        use crate::media::transcode::TranscodeCodec;
+        codec
+            .and_then(TranscodeCodec::from_stored_codec)
+            .or_else(|| transcode_streaming::codec_for(mime, filename))
+            .is_some_and(TranscodeCodec::is_decodable)
+    }
+}
+
+/// How this server should advertise a decoded alternative, if at all.
+///
+/// One place decides, so the two DIDL writers cannot drift apart on it, and the
+/// feature gate lives here rather than in the XML.
+pub(crate) fn transcode_advert<D: DatabaseManager>(
+    state: &AppState<D>,
+) -> Option<xml::TranscodeAdvert> {
+    #[cfg(not(feature = "transcode"))]
+    {
+        let _ = state;
+        None
+    }
+    #[cfg(feature = "transcode")]
+    {
+        use crate::config::{TranscodeAudioFormat, TranscodePreference};
+        let config = state.current_config();
+        if !config.transcode.enabled {
+            return None;
+        }
+        Some(xml::TranscodeAdvert {
+            // The MIME differs from the original's, which is what lets a
+            // renderer that matches against its own sink protocolInfo pick the
+            // one it can actually decode.
+            mime: match config.transcode.audio_format {
+                TranscodeAudioFormat::Lpcm => "audio/vnd.wave",
+                TranscodeAudioFormat::Aac => "audio/aac",
+            },
+            path: match config.transcode.audio_format {
+                TranscodeAudioFormat::Lpcm => "transcode/audio.wav",
+                TranscodeAudioFormat::Aac => "transcode/audio.aac",
+            },
+            first: config.transcode.prefer == TranscodePreference::Transcoded,
+        })
+    }
+}
 use axum::{
     extract::DefaultBodyLimit,
     middleware,

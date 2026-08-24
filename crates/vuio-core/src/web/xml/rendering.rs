@@ -143,6 +143,79 @@ pub struct BrowseRenderContext {
     pub autoplay_enabled: bool,
     pub update_id: u32,
     pub bookmarks: HashMap<i64, u32>,
+    /// Whether, and how, to offer a decoded alternative for AC-3/DTS items.
+    ///
+    /// `None` in a build with no decoder, or with `[transcode] enabled = false`
+    /// — either way the writers emit exactly the one `<res>` they always did.
+    pub transcode: Option<TranscodeAdvert>,
+}
+
+/// How a decoded alternative resource should be advertised.
+///
+/// A plain value rather than a read of the config, so the XML writers stay
+/// feature-blind and a test can set up either case directly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscodeAdvert {
+    /// MIME type of the decoded resource.
+    pub mime: &'static str,
+    /// Path suffix under `/media/{id}/` that serves it.
+    pub path: &'static str,
+    /// Whether the decoded resource is listed before the original.
+    pub first: bool,
+}
+
+impl TranscodeAdvert {
+    /// Write the decoded alternative for `file_id`.
+    ///
+    /// `DLNA.ORG_CI=1` is the conversion indicator: a renderer matching on
+    /// protocolInfo has to be told these bytes were produced rather than stored,
+    /// and every other `<res>` this server writes says `CI=0`.
+    fn write<W: std::fmt::Write>(
+        &self,
+        output: &mut W,
+        context: &BrowseRenderContext,
+        file_id: i64,
+        duration: Option<u64>,
+    ) -> std::fmt::Result {
+        self.write_didl(
+            output,
+            &context.server_ip,
+            context.server_port,
+            file_id,
+            duration,
+        )
+    }
+
+    /// The same, for the fallback writer, which carries its parts loose rather
+    /// than in a context.
+    pub(crate) fn write_didl<W: std::fmt::Write>(
+        &self,
+        output: &mut W,
+        server_ip: &str,
+        server_port: u16,
+        file_id: i64,
+        duration: Option<u64>,
+    ) -> std::fmt::Result {
+        write!(
+            output,
+            r#"<res protocolInfo="http-get:*:{}:DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000""#,
+            self.mime
+        )?;
+        if let Some(seconds) = duration {
+            write!(
+                output,
+                r#" duration="{:02}:{:02}:{:02}""#,
+                seconds / 3600,
+                (seconds % 3600) / 60,
+                seconds % 60
+            )?;
+        }
+        write!(
+            output,
+            ">http://{}:{}/media/{}/{}</res>",
+            server_ip, server_port, file_id, self.path
+        )
+    }
 }
 
 /// UPnP container classes.
@@ -377,6 +450,20 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             _ => mime,
         }
     };
+    // A second resource for an item whose audio this renderer may not be able to
+    // decode. Both are offered and the renderer picks — which is the whole point:
+    // there is no reliable table of which television model licensed which codec,
+    // and guessing wrong is worse than letting it choose. `prefer` decides the
+    // order, for the renderers that take the first without looking.
+    let transcoded = context
+        .transcode
+        .filter(|_| !is_radio)
+        .filter(|_| crate::web::item_needs_transcode(file.codec(), mime, file.filename()));
+    let item_duration = file.duration_secs().map(|value| value as u64);
+    if let Some(advert) = transcoded.filter(|a| a.first) {
+        advert.write(output, context, file_id, item_duration)?;
+    }
+
     write!(
         output,
         r#"<res protocolInfo="http-get:*:{wire_mime}:{flags}" size="{}""#,
@@ -427,6 +514,9 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
         ">http://{}:{}/media/{}</res>",
         context.server_ip, context.server_port, file_id
     )?;
+    if let Some(advert) = transcoded.filter(|a| !a.first) {
+        advert.write(output, context, file_id, item_duration)?;
+    }
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
         write!(
             output,

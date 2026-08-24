@@ -235,6 +235,29 @@ pub async fn generate_browse_response(
                 file.size.to_string()
             };
 
+            // The same second resource the indexed path offers. Kept in step
+            // with `rendering.rs` deliberately: an item reached through this
+            // fallback must not lose the alternative it would have been given
+            // through the other.
+            let transcoded = crate::web::transcode_advert(state)
+                .filter(|_| !is_radio)
+                .filter(|_| {
+                    crate::web::item_needs_transcode(
+                        file.stream.codec.as_deref(),
+                        &file.mime_type,
+                        &file.filename,
+                    )
+                });
+            if let Some(advert) = transcoded.filter(|a| a.first) {
+                let _ = advert.write_didl(
+                    &mut didl,
+                    &server_ip,
+                    state.http_binding.port(),
+                    file_id,
+                    duration_secs,
+                );
+            }
+
             let _ = write!(
                 &mut didl,
                 r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
@@ -267,6 +290,16 @@ pub async fn generate_browse_response(
                 state.http_binding.port(),
                 file_id
             );
+
+            if let Some(advert) = transcoded.filter(|a| !a.first) {
+                let _ = advert.write_didl(
+                    &mut didl,
+                    &server_ip,
+                    state.http_binding.port(),
+                    file_id,
+                    duration_secs,
+                );
+            }
 
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
                 let _ = write!(

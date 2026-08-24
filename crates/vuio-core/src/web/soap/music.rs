@@ -635,6 +635,7 @@ pub(super) async fn render_context<D: DatabaseManager>(
         autoplay_enabled: state.current_config().media.autoplay_enabled,
         update_id: state.content_update_id.load(Ordering::SeqCst),
         bookmarks,
+        transcode: crate::web::transcode_advert(state),
     }
 }
 

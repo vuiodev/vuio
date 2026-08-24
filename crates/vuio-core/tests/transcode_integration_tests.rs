@@ -338,3 +338,138 @@ async fn concurrent_transcodes_are_capped_rather_than_queued() {
     assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(second.headers()[header::RETRY_AFTER], "5");
 }
+
+// ---------------------------------------------------------------------------
+// What a television is actually told
+//
+// The stream above is only reachable if the browse response mentions it. These
+// drive the real SOAP endpoint, because the DIDL is generated in two places —
+// the indexed path and the fallback — and an item must not lose its alternative
+// depending on which one served it.
+// ---------------------------------------------------------------------------
+
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue};
+use vuio_core::web::soap::content_directory_control;
+
+fn browse_request(object_id: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+      <ObjectID>{object_id}</ObjectID>
+      <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+      <Filter>*</Filter>
+      <StartingIndex>0</StartingIndex>
+      <RequestedCount>50</RequestedCount>
+      <SortCriteria></SortCriteria>
+    </u:Browse>
+  </s:Body>
+</s:Envelope>"#
+    )
+}
+
+/// Browse the audio tree as a Samsung set — one of the profiles that actually
+/// dropped DTS support, and the one with the most quirks around `<res>`.
+async fn browse_audio(state: &AppState) -> String {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "soapaction",
+        HeaderValue::from_static("\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\""),
+    );
+    headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static("DLNADOC/1.50 SEC_HHP_[TV]UE40D7000/1.0"),
+    );
+    let response =
+        content_directory_control(State(state.clone()), headers, browse_request("audio/!all")).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // DIDL is double-escaped inside the SOAP body; unescape enough to read it.
+    String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&quot;", "\"")
+}
+
+#[tokio::test]
+async fn an_ac3_item_is_offered_both_the_original_and_a_decoded_resource() {
+    let (_temp, state, id) = library().await;
+    let didl = browse_audio(&state).await;
+
+    assert_eq!(
+        didl.matches("<res ").count(),
+        2,
+        "expected the original and one decoded alternative:\n{didl}"
+    );
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.wav")),
+        "the decoded resource must be reachable:\n{didl}"
+    );
+    assert!(
+        didl.contains("DLNA.ORG_CI=1"),
+        "the decoded resource must declare the conversion:\n{didl}"
+    );
+    assert!(
+        didl.contains("audio/vnd.wave"),
+        "its MIME must differ from the original's, or protocolInfo matching \
+         cannot tell them apart:\n{didl}"
+    );
+    // The original must survive untouched — a TV that can play AC-3 should see
+    // exactly what it saw before.
+    assert!(didl.contains(&format!(">http://127.0.0.1:8080/media/{id}</res>")) || didl.contains(&format!("/media/{id}</res>")));
+}
+
+#[tokio::test]
+async fn the_original_is_listed_first_by_default() {
+    let (_temp, state, _) = library().await;
+    let didl = browse_audio(&state).await;
+    let original = didl.find("audio/ac3").expect("original res");
+    let decoded = didl.find("audio/vnd.wave").expect("decoded res");
+    assert!(
+        original < decoded,
+        "a renderer that takes the first resource must keep getting the original:\n{didl}"
+    );
+}
+
+#[tokio::test]
+async fn prefer_transcoded_puts_the_decoded_resource_first() {
+    let (_temp, mut state, _) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.prefer = vuio_core::config::TranscodePreference::Transcoded;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_audio(&state).await;
+    let original = didl.find("audio/ac3").expect("original res");
+    let decoded = didl.find("audio/vnd.wave").expect("decoded res");
+    assert!(
+        decoded < original,
+        "the decoded resource must come first when asked for:\n{didl}"
+    );
+}
+
+#[tokio::test]
+async fn with_the_feature_off_an_item_has_exactly_one_resource() {
+    let (_temp, mut state, _) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.enabled = false;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_audio(&state).await;
+    assert_eq!(
+        didl.matches("<res ").count(),
+        1,
+        "turning the feature off must leave the DIDL exactly as it was:\n{didl}"
+    );
+    assert!(!didl.contains("DLNA.ORG_CI=1"));
+}
