@@ -200,8 +200,24 @@ pub async fn serve_hls_audio_init_segment<D: DatabaseManager>(
 fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> Vec<u8> {
     let out_track = rendition_track(track);
     let timescale = Fmp4Writer::timescale_for(&out_track);
-    let start_secs = seq as f64 * SEGMENT_DURATION_SECS as f64;
-    let nominal_decode_time = (start_secs * timescale as f64).round() as u64;
+    let is_reencoded_audio = track.codec_kind.transcode_codec().is_some();
+
+    // For re-encoded audio (AC-3/DTS -> AAC), align segment durations to integer AAC frames (1024 samples)
+    // so no segment ends on a fractional frame or requires zero-padding silence.
+    let (start_secs, target_duration_secs, nominal_decode_time) = if is_reencoded_audio {
+        let sample_rate = out_track.sample_rate.unwrap_or(48_000);
+        let frames_per_seg =
+            ((SEGMENT_DURATION_SECS as f64 * sample_rate as f64) / 1024.0).round() as u64;
+        let seg_samples = frames_per_seg * 1024;
+        let start_sample = seq as u64 * seg_samples;
+        let start_s = start_sample as f64 / sample_rate as f64;
+        let dur_s = seg_samples as f64 / sample_rate as f64;
+        (start_s, dur_s, start_sample)
+    } else {
+        let start_s = seq as f64 * SEGMENT_DURATION_SECS as f64;
+        let nominal = (start_s * timescale as f64).round() as u64;
+        (start_s, SEGMENT_DURATION_SECS as f64, nominal)
+    };
 
     let packets = MkvDemuxer::extract_track_packets(
         path,
@@ -209,7 +225,7 @@ fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> V
         track.codec_kind,
         timescale,
         start_secs,
-        SEGMENT_DURATION_SECS as f64,
+        target_duration_secs,
     )
     .unwrap_or_default();
 
@@ -227,10 +243,6 @@ fn build_segment_bytes(path: &std::path::Path, track: &TrackInfo, seq: u32) -> V
         None => packets,
     };
 
-    // Seeking lands at (or before) `start_secs`, not exactly on it, so the fragment's
-    // base decode time comes from the packets themselves (`build_segment` takes it from
-    // the first one's decode timestamp). The nominal `seq`-derived position is only a
-    // fallback for a segment that came back empty.
     Fmp4Writer::build_segment(seq + 1, &out_track, nominal_decode_time, &packets)
 }
 

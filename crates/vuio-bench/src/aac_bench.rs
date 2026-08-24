@@ -7,8 +7,10 @@
 use std::time::{Duration, Instant};
 use vuio_core::media::transcode::{PcmDecoder, TranscodeCodec};
 
-const AC3_FIXTURE: &[u8] = include_bytes!("../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
-const DTS_FIXTURE: &[u8] = include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+const AC3_FIXTURE: &[u8] =
+    include_bytes!("../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+const DTS_FIXTURE: &[u8] =
+    include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
 
 fn generate_sine_wave(sample_rate: u32, channels: u16, duration_secs: f64) -> Vec<i16> {
     let total_samples = (sample_rate as f64 * duration_secs) as usize;
@@ -44,8 +46,9 @@ fn bench_ac3_decode(iterations: usize) -> (Duration, f64, usize) {
     let first_frame = &AC3_FIXTURE[..frame_len];
 
     let start = Instant::now();
-    let (mut decoder, first_pcm) = PcmDecoder::open(TranscodeCodec::Ac3, 48000, Some(2), first_frame)
-        .expect("open AC-3 decoder");
+    let (mut decoder, first_pcm) =
+        PcmDecoder::open(TranscodeCodec::Ac3, 48000, Some(2), first_frame)
+            .expect("open AC-3 decoder");
 
     let mut total_pcm_bytes = first_pcm.len();
     let mut total_samples = 1536; // first frame samples
@@ -92,12 +95,20 @@ fn bench_eac3_decode(iterations: usize) -> (Duration, f64, usize) {
     while let Ok(pkt) = enc.receive_packet() {
         eac3_packets.push(pkt.data);
     }
-    assert!(!eac3_packets.is_empty(), "E-AC-3 encoder produced no packets");
+    assert!(
+        !eac3_packets.is_empty(),
+        "E-AC-3 encoder produced no packets"
+    );
 
     let first_frame = &eac3_packets[0];
     let start = Instant::now();
-    let (mut decoder, first_pcm) = PcmDecoder::open(TranscodeCodec::Eac3, sample_rate, Some(channels), first_frame)
-        .expect("open E-AC-3 decoder");
+    let (mut decoder, first_pcm) = PcmDecoder::open(
+        TranscodeCodec::Eac3,
+        sample_rate,
+        Some(channels),
+        first_frame,
+    )
+    .expect("open E-AC-3 decoder");
 
     let mut total_pcm_bytes = first_pcm.len();
     let mut total_samples = 1536;
@@ -139,8 +150,9 @@ fn bench_dts_decode(iterations: usize) -> (Duration, f64, usize) {
 
     let first_frame = frames[0];
     let start = Instant::now();
-    let (mut decoder, first_pcm) = PcmDecoder::open(TranscodeCodec::Dts, 48000, Some(2), first_frame)
-        .expect("open DTS decoder");
+    let (mut decoder, first_pcm) =
+        PcmDecoder::open(TranscodeCodec::Dts, 48000, Some(2), first_frame)
+            .expect("open DTS decoder");
 
     let mut total_pcm_bytes = first_pcm.len();
     let mut total_samples = 512;
@@ -292,7 +304,11 @@ mod apple_native {
         0
     }
 
-    pub fn bench_apple(pcm_bytes: &[u8], sample_rate: u32, channels: u16) -> (std::time::Duration, usize) {
+    pub fn bench_apple(
+        pcm_bytes: &[u8],
+        sample_rate: u32,
+        channels: u16,
+    ) -> (std::time::Duration, usize) {
         let start = std::time::Instant::now();
 
         let in_format = AudioStreamBasicDescription {
@@ -370,7 +386,11 @@ mod apple_native {
     }
 }
 
-fn bench_xaac(pcm_bytes: &[u8], sample_rate: u32, channels: u16) -> Result<(Duration, usize), String> {
+fn bench_xaac(
+    pcm_bytes: &[u8],
+    sample_rate: u32,
+    channels: u16,
+) -> Result<(Duration, usize), String> {
     let start = Instant::now();
     use xaac_rs::{Encoder, EncoderConfig, OutputFormat, Profile};
 
@@ -387,10 +407,14 @@ fn bench_xaac(pcm_bytes: &[u8], sample_rate: u32, channels: u16) -> Result<(Dura
     let mut out_len = 0;
     for chunk in pcm_bytes.chunks(frame_bytes) {
         if chunk.len() == frame_bytes {
-            let encoded = encoder.encode_pcm_bytes(chunk).map_err(|e| format!("{e:?}"))?;
+            let encoded = encoder
+                .encode_pcm_bytes(chunk)
+                .map_err(|e| format!("{e:?}"))?;
             out_len += encoded.data.len();
         } else {
-            let encoded = encoder.encode_pcm_bytes_with_padding(chunk).map_err(|e| format!("{e:?}"))?;
+            let encoded = encoder
+                .encode_pcm_bytes_with_padding(chunk)
+                .map_err(|e| format!("{e:?}"))?;
             out_len += encoded.packet.data.len();
         }
     }

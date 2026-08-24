@@ -32,14 +32,36 @@ default-members = [
 ]
 resolver = "2"
 
-# The vendored codecs are the only CPU-bound code in the tree. Optimizing those
-# packages alone leaves `cargo build` on the code actually being worked on as fast as it was.
+# Optimizing codecs, encoders, and demuxers in dev profile gives fast real-time
+# audio decoding and encoding without requiring release rebuilds.
 [profile.dev.package.oxideav-core]
-opt-level = 2
+opt-level = 3
 [profile.dev.package.oxideav-ac3]
-opt-level = 2
+opt-level = 3
 [profile.dev.package.oxideav-dts]
-opt-level = 2
+opt-level = 3
+[profile.dev.package.xaac-rs]
+opt-level = 3
+[profile.dev.package.libxaac-sys]
+opt-level = 3
+[profile.dev.package.symphonia]
+opt-level = 3
+[profile.dev.package.symphonia-core]
+opt-level = 3
+[profile.dev.package.symphonia-format-mkv]
+opt-level = 3
+[profile.dev.package.symphonia-format-riff]
+opt-level = 3
+[profile.dev.package.symphonia-format-isomp4]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-flac]
+opt-level = 3
+[profile.dev.package.symphonia-bundle-mp3]
+opt-level = 3
+[profile.dev.package.symphonia-codec-aac]
+opt-level = 3
+[profile.dev.package.symphonia-codec-pcm]
+opt-level = 3
 
 [profile.release]
 opt-level = 3

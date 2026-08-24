@@ -32,11 +32,19 @@ impl AacEncoder {
             anyhow::bail!("unsupported channel count for AAC: {channels}");
         }
 
+        let bitrate = match channels {
+            1 => 96_000,
+            2 => 192_000,
+            6 => 384_000,
+            8 => 512_000,
+            _ => 96_000 * u32::from(channels),
+        };
+
         let config = xaac_rs::EncoderConfig {
             profile: xaac_rs::Profile::AacLc,
             sample_rate,
             channels,
-            bitrate: 64_000 * u32::from(channels),
+            bitrate,
             output_format: xaac_rs::OutputFormat::Adts,
             ..Default::default()
         };

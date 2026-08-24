@@ -481,15 +481,10 @@ async fn an_audio_segment_carries_real_re_encoded_aac() {
         "ADTS framing leaked into an MP4 sample"
     );
 
-    // The second segment begins four seconds in, one AAC frame early to cancel
-    // the encoder's delay.
+    // The second segment begins four seconds in, matching the AAC frame-aligned decode time.
     let tfdt = find_box(&segment, "tfdt").expect("a tfdt");
     let base = u64::from_be_bytes(tfdt[4..12].try_into().unwrap());
-    assert_eq!(
-        base,
-        4 * 48_000 - 1024,
-        "the run must sit one frame before the segment boundary"
-    );
+    assert_eq!(base, 188 * 1024, "the run sits at the segment boundary");
 }
 
 #[tokio::test]

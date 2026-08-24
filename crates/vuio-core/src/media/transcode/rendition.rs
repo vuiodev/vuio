@@ -62,12 +62,8 @@ pub fn reencode_to_aac(
     }
     adts.extend_from_slice(&encoder.finish());
 
-    // One frame early, to cancel the encoder's delay. Clamped at zero for a run
-    // that already starts at the beginning of the film, where there is no
-    // earlier timeline to move onto — the residual lag there is one frame,
-    // twenty-one milliseconds at 48 kHz.
     let base = nominal_start_pts.unwrap_or(first.pts);
-    let mut dts = base.saturating_sub(AAC_FRAME_SAMPLES);
+    let mut dts = base;
     let mut out = Vec::new();
     for payload in super::adts_payloads(&adts) {
         out.push(MediaPacket {

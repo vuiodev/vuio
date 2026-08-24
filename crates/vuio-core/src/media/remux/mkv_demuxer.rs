@@ -359,8 +359,11 @@ impl MkvDemuxer {
             },
         );
 
+        let start_ticks =
+            (start_secs.max(0.0) * output_timescale as f64).round() as u64;
         let target_ticks =
             (target_duration_secs.max(0.0) * output_timescale as f64).round() as u64;
+        let is_video = matches!(codec, TrackCodec::Avc | TrackCodec::Hevc);
 
         let mut packets = Vec::new();
         let mut accumulated_ticks: u64 = 0;
@@ -392,26 +395,39 @@ impl MkvDemuxer {
                     let dts = rescale(packet.dts.get());
                     let dur = rescale(packet.dur.get() as i64);
                     let is_keyframe = packet_is_keyframe(&packet.data, codec);
-                    // Guarantee the segment opens on a random-access point even where
-                    // the container's cue index is sparse enough that the seek above
-                    // landed mid-GOP. Dropping these leading frames loses nothing: they
-                    // depend on references the player would not have when starting here,
-                    // and the previous segment already covers their span.
-                    if packets.is_empty() && !is_keyframe {
-                        continue;
+
+                    if is_video {
+                        // Guarantee the segment opens on a random-access point even where
+                        // the container's cue index is sparse enough that the seek above
+                        // landed mid-GOP. Dropping these leading frames loses nothing: they
+                        // depend on references the player would not have when starting here,
+                        // and the previous segment already covers their span.
+                        if packets.is_empty() && !is_keyframe {
+                            continue;
+                        }
+                        // Matroska stores no per-block duration: a `SimpleBlock` is a
+                        // timestamp and a payload, and symphonia can only report a
+                        // duration where the track declares `DefaultDuration` or the
+                        // codec implies one. Accumulating durations alone therefore
+                        // runs to the packet ceiling on any track that declares
+                        // neither — which is a segment holding the whole film. The
+                        // elapsed presentation time is the check that does not depend
+                        // on the container being generous.
+                        let elapsed = pts.saturating_sub(*first_pts.get_or_insert(pts));
+                        if elapsed >= target_ticks && !packets.is_empty() {
+                            break;
+                        }
+                    } else {
+                        // For audio tracks: discard packets that belong before this segment's start time
+                        // so coarse seeking does not replay packets from the previous segment.
+                        if (dur > 0 && pts + dur <= start_ticks) || (dur == 0 && pts < start_ticks) {
+                            continue;
+                        }
+                        if pts >= start_ticks + target_ticks && !packets.is_empty() {
+                            break;
+                        }
                     }
-                    // Matroska stores no per-block duration: a `SimpleBlock` is a
-                    // timestamp and a payload, and symphonia can only report a
-                    // duration where the track declares `DefaultDuration` or the
-                    // codec implies one. Accumulating durations alone therefore
-                    // runs to the packet ceiling on any track that declares
-                    // neither — which is a segment holding the whole film. The
-                    // elapsed presentation time is the check that does not depend
-                    // on the container being generous.
-                    let elapsed = pts.saturating_sub(*first_pts.get_or_insert(pts));
-                    if elapsed >= target_ticks && !packets.is_empty() {
-                        break;
-                    }
+
                     accumulated_ticks += dur;
                     packets.push(MediaPacket {
                         track_id: packet.track_id,
