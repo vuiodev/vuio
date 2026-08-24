@@ -38,6 +38,9 @@ default = [
     "mcp",
     "metadata",
     "mediainfo",
+    "transcode-ac3",
+    "transcode-dts",
+    "transcode-aac",
     "web-ui",
 ]
 
@@ -90,6 +93,36 @@ web-ui = ["dep:vuio-web", "dashboard"]
 # the feature, and nothing here opens a socket until the operator presses the
 # button. Drop it for a build that must never reach the internet.
 mediainfo = ["dep:reqwest"]
+
+# Decode AC-3, E-AC-3 and DTS so a TV that cannot play them is offered a second,
+# already-decoded resource beside the original and produces sound.
+#
+# On by default for the reason at the top of this section: the person whose TV
+# plays a film silently is exactly the person who will never think to recompile,
+# so shipping this off would mean it helps almost nobody. The flags are here so a
+# deployment that knows its renderers — a vehicle, an appliance, a Chromecast-only
+# install — can drop ~6 MB of decoder it will never reach.
+#
+# `transcode` is the plumbing with no decoder attached: the config section, the
+# second `<res>`, the WAV writer. Nothing selects it alone, but it is what makes
+# `--no-default-features --features transcode` build, and it keeps the CI
+# feature-matrix honest about which half of this is codec and which is server.
+# It carries `oxideav-core` because that crate is the trait and type layer —
+# `Decoder`, `Packet`, `AudioFrame`, `SampleFormat` — with no codec in it, and
+# the plumbing is written against those types whether or not a decoder exists to
+# hand it any.
+transcode = ["dep:oxideav-core"]
+
+# One crate, one decoder, both codecs: E-AC-3 is Annex E of the same A/52
+# specification and `Ac3Decoder` dispatches on the per-packet bsid. A separate
+# `eac3` flag would gate a match arm and save nothing.
+transcode-ac3 = ["transcode", "dep:oxideav-ac3"]
+transcode-dts = ["transcode", "dep:oxideav-dts"]
+
+# The AAC-LC encoder, for `[transcode] audio_format = "aac"`. LPCM is the
+# default output and needs no encoder, so this is separable — but it is also
+# what the HLS audio path will re-encode into, so it ships on.
+transcode-aac = ["transcode", "dep:oxideav-aac"]
 unstable-internals = []
 
 [dependencies]
@@ -144,6 +177,15 @@ symphonia = { version = "0.6", default-features = false, features = ["all"], opt
 getrandom = { version = "0.4", optional = true }
 plist = { version = "1.10", optional = true }
 hex = { version = "0.4", optional = true }
+# The AC-3 / E-AC-3 / DTS decoders and the AAC-LC encoder, vendored verbatim
+# under crates/vendor by `scripts/vendor-oxideav.sh`. Path deps with no version:
+# these are our copies, not registry crates, and `publish = false` on each says
+# so. They add no external crates — thiserror, serde_json and bytemuck were
+# already in the tree.
+oxideav-core = { path = "../vendor/oxideav-core", optional = true }
+oxideav-ac3 = { path = "../vendor/oxideav-ac3", optional = true }
+oxideav-dts = { path = "../vendor/oxideav-dts", optional = true }
+oxideav-aac = { path = "../vendor/oxideav-aac", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
 # over TLS. `rustls-no-provider` rather than a provider-selecting feature because
