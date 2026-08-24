@@ -1,6 +1,6 @@
 [package]
 name = "vuio-bench"
-version = "0.0.44"
+version = "0.0.45"
 edition = "2021"
 authors = ["vyrti"]
 description = "Generates large VuIO libraries for performance work. Not published."
@@ -25,4 +25,4 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 # because it opens every internal module and carries no stability promise. This
 # crate is `publish = false` and exists only to drive the database from the
 # inside, which is the same category as core's own dev-dependency on itself.
-vuio-core = { path = "../vuio-core", version = "0.0.44", features = ["unstable-internals"] }
+vuio-core = { path = "../vuio-core", version = "0.0.45", features = ["unstable-internals"] }

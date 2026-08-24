@@ -175,8 +175,10 @@ fn assert_same_audio(part: &[u8], whole_slice: &[u8], range_start: usize, what: 
     let mut worst = 0i32;
     let mut worst_at = 0usize;
     for (i, (a, b)) in part[lead..]
-        .chunks_exact(2)
-        .zip(whole_slice[lead..].chunks_exact(2))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(whole_slice[lead..].as_chunks::<2>().0)
         .enumerate()
     {
         let x = i16::from_le_bytes([a[0], a[1]]) as i32;
@@ -237,7 +239,7 @@ async fn an_ac3_file_is_served_as_playable_wav() {
     // The fixture is a 440 Hz sine, so silence here would mean we produced a
     // correctly-shaped empty response instead of decoding anything.
     let mut sum = 0f64;
-    for c in body[44..].chunks_exact(2) {
+    for c in body[44..].as_chunks::<2>().0 {
         let v = i16::from_le_bytes([c[0], c[1]]) as f64;
         sum += v * v;
     }

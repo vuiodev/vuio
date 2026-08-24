@@ -205,17 +205,18 @@ pub fn master_table(
 
 /// Figure 4.39 — `fMaster` for `bs_freq_scale == 0`.
 fn master_linear(k0_val: i32, k2_val: i32, bs_alter_scale: bool) -> Result<Vec<i32>> {
-    let dk;
-    let num_bands;
-    if !bs_alter_scale {
-        dk = 1;
+    let (dk, num_bands) = if !bs_alter_scale {
+        let dk = 1;
         // numBands = 2 * INT( (k2 - k0) / (dk * 2) )
-        num_bands = 2 * int_trunc((k2_val - k0_val) as f64 / (dk as f64 * 2.0));
+        (
+            dk,
+            2 * int_trunc((k2_val - k0_val) as f64 / (dk as f64 * 2.0)),
+        )
     } else {
-        dk = 2;
+        let dk = 2;
         // numBands = 2 * NINT( (k2 - k0) / (dk * 2) )
-        num_bands = 2 * nint((k2_val - k0_val) as f64 / (dk as f64 * 2.0));
-    }
+        (dk, 2 * nint((k2_val - k0_val) as f64 / (dk as f64 * 2.0)))
+    };
     if num_bands <= 0 {
         return Err(Error::SbrFreqBandInvalid);
     }
@@ -266,15 +267,11 @@ fn master_warped(
     // temp2 = {1.0, 1.3}; warp = temp2[bs_alter_scale].
     let warp = if bs_alter_scale { 1.3 } else { 1.0 };
 
-    let two_regions;
-    let k1;
-    if (k2_val as f64) / (k0_val as f64) > 2.2449 {
-        two_regions = true;
-        k1 = 2 * k0_val;
+    let (two_regions, k1) = if (k2_val as f64) / (k0_val as f64) > 2.2449 {
+        (true, 2 * k0_val)
     } else {
-        two_regions = false;
-        k1 = k2_val;
-    }
+        (false, k2_val)
+    };
 
     // Lower region.
     let v_k0 = warped_region(k0_val, k1, bands, 1.0)?;

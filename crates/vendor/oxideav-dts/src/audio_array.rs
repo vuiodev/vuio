@@ -422,9 +422,7 @@ impl AdpcmHistory {
     /// Zero every subband's history (the §5.3.1 `HFLAG = 0` frame
     /// gate: "Otherwise, the history will be ignored").
     pub fn clear(&mut self) {
-        for ch in &mut self.per_channel {
-            *ch = [[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND];
-        }
+        self.per_channel.fill([[0.0; NUM_ADPCM_COEFF]; NUM_SUBBAND]);
     }
 
     /// The four-sample history of one `(ch, n)` subband, oldest

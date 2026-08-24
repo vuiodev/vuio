@@ -1,0 +1,333 @@
+================================================================================
+PHASE 4 — AC-3 / E-AC-3 / DTS INSIDE FILMS
+Video files with undecodable audio tracks, for TVs that play them silently
+================================================================================
+
+CONTEXT
+
+Phases 1-3 (branch feat/transcode-ac3-dts, 6 commits) shipped the decode core
+and made it reachable for *elementary* streams: a standalone .ac3/.eac3/.dts
+file is indexed, offered as a second <res>, and served as LPCM or AAC.
+
+That is the foundation, not the payoff. The common shape of the problem is a
+film — Movie.mkv with an AC-3 or DTS track — where the TV shows the picture and
+produces no sound. Phase 4 is what actually fixes that.
+
+The seam is already marked in the code. media/remux/mkv_demuxer.rs:14-27:
+
+    /// This is a passthrough remuxer, not a transcoder: everything here is real
+    /// content Symphonia can identify (E-AC-3/AC-3/DTS/TrueHD audio, VP9/AV1
+    /// video, ...), but with no decoder/encoder in the pipeline those tracks are
+    /// marked `Unsupported` and left out of what gets offered to the browser
+    /// rather than shipped as a broken stream.
+    pub enum TrackCodec { Avc, Hevc, Aac, #[default] Unsupported }
+
+There is now a decoder in the pipeline. That comment is the work order.
+
+
+--------------------------------------------------------------------------------
+WHAT ALREADY EXISTS AND IS REUSED
+--------------------------------------------------------------------------------
+
+From phases 1-3 (all shared, no changes needed):
+
+  media/transcode/mod.rs      TranscodeCodec, make_decoder(), is_decodable()
+  media/transcode/pcm.rs      PcmDecoder — packets in, interleaved S16 out
+  media/transcode/aac.rs      AacEncoder — S16 in, ADTS AAC-LC out
+  media/transcode/session.rs  TranscodeState: plan cache + concurrency ceiling
+  web/mod.rs                  item_needs_transcode(codec, mime, filename)
+                              — already consults MediaFileView::codec() FIRST,
+                                which is exactly what a container track needs
+  web/mod.rs                  transcode_advert() -> Option<TranscodeAdvert>
+  web/xml/rendering.rs        TranscodeAdvert::write / write_didl
+  config                      [transcode] enabled/audio_format/prefer/max_concurrent
+
+Already in the repo, from the existing browser remux path:
+
+  media/remux/mkv_demuxer.rs      MkvDemuxer::inspect(), extract_track_packets()
+  media/remux/fmp4_writer.rs      Fmp4Writer::build_segment() — 849 lines,
+                                  writes avcC / hvcC / mp4a+esds (:225-365)
+  media/remux/hls.rs              master + media playlist generation
+  web/remux_streaming.rs          /media/{id}/hls/* handlers (199 lines)
+  web/radio.rs:141-171            the async_stream chunked-body pattern
+
+NOT reused, and why:
+  - oxideav-mkv / oxideav-mp4 muxers: oxideav's Muxer trait requires
+    Write + Seek, so it cannot write into an HTTP body. Fmp4Writer already
+    produces fragmented MP4, which needs neither seek nor a known length.
+  - oxideav-mpegts: demuxer only. There is no TS muxer in the family.
+  => Phase 4 vendors NOTHING NEW. All four crates are already in crates/vendor.
+
+
+--------------------------------------------------------------------------------
+STEP 1 — THE DATABASE PREREQUISITE (do this first; everything blocks on it)
+--------------------------------------------------------------------------------
+
+Deciding "does this film need a decoded alternative?" must be a DB read. Probing
+files while rendering a browse page is not an option — a folder of 400 films
+would open 400 files per Browse request.
+
+Two existing gaps make that impossible today:
+
+1. platform/filesystem/metadata.rs:184-204 derives stream.codec from
+
+       symphonia::default::get_codecs().get_audio_decoder(audio.codec)
+           .map(|registered| registered.codec.info.short_name.to_owned())
+
+   which returns None for any codec symphonia cannot DECODE. So an AC-3 track
+   stores a NULL codec even though symphonia identified it perfectly well.
+   => Add a CodecId -> &'static str fallback map covering at least
+      CODEC_ID_AC3 -> "ac3", CODEC_ID_EAC3 -> "eac3", CODEC_ID_DCA -> "dca",
+      CODEC_ID_TRUEHD -> "truehd". Note truehd is recorded but NOT decodable —
+      TranscodeCodec::from_stored_codec already returns None for it, and must
+      keep doing so.
+
+2. media/scanner.rs:737-739 only probes audio files:
+
+       if media_file.mime_type.starts_with("audio/") {
+           let _ = crate::platform::filesystem::extract_audio_metadata(...).await;
+       }
+
+   Video files get no stream info at all.
+   => Extend to video/*, capturing the audio track's codec id only. This is a
+      header probe, not a decode. Measure the added scan time on a real library
+      and record it in the commit message — this is the one place phase 4 makes
+      every user pay something.
+
+3. Bump TAGS_VERSION (metadata.rs:40) so existing libraries re-probe on the next
+   scan rather than sitting on NULL codecs forever.
+
+Test: a scanned MKV with an AC-3 track has codec == "ac3" in media_files, and
+item_needs_transcode() returns true for it without opening the file.
+
+Once this lands, the <res> advertising from phase 3 starts firing for films with
+no further change — which is why the URL it points at must exist first. Sequence
+Step 1 and Step 3 in the same PR, or gate on TranscodeCodec::is_decodable().
+
+
+--------------------------------------------------------------------------------
+STEP 2 — TEACH THE DEMUXER ABOUT THE THREE CODECS
+--------------------------------------------------------------------------------
+
+media/remux/mkv_demuxer.rs:
+
+  - Extend TrackCodec: Avc | Hevc | Aac | Ac3 | Eac3 | Dts | Unsupported.
+    Add the variants UNGATED. The enum is Serialize/Deserialize and the variants
+    are additive; a build with no decoder should still NAME the track ("AC-3,
+    cannot be decoded by this build") rather than reporting Unsupported, which
+    is a worse diagnostic and a worse log line.
+
+  - Audio classification (~:166-180) currently:
+
+        let (codec_kind, codec_name) = if a.codec == CODEC_ID_AAC {
+            (TrackCodec::Aac, "AAC")
+        } else {
+            (TrackCodec::Unsupported, "Audio")
+        };
+
+    becomes a match over CODEC_ID_AAC / AC3 / EAC3 / DCA.
+
+  - extra_data is currently captured only for AAC. AC-3/DTS need none for
+    decoding (the decoders read the bitstream headers), so leave that as is —
+    but the RE-ENCODED AAC track needs its own AudioSpecificConfig, which comes
+    from the encoder's output_params, not from the source.
+
+  - browser_audio_tracks (~:68-83) stops dropping these tracks when the matching
+    decoder feature is compiled in. Gate on TranscodeCodec::is_decodable() so a
+    build without transcode-dts still drops DTS rather than offering a track it
+    cannot produce.
+
+media/remux/hls.rs:8-14 and its test at :190-204
+  (test_master_playlist_excludes_unsupported_audio_codecs) asserts the OLD
+  behaviour. It must be rewritten, not deleted: the new contract is "excluded
+  when this build cannot decode it", which is still worth a test.
+
+
+--------------------------------------------------------------------------------
+STEP 3 — A PACKET SOURCE THAT ISN'T AN ELEMENTARY STREAM
+--------------------------------------------------------------------------------
+
+Phase 1-3's FrameIndex/AudioPlan walk sync words in a raw stream. A container
+track's packets come from symphonia instead. Generalise:
+
+  media/transcode/source.rs (new)
+
+      /// Where compressed audio frames come from.
+      enum PacketSource {
+          /// A raw .ac3/.eac3/.dts file, framed by walking sync words.
+          Elementary(FrameIndex),
+          /// One track inside a container symphonia can demux.
+          Container { track_id: u32, /* symphonia reader */ },
+      }
+
+Keep AudioPlan as the thing that resolves total samples / sample rate / channels
+before any bytes are sent — that contract is what makes the LPCM resource
+seekable and must not be weakened. For a container:
+
+  - Total samples: prefer symphonia's track n_frames when the container declares
+    it (MKV usually does via Duration + TimestampScale; MP4 via stts). If absent,
+    fall back to a demux-only counting pass — same cost class as the elementary
+    header walk, and it is cached in TranscodeState either way.
+  - IMPORTANT: if total samples cannot be determined, the resource must degrade
+    to chunked with DLNA.ORG_OP=00, never guess a Content-Length. A wrong
+    Content-Length is a truncated download; an absent one is only a lost seek.
+
+The audio-only resources from phase 2 (/transcode/audio.wav|.aac) then work for
+films too, and codec_for() in web/transcode_streaming.rs gains a DB-codec branch
+alongside its MIME/extension branches. That alone is worth shipping: it fixes
+"play the film's soundtrack on a hi-fi", and it exercises the container path
+before the video work lands on top of it.
+
+
+--------------------------------------------------------------------------------
+STEP 4 — THE BROWSER PATH (HLS)
+--------------------------------------------------------------------------------
+
+The smaller half, and the one with a working harness around it already.
+
+web/remux_streaming.rs:151-180, build_segment_response():
+  - Add a decode+re-encode variant for audio segments whose track is
+    Ac3/Eac3/Dts: extract_track_packets -> PcmDecoder -> AacEncoder ->
+    Fmp4Writer::build_segment with the encoder's own AudioSpecificConfig.
+  - Requires transcode-aac (already a default feature).
+
+  - MOVE SEGMENT BUILDING TO spawn_blocking. It currently runs synchronously on
+    the request task, which is survivable for a byte copy and is not for a
+    decode+encode of a 4-second segment (SEGMENT_DURATION_SECS, :26). This is a
+    prerequisite, not a nicety: without it one seeking client stalls the whole
+    runtime's worker.
+
+  - Take a TranscodeState permit per segment build, so HLS and the DLNA path
+    share one concurrency ceiling rather than each having their own.
+
+  - Segment caching becomes worth it here in a way it was not for a copy: the
+    same segment is rebuilt on every seek and every re-buffer. Key on
+    (file id, track, segment index) and reuse the existing Cache-Control.
+
+web/ui/js/video-player.js:54 already routes .mkv to /hls/master.m3u8, so the
+browser side needs no change once the audio track stops being dropped.
+
+
+--------------------------------------------------------------------------------
+STEP 5 — THE DLNA PATH (progressive fMP4) — THE ACTUAL DELIVERABLE
+--------------------------------------------------------------------------------
+
+New route, beside the phase-2 ones:
+
+    GET|HEAD /media/{id}/transcode/video.mp4
+
+Shape:
+  - Fragmented MP4: one init segment (ftyp + moov with the video track's avcC or
+    hvcC copied verbatim, plus an mp4a track from the AAC encoder's params),
+    then a continuous moof/mdat stream.
+  - Video is PASSTHROUGH. Nothing is re-encoded — only the audio track is
+    decoded and re-encoded. This is what keeps the CPU cost bounded and the
+    picture bit-identical.
+  - Chunked body via async_stream (web/radio.rs:141-171 is the proven pattern),
+    fed from a spawn_blocking producer over a bounded channel so a slow TV
+    applies backpressure instead of buffering a film into RAM.
+  - Headers: no Content-Length, no Accept-Ranges,
+    contentFeatures.dlna.org: DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=...
+    OP=00 because there is no seeking. Do not claim otherwise.
+
+<res> advertising: extend TranscodeAdvert so a video item advertises
+video/mp4 -> transcode/video.mp4 while an audio item keeps audio.wav/audio.aac.
+The selection belongs in web/mod.rs::transcode_advert() next to the existing
+audio_format switch, so both DIDL writers stay feature-blind.
+
+Track selection for multi-audio films: transcode the track the container marks
+DEFAULT; failing that the first audio track. Do not try to be clever about
+language — a wrong guess is worse than a predictable one. If it turns out to
+matter, the follow-up is one <res> per audio track, which the DIDL already
+supports (phase 3 proved multiple <res> render fine).
+
+
+--------------------------------------------------------------------------------
+RISKS, HONESTLY
+--------------------------------------------------------------------------------
+
+1. DO TVs ACTUALLY PLAY PROGRESSIVE fMP4 OVER DLNA? This is the largest product
+   risk in the whole feature and it is not answerable from the code. Support is
+   uneven and brand-specific. VERIFY THIS EARLY — before building Step 5 — with
+   a hand-built fMP4 served from a stub route to a real television. If it fails
+   broadly, the fallback is a progressive MPEG-TS mux, which nothing in the tree
+   provides and which would mean writing one (~600-900 lines) or vendoring a
+   fifth crate. Knowing this costs an afternoon; discovering it after Step 5
+   costs the step.
+
+2. No seeking on the video resource. A film you cannot scrub is a real
+   regression in user experience versus direct play. Partial mitigation: keep
+   the original <res> first (prefer = "original" default), so a TV that CAN
+   play AC-3 keeps its seekable direct-play resource and only the ones that
+   cannot fall back to the stream. Full mitigation is time-seek
+   (DLNA.ORG_OP=01 + TimeSeekRange.dlna.org), which is a follow-up: the
+   demuxer can seek by timestamp and the decoder can be primed the same way
+   phase 2 primes for byte ranges.
+
+3. CPU. Video passthrough keeps this bounded, but a 5.1 DTS track decoded and
+   re-encoded in real time on a Raspberry Pi is not free. max_concurrent
+   already exists and already refuses rather than queues. Measure on the
+   slowest target that matters before defaulting anything on.
+
+4. No real test fixtures exist. test-media/movie1.mkv is a 26-byte stub. Phase
+   1-3 solved this for audio by using the vendored crates' own fixtures and by
+   synthesizing with oxideav-ac3's ENCODER. For phase 4 the same trick extends:
+   build a small MKV at test time from a synthesized H.264 or MPEG-1 video
+   track plus an AC-3 track encoded by oxideav-ac3. Prefer that over committing
+   a binary film clip.
+
+5. The unit tests will lie to you. Phase 1-3 learned this the hard way: every
+   integration test injected MediaFile rows directly into the database and so
+   passed against a scanner that indexed nothing, and a range test that seeked
+   to frame 1 masked a real decoder-state bug. FOR PHASE 4, DRIVE A REAL SERVER
+   WITH A REAL FILE BEFORE BELIEVING ANY OF IT.
+
+
+--------------------------------------------------------------------------------
+SUGGESTED PR SPLIT
+--------------------------------------------------------------------------------
+
+PR A  Step 1 + Step 2 + Step 3.
+      DB codec identification, demuxer awareness, container packet source.
+      Ships a working feature on its own: a film's soundtrack becomes playable
+      as audio.wav/audio.aac. Low risk, fully testable, no new dependencies.
+
+PR B  Step 4. HLS audio for the browser player, plus the spawn_blocking and
+      caching fixes to build_segment_response that it forces.
+
+PR C  Step 5. The progressive video resource. GATE THIS ON RISK 1 BEING
+      ANSWERED FIRST.
+
+
+--------------------------------------------------------------------------------
+VERIFICATION (all of it self-run, no manual steps)
+--------------------------------------------------------------------------------
+
+  cargo build
+  cargo check -p vuio-core --no-default-features
+  cargo check -p vuio-core --no-default-features --features transcode
+  cargo check -p vuio-core --no-default-features --features transcode-ac3
+  cargo check -p vuio-core --no-default-features --features transcode-dts
+  cargo check -p vuio-core --no-default-features --features transcode-aac
+  cargo test --workspace
+
+  Integration, in crates/vuio-core/tests/ following the oneshot pattern in
+  web_ui_integration_tests.rs:1-130:
+    - a scanned MKV with an AC-3 track records codec "ac3" and advertises two
+      <res> elements
+    - the same MKV with the feature off advertises exactly one
+    - a build without transcode-dts drops a DTS track from the HLS master
+      playlist rather than offering a broken one
+    - the video.mp4 resource returns a parseable ftyp+moov followed by at least
+      two moof/mdat pairs, with the video track's avcC byte-identical to the
+      source's
+
+  Live, against ./target/debug/vuio with CONTAINER=1 VUIO_MEDIA_DIRS=... and
+  the server killed in the same command:
+    - Browse as a Samsung UA, confirm both <res> elements
+    - curl the video.mp4 resource, confirm it parses and carries both tracks
+    - confirm /media/{id} direct play is byte-identical to the source file
+
+  Last, before committing: cargo fmt and cargo clippy, scoped to the
+  first-party crates (-p vuio-core -p vuio-cli -p vuio-cast -p vuio-web) so the
+  vendored tree under crates/vendor is not linted.

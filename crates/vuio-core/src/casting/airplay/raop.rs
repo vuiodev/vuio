@@ -63,7 +63,7 @@ fn pcm_to_uncompressed_alac(frames: &[u8]) -> Vec<u8> {
     writer.write(0, 1); // hasSize
     writer.write(0, 2); // unused
     writer.write(1, 1); // isNotCompressed
-    for frame in frames.chunks_exact(BYTES_PER_FRAME) {
+    for frame in frames.as_chunks::<BYTES_PER_FRAME>().0 {
         let left = u16::from_le_bytes([frame[0], frame[1]]);
         let right = u16::from_le_bytes([frame[2], frame[3]]);
         writer.write(u32::from(left), 16);

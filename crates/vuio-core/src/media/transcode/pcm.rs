@@ -152,7 +152,7 @@ mod tests {
     fn rms(pcm: &[u8]) -> f64 {
         let mut sum = 0.0f64;
         let mut n = 0u64;
-        for c in pcm.chunks_exact(2) {
+        for c in pcm.as_chunks::<2>().0 {
             let v = i16::from_le_bytes([c[0], c[1]]) as f64;
             sum += v * v;
             n += 1;

@@ -435,7 +435,7 @@ impl LinuxError {
     pub fn recovery_actions(&self) -> Vec<String> {
         match self {
             LinuxError::InsufficientCapabilities { port } => vec![
-                format!("sudo setcap 'cap_net_bind_service=+ep' $(which vuio)"),
+                "sudo setcap 'cap_net_bind_service=+ep' $(which vuio)".to_string(),
                 format!("Use alternative port instead of {}", port),
                 "Run with sudo (not recommended for production)".to_string(),
             ],

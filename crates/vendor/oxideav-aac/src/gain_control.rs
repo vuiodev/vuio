@@ -274,8 +274,7 @@ fn gmf_long(
 ) -> (Vec<f64>, Vec<f64>) {
     // GMF spans 0..512 for the long sequences.
     let mut gmf = vec![0.0f64; 512];
-    let pfmd_next: Vec<f64>;
-    match seq {
+    let pfmd_next = match seq {
         WindowSequence::OnlyLong => {
             let a0 = alev0(band, 0);
             for (j, slot) in gmf.iter_mut().enumerate() {
@@ -286,7 +285,7 @@ fn gmf_long(
                 };
             }
             // PFMD_B(j) = FMD_0,B(j), 0 ≤ j ≤ 255.
-            pfmd_next = fmd[0][..256].to_vec();
+            fmd[0][..256].to_vec()
         }
         WindowSequence::LongStart => {
             let a0 = alev0(band, 0);
@@ -303,7 +302,7 @@ fn gmf_long(
                 };
             }
             // PFMD_B(j) = FMD_1,B(j), 0 ≤ j ≤ 31.
-            pfmd_next = fmd[1][..32].to_vec();
+            fmd[1][..32].to_vec()
         }
         WindowSequence::LongStop => {
             let a0 = alev0(band, 0);
@@ -320,10 +319,10 @@ fn gmf_long(
                 };
             }
             // PFMD_B(j) = FMD_1,B(j), 0 ≤ j ≤ 255.
-            pfmd_next = fmd[1][..256].to_vec();
+            fmd[1][..256].to_vec()
         }
         WindowSequence::EightShort => unreachable!("gmf_long called for short sequence"),
-    }
+    };
     (gmf, pfmd_next)
 }
 
