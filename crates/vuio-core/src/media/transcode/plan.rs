@@ -6,20 +6,21 @@
 //! channel count — is settled up front, here, and the streaming half only ever
 //! fills in a length that was already promised.
 //!
-//! Building a plan costs one pass over the file's headers plus one decoded
-//! frame. That is why plans are cached (see [`super::session`]): a renderer's
-//! `HEAD`, `GET` and range requests for one file should pay it once.
+//! Building a plan costs one pass over an elementary file's headers, or one
+//! container probe, plus one decoded frame. That is why plans are cached (see
+//! [`super::session`]): a renderer's `HEAD`, `GET` and range requests for one
+//! file should pay it once.
 
 use anyhow::{Context, Result};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom};
 use std::path::Path;
 
+use super::source::PacketSource;
 use super::wav::{pcm_size, wav_size, WAV_HEADER_LEN};
 use super::{FrameIndex, PcmDecoder, TranscodeCodec};
 
-/// The decoded shape of one file, and the frame table to produce it.
-#[derive(Debug)]
+/// The decoded shape of one file, and how to reach the frames that produce it.
 pub struct AudioPlan {
     /// The file this plan describes.
     ///
@@ -29,10 +30,22 @@ pub struct AudioPlan {
     pub source_path: std::path::PathBuf,
     /// Codec of the source.
     pub codec: TranscodeCodec,
-    /// Where every frame is and how long it decodes to.
-    pub index: FrameIndex,
+    /// Where the compressed frames come from, and what they add up to.
+    pub source: PacketSource,
     /// Channels the decoder emits — measured, not predicted.
     pub channels: u16,
+}
+
+impl std::fmt::Debug for AudioPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AudioPlan")
+            .field("source_path", &self.source_path)
+            .field("codec", &self.codec)
+            .field("sample_rate", &self.sample_rate())
+            .field("channels", &self.channels)
+            .field("total_samples", &self.total_samples())
+            .finish()
+    }
 }
 
 /// Channels to ask the decoder for.
@@ -42,14 +55,14 @@ pub struct AudioPlan {
 /// gets the §7.8 downmix the encoder authored rather than one we invent. A
 /// source already at or below stereo is unaffected — the decoder reports what it
 /// actually emitted and [`AudioPlan::channels`] records that.
-const TARGET_CHANNELS: u16 = 2;
+pub(crate) const TARGET_CHANNELS: u16 = 2;
 
 impl AudioPlan {
-    /// Index `path` and probe its decoded shape.
+    /// Index a raw `.ac3`/`.eac3`/`.dts` file and probe its decoded shape.
     ///
     /// Blocking: it reads the whole file's headers and decodes one frame, so
     /// callers on an async task must wrap it in `spawn_blocking`.
-    pub fn build(path: &Path, codec: TranscodeCodec) -> Result<Self> {
+    pub fn elementary(path: &Path, codec: TranscodeCodec) -> Result<Self> {
         let file = File::open(path)
             .with_context(|| format!("opening {} for transcoding", path.display()))?;
         let mut reader = BufReader::with_capacity(256 * 1024, file);
@@ -64,43 +77,83 @@ impl AudioPlan {
         file.read_exact(&mut buf)
             .context("reading the first frame")?;
 
-        let (decoder, _) = PcmDecoder::open(
-            codec,
-            index.sample_rate,
-            Some(TARGET_CHANNELS),
-            &buf,
-        )?;
+        let (decoder, _) = PcmDecoder::open(codec, index.sample_rate, Some(TARGET_CHANNELS), &buf)?;
 
         Ok(Self {
             source_path: path.to_path_buf(),
             codec,
             channels: decoder.channels(),
-            index,
+            source: PacketSource::Elementary(index),
         })
     }
 
+    /// Probe the audio track of a container — a film — and its decoded shape.
+    ///
+    /// Blocking, and much cheaper than the elementary path: the container's own
+    /// track declarations answer everything the header walk had to be run to
+    /// find out, so this reads the file's front matter and one packet.
+    #[cfg(feature = "demux")]
+    pub fn container(path: &Path) -> Result<Self> {
+        let (mut format, audio, codec) = super::source::probe_container_audio(path)?;
+        let (first, _) = super::source::next_track_packet(format.as_mut(), audio.track_id)?
+            .ok_or_else(|| anyhow::anyhow!("{} has no audio packets", path.display()))?;
+        let (decoder, _) =
+            PcmDecoder::open(codec, audio.sample_rate, Some(TARGET_CHANNELS), &first)?;
+
+        Ok(Self {
+            source_path: path.to_path_buf(),
+            codec,
+            channels: decoder.channels(),
+            source: PacketSource::Container(audio),
+        })
+    }
+
+    /// Total decoded sample frames, when they can be known before decoding.
+    pub fn total_samples(&self) -> Option<u64> {
+        self.source.total_samples()
+    }
+
     /// Total size of the WAV resource, header included.
-    pub fn wav_size(&self) -> u64 {
-        wav_size(self.index.total_samples, self.channels)
+    ///
+    /// `None` when the source will not say how long it is. The resource then has
+    /// no `Content-Length` and no seeking — an honest loss, where a guessed
+    /// length would be a truncated download.
+    pub fn wav_size(&self) -> Option<u64> {
+        self.total_samples()
+            .map(|samples| wav_size(samples, self.channels))
     }
 
     /// Sample rate of the decoded output, in Hz.
     pub fn sample_rate(&self) -> u32 {
-        self.index.sample_rate
+        self.source.sample_rate()
+    }
+
+    /// Duration in seconds, when the length is known.
+    pub fn duration_secs(&self) -> Option<f64> {
+        let rate = self.sample_rate();
+        self.total_samples()
+            .filter(|_| rate > 0)
+            .map(|samples| samples as f64 / f64::from(rate))
     }
 
     /// The WAV header describing this resource.
+    ///
+    /// A source of unknown length is described with the largest payload RIFF can
+    /// express, which is what a player shows as "unknown" rather than as zero.
     pub fn wav_header(&self) -> [u8; 44] {
-        super::wav_header(self.sample_rate(), self.channels, self.index.total_samples)
+        super::wav_header(
+            self.sample_rate(),
+            self.channels,
+            self.total_samples().unwrap_or(u64::MAX / 8),
+        )
     }
 
     /// Bytes each decoded sample frame occupies.
-    fn stride(&self) -> u64 {
+    pub fn stride(&self) -> u64 {
         self.channels as u64 * 2
     }
 
-    /// Turn a byte offset into the resource into the frame to start decoding at,
-    /// and how many decoded bytes to drop from that frame's output.
+    /// Turn a byte offset into the resource into where decoding starts.
     ///
     /// Offsets inside the 44-byte header resolve to the very start, because a
     /// range that begins mid-header still has to be served the rest of it.
@@ -108,24 +161,21 @@ impl AudioPlan {
         if byte_offset < WAV_HEADER_LEN {
             return Seeked {
                 header_skip: byte_offset as usize,
-                frame: 0,
-                pcm_skip: 0,
+                start_sample: 0,
+                byte_skip: 0,
             };
         }
         let pcm_offset = byte_offset - WAV_HEADER_LEN;
-        let sample = pcm_offset / self.stride();
-        let within = (pcm_offset % self.stride()) as usize;
-        let (frame, samples_into_frame) = self.index.locate(sample);
         Seeked {
             header_skip: WAV_HEADER_LEN as usize,
-            frame,
-            pcm_skip: samples_into_frame as usize * self.stride() as usize + within,
+            start_sample: pcm_offset / self.stride(),
+            byte_skip: (pcm_offset % self.stride()) as usize,
         }
     }
 
-    /// Decoded bytes produced by frame `i`.
-    pub fn frame_bytes(&self, i: usize) -> usize {
-        pcm_size(u64::from(self.index.frames[i].samples), self.channels) as usize
+    /// Decoded bytes `samples` sample frames occupy at this plan's channel count.
+    pub fn pcm_bytes(&self, samples: u64) -> u64 {
+        pcm_size(samples, self.channels)
     }
 }
 
@@ -134,10 +184,10 @@ impl AudioPlan {
 pub struct Seeked {
     /// Bytes of the WAV header already passed — 44 once past it entirely.
     pub header_skip: usize,
-    /// Index of the frame to begin decoding at.
-    pub frame: usize,
-    /// Decoded bytes to discard from that frame's output.
-    pub pcm_skip: usize,
+    /// The decoded sample frame output begins at.
+    pub start_sample: u64,
+    /// Bytes to drop from that sample frame, for a range beginning mid-sample.
+    pub byte_skip: usize,
 }
 
 #[cfg(test)]
@@ -153,7 +203,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("sine.ac3");
         std::fs::write(&path, AC3_FIXTURE).unwrap();
-        (AudioPlan::build(&path, TranscodeCodec::Ac3).unwrap(), dir)
+        (
+            AudioPlan::elementary(&path, TranscodeCodec::Ac3).unwrap(),
+            dir,
+        )
     }
 
     #[cfg(feature = "transcode-ac3")]
@@ -164,20 +217,20 @@ mod tests {
         assert_eq!(plan.sample_rate(), 48_000);
         assert_eq!(
             plan.wav_size(),
-            WAV_HEADER_LEN + plan.index.total_samples * 2 * 2
+            Some(WAV_HEADER_LEN + plan.total_samples().unwrap() * 2 * 2)
         );
     }
 
     #[cfg(feature = "transcode-ac3")]
     #[test]
-    fn offset_zero_starts_at_the_header_and_the_first_frame() {
+    fn offset_zero_starts_at_the_header_and_the_first_sample() {
         let (plan, _dir) = fixture_plan();
         assert_eq!(
             plan.seek(0),
             Seeked {
                 header_skip: 0,
-                frame: 0,
-                pcm_skip: 0
+                start_sample: 0,
+                byte_skip: 0
             }
         );
     }
@@ -188,32 +241,36 @@ mod tests {
         let (plan, _dir) = fixture_plan();
         let s = plan.seek(20);
         assert_eq!(s.header_skip, 20);
-        assert_eq!(s.frame, 0);
-        assert_eq!(s.pcm_skip, 0);
+        assert_eq!(s.start_sample, 0);
+        assert_eq!(s.byte_skip, 0);
     }
 
     #[cfg(feature = "transcode-ac3")]
     #[test]
-    fn a_range_past_the_header_lands_on_the_right_frame_and_sample() {
+    fn a_range_past_the_header_lands_on_the_right_sample() {
         let (plan, _dir) = fixture_plan();
         // One whole AC-3 frame of decoded stereo is 1536 * 2 * 2 bytes.
         let one_frame = 1536 * 2 * 2;
         let s = plan.seek(WAV_HEADER_LEN + one_frame);
         assert_eq!(s.header_skip, WAV_HEADER_LEN as usize, "header is done");
-        assert_eq!(s.frame, 1, "exactly the second frame");
-        assert_eq!(s.pcm_skip, 0);
+        assert_eq!(s.start_sample, 1536, "exactly the second frame's first sample");
+        assert_eq!(s.byte_skip, 0);
 
-        // Half a frame in: same frame, half its output discarded.
-        let s = plan.seek(WAV_HEADER_LEN + one_frame + one_frame / 2);
-        assert_eq!(s.frame, 1);
-        assert_eq!(s.pcm_skip, (one_frame / 2) as usize);
+        // Half a frame in, and one byte past a sample boundary: the sample is
+        // rounded down and the odd bytes are dropped from its front.
+        let s = plan.seek(WAV_HEADER_LEN + one_frame + one_frame / 2 + 1);
+        assert_eq!(s.start_sample, 1536 + 1536 / 2);
+        assert_eq!(s.byte_skip, 1);
     }
 
     #[cfg(feature = "transcode-ac3")]
     #[test]
-    fn every_frame_reports_the_byte_count_its_sample_count_implies() {
+    fn the_declared_size_is_the_payload_the_samples_imply() {
         let (plan, _dir) = fixture_plan();
-        let total: usize = (0..plan.index.frames.len()).map(|i| plan.frame_bytes(i)).sum();
-        assert_eq!(total as u64 + WAV_HEADER_LEN, plan.wav_size());
+        let samples = plan.total_samples().unwrap();
+        assert_eq!(
+            plan.wav_size().unwrap(),
+            WAV_HEADER_LEN + plan.pcm_bytes(samples)
+        );
     }
 }

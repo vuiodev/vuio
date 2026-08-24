@@ -77,19 +77,26 @@ impl PcmDecoder {
 
     /// Decode one compressed frame into interleaved S16.
     ///
-    /// A frame that fails to decode yields silence of the length the index said
-    /// it would occupy — the caller has already committed to a `Content-Length`
-    /// built from that index, so a mid-stream error must not change how many
-    /// bytes the response carries. One corrupt frame in a film is a tick; a
-    /// short body is a truncated download.
-    pub fn decode_or_silence(&mut self, frame: &[u8], expect_samples: u32) -> Vec<u8> {
-        let want = expect_samples as usize * self.channels as usize * BYTES_PER_SAMPLE;
+    /// `expect_samples` is what the frame's header said it would decode to. A
+    /// frame that fails yields silence of exactly that length — the caller has
+    /// already committed to a `Content-Length` built from the same headers, so a
+    /// mid-stream error must not change how many bytes the response carries. One
+    /// corrupt frame in a film is a tick; a short body is a truncated download.
+    ///
+    /// `None` means the header would not parse, which leaves nothing to pad to:
+    /// the decoder's own output is taken as it comes, and a failure costs the
+    /// frame rather than substituting for it.
+    pub fn decode_or_silence(&mut self, frame: &[u8], expect_samples: Option<u32>) -> Vec<u8> {
+        let want = expect_samples
+            .map(|samples| samples as usize * self.channels as usize * BYTES_PER_SAMPLE);
         match self.decode_measured(frame) {
             Ok((mut pcm, _)) => {
-                pcm.resize(want, 0);
+                if let Some(want) = want {
+                    pcm.resize(want, 0);
+                }
                 pcm
             }
-            Err(_) => vec![0u8; want],
+            Err(_) => vec![0u8; want.unwrap_or(0)],
         }
     }
 
@@ -144,7 +151,7 @@ mod tests {
         );
         for f in &idx.frames[1..] {
             let raw = &bytes[f.offset as usize..][..f.len as usize];
-            pcm.extend_from_slice(&dec.decode_or_silence(raw, f.samples));
+            pcm.extend_from_slice(&dec.decode_or_silence(raw, Some(f.samples)));
         }
         (pcm, idx, channels)
     }
@@ -217,7 +224,7 @@ mod tests {
         let (mut dec, _) =
             PcmDecoder::open(TranscodeCodec::Ac3, idx.sample_rate, Some(2), first).unwrap();
         let garbage = vec![0u8; 768];
-        let out = dec.decode_or_silence(&garbage, 1536);
+        let out = dec.decode_or_silence(&garbage, Some(1536));
         assert_eq!(out.len(), 1536 * 2 * 2);
         assert!(out.iter().all(|&b| b == 0));
     }

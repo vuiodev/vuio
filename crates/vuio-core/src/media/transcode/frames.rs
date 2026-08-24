@@ -219,6 +219,16 @@ fn parse_dts(_data: &[u8]) -> Result<Option<Header>> {
     bail!("this build of vuio-core was compiled without the `transcode-dts` feature")
 }
 
+/// Sample frames one compressed frame decodes to, read from its own header.
+///
+/// The container path's equivalent of [`IndexedFrame::samples`]: symphonia hands
+/// over a packet, and this is how its decoded length is known before it is
+/// decoded — which is what lets a frame that fails to decode be replaced by
+/// silence of exactly the right length instead of shortening the track.
+pub(crate) fn frame_samples(codec: TranscodeCodec, data: &[u8]) -> Option<u32> {
+    parse_header(codec, data).ok().flatten().map(|h| h.samples)
+}
+
 fn parse_header(codec: TranscodeCodec, data: &[u8]) -> Result<Option<Header>> {
     match codec {
         TranscodeCodec::Ac3 | TranscodeCodec::Eac3 => parse_ac3_family(data),

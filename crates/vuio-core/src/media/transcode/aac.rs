@@ -93,6 +93,92 @@ impl AacEncoder {
     }
 }
 
+/// ISO/IEC 14496-3 Table 1.18 sampling frequency indices.
+const SAMPLING_FREQUENCIES: [u32; 13] = [
+    96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000,
+    7_350,
+];
+
+/// The raw `AudioSpecificConfig` for AAC-LC at this shape.
+///
+/// An ADTS stream needs none of this — every frame carries its own header — but
+/// an MP4 does: the `esds` box in the init segment is where a player learns the
+/// stream's rate and channel layout, and it is written *before* a single frame
+/// has been encoded. So it is derived from the shape the encoder was configured
+/// with rather than read back out of its output. `asc_matches_the_encoders_own_adts_header`
+/// is what keeps the two from drifting.
+///
+/// A rate outside Table 1.18 uses the escape index (15) and an explicit 24-bit
+/// rate, which makes the config four bytes instead of two.
+pub fn audio_specific_config(sample_rate: u32, channels: u16) -> Vec<u8> {
+    const AAC_LC: u32 = 2;
+    let channel_configuration = u32::from(channels).min(7);
+
+    let mut bits: Vec<(u32, u32)> = vec![(AAC_LC, 5)];
+    match SAMPLING_FREQUENCIES.iter().position(|r| *r == sample_rate) {
+        Some(index) => bits.push((index as u32, 4)),
+        None => {
+            bits.push((0x0F, 4));
+            bits.push((sample_rate, 24));
+        }
+    }
+    bits.push((channel_configuration, 4));
+    // GASpecificConfig: frameLengthFlag = 0 (1024 samples), dependsOnCoreCoder
+    // = 0, extensionFlag = 0.
+    bits.push((0, 3));
+
+    let mut out = Vec::new();
+    let mut acc: u32 = 0;
+    let mut used = 0u32;
+    for (value, width) in bits {
+        for i in (0..width).rev() {
+            acc = (acc << 1) | ((value >> i) & 1);
+            used += 1;
+            if used == 8 {
+                out.push(acc as u8);
+                acc = 0;
+                used = 0;
+            }
+        }
+    }
+    if used > 0 {
+        out.push((acc << (8 - used)) as u8);
+    }
+    out
+}
+
+/// The payloads of an ADTS stream, with each frame's header removed.
+///
+/// ADTS framing is what makes the encoder's output self-describing over a bare
+/// socket, and exactly what an MP4 sample must not contain: the `stsd` entry
+/// already says everything the header repeats, and a decoder handed the header
+/// as sample data reads it as spectral coefficients.
+pub fn adts_payloads(stream: &[u8]) -> Vec<&[u8]> {
+    let mut frames = Vec::new();
+    let mut pos = 0usize;
+    while pos + 7 <= stream.len() {
+        let header = &stream[pos..];
+        if header[0] != 0xFF || (header[1] & 0xF0) != 0xF0 {
+            // Not a syncword. The encoder does not produce these, so rather than
+            // resynchronising, stop: a stream that has gone wrong here would
+            // produce garbage samples, not merely a lost frame.
+            break;
+        }
+        let frame_len = ((u32::from(header[3]) & 0x03) << 11)
+            | (u32::from(header[4]) << 3)
+            | (u32::from(header[5]) >> 5);
+        let frame_len = frame_len as usize;
+        // `protection_absent == 0` adds a two-byte CRC after the fixed header.
+        let header_len = if header[1] & 0x01 == 0 { 9 } else { 7 };
+        if frame_len < header_len || pos + frame_len > stream.len() {
+            break;
+        }
+        frames.push(&stream[pos + header_len..pos + frame_len]);
+        pos += frame_len;
+    }
+    frames
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -147,5 +233,60 @@ mod tests {
     fn a_channel_count_the_encoder_cannot_express_is_refused_at_construction() {
         // Seven channels has no Table 1.19 default configuration.
         assert!(AacEncoder::new(48_000, 7).is_err());
+    }
+
+    /// The init segment's `esds` and the segments' samples come from different
+    /// requests and different code paths, and a player that disagrees with one
+    /// of them produces noise rather than an error. This is the check that they
+    /// describe the same stream: the config written into the container has to
+    /// match what the encoder itself declares in every ADTS header it emits.
+    #[test]
+    fn asc_matches_the_encoders_own_adts_header() {
+        for (rate, channels) in [(48_000u32, 2u16), (44_100, 2), (32_000, 1)] {
+            let mut enc = AacEncoder::new(rate, channels).unwrap();
+            let mut out = enc.push(&sine(1, rate)).unwrap();
+            out.extend_from_slice(&enc.finish());
+
+            let profile = (out[2] >> 6) & 0x03;
+            let frequency_index = (out[2] >> 2) & 0x0F;
+            let channel_configuration = ((out[2] & 0x01) << 2) | (out[3] >> 6);
+
+            let asc = audio_specific_config(rate, channels);
+            assert_eq!(
+                asc[0] >> 3,
+                profile + 1,
+                "audioObjectType at {rate} Hz: ASC vs ADTS profile"
+            );
+            assert_eq!(
+                ((asc[0] & 0x07) << 1) | (asc[1] >> 7),
+                frequency_index,
+                "samplingFrequencyIndex at {rate} Hz"
+            );
+            assert_eq!(
+                (asc[1] >> 3) & 0x0F,
+                channel_configuration,
+                "channelConfiguration at {channels} channels"
+            );
+        }
+    }
+
+    #[test]
+    fn adts_framing_is_stripped_leaving_the_payloads() {
+        let mut enc = AacEncoder::new(48_000, 2).unwrap();
+        let mut stream = enc.push(&sine(1, 48_000)).unwrap();
+        stream.extend_from_slice(&enc.finish());
+
+        let payloads = adts_payloads(&stream);
+        assert!(payloads.len() > 40, "a second is ~47 frames of 1024 samples");
+        let total: usize = payloads.iter().map(|f| f.len()).sum();
+        assert_eq!(
+            total + payloads.len() * 7,
+            stream.len(),
+            "every byte is either a seven-byte header or payload"
+        );
+        // Nothing may start with a syncword any more — that is the header we removed.
+        for payload in payloads {
+            assert!(!(payload[0] == 0xFF && payload[1] & 0xF0 == 0xF0));
+        }
     }
 }

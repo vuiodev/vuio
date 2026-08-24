@@ -216,7 +216,20 @@ pub struct AudioTags {
 /// a track before fetching it.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StreamInfo {
+    /// The audio track's codec, as a short name (`ac3`, `flac`, `aac`, …).
+    ///
+    /// This is the field that decides whether an item needs a decoded
+    /// alternative offered beside it, so it is filled in for video files too —
+    /// a film's audio track is exactly the case the whole transcoding path
+    /// exists for.
     pub codec: Option<String>,
+    /// The video track's codec, where the file has one (`h264`, `hevc`, …).
+    ///
+    /// Separate from `codec` because the two answer different questions:
+    /// whether a decoded alternative is *needed* is about the audio, whether one
+    /// can be *produced* is about the video, which the alternative copies
+    /// through rather than re-encoding.
+    pub video_codec: Option<String>,
     pub sample_rate: Option<u32>,
     pub channels: Option<u16>,
     pub bits_per_sample: Option<u16>,
@@ -464,6 +477,9 @@ impl MediaFileView for MediaFile {
     fn codec(&self) -> Option<&str> {
         self.stream.codec.as_deref()
     }
+    fn video_codec(&self) -> Option<&str> {
+        self.stream.video_codec.as_deref()
+    }
     fn sample_rate(&self) -> Option<u32> {
         self.stream.sample_rate
     }
@@ -531,6 +547,13 @@ pub trait MediaFileView {
         None
     }
     fn codec(&self) -> Option<&str> {
+        None
+    }
+    /// The video track's codec, for a view that carries one.
+    ///
+    /// Defaults to `None`, which the browse path reads as "not recorded" and
+    /// treats as remuxable — see [`crate::web::item_can_remux_video`].
+    fn video_codec(&self) -> Option<&str> {
         None
     }
     fn sample_rate(&self) -> Option<u32> {

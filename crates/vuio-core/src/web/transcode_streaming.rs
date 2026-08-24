@@ -22,7 +22,7 @@ use axum::{
 use std::sync::Arc;
 use tracing::{debug, warn};
 
-use crate::media::transcode::{AudioPlan, IndexKey, PcmDecoder, TranscodeCodec};
+use crate::media::transcode::{AudioPlan, IndexKey, PcmStream, TranscodeCodec};
 use crate::{database::DatabaseManager, error::AppError, state::AppState};
 
 use super::streaming::{media_id_from_path_segment, parse_range_header};
@@ -47,11 +47,11 @@ pub async fn serve_transcoded_aac<D: DatabaseManager>(
     Path(id): Path<String>,
     method: Method,
 ) -> Result<Response, AppError> {
-    let (file, codec) = resolve(&state, &id).await?;
+    let file = resolve(&state, &id).await?;
     let Some(permit) = state.transcode.try_acquire() else {
         return Ok(busy(&state, &file.filename));
     };
-    let plan = plan_for(&state, file.id, &file.path, codec).await?;
+    let plan = plan_for(&state, &file).await?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -82,25 +82,13 @@ fn aac_body(plan: Arc<AudioPlan>, permit: tokio::sync::OwnedSemaphorePermit) -> 
 
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let file = match std::fs::File::open(&plan.source_path) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = tx.blocking_send(Err(e));
-                return;
-            }
-        };
-        let mut source = std::io::BufReader::with_capacity(256 * 1024, file);
-
-        let (mut decoder, primed) = match prime(&plan, &mut source, 0) {
-            Ok(d) => d,
+        let mut stream = match PcmStream::open(&plan, 0) {
+            Ok(stream) => stream,
             Err(e) => {
                 let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
                 return;
             }
         };
-        // As above: the first frame is already decoded, and re-feeding it would
-        // push its samples through the overlap buffer a second time.
-        let mut primed = Some(primed);
         let mut encoder = match AacEncoder::new(plan.sample_rate(), plan.channels) {
             Ok(e) => e,
             Err(e) => {
@@ -109,20 +97,7 @@ fn aac_body(plan: Arc<AudioPlan>, permit: tokio::sync::OwnedSemaphorePermit) -> 
             }
         };
 
-        for (i, frame) in plan.index.frames.iter().enumerate() {
-            let pcm = match primed.take() {
-                Some(mut pcm) => {
-                    pcm.resize(plan.frame_bytes(i), 0);
-                    pcm
-                }
-                None => {
-                    let mut raw = vec![0u8; frame.len as usize];
-                    if read_frame(&mut source, frame.offset, &mut raw).is_err() {
-                        break;
-                    }
-                    decoder.decode_or_silence(&raw, frame.samples)
-                }
-            };
+        while let Some(pcm) = stream.next_block() {
             match encoder.push(&pcm) {
                 Ok(adts) if adts.is_empty() => continue,
                 Ok(adts) => {
@@ -149,7 +124,7 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let (file, codec) = resolve(&state, &id).await?;
+    let file = resolve(&state, &id).await?;
 
     // Ration the CPU before doing any of it. A refusal here is deliberate: a
     // renderer told to wait looks to its user like a file that will not open,
@@ -158,8 +133,27 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
         return Ok(busy(&state, &file.filename));
     };
 
-    let plan = plan_for(&state, file.id, &file.path, codec).await?;
-    let total = plan.wav_size();
+    let plan = plan_for(&state, &file).await?;
+
+    // A source that will not say how long it is gets a chunked body: no length,
+    // no ranges, `DLNA.ORG_OP=00`. That loses the scrub bar; a guessed length
+    // would lose the transfer, because a `Content-Length` a renderer cannot be
+    // given reads as a truncated download rather than a shorter film.
+    let Some(total) = plan.wav_size() else {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "audio/vnd.wave; codec=1")
+            .header("transferMode.dlna.org", "Streaming")
+            .header(
+                "contentFeatures.dlna.org",
+                "DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+            );
+        if method == Method::HEAD {
+            drop(permit);
+            return Ok(response.body(Body::empty())?);
+        }
+        return Ok(response.body(pcm_body(plan, 0, u64::MAX, permit))?);
+    };
 
     // Range handling is byte-identical to the passthrough path — the resource
     // just happens not to exist on disk.
@@ -208,6 +202,27 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
     Ok(response.body(pcm_body(plan, start, len, permit))?)
 }
 
+/// One library entry, resolved to something transcodable.
+pub(crate) struct Resolved {
+    pub id: i64,
+    pub path: std::path::PathBuf,
+    pub filename: String,
+    /// The codec of the audio to be decoded.
+    pub codec: TranscodeCodec,
+    /// How its frames are reached.
+    pub kind: SourceKind,
+}
+
+/// Whether the frames are the file, or are inside it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum SourceKind {
+    /// A raw `.ac3`/`.eac3`/`.dts` file.
+    Elementary,
+    /// One track inside a container.
+    #[cfg(feature = "demux")]
+    Container,
+}
+
 /// Look the item up and confirm this build can decode it.
 ///
 /// A 404 for anything that is not decodable here, rather than an error: the URL
@@ -216,7 +231,7 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
 async fn resolve<D: DatabaseManager>(
     state: &AppState<D>,
     id: &str,
-) -> Result<(crate::database::FileLocation, TranscodeCodec), AppError> {
+) -> Result<Resolved, AppError> {
     let Some(file_id) = media_id_from_path_segment(id) else {
         return Err(AppError::NotFound);
     };
@@ -225,13 +240,18 @@ async fn resolve<D: DatabaseManager>(
     }
     let file = state
         .database
-        .get_file_location_by_id(file_id)
+        .get_file_by_id(file_id)
         .await?
         .ok_or(AppError::NotFound)?;
 
-    // The codec comes from what the scanner recorded, not from opening the file:
-    // re-probing here would repeat work the scan already did.
-    let Some(codec) = codec_for(&file.mime_type, &file.filename) else {
+    // Everything here comes from what the scanner recorded, not from opening the
+    // file: re-probing to answer "is there a second resource?" would repeat work
+    // the scan already did, once per item of every Browse response.
+    let Some((codec, kind)) = source_for(
+        file.stream.codec.as_deref(),
+        &file.mime_type,
+        &file.filename,
+    ) else {
         return Err(AppError::NotFound);
     };
     if !codec.is_decodable() {
@@ -242,7 +262,13 @@ async fn resolve<D: DatabaseManager>(
         );
         return Err(AppError::NotFound);
     }
-    Ok((file, codec))
+    Ok(Resolved {
+        id: file_id,
+        path: file.path,
+        filename: file.filename,
+        codec,
+        kind,
+    })
 }
 
 /// Every slot is busy.
@@ -261,15 +287,13 @@ fn busy<D: DatabaseManager>(state: &AppState<D>, filename: &str) -> Response {
 }
 
 /// Fetch a cached plan, or build one off the async runtime.
-async fn plan_for<D: DatabaseManager>(
+pub(crate) async fn plan_for<D: DatabaseManager>(
     state: &AppState<D>,
-    file_id: i64,
-    path: &std::path::Path,
-    codec: TranscodeCodec,
+    file: &Resolved,
 ) -> Result<Arc<AudioPlan>, AppError> {
-    let metadata = tokio::fs::metadata(path).await?;
+    let metadata = tokio::fs::metadata(&file.path).await?;
     let key = IndexKey {
-        id: file_id,
+        id: file.id,
         size: metadata.len(),
         modified: metadata
             .modified()
@@ -283,11 +307,17 @@ async fn plan_for<D: DatabaseManager>(
         return Ok(plan);
     }
 
-    let owned = path.to_path_buf();
-    let plan = tokio::task::spawn_blocking(move || AudioPlan::build(&owned, codec))
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("transcode planner panicked: {e}")))?
-        .map_err(AppError::Internal)?;
+    let owned = file.path.clone();
+    let codec = file.codec;
+    let kind = file.kind;
+    let plan = tokio::task::spawn_blocking(move || match kind {
+        SourceKind::Elementary => AudioPlan::elementary(&owned, codec),
+        #[cfg(feature = "demux")]
+        SourceKind::Container => AudioPlan::container(&owned),
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("transcode planner panicked: {e}")))?
+    .map_err(AppError::Internal)?;
     let plan = Arc::new(plan);
     state.transcode.remember(key, plan.clone()).await;
     Ok(plan)
@@ -331,66 +361,26 @@ fn pcm_body(
             return;
         }
 
-        let file = match std::fs::File::open(&plan.source_path) {
-            Ok(f) => f,
-            Err(e) => {
-                let _ = tx.blocking_send(Err(e));
-                return;
-            }
-        };
-        let mut source = std::io::BufReader::with_capacity(256 * 1024, file);
-
-        // A decoder must be primed with the frame it starts on, and AC-3/DTS
-        // frames overlap by half a window, so the sample right at a seek point
-        // is reconstructed from state the previous frame carried. Starting one
-        // frame early and discarding its output removes the transient that
-        // would otherwise tick at the start of every seek.
-        let preroll = seeked.frame.saturating_sub(1);
-        let (mut decoder, primed) = match prime(&plan, &mut source, preroll) {
-            Ok(d) => d,
+        let mut stream = match PcmStream::open(&plan, seeked.start_sample) {
+            Ok(stream) => stream,
             Err(e) => {
                 let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
                 return;
             }
         };
-        // Priming already decoded frame `preroll`. Feeding it again would run
-        // its samples through the overlap buffer twice, and every frame after
-        // it would then differ from the same frame in a sequential decode — so
-        // a range would not be the slice of the whole that it claims to be.
-        let mut primed = Some(primed);
 
-        let mut skip = seeked.pcm_skip;
-        for i in preroll..plan.index.frames.len() {
-            if remaining == 0 {
-                break;
-            }
-            let frame = plan.index.frames[i];
-            let pcm = match primed.take() {
-                Some(mut pcm) => {
-                    pcm.resize(plan.frame_bytes(i), 0);
-                    pcm
-                }
-                None => {
-                    let mut raw = vec![0u8; frame.len as usize];
-                    if read_frame(&mut source, frame.offset, &mut raw).is_err() {
-                        break;
-                    }
-                    decoder.decode_or_silence(&raw, frame.samples)
-                }
-            };
-
-            // Frames before the seek point are decoded for their state only.
-            if i < seeked.frame {
-                continue;
-            }
+        // A range may begin partway through a sample frame, which no decoder
+        // can be positioned on — so the odd bytes come off the front here.
+        let mut skip = seeked.byte_skip;
+        while remaining > 0 {
+            let Some(pcm) = stream.next_block() else { break };
             let pcm = if skip >= pcm.len() {
                 skip -= pcm.len();
                 continue;
             } else {
-                let out = &pcm[skip..];
-                skip = 0;
-                out
+                &pcm[skip..]
             };
+            skip = 0;
             let take = pcm.len().min(remaining as usize);
             if tx
                 .blocking_send(Ok(bytes::Bytes::copy_from_slice(&pcm[..take])))
@@ -419,36 +409,6 @@ fn pcm_body(
     Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-/// Open a decoder positioned at frame `at`, returning it and that frame's PCM.
-///
-/// The PCM comes back rather than being dropped because opening a decoder
-/// necessarily decodes a frame, and decoding the same frame again to get its
-/// samples would advance the overlap state a second time.
-fn prime<R: std::io::Read + std::io::Seek>(
-    plan: &AudioPlan,
-    source: &mut R,
-    at: usize,
-) -> anyhow::Result<(PcmDecoder, Vec<u8>)> {
-    let first = plan.index.frames[at];
-    let mut raw = vec![0u8; first.len as usize];
-    read_frame(source, first.offset, &mut raw)?;
-    PcmDecoder::open(
-        plan.codec,
-        plan.index.sample_rate,
-        Some(plan.channels),
-        &raw,
-    )
-}
-
-fn read_frame<R: std::io::Read + std::io::Seek>(
-    source: &mut R,
-    offset: u64,
-    into: &mut [u8],
-) -> std::io::Result<()> {
-    source.seek(std::io::SeekFrom::Start(offset))?;
-    source.read_exact(into)
-}
-
 /// Which codec a library entry holds, from what the scanner recorded.
 ///
 /// The MIME type is the primary signal because it is what the scanner assigned
@@ -470,9 +430,56 @@ pub(crate) fn codec_for(mime: &str, filename: &str) -> Option<TranscodeCodec> {
     }
 }
 
+/// Which codec an item's audio is in, and where its frames live.
+///
+/// The elementary check comes first, and on the file's own identity: an `.ac3`
+/// file *is* the bitstream, so its frames are found by walking sync words and
+/// the resource it produces is seekable to the sample. Anything else with a
+/// recorded AC-3/E-AC-3/DTS codec is a container holding a track — a film — and
+/// is demuxed instead. A file with neither has no decoded resource at all.
+pub(crate) fn source_for(
+    stored_codec: Option<&str>,
+    mime: &str,
+    filename: &str,
+) -> Option<(TranscodeCodec, SourceKind)> {
+    if let Some(codec) = codec_for(mime, filename) {
+        return Some((codec, SourceKind::Elementary));
+    }
+    #[cfg(feature = "demux")]
+    {
+        stored_codec
+            .and_then(TranscodeCodec::from_stored_codec)
+            .map(|codec| (codec, SourceKind::Container))
+    }
+    // Without symphonia there is nothing that can open a container, so a film's
+    // audio track is simply out of reach and no resource is offered for it.
+    #[cfg(not(feature = "demux"))]
+    {
+        let _ = stored_codec;
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_raw_bitstream_is_framed_by_walking_it_and_a_film_is_demuxed() {
+        assert_eq!(
+            source_for(Some("ac3"), "audio/ac3", "track.ac3"),
+            Some((TranscodeCodec::Ac3, SourceKind::Elementary))
+        );
+        #[cfg(feature = "demux")]
+        assert_eq!(
+            source_for(Some("ac3"), "video/x-matroska", "Film.mkv"),
+            Some((TranscodeCodec::Ac3, SourceKind::Container))
+        );
+        // A film whose audio is already playable everywhere gets nothing.
+        assert_eq!(source_for(Some("aac"), "video/mp4", "Film.mp4"), None);
+        // Nor does one nothing vendored decodes.
+        assert_eq!(source_for(Some("truehd"), "video/x-matroska", "Film.mkv"), None);
+    }
 
     #[test]
     fn codec_is_read_from_the_mime_the_scanner_assigned() {

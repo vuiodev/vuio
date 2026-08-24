@@ -150,31 +150,61 @@ pub struct BrowseRenderContext {
     pub transcode: Option<TranscodeAdvert>,
 }
 
-/// How a decoded alternative resource should be advertised.
-///
-/// A plain value rather than a read of the config, so the XML writers stay
-/// feature-blind and a test can set up either case directly.
+/// One resource this server can produce in place of an item it may not play.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TranscodeAdvert {
-    /// MIME type of the decoded resource.
+pub struct AdvertResource {
+    /// MIME type of the produced resource.
     pub mime: &'static str,
     /// Path suffix under `/media/{id}/` that serves it.
     pub path: &'static str,
+    /// The `DLNA.ORG_OP` value this resource can actually honour.
+    ///
+    /// Stated per resource, and it differs: constant-bitrate LPCM divides a byte
+    /// offset straight back into a sample, so it is `11`; a re-encoded AAC
+    /// stream has no length to seek within, so it is `00`; a remuxed film is
+    /// `01`, time seek only. A resource that claims an operation it cannot
+    /// perform is worse than one that claims none — a renderer which byte-seeks
+    /// and gets nothing usable stops playing rather than falling back.
+    pub op: &'static str,
+}
+
+/// How a decoded alternative resource should be advertised.
+///
+/// A plain value rather than a read of the config, so the XML writers stay
+/// feature-blind and a test can set up either case directly. It carries both
+/// answers because one DIDL response mixes films and music: the item's own MIME
+/// type selects between them at the point the `<res>` is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscodeAdvert {
+    /// What an audio item is offered instead.
+    pub audio: AdvertResource,
+    /// What a video item is offered instead, where this build can produce one.
+    ///
+    /// `None` in a build with no remuxer or no encoder. A film then gets no
+    /// second resource at all rather than being offered its own soundtrack in
+    /// place of itself.
+    pub video: Option<AdvertResource>,
     /// Whether the decoded resource is listed before the original.
     pub first: bool,
 }
 
 impl TranscodeAdvert {
+    /// The resource to offer for an item of `mime`, if there is one.
+    pub(crate) fn resource_for(&self, mime: &str) -> Option<AdvertResource> {
+        if mime.starts_with("video/") {
+            self.video
+        } else {
+            Some(self.audio)
+        }
+    }
+
     /// Write the decoded alternative for `file_id`.
-    ///
-    /// `DLNA.ORG_CI=1` is the conversion indicator: a renderer matching on
-    /// protocolInfo has to be told these bytes were produced rather than stored,
-    /// and every other `<res>` this server writes says `CI=0`.
     fn write<W: std::fmt::Write>(
         &self,
         output: &mut W,
         context: &BrowseRenderContext,
         file_id: i64,
+        mime: &str,
         duration: Option<u64>,
     ) -> std::fmt::Result {
         self.write_didl(
@@ -182,24 +212,33 @@ impl TranscodeAdvert {
             &context.server_ip,
             context.server_port,
             file_id,
+            mime,
             duration,
         )
     }
 
     /// The same, for the fallback writer, which carries its parts loose rather
     /// than in a context.
+    ///
+    /// `DLNA.ORG_CI=1` is the conversion indicator: a renderer matching on
+    /// protocolInfo has to be told these bytes were produced rather than stored,
+    /// and every other `<res>` this server writes says `CI=0`.
     pub(crate) fn write_didl<W: std::fmt::Write>(
         &self,
         output: &mut W,
         server_ip: &str,
         server_port: u16,
         file_id: i64,
+        mime: &str,
         duration: Option<u64>,
     ) -> std::fmt::Result {
+        let Some(resource) = self.resource_for(mime) else {
+            return Ok(());
+        };
         write!(
             output,
-            r#"<res protocolInfo="http-get:*:{}:DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000""#,
-            self.mime
+            r#"<res protocolInfo="http-get:*:{}:DLNA.ORG_OP={};DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000""#,
+            resource.mime, resource.op
         )?;
         if let Some(seconds) = duration {
             write!(
@@ -213,7 +252,7 @@ impl TranscodeAdvert {
         write!(
             output,
             ">http://{}:{}/media/{}/{}</res>",
-            server_ip, server_port, file_id, self.path
+            server_ip, server_port, file_id, resource.path
         )
     }
 }
@@ -458,10 +497,14 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
     let transcoded = context
         .transcode
         .filter(|_| !is_radio)
-        .filter(|_| crate::web::item_needs_transcode(file.codec(), mime, file.filename()));
+        .filter(|_| crate::web::item_needs_transcode(file.codec(), mime, file.filename()))
+        .filter(|advert| advert.resource_for(mime).is_some())
+        .filter(|_| {
+            !mime.starts_with("video/") || crate::web::item_can_remux_video(file.video_codec())
+        });
     let item_duration = file.duration_secs().map(|value| value as u64);
     if let Some(advert) = transcoded.filter(|a| a.first) {
-        advert.write(output, context, file_id, item_duration)?;
+        advert.write(output, context, file_id, mime, item_duration)?;
     }
 
     write!(
@@ -515,7 +558,7 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
         context.server_ip, context.server_port, file_id
     )?;
     if let Some(advert) = transcoded.filter(|a| !a.first) {
-        advert.write(output, context, file_id, item_duration)?;
+        advert.write(output, context, file_id, mime, item_duration)?;
     }
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
         write!(

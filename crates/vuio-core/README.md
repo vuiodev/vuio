@@ -83,7 +83,7 @@ firmware has less to read.
 | --- | --- | --- |
 | `casting` | Chromecast, AirPlay and DLNA renderer control | 44 |
 | `mediainfo` | titles, synopses, ratings and artwork from public APIs | 29 |
-| `transcode-ac3` / `-dts` / `-aac` | AC-3, E-AC-3 and DTS decoded for renderers that cannot play them | 4 |
+| `transcode-ac3` / `-dts` / `-aac` | AC-3, E-AC-3 and DTS decoded for renderers that cannot play them, in a film as well as on its own | 4 |
 | `diagnostics` | system and disk metrics on the status endpoints | 3 |
 | `web-ui` | the Svelte interface on the second listener | 1 |
 | `metadata` | tags and embedded cover art (files keep filename titles) | 0 |

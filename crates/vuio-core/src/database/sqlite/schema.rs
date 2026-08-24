@@ -21,7 +21,7 @@ use crate::database::{
 /// [`migrations`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 6;
+pub(super) const SCHEMA_VERSION: i64 = 7;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -73,6 +73,11 @@ CREATE TABLE IF NOT EXISTS media_files (
     channels           INTEGER,
     bits_per_sample    INTEGER,
     bit_rate           INTEGER,
+    -- The *video* track's codec, where the file has one. `codec` above is the
+    -- audio track's, which is what decides whether a decoded alternative is
+    -- needed; this decides whether one can be produced, because the alternative
+    -- copies the picture through and can only do that for AVC and HEVC.
+    video_codec        TEXT,
     -- Which tag reader wrote this record. A file whose bytes have not changed
     -- is still re-read when this trails the current reader, which is how a
     -- better extractor reaches records that were already indexed.
@@ -344,6 +349,7 @@ fn migrations() -> Vec<(i64, String)> {
         (4, migration_v4()),
         (5, MIGRATION_V5.to_owned()),
         (6, MIGRATION_V6.to_owned()),
+        (7, MIGRATION_V7.to_owned()),
     ]
 }
 
@@ -472,7 +478,22 @@ media_files.sort_title, media_files.sort_artist, media_files.sort_album, \
 media_files.release_date, media_files.musicbrainz_track_id, \
 media_files.musicbrainz_album_id, media_files.musicbrainz_artist_id, \
 media_files.codec, media_files.sample_rate, media_files.channels, \
-media_files.bits_per_sample, media_files.bit_rate, media_files.tags_version";
+media_files.bits_per_sample, media_files.bit_rate, media_files.tags_version, \
+media_files.video_codec";
+
+/// v6 → v7: the video track's codec.
+///
+/// A film with an AC-3 or DTS track is offered a remuxed alternative whose
+/// picture is copied through untouched, which only works for the video codecs
+/// the fMP4 writer can describe. Deciding that has to be a column read for the
+/// same reason the audio codec is: a folder of four hundred films would
+/// otherwise be four hundred file opens per Browse response.
+///
+/// Existing rows get NULL, and `TAGS_VERSION` moved with this change, so the
+/// next scan fills them in.
+const MIGRATION_V7: &str = r#"
+ALTER TABLE media_files ADD COLUMN video_codec TEXT;
+"#;
 
 /// Positions within [`MEDIA_COLUMNS`], shared by the owned decoder and the
 /// borrowed views so the two can never drift apart.
@@ -514,6 +535,7 @@ pub(super) mod column {
     pub const BITS_PER_SAMPLE: usize = 34;
     pub const BIT_RATE: usize = 35;
     pub const TAGS_VERSION: usize = 36;
+    pub const VIDEO_CODEC: usize = 37;
 }
 
 /// Open one connection and put it in the state every caller expects.
@@ -737,6 +759,7 @@ pub(super) fn media_file_from_row(row: &Row<'_>) -> rusqlite::Result<MediaFile> 
         },
         stream: StreamInfo {
             codec: row.get(column::CODEC)?,
+            video_codec: row.get(column::VIDEO_CODEC)?,
             sample_rate: optional_u32(row, column::SAMPLE_RATE)?,
             channels: optional_u32(row, column::CHANNELS)?.map(|value| value as u16),
             bits_per_sample: optional_u32(row, column::BITS_PER_SAMPLE)?.map(|value| value as u16),

@@ -234,7 +234,7 @@ jobs:
       - name: Build each feature alone
         run: |
           for feature in casting dashboard diagnostics mcp mediainfo metadata web-ui \
-                         transcode transcode-ac3 transcode-dts transcode-aac; do
+                         demux transcode transcode-ac3 transcode-dts transcode-aac; do
             echo "::group::$feature"
             cargo check -p vuio-core --no-default-features --features "$feature"
             echo "::endgroup::"

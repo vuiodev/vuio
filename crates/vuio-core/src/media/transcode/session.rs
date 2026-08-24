@@ -33,11 +33,43 @@ pub struct IndexKey {
     pub modified: i64,
 }
 
+/// Identifies a cached fMP4 segment.
+///
+/// Segments are cached where the elementary index is not, and for a different
+/// reason: a copy is cheap to redo, but a decode-and-re-encode is not, and
+/// seeking or re-buffering asks for the same segment again and again. Keyed on
+/// the track as well as the file because a film's renditions are built
+/// independently and a browser may be pulling two of them at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SegmentKey {
+    /// Database id of the file.
+    pub id: i64,
+    /// Container track id.
+    pub track: u32,
+    /// Segment index within the rendition.
+    pub seq: u32,
+}
+
+/// How many segments to keep, and how much memory they may occupy between them.
+///
+/// A segment of 1080p video is single-digit megabytes, so a count alone would
+/// bound the wrong thing on a large file and the wrong thing on a small one.
+const MAX_CACHED_SEGMENTS: usize = 24;
+const MAX_CACHED_SEGMENT_BYTES: usize = 48 * 1024 * 1024;
+
 /// Shared transcoding state, held by `AppState`.
 #[derive(Debug)]
 pub struct TranscodeState {
     cache: Mutex<Cache>,
+    segments: Mutex<SegmentCache>,
     permits: Arc<Semaphore>,
+}
+
+#[derive(Debug, Default)]
+struct SegmentCache {
+    entries: HashMap<SegmentKey, bytes::Bytes>,
+    order: Vec<SegmentKey>,
+    bytes: usize,
 }
 
 #[derive(Debug, Default)]
@@ -64,6 +96,7 @@ impl TranscodeState {
     pub fn new(max_concurrent: usize) -> Self {
         Self {
             cache: Mutex::new(Cache::default()),
+            segments: Mutex::new(SegmentCache::default()),
             permits: Arc::new(Semaphore::new(max_concurrent.max(1))),
         }
     }
@@ -93,6 +126,30 @@ impl TranscodeState {
             }
         }
     }
+
+    /// The bytes of segment `key`, if it was built recently.
+    pub async fn cached_segment(&self, key: &SegmentKey) -> Option<bytes::Bytes> {
+        self.segments.lock().await.entries.get(key).cloned()
+    }
+
+    /// Remember a built segment, evicting oldest-first past either ceiling.
+    pub async fn remember_segment(&self, key: SegmentKey, segment: bytes::Bytes) {
+        let mut cache = self.segments.lock().await;
+        let len = segment.len();
+        if cache.entries.insert(key, segment).is_none() {
+            cache.order.push(key);
+            cache.bytes += len;
+        }
+        while cache.order.len() > MAX_CACHED_SEGMENTS || cache.bytes > MAX_CACHED_SEGMENT_BYTES {
+            let Some(oldest) = cache.order.first().copied() else {
+                break;
+            };
+            cache.order.remove(0);
+            if let Some(evicted) = cache.entries.remove(&oldest) {
+                cache.bytes = cache.bytes.saturating_sub(evicted.len());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -105,12 +162,14 @@ mod tests {
             source_path: std::path::PathBuf::from("/dev/null"),
             codec: TranscodeCodec::Ac3,
             channels: 2,
-            index: crate::media::transcode::FrameIndex {
-                codec: TranscodeCodec::Ac3,
-                sample_rate: 48_000,
-                frames: Vec::new(),
-                total_samples: 0,
-            },
+            source: crate::media::transcode::PacketSource::Elementary(
+                crate::media::transcode::FrameIndex {
+                    codec: TranscodeCodec::Ac3,
+                    sample_rate: 48_000,
+                    frames: Vec::new(),
+                    total_samples: 0,
+                },
+            ),
         })
     }
 
@@ -161,5 +220,46 @@ mod tests {
     async fn a_zero_ceiling_still_serves_one_rather_than_nothing() {
         let state = TranscodeState::new(0);
         assert!(state.try_acquire().is_some());
+    }
+
+    #[tokio::test]
+    async fn segments_are_evicted_once_they_outgrow_their_memory_ceiling() {
+        let state = TranscodeState::new(1);
+        let key = |seq| SegmentKey {
+            id: 1,
+            track: 2,
+            seq,
+        };
+        // Four segments of 16 MB: the fourth must push the first out, because
+        // the byte ceiling binds long before the entry count does.
+        for seq in 0..4 {
+            state
+                .remember_segment(key(seq), bytes::Bytes::from(vec![0u8; 16 * 1024 * 1024]))
+                .await;
+        }
+        assert!(state.cached_segment(&key(0)).await.is_none());
+        assert!(state.cached_segment(&key(3)).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_segment_is_found_again_under_the_key_that_stored_it() {
+        let state = TranscodeState::new(1);
+        let key = SegmentKey {
+            id: 7,
+            track: 2,
+            seq: 3,
+        };
+        state
+            .remember_segment(key, bytes::Bytes::from_static(b"segment"))
+            .await;
+        assert_eq!(
+            state.cached_segment(&key).await.as_deref(),
+            Some(&b"segment"[..])
+        );
+        // A different rendition of the same file is a different segment.
+        assert!(state
+            .cached_segment(&SegmentKey { track: 3, ..key })
+            .await
+            .is_none());
     }
 }

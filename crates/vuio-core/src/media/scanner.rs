@@ -736,6 +736,13 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
         if media_file.mime_type.starts_with("audio/") {
             let _ = crate::platform::filesystem::extract_audio_metadata(&mut media_file).await;
+        } else if media_file.mime_type.starts_with("video/") {
+            // Films get a header probe too, for one field: the audio track's
+            // codec. Deciding "does this need a decoded alternative?" has to be
+            // a database read — a folder of 400 films would otherwise open 400
+            // files to render one Browse response. Stream properties only: a
+            // video's titling stays with the filename.
+            let _ = crate::platform::filesystem::extract_stream_info(&mut media_file).await;
         }
 
         if matches!(ext.to_lowercase().as_str(), "m3u" | "m3u8" | "pls") || media_file.mime_type == "audio/radio" {

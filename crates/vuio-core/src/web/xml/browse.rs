@@ -247,6 +247,11 @@ pub async fn generate_browse_response(
                         &file.mime_type,
                         &file.filename,
                     )
+                })
+                .filter(|advert| advert.resource_for(&file.mime_type).is_some())
+                .filter(|_| {
+                    !file.mime_type.starts_with("video/")
+                        || crate::web::item_can_remux_video(file.stream.video_codec.as_deref())
                 });
             if let Some(advert) = transcoded.filter(|a| a.first) {
                 let _ = advert.write_didl(
@@ -254,6 +259,7 @@ pub async fn generate_browse_response(
                     server_ip,
                     state.http_binding.port(),
                     file_id,
+                    &file.mime_type,
                     duration_secs,
                 );
             }
@@ -297,6 +303,7 @@ pub async fn generate_browse_response(
                     server_ip,
                     state.http_binding.port(),
                     file_id,
+                    &file.mime_type,
                     duration_secs,
                 );
             }

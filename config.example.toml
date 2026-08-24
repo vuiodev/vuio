@@ -131,13 +131,17 @@ port = 8090                             # Must differ from server.port
 # A TV that was already fine is unaffected.
 [transcode]
 enabled = true
-# What the decoded version is delivered as.
+# What the decoded version of an *audio* item is delivered as.
 #   lpcm  uncompressed, seekable, about 1.5 Mbps
 #   aac   about a tenth of that, lossy, and cannot be scrubbed
+# A film is always delivered as fragmented MP4 — the picture copied through
+# untouched, the soundtrack re-encoded — and is seekable by time rather than by
+# byte, which works the same whatever its audio codec was.
 audio_format = "lpcm"
 # Which version is listed first, for a TV that takes what it is given rather
 # than choosing. Switch to "transcoded" only if a TV still plays silently.
 prefer = "original"
-# Decodes allowed at once. Past this a further request is refused rather than
-# queued, so the streams already playing keep up.
+# Decodes allowed at once, shared between TVs and the browser player. Past this
+# a further request is refused rather than queued, so the streams already
+# playing keep up.
 max_concurrent = 2

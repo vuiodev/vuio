@@ -55,7 +55,7 @@ default = [
 # real-time decode on a small box is tight.
 casting = [
     "dep:vuio-cast",
-    "dep:symphonia",
+    "demux",
     "symphonia/opt-simd",
     "dep:hap-crypto",
     "dep:hap-transport",
@@ -70,7 +70,15 @@ casting = [
 dashboard = []
 diagnostics = ["dep:sysinfo"]
 mcp = []
-metadata = ["dep:symphonia"]
+metadata = ["demux"]
+
+# Internal, and not meant to be selected on its own: "symphonia is in this
+# build, so a container can be demuxed". Both `metadata` and `casting` need
+# exactly that and nothing more of each other — reading a film's audio track out
+# of its MKV is the same operation whether the caller wanted its tags or wanted
+# to remux it — so the code that does it asks for this rather than for
+# `any(metadata, casting)` at every call site.
+demux = ["dep:symphonia"]
 
 # The Svelte browser interface, served on its own listener (port 8090 by
 # default) beside the built-in dashboard on the main port. Both surfaces are

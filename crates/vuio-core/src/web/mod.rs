@@ -19,6 +19,8 @@ pub mod streaming;
 pub mod subtitles;
 #[cfg(feature = "transcode")]
 pub mod transcode_streaming;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
+pub mod video_streaming;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
@@ -49,6 +51,29 @@ pub(crate) fn item_needs_transcode(codec: Option<&str>, mime: &str, filename: &s
     }
 }
 
+/// Whether a film's picture can be copied into the remuxed alternative.
+///
+/// Needing an alternative and being able to produce one are different
+/// questions, asked of different tracks. The audio decides the first; the video
+/// decides the second, because the alternative copies the picture through
+/// rather than re-encoding it and can only do that for the codecs the fMP4
+/// writer knows how to describe. A film with a VP9 or MPEG-2 picture and an AC-3
+/// soundtrack therefore gets no second resource — advertising one and answering
+/// 404 would be worse than the silence it was meant to fix.
+///
+/// A record written before the scanner recorded video codecs carries `None`.
+/// Those are treated as remuxable: the next scan fills the column in, and until
+/// it does, the far more common case is the one that works.
+pub(crate) fn item_can_remux_video(video_codec: Option<&str>) -> bool {
+    match video_codec {
+        None => true,
+        Some(codec) => matches!(
+            codec.trim().to_ascii_lowercase().as_str(),
+            "h264" | "avc" | "avc1" | "hevc" | "h265" | "hvc1"
+        ),
+    }
+}
+
 /// How this server should advertise a decoded alternative, if at all.
 ///
 /// One place decides, so the two DIDL writers cannot drift apart on it, and the
@@ -72,14 +97,37 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
             // The MIME differs from the original's, which is what lets a
             // renderer that matches against its own sink protocolInfo pick the
             // one it can actually decode.
-            mime: match config.transcode.audio_format {
-                TranscodeAudioFormat::Lpcm => "audio/vnd.wave",
-                TranscodeAudioFormat::Aac => "audio/aac",
+            audio: match config.transcode.audio_format {
+                TranscodeAudioFormat::Lpcm => xml::AdvertResource {
+                    mime: "audio/vnd.wave",
+                    path: "transcode/audio.wav",
+                    // Constant-bitrate PCM: a byte offset divides straight back
+                    // into a sample, so this is a real seek.
+                    op: "11",
+                },
+                TranscodeAudioFormat::Aac => xml::AdvertResource {
+                    mime: "audio/aac",
+                    path: "transcode/audio.aac",
+                    // A lossy re-encode has no length until it exists, so there
+                    // is nothing to seek within.
+                    op: "00",
+                },
             },
-            path: match config.transcode.audio_format {
-                TranscodeAudioFormat::Lpcm => "transcode/audio.wav",
-                TranscodeAudioFormat::Aac => "transcode/audio.aac",
-            },
+            // A film is offered the film, not its soundtrack: the same picture,
+            // with an audio track the renderer can actually decode. Time seek
+            // only — see `web::video_streaming` for why byte seek is not on
+            // offer and why time seek is enough.
+            #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+            video: Some(xml::AdvertResource {
+                mime: "video/mp4",
+                path: "transcode/video.mp4",
+                op: "01",
+            }),
+            // With no remuxer or no encoder there is nothing to offer a film.
+            // Offering it `audio.wav` instead would replace a silent film with
+            // no film at all.
+            #[cfg(not(all(feature = "transcode-aac", feature = "casting")))]
+            video: None,
             first: config.transcode.prefer == TranscodePreference::Transcoded,
         })
     }
@@ -310,6 +358,14 @@ pub fn create_router<D: DatabaseManager + 'static>(
         "/media/{id}/transcode/audio.aac",
         get(transcode_streaming::serve_transcoded_aac::<D>)
             .head(transcode_streaming::serve_transcoded_aac::<D>),
+    );
+    // The film itself, remuxed with its audio decoded. Needs the demuxer as
+    // well as the encoder, which is why it rides on `casting` too.
+    #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+    let router = router.route(
+        "/media/{id}/transcode/video.mp4",
+        get(video_streaming::serve_transcoded_video::<D>)
+            .head(video_streaming::serve_transcoded_video::<D>),
     );
 
     #[cfg(feature = "casting")]

@@ -18,11 +18,16 @@ mod aac;
 mod frames;
 mod pcm;
 mod plan;
+#[cfg(all(feature = "transcode-aac", feature = "demux"))]
+mod rendition;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
+mod video;
 mod session;
+mod source;
 mod wav;
 
 #[cfg(feature = "transcode-aac")]
-pub use aac::AacEncoder;
+pub use aac::{adts_payloads, audio_specific_config, AacEncoder};
 // These are the vocabulary of this module's public surface — the element type
 // of `FrameIndex::frames`, the result of `AudioPlan::seek`, the header length a
 // caller subtracts from an offset. Nothing inside the crate spells some of them
@@ -33,7 +38,14 @@ pub use frames::{FrameIndex, IndexedFrame};
 pub use pcm::PcmDecoder;
 #[allow(unused_imports)]
 pub use plan::{AudioPlan, Seeked};
-pub use session::{IndexKey, TranscodeState};
+#[cfg(all(feature = "transcode-aac", feature = "demux"))]
+#[allow(unused_imports)]
+pub use rendition::{fit_channels, reencode_to_aac, AAC_FRAME_SAMPLES};
+pub use session::{IndexKey, SegmentKey, TranscodeState};
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
+pub use video::ProgressiveStream;
+#[allow(unused_imports)]
+pub use source::{PacketSource, PcmStream};
 #[allow(unused_imports)]
 pub use wav::{wav_header, WAV_HEADER_LEN};
 

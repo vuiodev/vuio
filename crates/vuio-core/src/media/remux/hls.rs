@@ -7,10 +7,12 @@ pub struct HlsGenerator;
 impl HlsGenerator {
     /// Generate HLS Master Playlist (`master.m3u8`) for an MKV file containing multi-audio tracks.
     ///
-    /// Only tracks this remuxer can actually pass through into fMP4 are offered: a video
-    /// track must be AVC/HEVC, and only AAC audio tracks are listed as selectable
-    /// renditions (E-AC-3/AC-3/DTS/TrueHD/etc. audio has no in-browser decoder, so
-    /// serving it would just be a silent/broken rendition).
+    /// Only tracks this build can actually produce are offered: a video track must be
+    /// AVC/HEVC, and an audio track must be either AAC (passed through) or one of the
+    /// three codecs the vendored decoders handle, re-encoded to AAC on the way out. A
+    /// build compiled without the matching decoder — or a codec nothing here decodes,
+    /// TrueHD being the one that turns up in real libraries — drops the rendition
+    /// rather than offering one that would arrive silent.
     pub fn build_master_playlist(_media_id: &str, tracks: &[TrackInfo]) -> String {
         let Some(video_track) = browser_video_track(tracks) else {
             // No browser-playable video track: a variant-less master playlist fails
@@ -148,6 +150,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![0x01, 0x64, 0x00, 0x28],
         }
     }
@@ -164,7 +167,14 @@ mod tests {
             channels: Some(if codec_kind == TrackCodec::Aac { 2 } else { 6 }),
             width: None,
             height: None,
-            extra_data: vec![0x11, 0x90],
+            is_default: false,
+            // Only an AAC source carries an AudioSpecificConfig; a decoded track's
+            // config comes from the encoder, and the writer must cope with neither.
+            extra_data: if codec_kind == TrackCodec::Aac {
+                vec![0x11, 0x90]
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -185,19 +195,55 @@ mod tests {
     }
 
     #[test]
-    fn test_master_playlist_excludes_unsupported_audio_codecs() {
-        // Mirrors a real WEB-DL release: AVC video with only E-AC-3/AC-3 audio tracks —
-        // none of those tracks can be decoded in-browser, so none should be offered.
+    fn test_master_playlist_excludes_audio_this_build_cannot_produce() {
+        // TrueHD: identified, named, and decoded by nothing vendored. A rendition
+        // pointing at it would arrive silent, so it must not be listed — in any build.
         let tracks = vec![
             video_track(TrackCodec::Avc),
-            audio_track(2, TrackCodec::Unsupported, "5.1 Atmos", "eng"),
-            audio_track(3, TrackCodec::Unsupported, "Stereo", "eng"),
+            audio_track(2, TrackCodec::Unsupported, "TrueHD Atmos", "eng"),
         ];
 
         let master = HlsGenerator::build_master_playlist("test-id", &tracks);
         assert!(!master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
         assert!(!master.contains("AUDIO=\"audio\""));
         assert!(master.contains("video/index.m3u8"));
+    }
+
+    /// The contract that replaced "AAC only": a rendition is offered exactly when
+    /// this build can produce it. Compiled with the decoder, an AC-3 track becomes a
+    /// selectable rendition; compiled without, it disappears rather than being
+    /// advertised and then failing.
+    #[test]
+    fn test_master_playlist_offers_ac3_only_when_this_build_can_decode_it() {
+        let tracks = vec![
+            video_track(TrackCodec::Avc),
+            audio_track(2, TrackCodec::Ac3, "5.1 English", "eng"),
+        ];
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+
+        if TrackCodec::Ac3.is_playable() {
+            assert!(master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
+            assert!(master.contains("NAME=\"5.1 English\""));
+            assert!(master.contains("audio/0/index.m3u8"));
+            // Re-encoded, so the rendition really is AAC-LC whatever the source was.
+            assert!(master.contains("mp4a.40.2"), "{master}");
+        } else {
+            assert!(!master.contains("#EXT-X-MEDIA:TYPE=AUDIO"), "{master}");
+        }
+    }
+
+    #[test]
+    fn test_master_playlist_offers_dts_only_when_this_build_can_decode_it() {
+        let tracks = vec![
+            video_track(TrackCodec::Avc),
+            audio_track(2, TrackCodec::Dts, "DTS", "eng"),
+        ];
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+        assert_eq!(
+            master.contains("#EXT-X-MEDIA:TYPE=AUDIO"),
+            TrackCodec::Dts.is_playable(),
+            "a DTS rendition must appear exactly when this build can decode DTS"
+        );
     }
 
     #[test]
