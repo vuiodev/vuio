@@ -13,12 +13,16 @@
 //! site — it asks [`TranscodeCodec::is_decodable`] and gets an honest answer in
 //! every build.
 
+#[cfg(feature = "transcode-aac")]
+mod aac;
 mod frames;
 mod pcm;
 mod plan;
 mod session;
 mod wav;
 
+#[cfg(feature = "transcode-aac")]
+pub use aac::AacEncoder;
 pub use frames::{FrameIndex, IndexedFrame};
 pub use pcm::PcmDecoder;
 pub use plan::{AudioPlan, Seeked};

@@ -34,6 +34,103 @@ use super::streaming::{media_id_from_path_segment, parse_range_header};
 /// and into memory; a handful of frames is a fraction of a second of audio.
 const PIPELINE_DEPTH: usize = 8;
 
+/// `GET`/`HEAD /media/{id}/transcode/audio.aac`.
+///
+/// The compressed alternative. Unlike the WAV resource this one is chunked: the
+/// encoder's output size is not known until it has produced it, so there is no
+/// honest `Content-Length` to send and therefore no byte-range seeking either.
+/// A renderer gets a stream it can play from the start and not scrub within,
+/// which is the trade the operator made by choosing `audio_format = "aac"`.
+#[cfg(feature = "transcode-aac")]
+pub async fn serve_transcoded_aac<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    Path(id): Path<String>,
+    method: Method,
+) -> Result<Response, AppError> {
+    let (file, codec) = resolve(&state, &id).await?;
+    let Some(permit) = state.transcode.try_acquire() else {
+        return Ok(busy(&state, &file.filename));
+    };
+    let plan = plan_for(&state, file.id, &file.path, codec).await?;
+
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "audio/aac")
+        // No Accept-Ranges: saying "bytes" and then refusing every range is
+        // worse than never claiming it.
+        .header("transferMode.dlna.org", "Streaming")
+        // OP=00 — no seeking, in either the time or byte dimension. CI=1 as
+        // ever, because these bytes were produced rather than stored.
+        .header(
+            "contentFeatures.dlna.org",
+            "DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+        );
+
+    if method == Method::HEAD {
+        drop(permit);
+        return Ok(response.body(Body::empty())?);
+    }
+    Ok(response.body(aac_body(plan, permit))?)
+}
+
+/// Decode the whole track and re-encode it, frame by frame.
+#[cfg(feature = "transcode-aac")]
+fn aac_body(plan: Arc<AudioPlan>, permit: tokio::sync::OwnedSemaphorePermit) -> Body {
+    use crate::media::transcode::AacEncoder;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(PIPELINE_DEPTH);
+
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let file = match std::fs::File::open(&plan.source_path) {
+            Ok(f) => f,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(e));
+                return;
+            }
+        };
+        let mut source = std::io::BufReader::with_capacity(256 * 1024, file);
+
+        let mut decoder = match prime(&plan, &mut source, 0) {
+            Ok(d) => d,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+                return;
+            }
+        };
+        let mut encoder = match AacEncoder::new(plan.sample_rate(), plan.channels) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+                return;
+            }
+        };
+
+        for frame in &plan.index.frames {
+            let mut raw = vec![0u8; frame.len as usize];
+            if read_frame(&mut source, frame.offset, &mut raw).is_err() {
+                break;
+            }
+            let pcm = decoder.decode_or_silence(&raw, frame.samples);
+            match encoder.push(&pcm) {
+                Ok(adts) if adts.is_empty() => continue,
+                Ok(adts) => {
+                    if tx.blocking_send(Ok(bytes::Bytes::from(adts))).is_err() {
+                        return;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let tail = encoder.finish();
+        if !tail.is_empty() {
+            let _ = tx.blocking_send(Ok(bytes::Bytes::from(tail)));
+        }
+    });
+
+    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
 /// `GET`/`HEAD /media/{id}/transcode/audio.wav`.
 pub async fn serve_transcoded_wav<D: DatabaseManager>(
     State(state): State<AppState<D>>,
@@ -41,51 +138,16 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
     method: Method,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(file_id) = media_id_from_path_segment(&id) else {
-        return Err(AppError::NotFound);
-    };
-    if !state.config.transcode.enabled {
-        return Err(AppError::NotFound);
-    }
-
-    let file = state
-        .database
-        .get_file_location_by_id(file_id)
-        .await?
-        .ok_or(AppError::NotFound)?;
-
-    // The codec comes from what the scanner recorded, not from opening the file:
-    // this handler is reached by a renderer that was told the resource exists,
-    // and re-probing here would repeat work the scan already did.
-    let Some(codec) = codec_for(&file.mime_type, &file.filename) else {
-        return Err(AppError::NotFound);
-    };
-    if !codec.is_decodable() {
-        debug!(
-            "refusing to transcode {} — this build has no {} decoder",
-            file.filename,
-            codec.as_str()
-        );
-        return Err(AppError::NotFound);
-    }
+    let (file, codec) = resolve(&state, &id).await?;
 
     // Ration the CPU before doing any of it. A refusal here is deliberate: a
     // renderer told to wait looks to its user like a file that will not open,
     // and the streams already playing would lose CPU to it meanwhile.
     let Some(permit) = state.transcode.try_acquire() else {
-        warn!(
-            "refusing to transcode {}: all {} transcode slots are in use",
-            file.filename, state.config.transcode.max_concurrent
-        );
-        return Ok((
-            StatusCode::SERVICE_UNAVAILABLE,
-            [(header::RETRY_AFTER, "5")],
-            "All transcoding slots are in use.",
-        )
-            .into_response());
+        return Ok(busy(&state, &file.filename));
     };
 
-    let plan = plan_for(&state, file_id, &file.path, codec).await?;
+    let plan = plan_for(&state, file.id, &file.path, codec).await?;
     let total = plan.wav_size();
 
     // Range handling is byte-identical to the passthrough path — the resource
@@ -133,6 +195,58 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
     }
 
     Ok(response.body(pcm_body(plan, start, len, permit))?)
+}
+
+/// Look the item up and confirm this build can decode it.
+///
+/// A 404 for anything that is not decodable here, rather than an error: the URL
+/// describes a resource that, for this file and this build, simply does not
+/// exist. Only a renderer that was told about it should be asking.
+async fn resolve<D: DatabaseManager>(
+    state: &AppState<D>,
+    id: &str,
+) -> Result<(crate::database::FileLocation, TranscodeCodec), AppError> {
+    let Some(file_id) = media_id_from_path_segment(id) else {
+        return Err(AppError::NotFound);
+    };
+    if !state.current_config().transcode.enabled {
+        return Err(AppError::NotFound);
+    }
+    let file = state
+        .database
+        .get_file_location_by_id(file_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+    // The codec comes from what the scanner recorded, not from opening the file:
+    // re-probing here would repeat work the scan already did.
+    let Some(codec) = codec_for(&file.mime_type, &file.filename) else {
+        return Err(AppError::NotFound);
+    };
+    if !codec.is_decodable() {
+        debug!(
+            "refusing to transcode {} — this build has no {} decoder",
+            file.filename,
+            codec.as_str()
+        );
+        return Err(AppError::NotFound);
+    }
+    Ok((file, codec))
+}
+
+/// Every slot is busy.
+fn busy<D: DatabaseManager>(state: &AppState<D>, filename: &str) -> Response {
+    warn!(
+        "refusing to transcode {}: all {} transcode slots are in use",
+        filename,
+        state.current_config().transcode.max_concurrent
+    );
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "5")],
+        "All transcoding slots are in use.",
+    )
+        .into_response()
 }
 
 /// Fetch a cached plan, or build one off the async runtime.

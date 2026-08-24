@@ -305,6 +305,12 @@ pub fn create_router<D: DatabaseManager + 'static>(
         get(transcode_streaming::serve_transcoded_wav::<D>)
             .head(transcode_streaming::serve_transcoded_wav::<D>),
     );
+    #[cfg(feature = "transcode-aac")]
+    let router = router.route(
+        "/media/{id}/transcode/audio.aac",
+        get(transcode_streaming::serve_transcoded_aac::<D>)
+            .head(transcode_streaming::serve_transcoded_aac::<D>),
+    );
 
     #[cfg(feature = "casting")]
     let router = router

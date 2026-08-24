@@ -270,7 +270,11 @@ async fn turning_the_feature_off_withdraws_the_resource() {
     let (_temp, mut state, id) = library().await;
     let mut config = (*state.config).clone();
     config.transcode.enabled = false;
-    state.config = Arc::new(config);
+    let config = Arc::new(config);
+    state.config = config.clone();
+    // The handler reads the live config, not the startup snapshot, so turning
+    // this off takes effect on reload rather than at the next restart.
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
 
     let (status, _, _) = request(&state, id, Method::GET, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -472,4 +476,68 @@ async fn with_the_feature_off_an_item_has_exactly_one_resource() {
         "turning the feature off must leave the DIDL exactly as it was:\n{didl}"
     );
     assert!(!didl.contains("DLNA.ORG_CI=1"));
+}
+
+// ---------------------------------------------------------------------------
+// The compressed alternative
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "transcode-aac")]
+#[tokio::test]
+async fn the_aac_resource_streams_adts_without_claiming_to_be_seekable() {
+    let (_temp, state, id) = library().await;
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}/transcode/audio.aac"))
+                .extension(ConnectInfo(peer()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/aac");
+    // Its length is not knowable in advance, so it must not claim otherwise —
+    // and must not advertise ranges it would then refuse.
+    assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+    assert!(response.headers().get(header::ACCEPT_RANGES).is_none());
+    let features = response.headers()["contentFeatures.dlna.org"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(features.contains("DLNA.ORG_OP=00"), "no seeking: {features}");
+    assert!(features.contains("DLNA.ORG_CI=1"), "converted: {features}");
+
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!body.is_empty());
+    assert_eq!(body[0], 0xFF, "ADTS syncword");
+    assert_eq!(body[1] & 0xF0, 0xF0, "ADTS syncword");
+    // The point of choosing AAC over LPCM.
+    assert!(
+        body.len() < AC3.len() * 4,
+        "AAC output should be far smaller than the equivalent PCM"
+    );
+}
+
+#[cfg(feature = "transcode-aac")]
+#[tokio::test]
+async fn choosing_aac_advertises_the_aac_resource() {
+    let (_temp, mut state, id) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.audio_format = vuio_core::config::TranscodeAudioFormat::Aac;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_audio(&state).await;
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.aac")),
+        "the advertised resource must be the one the config selected:\n{didl}"
+    );
+    assert!(didl.contains("audio/aac"));
+    assert!(!didl.contains("audio.wav"));
 }
