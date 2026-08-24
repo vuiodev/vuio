@@ -125,6 +125,13 @@ impl AppConfig {
                 "aac".to_string(),
                 "ogg".to_string(),
                 "wma".to_string(),
+                // Elementary Dolby and DTS streams. Listed because VuIO can now
+                // decode them for renderers that cannot — before that there was
+                // nothing useful to do with one, which is why they were absent.
+                "ac3".to_string(),
+                "eac3".to_string(),
+                "ec3".to_string(),
+                "dts".to_string(),
                 "jpg".to_string(),
                 "jpeg".to_string(),
                 "png".to_string(),

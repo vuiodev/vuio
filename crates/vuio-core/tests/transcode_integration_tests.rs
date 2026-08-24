@@ -150,6 +150,49 @@ async fn request(
     (status, headers, body)
 }
 
+/// Assert a ranged response is the same audio as that slice of the whole.
+///
+/// "Same" to within one LSB per sample, not byte-for-byte. A seek primes the
+/// decoder one frame early rather than replaying the file from the start, so
+/// the IMDCT's floating-point state is reached by a different route and a
+/// sample sitting exactly on a rounding boundary can quantise to the adjacent
+/// integer. That is 1/32768 — around -90 dBFS, inaudible, and the tolerance the
+/// decoder's own conformance tests use. Anything larger means the seek landed
+/// somewhere else entirely.
+///
+/// `range_start` is needed because a byte range may begin mid-sample, and
+/// pairing bytes from the wrong phase turns a 1-LSB difference into a 256-LSB
+/// one. The partial sample at each end is compared as bytes instead.
+fn assert_same_audio(part: &[u8], whole_slice: &[u8], range_start: usize, what: &str) {
+    assert_eq!(part.len(), whole_slice.len(), "{what}: length");
+
+    // Byte offset into the PCM payload, and how far into a 4-byte stereo sample
+    // frame the range begins.
+    let phase = range_start.saturating_sub(44) % 4;
+    let lead = if phase == 0 { 0 } else { 4 - phase };
+    let lead = lead.min(part.len());
+
+    let mut worst = 0i32;
+    let mut worst_at = 0usize;
+    for (i, (a, b)) in part[lead..]
+        .chunks_exact(2)
+        .zip(whole_slice[lead..].chunks_exact(2))
+        .enumerate()
+    {
+        let x = i16::from_le_bytes([a[0], a[1]]) as i32;
+        let y = i16::from_le_bytes([b[0], b[1]]) as i32;
+        if (x - y).abs() > worst {
+            worst = (x - y).abs();
+            worst_at = i;
+        }
+    }
+    assert!(
+        worst <= 1,
+        "{what}: samples differ by up to {worst} LSB (first worst at sample {worst_at}) \
+         — the seek landed in the wrong place, not merely rounded differently"
+    );
+}
+
 fn header_u64(headers: &axum::http::HeaderMap, name: header::HeaderName) -> u64 {
     headers[&name].to_str().unwrap().parse().unwrap()
 }
@@ -235,11 +278,34 @@ async fn a_byte_range_returns_exactly_that_slice_of_the_full_decode() {
         format!("bytes {start}-{end}/{}", whole.len())
     );
     assert_eq!(part.len(), end - start + 1);
-    assert_eq!(
-        part,
-        whole[start..=end],
-        "a range must be byte-identical to that slice of the whole"
-    );
+    assert_same_audio(&part, &whole[start..=end], start, "mid-frame range");
+}
+
+/// The case that only shows up deeper into the file.
+///
+/// Seeking starts the decoder one frame early so the IMDCT overlap is warm.
+/// Opening a decoder necessarily decodes that frame, and if it is then fed to
+/// the decoder a *second* time its samples run through the overlap buffer twice
+/// — every frame after it lands somewhere a sequential decode never goes, and
+/// the range stops being the audio its Content-Range claims.
+///
+/// It cancels out at frame 1, where the pre-roll is frame 0 and the whole-file
+/// decode primes on frame 0 too, which is why the seeks here are deliberately
+/// several frames in. A live server caught this; the frame-1 test did not.
+#[tokio::test]
+async fn a_deep_seek_matches_the_sequential_decode_frame_for_frame() {
+    let (_temp, state, id) = library().await;
+    let (_, _, whole) = request(&state, id, Method::GET, None).await;
+
+    for frame in [2usize, 5, 8] {
+        let start = 44 + frame * 1536 * 2 * 2 + 777;
+        let end = start + 8_000;
+        assert!(end < whole.len(), "fixture is long enough for frame {frame}");
+        let (status, _, part) =
+            request(&state, id, Method::GET, Some(&format!("bytes={start}-{end}"))).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_same_audio(&part, &whole[start..=end], start, &format!("range into frame {frame}"));
+    }
 }
 
 #[tokio::test]
@@ -252,7 +318,9 @@ async fn a_range_spanning_the_header_boundary_is_still_exact() {
     let (status, _, part) = request(&state, id, Method::GET, Some("bytes=20-2043")).await;
     assert_eq!(status, StatusCode::PARTIAL_CONTENT);
     assert_eq!(part.len(), 2024);
-    assert_eq!(part, whole[20..=2043]);
+    // The WAV header is copied, not decoded, so those bytes must match exactly.
+    assert_eq!(&part[..24], &whole[20..44], "the tail of the WAV header");
+    assert_same_audio(&part[24..], &whole[44..=2043], 44, "audio after the header");
 }
 
 #[tokio::test]

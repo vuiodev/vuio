@@ -91,13 +91,16 @@ fn aac_body(plan: Arc<AudioPlan>, permit: tokio::sync::OwnedSemaphorePermit) -> 
         };
         let mut source = std::io::BufReader::with_capacity(256 * 1024, file);
 
-        let mut decoder = match prime(&plan, &mut source, 0) {
+        let (mut decoder, primed) = match prime(&plan, &mut source, 0) {
             Ok(d) => d,
             Err(e) => {
                 let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
                 return;
             }
         };
+        // As above: the first frame is already decoded, and re-feeding it would
+        // push its samples through the overlap buffer a second time.
+        let mut primed = Some(primed);
         let mut encoder = match AacEncoder::new(plan.sample_rate(), plan.channels) {
             Ok(e) => e,
             Err(e) => {
@@ -106,12 +109,20 @@ fn aac_body(plan: Arc<AudioPlan>, permit: tokio::sync::OwnedSemaphorePermit) -> 
             }
         };
 
-        for frame in &plan.index.frames {
-            let mut raw = vec![0u8; frame.len as usize];
-            if read_frame(&mut source, frame.offset, &mut raw).is_err() {
-                break;
-            }
-            let pcm = decoder.decode_or_silence(&raw, frame.samples);
+        for (i, frame) in plan.index.frames.iter().enumerate() {
+            let pcm = match primed.take() {
+                Some(mut pcm) => {
+                    pcm.resize(plan.frame_bytes(i), 0);
+                    pcm
+                }
+                None => {
+                    let mut raw = vec![0u8; frame.len as usize];
+                    if read_frame(&mut source, frame.offset, &mut raw).is_err() {
+                        break;
+                    }
+                    decoder.decode_or_silence(&raw, frame.samples)
+                }
+            };
             match encoder.push(&pcm) {
                 Ok(adts) if adts.is_empty() => continue,
                 Ok(adts) => {
@@ -335,13 +346,18 @@ fn pcm_body(
         // frame early and discarding its output removes the transient that
         // would otherwise tick at the start of every seek.
         let preroll = seeked.frame.saturating_sub(1);
-        let mut decoder = match prime(&plan, &mut source, preroll) {
+        let (mut decoder, primed) = match prime(&plan, &mut source, preroll) {
             Ok(d) => d,
             Err(e) => {
                 let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
                 return;
             }
         };
+        // Priming already decoded frame `preroll`. Feeding it again would run
+        // its samples through the overlap buffer twice, and every frame after
+        // it would then differ from the same frame in a sequential decode — so
+        // a range would not be the slice of the whole that it claims to be.
+        let mut primed = Some(primed);
 
         let mut skip = seeked.pcm_skip;
         for i in preroll..plan.index.frames.len() {
@@ -349,11 +365,19 @@ fn pcm_body(
                 break;
             }
             let frame = plan.index.frames[i];
-            let mut raw = vec![0u8; frame.len as usize];
-            if read_frame(&mut source, frame.offset, &mut raw).is_err() {
-                break;
-            }
-            let pcm = decoder.decode_or_silence(&raw, frame.samples);
+            let pcm = match primed.take() {
+                Some(mut pcm) => {
+                    pcm.resize(plan.frame_bytes(i), 0);
+                    pcm
+                }
+                None => {
+                    let mut raw = vec![0u8; frame.len as usize];
+                    if read_frame(&mut source, frame.offset, &mut raw).is_err() {
+                        break;
+                    }
+                    decoder.decode_or_silence(&raw, frame.samples)
+                }
+            };
 
             // Frames before the seek point are decoded for their state only.
             if i < seeked.frame {
@@ -395,22 +419,25 @@ fn pcm_body(
     Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
-/// Decode every frame up to `upto` so the decoder carries the right state.
+/// Open a decoder positioned at frame `at`, returning it and that frame's PCM.
+///
+/// The PCM comes back rather than being dropped because opening a decoder
+/// necessarily decodes a frame, and decoding the same frame again to get its
+/// samples would advance the overlap state a second time.
 fn prime<R: std::io::Read + std::io::Seek>(
     plan: &AudioPlan,
     source: &mut R,
-    upto: usize,
-) -> anyhow::Result<PcmDecoder> {
-    let first = plan.index.frames[upto];
+    at: usize,
+) -> anyhow::Result<(PcmDecoder, Vec<u8>)> {
+    let first = plan.index.frames[at];
     let mut raw = vec![0u8; first.len as usize];
     read_frame(source, first.offset, &mut raw)?;
-    let (decoder, _) = PcmDecoder::open(
+    PcmDecoder::open(
         plan.codec,
         plan.index.sample_rate,
         Some(plan.channels),
         &raw,
-    )?;
-    Ok(decoder)
+    )
 }
 
 fn read_frame<R: std::io::Read + std::io::Seek>(
