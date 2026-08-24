@@ -308,6 +308,10 @@ impl MkvDemuxer {
         // A safety valve, not a tuning knob: guards against runaway loops if a track's
         // packets never accumulate to `target_duration_secs` (e.g. a corrupt duration).
         const MAX_PACKETS_PER_SEGMENT: usize = 4096;
+        // How far before the requested time to aim the seek. One Matroska tick:
+        // enough to land at or before the block asked for, and short enough that
+        // nothing else is read to get there.
+        const SEEK_BACKOFF_SECS: f64 = 0.001;
         use symphonia::core::formats::probe::Hint;
         use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
         use symphonia::core::io::MediaSourceStream;
@@ -350,7 +354,14 @@ impl MkvDemuxer {
         // Coarse lands on the container's own cue point (a keyframe) at or before the
         // requested time, where Accurate lands on the nearest sample — which is usually
         // mid-GOP, and produced segments a player could not start on.
-        let target_time = Time::try_from_secs_f64(start_secs.max(0.0)).unwrap_or(Time::ZERO);
+        // Backed off by a hair, because symphonia's seek lands on the first
+        // block whose presentation time is at or *after* the request, and asking
+        // for exactly a keyframe's own timestamp is answered with the block
+        // after it — half a second of film, gone, at the start of every segment.
+        // Asking a millisecond earlier lands one frame before the keyframe
+        // instead, which the filter below then drops.
+        let target_time = Time::try_from_secs_f64((start_secs - SEEK_BACKOFF_SECS).max(0.0))
+            .unwrap_or(Time::ZERO);
         let _ = format.seek(
             SeekMode::Coarse,
             SeekTo::Time {
@@ -363,13 +374,9 @@ impl MkvDemuxer {
             (start_secs.max(0.0) * output_timescale as f64).round() as u64;
         let target_ticks =
             (target_duration_secs.max(0.0) * output_timescale as f64).round() as u64;
-        let is_video = matches!(codec, TrackCodec::Avc | TrackCodec::Hevc);
 
         let mut packets = Vec::new();
         let mut accumulated_ticks: u64 = 0;
-        // Where the segment began on the presentation timeline, for the elapsed
-        // check below.
-        let mut first_pts: Option<u64> = None;
 
         loop {
             if packets.len() >= MAX_PACKETS_PER_SEGMENT {
@@ -396,44 +403,36 @@ impl MkvDemuxer {
                     let dur = rescale(packet.dur.get() as i64);
                     let is_keyframe = packet_is_keyframe(&packet.data, codec);
 
-                    if is_video {
-                        // Guarantee the segment opens on a random-access point even where
-                        // the container's cue index is sparse enough that the seek above
-                        // landed mid-GOP. Dropping these leading frames loses nothing: they
-                        // depend on references the player would not have when starting here,
-                        // and the previous segment already covers their span. Refusing the
-                        // frames *before* `start_ticks` instead would be the opposite
-                        // trade: on a film whose keyframes are further apart than a
-                        // segment, the segment would open at the next one and leave a hole
-                        // where the picture should be.
-                        if packets.is_empty() && !is_keyframe {
-                            continue;
-                        }
-                        // Matroska stores no per-block duration: a `SimpleBlock` is a
-                        // timestamp and a payload, and symphonia can only report a
-                        // duration where the track declares `DefaultDuration` or the
-                        // codec implies one. Accumulating durations alone therefore
-                        // runs to the packet ceiling on any track that declares
-                        // neither — which is a segment holding the whole film. The
-                        // elapsed presentation time is the check that does not depend
-                        // on the container being generous.
-                        let elapsed = pts.saturating_sub(*first_pts.get_or_insert(pts));
-                        if elapsed >= target_ticks && !packets.is_empty() {
-                            break;
-                        }
-                    } else {
-                        // Audio is partitioned strictly by the packet's own start, so
-                        // every packet lands in exactly one segment and consecutive
-                        // segments meet without overlapping. A caller that needs samples
-                        // from before its segment — the re-encode does, to prime an
-                        // encoder — asks for an earlier `start_secs` rather than being
-                        // handed a packet twice.
-                        if pts < start_ticks {
-                            continue;
-                        }
-                        if pts >= start_ticks + target_ticks && !packets.is_empty() {
-                            break;
-                        }
+                    // Every track is partitioned strictly by the packet's own
+                    // presentation time, so a packet lands in exactly one segment
+                    // and consecutive segments meet without a gap or an overlap.
+                    // Note what this deliberately does *not* do: round the start
+                    // forward to a keyframe. A film's keyframes are eight to
+                    // twelve seconds apart, so rounding hands back a stretch of
+                    // film several segments further on than the caller asked for,
+                    // and the player's timeline and the media stop describing the
+                    // same thing. Opening on a keyframe is real, and is the
+                    // caller's to arrange by asking for a range that starts on
+                    // one — which is what `web::remux_streaming::segmentation`
+                    // reads the container's cue index to do.
+                    //
+                    // A caller that needs samples from before its segment — the
+                    // audio re-encode does, to prime an encoder — asks for an
+                    // earlier `start_secs` rather than being handed a packet that
+                    // also belongs to its neighbour.
+                    if pts < start_ticks {
+                        continue;
+                    }
+                    // Matroska stores no per-block duration: a `SimpleBlock` is a
+                    // timestamp and a payload, and symphonia can only report a
+                    // duration where the track declares `DefaultDuration` or the
+                    // codec implies one. Accumulating durations alone therefore
+                    // runs to the packet ceiling on any track that declares
+                    // neither — which is a segment holding the whole film. The
+                    // presentation time is the check that does not depend on the
+                    // container being generous.
+                    if pts >= start_ticks + target_ticks && !packets.is_empty() {
+                        break;
                     }
 
                     accumulated_ticks += dur;

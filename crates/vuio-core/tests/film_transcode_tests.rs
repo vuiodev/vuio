@@ -489,24 +489,42 @@ async fn an_audio_segment_carries_real_re_encoded_aac() {
     assert_eq!(base, 188 * 1024, "the run opens on the frame grid");
 }
 
-/// The defect a browser hears as a tick every four seconds.
+/// The two defects a browser shows as playback stopping a few seconds in.
 ///
-/// Each segment is built by its own request, on its own thread, from nothing
-/// but its sequence number — so if they disagree by even one frame about where
-/// they sit, the player's source buffer resolves the collision by throwing
-/// samples away. What is asserted is the only thing that rules that out: each
-/// segment opens exactly where the previous one's last sample ended, and the
-/// run of them keeps time with the wall clock rather than drifting a fraction
-/// of a frame per segment.
+/// A player builds its whole timeline out of the playlist's `EXTINF` durations
+/// and then fetches segments expecting to find exactly that. If a segment
+/// overruns the next one's start the source buffer resolves the collision by
+/// throwing samples away; if it covers something else entirely — which is what
+/// rounding a segment's start forward to the next keyframe does on a film whose
+/// keyframes are ten seconds apart — the buffer never reaches the playhead and
+/// playback stops. So this asserts the one property that rules both out: the
+/// segments tile the timeline the playlist described, exactly, with nothing
+/// between them and nothing on top of each other.
 #[tokio::test]
-async fn consecutive_audio_segments_meet_without_a_gap_or_an_overlap() {
+async fn the_segments_tile_the_timeline_the_playlist_promised() {
     const FRAME: u64 = 1024;
+    const RATE: f64 = 48_000.0;
     let (_temp, state, id) = scanned_film(24.0).await;
+
+    let (status, _, body) = get(
+        &state,
+        &format!("/media/{id}/hls/audio/0/index.m3u8"),
+        Method::GET,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let playlist = String::from_utf8(body).expect("a playlist is text");
+    let promised: Vec<f64> = playlist
+        .lines()
+        .filter_map(|line| line.strip_prefix("#EXTINF:"))
+        .filter_map(|value| value.trim_end_matches(',').parse().ok())
+        .collect();
+    assert!(!promised.is_empty(), "no segments offered:\n{playlist}");
 
     let mut opens_at: Option<u64> = None;
     let mut first_open = 0u64;
-    let segments = 5u32;
-    for seq in 0..segments {
+    for seq in 0..promised.len() {
         let (status, _, segment) = get(
             &state,
             &format!("/media/{id}/hls/audio/0/segment/{seq}"),
@@ -514,7 +532,12 @@ async fn consecutive_audio_segments_meet_without_a_gap_or_an_overlap() {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "segment {seq}");
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "segment {seq} of {}",
+            promised.len()
+        );
 
         let tfdt = find_box(&segment, "tfdt").expect("a tfdt");
         let base = u64::from_be_bytes(tfdt[4..12].try_into().unwrap());
@@ -533,12 +556,13 @@ async fn consecutive_audio_segments_meet_without_a_gap_or_an_overlap() {
         opens_at = Some(base + samples * FRAME);
     }
 
-    // Four seconds a segment on average, to within the frame the grid rounds by.
+    // And the timeline they cover is the one the playlist described, to within
+    // the frame the AAC grid rounds by.
     let covered = opens_at.unwrap() - first_open;
-    let nominal = u64::from(segments) * 4 * 48_000;
+    let promised_samples = (promised.iter().sum::<f64>() * RATE).round() as u64;
     assert!(
-        covered.abs_diff(nominal) < FRAME,
-        "{segments} segments covered {covered} samples where four seconds each is {nominal}"
+        covered.abs_diff(promised_samples) < FRAME,
+        "the segments carry {covered} samples where the playlist promised {promised_samples}"
     );
 }
 

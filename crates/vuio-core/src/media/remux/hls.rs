@@ -13,7 +13,16 @@ impl HlsGenerator {
     /// build compiled without the matching decoder — or a codec nothing here decodes,
     /// TrueHD being the one that turns up in real libraries — drops the rendition
     /// rather than offering one that would arrive silent.
-    pub fn build_master_playlist(_media_id: &str, tracks: &[TrackInfo]) -> String {
+    ///
+    /// `independent_segments` says whether every segment really does open on a
+    /// keyframe. Claiming it when it is not true tells a player it may start
+    /// decoding at any segment boundary, which it then does, to a blank picture
+    /// until the next keyframe arrives.
+    pub fn build_master_playlist(
+        _media_id: &str,
+        tracks: &[TrackInfo],
+        independent_segments: bool,
+    ) -> String {
         let Some(video_track) = browser_video_track(tracks) else {
             // No browser-playable video track: a variant-less master playlist fails
             // hls.js's manifest parse, which routes the player to its existing
@@ -27,7 +36,10 @@ impl HlsGenerator {
         let mut playlist = String::new();
         playlist.push_str("#EXTM3U\n");
         playlist.push_str("#EXT-X-VERSION:6\n");
-        playlist.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n\n");
+        if independent_segments {
+            playlist.push_str("#EXT-X-INDEPENDENT-SEGMENTS\n");
+        }
+        playlist.push('\n');
 
         let video_codec = video_codec_string(video_track);
 
@@ -66,42 +78,56 @@ impl HlsGenerator {
     ///
     /// Every rendition's init segment and segments live alongside its own playlist
     /// (`init.mp4`, `segment/{n}`), so this is identical for video and audio callers.
-    pub fn build_media_playlist(total_duration_secs: f64, segment_duration_secs: u32) -> String {
-        let segment_duration_secs = segment_duration_secs.max(1);
-        let total_duration_secs = total_duration_secs.max(0.0);
-        let segment_count = (total_duration_secs / segment_duration_secs as f64)
+    ///
+    /// `boundaries` is where each segment starts followed by where the last one
+    /// ends — one more value than there are segments. They are not assumed to be
+    /// evenly spaced, because for a film they are not: a segment opens on a
+    /// keyframe, and a Blu-ray remux puts one every eight to twelve seconds. What
+    /// a playlist may never do is state a duration the segment does not have. A
+    /// player builds its whole timeline out of these numbers, and one that
+    /// disagrees with the media by even a fraction stalls on the difference.
+    pub fn build_media_playlist(boundaries: &[f64]) -> String {
+        let target = boundaries
+            .windows(2)
+            .map(|w| w[1] - w[0])
+            .fold(0.0f64, f64::max)
             .ceil()
-            .max(1.0) as usize;
+            .max(1.0) as u64;
 
         let mut playlist = String::new();
         playlist.push_str("#EXTM3U\n");
         playlist.push_str("#EXT-X-VERSION:6\n");
-        playlist.push_str(&format!(
-            "#EXT-X-TARGETDURATION:{}\n",
-            segment_duration_secs
-        ));
+        playlist.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n"));
         playlist.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
         playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
         playlist.push_str("#EXT-X-MAP:URI=\"init.mp4\"\n\n");
 
-        let mut remaining = total_duration_secs;
-        for i in 0..segment_count {
-            // Every segment is `segment_duration_secs` except the last, which is
-            // whatever real time is left — declaring the nominal duration for a
-            // shorter final segment drifts the reported vs. actual timeline and can
-            // make players stall waiting for content that was never coming.
-            let this_duration = if i + 1 == segment_count {
-                remaining.max(0.0)
-            } else {
-                segment_duration_secs as f64
-            };
-            remaining -= this_duration;
-
-            playlist.push_str(&format!("#EXTINF:{:.3},\nsegment/{}\n", this_duration, i));
+        for (i, pair) in boundaries.windows(2).enumerate() {
+            playlist.push_str(&format!(
+                "#EXTINF:{:.3},\nsegment/{}\n",
+                (pair[1] - pair[0]).max(0.0),
+                i
+            ));
         }
 
         playlist.push_str("#EXT-X-ENDLIST\n");
         playlist
+    }
+
+    /// An evenly spaced set of boundaries, for a film whose keyframes are not
+    /// known.
+    ///
+    /// The last segment is whatever real time is left rather than another whole
+    /// one: declaring the nominal duration for a short final segment drifts the
+    /// reported timeline against the real one and can leave a player waiting for
+    /// content that was never coming.
+    pub fn uniform_boundaries(total_duration_secs: f64, segment_duration_secs: u32) -> Vec<f64> {
+        let step = f64::from(segment_duration_secs.max(1));
+        let total = total_duration_secs.max(0.0);
+        let count = (total / step).ceil().max(1.0) as usize;
+        let mut boundaries: Vec<f64> = (0..count).map(|i| i as f64 * step).collect();
+        boundaries.push(total.max(boundaries.last().copied().unwrap_or(0.0)));
+        boundaries
     }
 }
 
@@ -269,7 +295,7 @@ mod tests {
             audio_track(3, TrackCodec::Aac, "Spanish", "spa"),
         ];
 
-        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks, true);
         assert!(master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
         assert!(master.contains("NAME=\"English\""));
         assert!(master.contains("NAME=\"Spanish\""));
@@ -286,7 +312,7 @@ mod tests {
             audio_track(2, TrackCodec::Unsupported, "TrueHD Atmos", "eng"),
         ];
 
-        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks, true);
         assert!(!master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
         assert!(!master.contains("AUDIO=\"audio\""));
         assert!(master.contains("video/index.m3u8"));
@@ -302,7 +328,7 @@ mod tests {
             video_track(TrackCodec::Avc),
             audio_track(2, TrackCodec::Ac3, "5.1 English", "eng"),
         ];
-        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks, true);
 
         if TrackCodec::Ac3.is_playable() {
             assert!(master.contains("#EXT-X-MEDIA:TYPE=AUDIO"));
@@ -321,7 +347,7 @@ mod tests {
             video_track(TrackCodec::Avc),
             audio_track(2, TrackCodec::Dts, "DTS", "eng"),
         ];
-        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks, true);
         assert_eq!(
             master.contains("#EXT-X-MEDIA:TYPE=AUDIO"),
             TrackCodec::Dts.is_playable(),
@@ -332,7 +358,7 @@ mod tests {
     #[test]
     fn test_master_playlist_no_supported_video_is_variant_less() {
         let tracks = vec![video_track(TrackCodec::Unsupported)];
-        let master = HlsGenerator::build_master_playlist("test-id", &tracks);
+        let master = HlsGenerator::build_master_playlist("test-id", &tracks, true);
         assert!(!master.contains("#EXT-X-STREAM-INF"));
     }
 
@@ -340,12 +366,40 @@ mod tests {
     fn test_media_playlist_final_segment_uses_real_remainder() {
         // 10 seconds of content at a 4-second target: 4, 4, then a 2-second remainder —
         // not another 4-second entry that overruns the real content.
-        let playlist = HlsGenerator::build_media_playlist(10.0, 4);
+        let playlist =
+            HlsGenerator::build_media_playlist(&HlsGenerator::uniform_boundaries(10.0, 4));
         assert!(playlist.contains("#EXTINF:4.000,\nsegment/0\n"));
         assert!(playlist.contains("#EXTINF:4.000,\nsegment/1\n"));
         assert!(playlist.contains("#EXTINF:2.000,\nsegment/2\n"));
         assert!(!playlist.contains("segment/3"));
         assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+    }
+
+    /// A film's keyframes are not four seconds apart, and a playlist that says
+    /// they are is the defect: the player builds its timeline from these
+    /// numbers, seeks to where they say the next segment begins, and stalls on
+    /// finding something else there.
+    #[test]
+    fn test_media_playlist_states_the_real_length_of_uneven_segments() {
+        let playlist = HlsGenerator::build_media_playlist(&[0.0, 12.429, 22.814, 33.242]);
+        assert!(playlist.contains("#EXTINF:12.429,\nsegment/0\n"), "{playlist}");
+        assert!(playlist.contains("#EXTINF:10.385,\nsegment/1\n"), "{playlist}");
+        assert!(playlist.contains("#EXTINF:10.428,\nsegment/2\n"), "{playlist}");
+        assert!(!playlist.contains("segment/3"));
+        // The target duration has to cover the longest of them, or a player is
+        // entitled to treat the playlist as malformed.
+        assert!(playlist.contains("#EXT-X-TARGETDURATION:13\n"), "{playlist}");
+    }
+
+    /// The tag is a promise that a player may start decoding at any segment. It
+    /// is only true when the boundaries came from the film's own keyframes.
+    #[test]
+    fn test_master_playlist_only_claims_independent_segments_when_they_are() {
+        let tracks = vec![video_track(TrackCodec::Avc)];
+        assert!(HlsGenerator::build_master_playlist("id", &tracks, true)
+            .contains("#EXT-X-INDEPENDENT-SEGMENTS"));
+        assert!(!HlsGenerator::build_master_playlist("id", &tracks, false)
+            .contains("#EXT-X-INDEPENDENT-SEGMENTS"));
     }
 
     #[test]
