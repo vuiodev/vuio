@@ -685,10 +685,7 @@ impl Ac3Encoder {
                 // 4-way distinction collapse to the long window for
                 // every block, which we honour here.
                 let mut win_buf = [0.0f32; 512];
-                for n in 0..256 {
-                    win_buf[n] = in_buf[n] * WINDOW[n];
-                    win_buf[511 - n] = in_buf[511 - n] * WINDOW[n];
-                }
+                crate::simd::window_512(&in_buf, &WINDOW, &mut win_buf);
                 // Update delay line to right-half of the next block.
                 self.delay_line[ch].copy_from_slice(
                     &drain[blk * SAMPLES_PER_BLOCK..(blk + 1) * SAMPLES_PER_BLOCK],
@@ -1065,12 +1062,8 @@ impl Ac3Encoder {
                     // unscaled energies here.
                     if e_s.min(e_d) < e_l.min(e_r) {
                         rematflg[blk][bnd_idx] = true;
-                        for bin in lo..hi {
-                            let l = coeffs[0][blk][bin];
-                            let r = coeffs[1][blk][bin];
-                            coeffs[0][blk][bin] = 0.5 * (l + r);
-                            coeffs[1][blk][bin] = 0.5 * (l - r);
-                        }
+                        let (c0, c1_rest) = coeffs.split_at_mut(1);
+                        crate::simd::rematrix_stereo(&mut c0[0][blk][lo..hi], &mut c1_rest[0][blk][lo..hi]);
                     }
                     if std::env::var("AC3_TRACE_REMAT_ENC").is_ok() {
                         eprintln!(
@@ -2146,14 +2139,13 @@ fn detect_transient(block: &[f32]) -> bool {
 /// left shifts that would bring `|x|` to the interval `[0.5, 1)`, clamped
 /// to `0..=24` (§8.2.7 extract_exponents).
 pub(crate) fn extract_exponent(x: f32) -> u8 {
-    let ax = x.abs();
-    if ax < f32::MIN_POSITIVE {
+    let bits = (x.to_bits() & 0x7FFF_FFFF) as u32;
+    if bits == 0 {
         return 24;
     }
-    // x = m * 2^-e with |m| in [0.5, 1) ⇒ e = -floor(log2(ax)) - 1,
-    // which for ax ∈ [2^-25, 1) lies in 0..=24.
-    let e = (-ax.log2().floor() as i32) - 1;
-    e.clamp(0, 24) as u8
+    let exp_field = (bits >> 23) as i32;
+    let exp = 126 - exp_field;
+    exp.clamp(0, 24) as u8
 }
 
 /// Pre-process the D15 exponent run so that successive differences
@@ -3441,75 +3433,87 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // tie cplfsnr ≡ fsnr (the cpl pseudo-channel and the fbw channels
     // share the same sub-band SNR offset). This is sub-optimal but
     // adequate for an initial coupling-encode implementation.
-    let mut best = *ba;
-    let mut best_offset: i32 = -1;
-    for csnr in 0..=63u8 {
-        for fsnr in 0..=15u8 {
-            let mut cand = *ba;
-            cand.csnroffst = csnr;
-            cand.fsnroffst = fsnr;
-            cand.cplfsnroffst = fsnr;
-            cand.lfefsnroffst = fsnr;
-            // baps slot layout: 0..nchan = fbw, nchan = cpl, nchan+1 = lfe.
-            let mut baps: Vec<Vec<[u8; N_COEFFS]>> =
-                vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
-            for ch in 0..nchan {
-                let ch_end = end_ch.map_or(end, |e| e[ch]);
-                for blk in 0..exps[ch].len() {
-                    compute_bap(
-                        &exps[ch][blk],
-                        ch_end,
-                        fscod,
-                        &cand,
-                        &mut baps[ch][blk],
-                        Some((dba, ch)),
-                    );
-                }
-            }
-            if cpl.in_use {
-                let cpl_idx = nchan;
-                let begf_mant = cpl.begf_mant();
-                let endf_mant = cpl.endf_mant();
-                let mut cpl_ba = cand;
-                cpl_ba.fsnroffst = cand.cplfsnroffst;
-                cpl_ba.fgaincod = cand.cplfgaincod;
-                for blk in 0..exps[cpl_idx].len() {
-                    compute_bap_cpl(
-                        &exps[cpl_idx][blk],
-                        begf_mant,
-                        endf_mant,
-                        fscod,
-                        &cpl_ba,
-                        &mut baps[cpl_idx][blk],
-                        Some((dba, MAX_FBW)),
-                    );
-                }
-            }
-            if lfeon {
-                let lfe_idx = nchan + 1;
-                let mut lfe_ba = cand;
-                lfe_ba.fsnroffst = cand.lfefsnroffst;
-                lfe_ba.fgaincod = cand.lfefgaincod;
-                for blk in 0..exps[lfe_idx].len() {
-                    compute_bap(
-                        &exps[lfe_idx][blk],
-                        LFE_END_MANT,
-                        fscod,
-                        &lfe_ba,
-                        &mut baps[lfe_idx][blk],
-                        None,
-                    );
-                }
-            }
-            let used = mantissa_bits_total_ends(&baps, end, end_ch, nchan, cpl, lfeon);
-            if used <= budget {
-                let combined = (csnr as i32) * 16 + fsnr as i32;
-                if combined > best_offset {
-                    best_offset = combined;
-                    best = cand;
-                }
+    let mut baps: Vec<Vec<[u8; N_COEFFS]>> =
+        vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+
+    let calc_used = |combined: i32, baps: &mut [Vec<[u8; N_COEFFS]>]| -> (u32, BitAllocParams) {
+        let csnr = (combined / 16).min(63) as u8;
+        let fsnr = (combined % 16).min(15) as u8;
+        let mut cand = *ba;
+        cand.csnroffst = csnr;
+        cand.fsnroffst = fsnr;
+        cand.cplfsnroffst = fsnr;
+        cand.lfefsnroffst = fsnr;
+        for ch in 0..nchan {
+            let ch_end = end_ch.map_or(end, |e| e[ch]);
+            for blk in 0..exps[ch].len() {
+                compute_bap(
+                    &exps[ch][blk],
+                    ch_end,
+                    fscod,
+                    &cand,
+                    &mut baps[ch][blk],
+                    Some((dba, ch)),
+                );
             }
         }
+        if cpl.in_use {
+            let cpl_idx = nchan;
+            let begf_mant = cpl.begf_mant();
+            let endf_mant = cpl.endf_mant();
+            let mut cpl_ba = cand;
+            cpl_ba.fsnroffst = cand.cplfsnroffst;
+            cpl_ba.fgaincod = cand.cplfgaincod;
+            for blk in 0..exps[cpl_idx].len() {
+                compute_bap_cpl(
+                    &exps[cpl_idx][blk],
+                    begf_mant,
+                    endf_mant,
+                    fscod,
+                    &cpl_ba,
+                    &mut baps[cpl_idx][blk],
+                    Some((dba, MAX_FBW)),
+                );
+            }
+        }
+        if lfeon {
+            let lfe_idx = nchan + 1;
+            let mut lfe_ba = cand;
+            lfe_ba.fsnroffst = cand.lfefsnroffst;
+            lfe_ba.fgaincod = cand.lfefgaincod;
+            for blk in 0..exps[lfe_idx].len() {
+                compute_bap(
+                    &exps[lfe_idx][blk],
+                    LFE_END_MANT,
+                    fscod,
+                    &lfe_ba,
+                    &mut baps[lfe_idx][blk],
+                    None,
+                );
+            }
+        }
+        let used = mantissa_bits_total_ends(baps, end, end_ch, nchan, cpl, lfeon);
+        (used, cand)
+    };
+
+    let mut low = 0i32;
+    let mut high = 63 * 16 + 15; // 1023
+    let mut best = *ba;
+    let mut best_cand_opt = None;
+
+    while low <= high {
+        let mid = (low + high) / 2;
+        let (used, cand) = calc_used(mid, &mut baps);
+        if used <= budget {
+            best_cand_opt = Some(cand);
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    if let Some(c) = best_cand_opt {
+        best = c;
     }
     // Seed per-channel array with the chosen global fsnr so the
     // bitstream emitter has a populated `fsnroffst_ch` even when the
@@ -3554,9 +3558,9 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // We don't tune cplfsnroffst / lfefsnroffst per-channel here —
     // they're singletons in the bitstream syntax and the cpl/lfe
     // pseudo-channels don't need it for the current test inputs.
-    let recompute_used = |ba_in: &BitAllocParams| -> u32 {
-        let mut bps: Vec<Vec<[u8; N_COEFFS]>> =
-            vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+    let mut scratch_bps: Vec<Vec<[u8; N_COEFFS]>> =
+        vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+    let mut recompute_used = |ba_in: &BitAllocParams, bps: &mut [Vec<[u8; N_COEFFS]>]| -> u32 {
         for ch in 0..nchan {
             let mut ch_ba = *ba_in;
             ch_ba.fsnroffst = ba_in.fsnroffst_ch[ch];
@@ -3607,7 +3611,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
                 );
             }
         }
-        mantissa_bits_total_ends(&bps, end, end_ch, nchan, cpl, lfeon)
+        mantissa_bits_total_ends(bps, end, end_ch, nchan, cpl, lfeon)
     };
 
     // Per-channel greedy bumps, **least-served first with fairness
@@ -3665,7 +3669,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         for &ch in &order[..n_eligible] {
             let mut trial = best;
             trial.fsnroffst_ch[ch] += 1;
-            let trial_used = recompute_used(&trial);
+            let trial_used = recompute_used(&trial, &mut scratch_bps);
             if trial_used <= budget {
                 best = trial;
                 bumped = true;
@@ -3712,7 +3716,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         for &ch in &order[..n_eligible] {
             let mut trial = best;
             trial.fsnroffst_ch[ch] += 1;
-            let trial_used = recompute_used(&trial);
+            let trial_used = recompute_used(&trial, &mut scratch_bps);
             if trial_used <= budget {
                 best = trial;
                 bumped = true;
@@ -3958,9 +3962,9 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     // Helper: compute current total mantissa bits across all blocks
     // under the current `plan`, plus per-block snroffste overhead
     // delta vs the pre-#170 baseline (block-0-only emission).
-    let recompute = |plan: &PerBlockSnr| -> u32 {
-        let mut bps: Vec<Vec<[u8; N_COEFFS]>> =
-            vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+    let mut scratch_bps: Vec<Vec<[u8; N_COEFFS]>> =
+        vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+    let mut recompute = |plan: &PerBlockSnr, bps: &mut [Vec<[u8; N_COEFFS]>]| -> u32 {
         for blk in 0..BLOCKS_PER_FRAME {
             for ch in 0..nchan {
                 let ch_ba = plan.ba_for_fbw(ba, blk, ch);
@@ -3999,7 +4003,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                 );
             }
         }
-        mantissa_bits_total(&bps, end, nchan, cpl, lfeon)
+        mantissa_bits_total(bps, end, nchan, cpl, lfeon)
     };
 
     // Per-block snroffste overhead bits when set to 1 (block 0 was
@@ -4021,7 +4025,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
         return plan;
     }
     let baseline_budget = total_bits - baseline_overhead;
-    let baseline_used = recompute(&plan);
+    let baseline_used = recompute(&plan, &mut scratch_bps);
     if baseline_used > baseline_budget {
         // Global tuner should have prevented this; bail rather than
         // make things worse.
@@ -4131,7 +4135,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                             ((trial.lfefsnroffst[rb] as i32) + up).min(15) as u8;
                     }
                 }
-                let trial_used = recompute(&trial);
+                let trial_used = recompute(&trial, &mut scratch_bps);
                 let trial_overhead = extra_snr_overhead(&trial);
                 let fits = trial_used + trial_overhead <= baseline_budget;
                 if std::env::var("AC3_DEBUG_PERBLOCK_SNR").is_ok() && fits {
@@ -4177,7 +4181,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                 let mut trial = plan;
                 trial.fsnroffst_ch[donor][dc] -= 1;
                 trial.fsnroffst_ch[recipient][rc] += 1;
-                let trial_used = recompute(&trial);
+                let trial_used = recompute(&trial, &mut scratch_bps);
                 let trial_overhead = extra_snr_overhead(&trial);
                 if trial_used + trial_overhead <= baseline_budget {
                     plan = trial;
@@ -4193,7 +4197,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     // Final guard: the per-block plan must still fit. If somehow the
     // greedy walk overshot (shouldn't happen, but be defensive), fall
     // back to the flat plan.
-    let final_used = recompute(&plan);
+    let final_used = recompute(&plan, &mut scratch_bps);
     let final_overhead = extra_snr_overhead(&plan);
     if final_used + final_overhead > baseline_budget {
         return PerBlockSnr::from_global(ba);

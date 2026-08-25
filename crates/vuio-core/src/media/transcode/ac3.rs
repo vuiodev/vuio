@@ -100,11 +100,12 @@ impl Ac3Encoder {
 /// speaker and the bass in the centre.
 fn to_bitstream_order(pcm: &[u8], channels: u16) -> Vec<u8> {
     // WAVE slot for each bitstream slot, for the layouts with an ambiguity.
+    const FIVE_ZERO: [usize; 5] = [0, 2, 1, 3, 4];
     const FIVE_ONE: [usize; 6] = [0, 2, 1, 4, 5, 3];
     let map: &[usize] = match channels {
+        5 => &FIVE_ZERO,
         6 => &FIVE_ONE,
-        // Mono and stereo agree in both orders, and the rest are rare enough
-        // that passing them through unchanged beats guessing.
+        // Mono and stereo agree in both orders
         _ => return pcm.to_vec(),
     };
     let stride = usize::from(channels) * 2;
