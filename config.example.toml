@@ -138,9 +138,11 @@ enabled = true
 # untouched, the soundtrack re-encoded — and is seekable by time rather than by
 # byte, which works the same whatever its audio codec was.
 audio_format = "lpcm"
-# Which version is listed first, for a TV that takes what it is given rather
-# than choosing. Switch to "transcoded" only if a TV still plays silently.
-prefer = "original"
+# Operating mode for transcode advertisement:
+#   enabled   transcode is available; original stream listed first, transcode as alternative
+#   forced    transcode is forced; only transcoded stream is offered so every TV plays it
+#   disabled  transcode is disabled
+mode = "enabled"
 # Decodes allowed at once, shared between TVs and the browser player. Past this
 # a further request is refused rather than queued, so the streams already
 # playing keep up.

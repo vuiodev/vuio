@@ -537,20 +537,22 @@ async fn the_original_is_listed_first_by_default() {
 }
 
 #[tokio::test]
-async fn prefer_transcoded_puts_the_decoded_resource_first() {
+async fn forced_transcode_serves_the_decoded_resource_exclusively() {
     let (_temp, mut state, _) = library().await;
     let mut config = (*state.config).clone();
-    config.transcode.prefer = vuio_core::config::TranscodePreference::Transcoded;
+    config.transcode.mode = vuio_core::config::TranscodeMode::Forced;
     let config = Arc::new(config);
     state.config = config.clone();
     state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
 
     let didl = browse_audio(&state).await;
-    let original = didl.find("audio/ac3").expect("original res");
-    let decoded = didl.find("audio/vnd.wave").expect("decoded res");
     assert!(
-        decoded < original,
-        "the decoded resource must come first when asked for:\n{didl}"
+        didl.find("audio/vnd.wave").is_some(),
+        "the decoded resource must be present:\n{didl}"
+    );
+    assert!(
+        didl.find("audio/ac3").is_none(),
+        "the original unsupported resource must be omitted in forced mode:\n{didl}"
     );
 }
 

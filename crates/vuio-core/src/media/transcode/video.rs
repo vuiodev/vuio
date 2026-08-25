@@ -3,9 +3,19 @@
 //! The deliverable of phase 4. A television that cannot decode AC-3 or DTS shows
 //! the picture and produces no sound; what it is offered instead is this — the
 //! same file, in fragmented MP4, with the video track copied out bit for bit and
-//! only the audio track decoded and re-encoded as AAC. The picture is never
-//! touched, which is what keeps the CPU cost proportional to the soundtrack
+//! every audio track decoded and re-encoded as AAC. The picture is never
+//! touched, which is what keeps the CPU cost proportional to the soundtracks
 //! rather than to the film.
+//!
+//! Every soundtrack, not the one we guessed at. A television switches audio
+//! track inside its own demuxer, on bytes it already holds — no second request
+//! is made and nothing about the switch reaches this server, so a track it can
+//! be switched to has to be in the body before it asks. Carrying them all is
+//! what makes the audio button work; the alternative is guessing which one the
+//! viewer wanted and being wrong for every film with a commentary. It is
+//! affordable because the picture is passthrough either way: one decode and
+//! re-encode chain measures at about a hundredth of a core, so a film with four
+//! soundtracks costs four hundredths rather than twice anything.
 //!
 //! Nothing about the output is written twice or seeked back into, because a
 //! fragmented MP4 has no index to fix up at the end: an init segment describing
@@ -46,7 +56,10 @@ const DECODED_CHANNELS: u16 = 2;
 pub struct ProgressiveStream {
     format: Box<dyn symphonia::core::formats::FormatReader>,
     video: TrackSink,
-    audio: Option<AudioSink>,
+    /// Every soundtrack being carried, in the order they are written into the
+    /// `moov` — which is the order a renderer that takes the first audio track
+    /// without asking will read them in, so the caller puts the default first.
+    audio: Vec<AudioSink>,
     /// Total length of the film, for `mehd`.
     duration_secs: Option<f64>,
     sequence: u32,
@@ -109,11 +122,14 @@ impl ProgressiveStream {
     /// Open `path` positioned at `start_secs`, ready to emit fragments.
     ///
     /// `video` and `audio` come from the same probe the caller used to decide
-    /// this resource exists at all, so nothing here re-inspects the file.
+    /// this resource exists at all, so nothing here re-inspects the file. Order
+    /// in `audio` is preserved into the output, and a track this build cannot
+    /// produce is dropped rather than carried: better a film with two working
+    /// soundtracks than one with a third that plays noise.
     pub fn open(
         path: &Path,
         video: &TrackInfo,
-        audio: Option<&TrackInfo>,
+        audio: &[TrackInfo],
         start_secs: f64,
         duration_secs: Option<f64>,
     ) -> Result<Self> {
@@ -137,22 +153,22 @@ impl ProgressiveStream {
         }
 
         let video_tb = track_time_base(format.as_ref(), video.id);
-        // An audio track this build cannot produce is no audio track: better a
-        // silent film with a picture that plays than a stream carrying samples
-        // the renderer will read as noise.
-        let audio = audio.and_then(|track| {
-            let codec = track.codec_kind.transcode_codec();
-            if codec.is_none() && track.codec_kind != TrackCodec::Aac {
-                return None;
-            }
-            let audio_tb = track_time_base(format.as_ref(), track.id);
-            Some(AudioSink {
-                source_id: track.id,
-                codec,
-                sink: TrackSink::new(aac_track(track), audio_tb),
-                decode: None,
+        let audio: Vec<AudioSink> = audio
+            .iter()
+            .filter_map(|track| {
+                let codec = track.codec_kind.transcode_codec();
+                if codec.is_none() && track.codec_kind != TrackCodec::Aac {
+                    return None;
+                }
+                let audio_tb = track_time_base(format.as_ref(), track.id);
+                Some(AudioSink {
+                    source_id: track.id,
+                    codec,
+                    sink: TrackSink::new(aac_track(track), audio_tb),
+                    decode: None,
+                })
             })
-        });
+            .collect();
 
         Ok(Self {
             format,
@@ -165,12 +181,10 @@ impl ProgressiveStream {
         })
     }
 
-    /// `ftyp` + `moov`: the init segment describing both tracks.
+    /// `ftyp` + `moov`: the init segment describing every track.
     pub fn init_segment(&self) -> Vec<u8> {
         let mut tracks: Vec<&TrackInfo> = vec![&self.video.track];
-        if let Some(audio) = &self.audio {
-            tracks.push(&audio.sink.track);
-        }
+        tracks.extend(self.audio.iter().map(|audio| &audio.sink.track));
         let duration_ms = self
             .duration_secs
             .filter(|d| *d > 0.0)
@@ -239,14 +253,19 @@ impl ProgressiveStream {
         }
     }
 
-    /// Feed one audio packet, if it belongs to the track being carried.
+    /// Feed one audio packet to whichever carried track it belongs to.
+    ///
+    /// A packet from a track that is not being carried — TrueHD, or a codec no
+    /// decoder here handles — finds no sink and is dropped, which is the whole
+    /// of what "not carried" means.
     fn take_audio(&mut self, track_id: u32, pts: i64, data: &[u8]) -> Result<()> {
-        let Some(audio) = self.audio.as_mut() else {
+        let Some(audio) = self
+            .audio
+            .iter_mut()
+            .find(|audio| audio.source_id == track_id)
+        else {
             return Ok(());
         };
-        if track_id != audio.source_id {
-            return Ok(());
-        }
         let sample_rate = audio.sink.track.sample_rate.unwrap_or(48_000);
         let ticks = audio.sink.rescale(pts, sample_rate);
 
@@ -292,33 +311,34 @@ impl ProgressiveStream {
     }
 
     fn flush_audio(&mut self) {
-        let Some(audio) = self.audio.as_mut() else {
-            return;
-        };
-        let Some(decode) = audio.decode.as_mut() else {
-            return;
-        };
-        let tail = decode.encoder.finish();
-        push_aac(&mut audio.sink, decode, &tail, true);
+        for audio in &mut self.audio {
+            let Some(decode) = audio.decode.as_mut() else {
+                continue;
+            };
+            let tail = decode.encoder.finish();
+            push_aac(&mut audio.sink, decode, &tail, true);
+        }
     }
 
-    /// Wrap whatever both tracks hold into one fragment.
+    /// Wrap whatever every track holds into one fragment.
     fn emit(&mut self) -> Option<Vec<u8>> {
         // A fragment about to be written cannot wait for more packets before
-        // deciding where the audio run sits, so this is where the decision is
-        // forced if it has not been made already.
-        if let Some(audio) = self.audio.as_mut() {
+        // deciding where each audio run sits, so this is where the decision is
+        // forced if it has not been made already. Every track settles its own:
+        // they are separate runs off separate decoders and nothing about one
+        // says where another belongs.
+        for audio in &mut self.audio {
             if let Some(decode) = audio.decode.as_mut() {
                 push_aac(&mut audio.sink, decode, &[], true);
             }
         }
         let video_packets = self.video.take();
-        let audio_packets = self
+        let audio_packets: Vec<Vec<MediaPacket>> = self
             .audio
-            .as_mut()
+            .iter_mut()
             .map(|audio| audio.sink.take())
-            .unwrap_or_default();
-        if video_packets.is_empty() && audio_packets.is_empty() {
+            .collect();
+        if video_packets.is_empty() && audio_packets.iter().all(Vec::is_empty) {
             return None;
         }
 
@@ -326,8 +346,8 @@ impl ProgressiveStream {
         let mut tracks: Vec<(&TrackInfo, &[MediaPacket])> =
             vec![(&self.video.track, &video_packets)];
         let mut fallbacks = vec![self.video.next_decode_time];
-        if let Some(audio) = &self.audio {
-            tracks.push((&audio.sink.track, &audio_packets));
+        for (audio, packets) in self.audio.iter().zip(&audio_packets) {
+            tracks.push((&audio.sink.track, packets));
             fallbacks.push(audio.sink.next_decode_time);
         }
         let fragment = Fmp4Writer::build_multi_track_segment(self.sequence, &tracks, &fallbacks);
@@ -335,8 +355,8 @@ impl ProgressiveStream {
         // Remember where each track's timeline reached, so a fragment a track
         // contributes nothing to still declares a sane base decode time.
         self.video.advance(&video_packets);
-        if let Some(audio) = self.audio.as_mut() {
-            audio.sink.advance(&audio_packets);
+        for (audio, packets) in self.audio.iter_mut().zip(&audio_packets) {
+            audio.sink.advance(packets);
         }
         Some(fragment)
     }
@@ -461,8 +481,12 @@ impl TrackSink {
 /// encoder's channel count rather than the source's 5.1. A track that is already
 /// AAC keeps everything it had, including the config the container carried.
 fn aac_track(track: &TrackInfo) -> TrackInfo {
+    let name = track.name.clone().or_else(|| Some(source_label(track)));
     if track.codec_kind == TrackCodec::Aac {
-        return track.clone();
+        return TrackInfo {
+            name,
+            ..track.clone()
+        };
     }
     let sample_rate = track.sample_rate.unwrap_or(48_000);
     TrackInfo {
@@ -471,8 +495,29 @@ fn aac_track(track: &TrackInfo) -> TrackInfo {
         channels: Some(DECODED_CHANNELS as u8),
         extra_data: super::audio_specific_config(sample_rate, DECODED_CHANNELS),
         track_kind: TrackKind::Audio,
+        name,
         ..track.clone()
     }
+}
+
+/// What to call this track in a renderer's audio menu.
+///
+/// Every carried track leaves here as stereo AAC, so naming them after what they
+/// have become would print the same three words three times. What tells a film's
+/// soundtracks apart is what they arrived as — the main mix in DTS 5.1, the
+/// commentary in AC-3 stereo — so that is what the label states. Matroska's own
+/// track name would be better still, and is preferred when there is one; there
+/// is not, today, because the demuxer this reads from does not surface it.
+fn source_label(track: &TrackInfo) -> String {
+    let layout = match track.channels {
+        Some(1) => "Mono".to_string(),
+        Some(2) => "Stereo".to_string(),
+        Some(6) => "5.1".to_string(),
+        Some(8) => "7.1".to_string(),
+        Some(count) => format!("{count}ch"),
+        None => return track.codec.clone(),
+    };
+    format!("{} {layout}", track.codec)
 }
 
 fn track_time_base(

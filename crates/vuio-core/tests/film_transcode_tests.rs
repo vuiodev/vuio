@@ -59,6 +59,7 @@ pub fn film(seconds: f64) -> Vec<u8> {
                 samples: video_samples,
                 all_keyframes: false,
                 is_default: true,
+                language: None,
             },
             Track {
                 number: 2,
@@ -71,6 +72,7 @@ pub fn film(seconds: f64) -> Vec<u8> {
                 samples: audio_samples,
                 all_keyframes: true,
                 is_default: true,
+                language: Some("eng"),
             },
         ],
         seconds * 1000.0,
@@ -649,7 +651,7 @@ async fn the_remuxed_film_is_a_parseable_fmp4_with_both_tracks() {
     let features = headers["contentFeatures.dlna.org"].to_str().unwrap();
     assert!(features.contains("DLNA.ORG_CI=1"), "{features}");
     assert!(
-        features.contains("DLNA.ORG_OP=01"),
+        features.contains("DLNA.ORG_OP=10"),
         "time seek yes, byte seek no: {features}"
     );
     assert!(
@@ -761,6 +763,45 @@ async fn a_time_seek_starts_the_film_where_it_was_asked_to() {
     );
 }
 
+/// A `206` is an answer to a range request. `?t=` is not one — it is how the
+/// browser player and these tests name a starting point — so it gets a plain
+/// `200`, and no `TimeSeekRange.dlna.org` stating a range nobody asked about.
+#[tokio::test]
+async fn only_a_range_request_is_answered_as_partial_content() {
+    let (_temp, state, id) = scanned_film(12.0).await;
+
+    let (status, headers, _) = video_mp4(&state, id, Method::GET, Some("npt=6.000-")).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert!(headers.contains_key("TimeSeekRange.dlna.org"));
+
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/media/{id}/transcode/video.mp4?t=6.0"))
+                .extension(ConnectInfo::<std::net::SocketAddr>(
+                    "127.0.0.1:50000".parse().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        !response.headers().contains_key("TimeSeekRange.dlna.org"),
+        "the header is a reply to a request that named a range"
+    );
+
+    // And the seek still happened — the point is the status, not the position.
+    let body = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap();
+    let tfdt = find_box(&body, "tfdt").expect("a tfdt in the first fragment");
+    let seconds = u64::from_be_bytes(tfdt[4..12].try_into().unwrap()) as f64 / 90_000.0;
+    assert!((5.0..=6.1).contains(&seconds), "started at {seconds:.3}s");
+}
+
 #[tokio::test]
 async fn the_same_seek_expressed_as_a_clock_time_lands_in_the_same_place() {
     let (_temp, state, id) = scanned_film(12.0).await;
@@ -782,52 +823,276 @@ async fn a_seek_past_the_end_is_clamped_rather_than_refused() {
     assert_eq!(&top[..2], &["ftyp", "moov"]);
 }
 
-/// A film with several soundtracks: the one the container marks default is the
-/// one carried. The output track keeps the source's track number, so the `tkhd`
-/// in the init segment says which was chosen.
+/// The reason every soundtrack is carried rather than one: a television switches
+/// audio track inside its own demuxer, on bytes it already holds. No second
+/// request is made, and nothing about the switch reaches this server — so a
+/// track it can be switched to has to be in the body before it asks.
 #[tokio::test]
-async fn a_multi_audio_film_carries_the_track_the_container_marks_default() {
-    for default_track in [2u64, 3] {
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().join("media");
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("Film.mkv"), multi_audio_film(6.0, default_track)).unwrap();
+async fn a_multi_audio_film_carries_every_soundtrack() {
+    let (_temp, state, id) = multi_audio_state(6.0, 2).await;
+    let (status, _, body) = video_mp4(&state, id, Method::GET, None).await;
+    assert_eq!(status, StatusCode::OK);
 
-        let state = common::state_over(temp.path(), &root).await;
-        let id = common::scan_into(&state)
-            .await
-            .iter()
-            .find(|f| f.filename == "Film.mkv")
-            .unwrap()
-            .id
-            .unwrap();
+    assert_eq!(
+        audio_track_ids(&body),
+        vec![2, 3, 4],
+        "all three soundtracks must be in the container, not the one we guessed at"
+    );
+    let moov = find_moov(&body);
+    let traks = boxes(moov).iter().filter(|(n, _)| n == "trak").count();
+    assert_eq!(traks, 4, "one video track and three audio tracks");
+}
 
-        let (status, _, body) = video_mp4(&state, id, Method::GET, None).await;
-        assert_eq!(status, StatusCode::OK);
-
-        let moov = boxes(&body)
-            .into_iter()
-            .find(|(name, _)| name == "moov")
-            .unwrap()
-            .1;
-        let audio_trak = boxes(moov)
-            .into_iter()
-            .filter(|(name, _)| name == "trak")
-            .find(|(_, body)| find_box(body, "mp4a").is_some())
-            .expect("an audio track")
-            .1;
-        let tkhd = find_box(audio_trak, "tkhd").expect("a tkhd");
-        // version(1) + flags(3) + creation(4) + modification(4), then track_id.
-        let track_id = u32::from_be_bytes(tkhd[12..16].try_into().unwrap());
+/// The default leads, because a renderer that takes the first audio track
+/// without asking must still get the one the container nominated.
+#[tokio::test]
+async fn the_default_soundtrack_is_written_first() {
+    for (default_track, expected) in [
+        (2u64, vec![2, 3, 4]),
+        (3, vec![3, 2, 4]),
+        (4, vec![4, 2, 3]),
+    ] {
+        let (_temp, state, id) = multi_audio_state(6.0, default_track).await;
+        let (_, _, body) = video_mp4(&state, id, Method::GET, None).await;
         assert_eq!(
-            u64::from(track_id),
-            default_track,
-            "the default-marked track must be the one carried"
+            audio_track_ids(&body),
+            expected,
+            "with track {default_track} marked default"
         );
     }
 }
 
-/// A film with two AC-3 soundtracks, one of which the container marks default.
+/// Audio tracks all in one alternate group, and only the first of them enabled.
+/// A player reading a file whose audio tracks are all in group zero is entitled
+/// to render them all at once — three soundtracks over each other — and three
+/// tracks all claiming to be the default is a choice it then makes for itself.
+#[tokio::test]
+async fn the_soundtracks_are_declared_alternatives_of_each_other() {
+    let (_temp, state, id) = multi_audio_state(6.0, 2).await;
+    let (_, _, body) = video_mp4(&state, id, Method::GET, None).await;
+
+    let headers: Vec<(&str, u8, u16)> = traks_by_kind(&body)
+        .into_iter()
+        .map(|(kind, trak)| {
+            let tkhd = find_box(trak, "tkhd").expect("a tkhd");
+            // version(1) + flags(3) + creation(4) + modification(4) + track_id(4)
+            // + reserved(4) + duration(4) + reserved(8) + layer(2).
+            (
+                kind,
+                tkhd[3],
+                u16::from_be_bytes(tkhd[34..36].try_into().unwrap()),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        headers,
+        vec![
+            ("video", 0x7, 0),
+            ("audio", 0x7, 1),
+            ("audio", 0x6, 1),
+            ("audio", 0x6, 1),
+        ],
+        "(kind, tkhd flags, alternate_group) per track"
+    );
+}
+
+/// What a television prints beside each entry in its audio menu. Without these
+/// three soundtracks are three identical lines.
+#[tokio::test]
+async fn each_soundtrack_carries_its_language_and_a_label() {
+    let (_temp, state, id) = multi_audio_state(6.0, 2).await;
+    let (_, _, body) = video_mp4(&state, id, Method::GET, None).await;
+
+    let mut seen = Vec::new();
+    for (kind, trak) in traks_by_kind(&body) {
+        if kind != "audio" {
+            continue;
+        }
+        let mdhd = find_box(trak, "mdhd").expect("an mdhd");
+        // version(1) + flags(3) + creation(4) + modification(4) + timescale(4)
+        // + duration(4), then the packed language.
+        let packed = u16::from_be_bytes(mdhd[20..22].try_into().unwrap());
+        let unpack = |shift: u16| (((packed >> shift) & 0x1f) as u8 + 0x60) as char;
+        let language: String = [unpack(10), unpack(5), unpack(0)].into_iter().collect();
+
+        let hdlr = find_box(trak, "hdlr").expect("an hdlr");
+        // version+flags(4) + pre_defined(4) + handler_type(4) + reserved(12).
+        let name = String::from_utf8_lossy(&hdlr[24..])
+            .trim_end_matches('\0')
+            .to_string();
+        seen.push((language, name));
+    }
+
+    assert_eq!(
+        seen,
+        vec![
+            ("eng".to_string(), "AC-3 Stereo".to_string()),
+            ("fra".to_string(), "AC-3 Stereo".to_string()),
+            ("deu".to_string(), "AC-3 Stereo".to_string()),
+        ],
+        "each track must state the language it is in and what it arrived as"
+    );
+}
+
+/// The one path that still carries a single track, for the browser player and
+/// for narrowing down a report of a bad soundtrack.
+#[tokio::test]
+async fn an_explicit_audio_track_index_carries_that_one_alone() {
+    let (_temp, state, id) = multi_audio_state(6.0, 2).await;
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/media/{id}/transcode/video.mp4?audio_track=1"))
+                .extension(ConnectInfo::<std::net::SocketAddr>(
+                    "127.0.0.1:50000".parse().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+
+    assert_eq!(
+        audio_track_ids(&body),
+        vec![3],
+        "index 1 of the playable tracks is the film's second soundtrack"
+    );
+}
+
+/// Present in the `moov` is not the same as audible. Each soundtrack runs off
+/// its own decoder and its own encoder, and a routing mistake would leave two of
+/// them declared in the init segment and empty for the length of the film —
+/// which a television shows as three entries, two of them silent.
+#[tokio::test]
+async fn every_soundtrack_carries_samples_through_the_whole_film() {
+    let (_temp, state, id) = multi_audio_state(6.0, 2).await;
+    let (_, _, body) = video_mp4(&state, id, Method::GET, None).await;
+
+    let mut samples: std::collections::BTreeMap<u32, u32> = Default::default();
+    let mut fragments = 0;
+    for (name, moof) in boxes(&body) {
+        if name != "moof" {
+            continue;
+        }
+        fragments += 1;
+        for (name, traf) in boxes(moof) {
+            if name != "traf" {
+                continue;
+            }
+            let mut track_id = None;
+            for (name, contents) in boxes(traf) {
+                // tfhd: version(1) + flags(3), then track_ID.
+                if name == "tfhd" {
+                    track_id = Some(u32::from_be_bytes(contents[4..8].try_into().unwrap()));
+                }
+                // trun: version(1) + flags(3), then sample_count.
+                if name == "trun" {
+                    let count = u32::from_be_bytes(contents[4..8].try_into().unwrap());
+                    *samples
+                        .entry(track_id.expect("a tfhd before the trun"))
+                        .or_default() += count;
+                }
+            }
+        }
+    }
+
+    assert!(
+        fragments >= 2,
+        "expected several fragments, got {fragments}"
+    );
+    // Six seconds of 48 kHz audio is 281 AAC frames of 1024 samples, and each
+    // track should carry very nearly all of them — the first fragment or two
+    // are lost to the wait for the video's first keyframe.
+    for track_id in [2u32, 3, 4] {
+        let count = samples.get(&track_id).copied().unwrap_or(0);
+        assert!(
+            (200..=290).contains(&count),
+            "track {track_id} carried {count} AAC frames across the film: {samples:?}"
+        );
+    }
+    let video = samples.get(&1).copied().unwrap_or(0);
+    assert!(
+        (140..=155).contains(&video),
+        "the picture must still come through: {video} frames of a 25 fps six-second film"
+    );
+}
+
+/// A film with several soundtracks, scanned and served.
+async fn multi_audio_state(
+    seconds: f64,
+    default_track: u64,
+) -> (tempfile::TempDir, vuio_core::state::AppState, i64) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("media");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(
+        root.join("Film.mkv"),
+        multi_audio_film(seconds, default_track),
+    )
+    .unwrap();
+
+    let state = common::state_over(temp.path(), &root).await;
+    let id = common::scan_into(&state)
+        .await
+        .iter()
+        .find(|f| f.filename == "Film.mkv")
+        .unwrap()
+        .id
+        .unwrap();
+    (temp, state, id)
+}
+
+fn find_moov(body: &[u8]) -> &[u8] {
+    boxes(body)
+        .into_iter()
+        .find(|(name, _)| name == "moov")
+        .expect("a moov")
+        .1
+}
+
+/// Each `trak` in the init segment, tagged by what it carries, in `moov` order.
+fn traks_by_kind(body: &[u8]) -> Vec<(&'static str, &[u8])> {
+    boxes(find_moov(body))
+        .into_iter()
+        .filter(|(name, _)| name == "trak")
+        .map(|(_, trak)| {
+            let kind = if find_box(trak, "mp4a").is_some() {
+                "audio"
+            } else {
+                "video"
+            };
+            (kind, trak)
+        })
+        .collect()
+}
+
+/// The `tkhd` track ids of the audio tracks, in the order they are written.
+///
+/// The output track keeps the source's track number — one track in, one track
+/// out — so this says which of the film's soundtracks went where.
+fn audio_track_ids(body: &[u8]) -> Vec<u32> {
+    traks_by_kind(body)
+        .into_iter()
+        .filter(|(kind, _)| *kind == "audio")
+        .map(|(_, trak)| {
+            let tkhd = find_box(trak, "tkhd").expect("a tkhd");
+            // version(1) + flags(3) + creation(4) + modification(4), then track_id.
+            u32::from_be_bytes(tkhd[12..16].try_into().unwrap())
+        })
+        .collect()
+}
+
+/// A film with three soundtracks, one of which the container marks default.
+///
+/// Three rather than two, and in three languages, so that "the default leads"
+/// and "the rest keep container order" are distinguishable assertions rather
+/// than the same one.
 fn multi_audio_film(seconds: f64, default_track: u64) -> Vec<u8> {
     let frames: Vec<&[u8]> = AC3.chunks_exact(AC3_FRAME_LEN).collect();
     let audio_count = (seconds * 1000.0 / AC3_FRAME_MS).round() as usize;
@@ -851,7 +1116,7 @@ fn multi_audio_film(seconds: f64, default_track: u64) -> Vec<u8> {
         })
         .collect();
 
-    let audio = |number: u64, offset: usize| Track {
+    let audio = |number: u64, offset: usize, language: &'static str| Track {
         number,
         codec_id: "A_AC3",
         codec_private: Vec::new(),
@@ -862,6 +1127,7 @@ fn multi_audio_film(seconds: f64, default_track: u64) -> Vec<u8> {
         samples: audio_samples(offset),
         all_keyframes: true,
         is_default: number == default_track,
+        language: Some(language),
     };
 
     build_mkv(
@@ -877,9 +1143,11 @@ fn multi_audio_film(seconds: f64, default_track: u64) -> Vec<u8> {
                 samples: video_samples,
                 all_keyframes: false,
                 is_default: true,
+                language: None,
             },
-            audio(2, 0),
-            audio(3, 1),
+            audio(2, 0, "eng"),
+            audio(3, 1, "fra"),
+            audio(4, 2, "deu"),
         ],
         seconds * 1000.0,
     )
@@ -899,7 +1167,7 @@ async fn a_film_advertises_the_remuxed_film_and_not_its_soundtrack() {
         "offering a film's soundtrack in place of the film would lose the picture:\n{didl}"
     );
     assert!(
-        didl.contains("DLNA.ORG_OP=01;DLNA.ORG_CI=1"),
+        didl.contains("DLNA.ORG_OP=10;DLNA.ORG_CI=1"),
         "the advertised operations must be the ones the resource honours:\n{didl}"
     );
     // The original stays, and stays first by default, so a television that can
@@ -1049,4 +1317,16 @@ fn dump_long_fixture() {
     let out = std::env::var("VUIO_FIXTURE_OUT").unwrap_or_else(|_| "/tmp/vuio-long.mkv".into());
     std::fs::write(&out, film(7200.0)).unwrap();
     eprintln!("wrote {out}");
+}
+
+/// Not a test: writes the multi-audio remux out so an external demuxer can be
+/// pointed at it. `cargo test --all-features dump_multi_audio -- --ignored`
+#[tokio::test]
+#[ignore]
+async fn dump_multi_audio() {
+    let (_temp, state, id) = multi_audio_state(6.0, 3).await;
+    let (_, _, body) = video_mp4(&state, id, Method::GET, None).await;
+    let out = std::env::var("VUIO_DUMP").unwrap_or_else(|_| "/tmp/multi_audio.mp4".into());
+    std::fs::write(&out, &body).unwrap();
+    eprintln!("wrote {} bytes to {out}", body.len());
 }

@@ -83,9 +83,28 @@ impl Fmp4Writer {
         mvhd.extend_from_slice(&next_track_id.to_be_bytes());
         moov_body.extend_from_slice(&Self::wrap_box(&mvhd));
 
-        // 2. trak (Track Atom), one per track
-        for track in tracks {
-            moov_body.extend_from_slice(&Self::build_trak(track, movie_duration));
+        // 2. trak (Track Atom), one per track.
+        //
+        // Every audio track goes into one alternate group, and only the first of
+        // them is enabled. Both halves matter and they say different things. The
+        // group says the soundtracks are alternatives: a player reading a file
+        // whose audio tracks are all in group zero is entitled to render them
+        // all at once, which for a film with three soundtracks is three
+        // soundtracks played over each other. The enabled bit says which one to
+        // start with, and exactly one track in a group should carry it — three
+        // tracks all claiming to be the default is a choice the renderer then
+        // makes for itself. Both match what every muxer writes.
+        let leading_audio = tracks
+            .iter()
+            .position(|track| track.track_kind == TrackKind::Audio);
+        for (index, track) in tracks.iter().enumerate() {
+            let audio = track.track_kind == TrackKind::Audio;
+            moov_body.extend_from_slice(&Self::build_trak(
+                track,
+                movie_duration,
+                u16::from(audio),
+                !audio || Some(index) == leading_audio,
+            ));
         }
 
         // 3. mvex (Movie Extends Atom)
@@ -109,14 +128,23 @@ impl Fmp4Writer {
         }
     }
 
-    fn build_trak(track: &TrackInfo, movie_duration: u32) -> Vec<u8> {
+    fn build_trak(
+        track: &TrackInfo,
+        movie_duration: u32,
+        alternate_group: u16,
+        enabled: bool,
+    ) -> Vec<u8> {
         let mut trak_body = Vec::new();
 
         // tkhd (Track Header)
         let mut tkhd = Vec::new();
         tkhd.extend_from_slice(b"tkhd");
         tkhd.push(0); // version
-        tkhd.extend_from_slice(&[0, 0, 7]); // flags = enabled + in_movie + in_preview
+        // flags = in_movie + in_preview, and enabled for a track a renderer
+        // should play without being asked. Clearing the enabled bit does not
+        // hide an alternate — it is how a group says "selectable, but not the
+        // one to start with".
+        tkhd.extend_from_slice(&[0, 0, if enabled { 0x7 } else { 0x6 }]);
         tkhd.extend_from_slice(&[0; 4]); // creation_time
         tkhd.extend_from_slice(&[0; 4]); // modification_time
         tkhd.extend_from_slice(&track.id.to_be_bytes()); // track_id
@@ -124,7 +152,7 @@ impl Fmp4Writer {
         tkhd.extend_from_slice(&movie_duration.to_be_bytes()); // duration, mvhd units
         tkhd.extend_from_slice(&[0; 8]); // reserved
         tkhd.extend_from_slice(&[0; 2]); // layer
-        tkhd.extend_from_slice(&[0; 2]); // alternate_group
+        tkhd.extend_from_slice(&alternate_group.to_be_bytes());
         let vol = if track.track_kind == TrackKind::Audio {
             0x0100u16
         } else {
@@ -168,16 +196,28 @@ impl Fmp4Writer {
         mdhd.extend_from_slice(&[0; 4]); // modification_time
         mdhd.extend_from_slice(&timescale.to_be_bytes());
         mdhd.extend_from_slice(&[0; 4]); // duration
-        mdhd.extend_from_slice(&[0x55, 0xc4]); // lang: "und"
+        mdhd.extend_from_slice(&packed_language(track.language.as_deref()));
         mdhd.extend_from_slice(&[0; 2]); // pre_defined
         mdia_body.extend_from_slice(&Self::wrap_box(&mdhd));
 
         // hdlr (Handler Reference Atom)
-        let (handler_type, name) = match track.track_kind {
+        //
+        // The name field is nominally a description of the handler, and that is
+        // what it holds for a track with nothing better to say. But it is also
+        // where a good many renderers read the label they put beside a track in
+        // an audio menu, so a track the container named — "Commentary",
+        // "Director's cut" — carries that name here instead.
+        let (handler_type, default_name) = match track.track_kind {
             TrackKind::Video => (b"vide", "VideoHandler"),
             TrackKind::Audio => (b"soun", "SoundHandler"),
             TrackKind::Other => (b"hint", "HintHandler"),
         };
+        let name = track
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(default_name);
         let mut hdlr = Vec::new();
         hdlr.extend_from_slice(b"hdlr");
         hdlr.extend_from_slice(&[0; 4]); // version + flags
@@ -740,9 +780,133 @@ impl Fmp4Writer {
     }
 }
 
+/// A track's language, as `mdhd` carries it.
+///
+/// ISO-BMFF packs three lowercase ISO-639-2/T letters into fifteen bits, each
+/// letter held as its distance from `0x60` — one below `a`, not `a` itself,
+/// which is why the "und" every muxer writes for an unknown language comes out
+/// as `0x55c4` and not a value fifty-nine lower. That is also what
+/// anything unrecognisable resolves to here: a television offered a soundtrack
+/// labelled with a language it cannot parse tends to hide the track, where an
+/// honest "undetermined" leaves it listed.
+///
+/// Matroska stores the two-letter ISO-639-1 forms in some files and the
+/// three-letter ones in others, and appends a country suffix (`pt-BR`) in a few.
+/// Only the three-letter form fits the field, so that is the one taken; the rest
+/// is undetermined rather than guessed at.
+fn packed_language(language: Option<&str>) -> [u8; 2] {
+    /// `und`, the value for a language not stated.
+    const UNDETERMINED: [u8; 2] = [0x55, 0xc4];
+
+    let Some(language) = language else {
+        return UNDETERMINED;
+    };
+    let code = language.trim().split(['-', '_']).next().unwrap_or_default();
+    let bytes = code.as_bytes();
+    if bytes.len() != 3 || !bytes.iter().all(|b| b.is_ascii_alphabetic()) {
+        return UNDETERMINED;
+    }
+    let packed = bytes.iter().fold(0u16, |packed, byte| {
+        (packed << 5) | u16::from(byte.to_ascii_lowercase() - 0x60)
+    });
+    packed.to_be_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_language_is_packed_as_three_five_bit_letters() {
+        // The value every muxer writes for a language it does not know, and the
+        // one every reader recognises.
+        assert_eq!(packed_language(None), [0x55, 0xc4]);
+        assert_eq!(packed_language(Some("und")), [0x55, 0xc4]);
+        // 'e'-0x60 = 5, 'n'-0x60 = 14, 'g'-0x60 = 7, in fifteen bits.
+        let eng: u16 = (5 << 10) | (14 << 5) | 7;
+        assert_eq!(packed_language(Some("eng")), eng.to_be_bytes());
+        assert_eq!(packed_language(Some("ENG")), packed_language(Some("eng")));
+    }
+
+    /// Only the three-letter form fits the field. Anything else is undetermined
+    /// rather than guessed at — a television offered a soundtrack labelled with
+    /// a language it cannot parse tends to hide the track entirely.
+    #[test]
+    fn a_language_that_does_not_fit_the_field_is_undetermined() {
+        for input in ["en", "english", "", "  ", "e1g", "日本語"] {
+            assert_eq!(
+                packed_language(Some(input)),
+                [0x55, 0xc4],
+                "{input:?} must not be packed into fifteen bits"
+            );
+        }
+        // A country suffix is dropped rather than taken as part of the code.
+        assert_eq!(packed_language(Some("por-BR")), packed_language(Some("por")));
+    }
+
+    fn track_of(id: u32, kind: TrackKind) -> TrackInfo {
+        TrackInfo {
+            id,
+            track_kind: kind,
+            codec: "AAC".into(),
+            codec_kind: TrackCodec::Aac,
+            language: None,
+            name: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            width: None,
+            height: None,
+            is_default: true,
+            extra_data: vec![0x11, 0x90],
+        }
+    }
+
+    /// Every `tkhd` in a `moov`, as (flags, alternate_group), in track order.
+    fn track_headers(moov: &[u8]) -> Vec<(u32, u16)> {
+        let mut out = Vec::new();
+        let mut from = 0;
+        while let Some(at) = moov[from..].windows(4).position(|w| w == b"tkhd") {
+            // tkhd body: version(1) + flags(3) + creation(4) + modification(4)
+            // + track_id(4) + reserved(4) + duration(4) + reserved(8) + layer(2).
+            let body = from + at + 4;
+            let flags = u32::from_be_bytes([0, moov[body + 1], moov[body + 2], moov[body + 3]]);
+            let group = u16::from_be_bytes(moov[body + 34..body + 36].try_into().unwrap());
+            out.push((flags, group));
+            from = body;
+        }
+        out
+    }
+
+    /// Audio tracks must be declared alternatives of each other, or a player is
+    /// entitled to render every one of them at once — and exactly one of them
+    /// carries the enabled bit, or three tracks all claim to be the default.
+    ///
+    /// The values are ffmpeg's, checked against a file it muxed: the alternates
+    /// differ from the leading track in the enabled bit and nothing else.
+    #[test]
+    fn only_the_leading_soundtrack_is_enabled_and_they_share_a_group() {
+        let tracks = [
+            track_of(1, TrackKind::Video),
+            track_of(2, TrackKind::Audio),
+            track_of(3, TrackKind::Audio),
+            track_of(4, TrackKind::Audio),
+        ];
+        let refs: Vec<&TrackInfo> = tracks.iter().collect();
+        assert_eq!(
+            track_headers(&Fmp4Writer::build_moov_for(&refs, None)),
+            vec![(0x7, 0), (0x7, 1), (0x6, 1), (0x6, 1)]
+        );
+    }
+
+    /// A lone soundtrack is the leading one, so the single-track path a browser
+    /// rendition takes is unaffected by any of that.
+    #[test]
+    fn a_single_track_moov_is_enabled_whatever_it_carries() {
+        for kind in [TrackKind::Audio, TrackKind::Video] {
+            let moov = Fmp4Writer::build_moov(&track_of(1, kind));
+            assert_eq!(track_headers(&moov)[0].0, 0x7, "{kind:?}");
+        }
+    }
 
     #[test]
     fn test_ftyp_box_magic() {

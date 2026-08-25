@@ -245,12 +245,23 @@ fn probe_metadata(path: &Path) -> anyhow::Result<ProbedMetadata> {
         }
     }
 
+    // The container's own duration (e.g. Matroska's Segment > Info > Duration or MP4 mvhd)
+    let media_info = format.media_info();
+    if let (Some(time_base), Some(duration)) = (media_info.time_base, media_info.duration) {
+        if let Some(t) = time_base.calc_time(symphonia::core::units::Timestamp::new(duration.get() as i64)) {
+            let secs = t.as_secs_f64();
+            if secs > 0.0 {
+                probed.duration = Some(Duration::from_secs_f64(secs));
+            }
+        }
+    }
+
     // Stream properties come off the default audio track. A container with no
     // audio track still has usable tags, so this is not an error.
     if let Some(track) = format.default_track(TrackType::Audio) {
         let num_frames = track.num_frames;
         if let Some(audio) = track.codec_params.as_ref().and_then(|params| params.audio()) {
-            probed.stream.codec = audio_codec_short_name(audio.codec);
+            probed.stream.codec = audio_codec_short_name(audio.codec).map(|c| c.to_string());
             probed.stream.sample_rate = audio.sample_rate;
             probed.stream.channels = audio
                 .channels
@@ -261,10 +272,27 @@ fn probe_metadata(path: &Path) -> anyhow::Result<ProbedMetadata> {
                 .or(audio.bits_per_coded_sample)
                 .map(|bits| bits as u16);
 
-            if let (Some(frames), Some(rate)) = (num_frames, audio.sample_rate.filter(|r| *r > 0)) {
-                probed.duration = Some(Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+            if probed.duration.is_none() {
+                if let (Some(frames), Some(rate)) = (num_frames, audio.sample_rate.filter(|r| *r > 0)) {
+                    probed.duration = Some(Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+                }
             }
         }
+    }
+
+    // If any audio track in the container is DTS, record it as DTS so that DTS transcoding
+    // can be properly applied for the film.
+    let has_dts = format.tracks().iter().any(|t| {
+        t.track_type() == Some(TrackType::Audio)
+            && t.codec_params
+                .as_ref()
+                .and_then(|p| p.audio())
+                .and_then(|a| audio_codec_short_name(a.codec))
+                .map(|c| c == "dca" || c == "dts")
+                .unwrap_or(false)
+    });
+    if has_dts {
+        probed.stream.codec = Some("dts".to_string());
     }
 
     // A file can carry more than one revision — ID3v2 at the head and APEv2 at

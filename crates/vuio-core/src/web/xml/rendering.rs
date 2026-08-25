@@ -502,63 +502,74 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
         .filter(|_| {
             !mime.starts_with("video/") || crate::web::item_can_remux_video(file.video_codec())
         });
+    let is_dts = !mime.starts_with("video/")
+        || file
+            .codec()
+            .map(|c| c.trim().to_ascii_lowercase())
+            .map(|c| c == "dca" || c == "dts" || c == "a_dts")
+            .unwrap_or_else(|| {
+                mime.contains("dts") || file.filename().to_ascii_lowercase().ends_with(".dts")
+            });
+    let is_forced = transcoded.as_ref().is_some_and(|a| a.first && is_dts);
     let item_duration = file.duration_secs().map(|value| value as u64);
-    if let Some(advert) = transcoded.filter(|a| a.first) {
+    if let Some(advert) = transcoded.filter(|a| a.first && is_dts) {
         advert.write(output, context, file_id, mime, item_duration)?;
     }
 
-    write!(
-        output,
-        r#"<res protocolInfo="http-get:*:{wire_mime}:{flags}" size="{}""#,
-        if is_radio { 0 } else { file.size() }
-    )?;
-    if !is_radio && (mime.starts_with("video/") || mime.starts_with("audio/")) {
-        if let Some(seconds) = file.duration_secs().map(|value| value as u64) {
-            write!(
-                output,
-                r#" duration="{:02}:{:02}:{:02}""#,
-                seconds / 3600,
-                (seconds % 3600) / 60,
-                seconds % 60
-            )?;
-        }
-    }
-    if !is_radio {
-        // Renderers use these to decide whether they can play a track before
-        // fetching a byte of it. Note that DLNA's `res@bitrate` is *bytes* per
-        // second, not bits, which is the usual thing to get wrong.
-        if let Some(bits_per_second) = file.bit_rate().filter(|rate| *rate > 0) {
-            write!(output, r#" bitrate="{}""#, bits_per_second / 8)?;
-        }
-        if let Some(sample_rate) = file.sample_rate().filter(|rate| *rate > 0) {
-            write!(output, r#" sampleFrequency="{sample_rate}""#)?;
-        }
-        if let Some(channels) = file.channels().filter(|count| *count > 0) {
-            write!(output, r#" nrAudioChannels="{channels}""#)?;
-        }
-        if let Some(bits) = file.bits_per_sample().filter(|bits| *bits > 0) {
-            write!(output, r#" bitsPerSample="{bits}""#)?;
-        }
-    }
-    if matches!(
-        context.client,
-        crate::web::client::DlnaClientProfile::LgTv
-            | crate::web::client::DlnaClientProfile::PanasonicTv
-    ) && has_srt
-    {
+    if !is_forced {
         write!(
             output,
-            r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+            r#"<res protocolInfo="http-get:*:{wire_mime}:{flags}" size="{}""#,
+            if is_radio { 0 } else { file.size() }
+        )?;
+        if !is_radio && (mime.starts_with("video/") || mime.starts_with("audio/")) {
+            if let Some(seconds) = file.duration_secs().map(|value| value as u64) {
+                write!(
+                    output,
+                    r#" duration="{:02}:{:02}:{:02}""#,
+                    seconds / 3600,
+                    (seconds % 3600) / 60,
+                    seconds % 60
+                )?;
+            }
+        }
+        if !is_radio {
+            // Renderers use these to decide whether they can play a track before
+            // fetching a byte of it. Note that DLNA's `res@bitrate` is *bytes* per
+            // second, not bits, which is the usual thing to get wrong.
+            if let Some(bits_per_second) = file.bit_rate().filter(|rate| *rate > 0) {
+                write!(output, r#" bitrate="{}""#, bits_per_second / 8)?;
+            }
+            if let Some(sample_rate) = file.sample_rate().filter(|rate| *rate > 0) {
+                write!(output, r#" sampleFrequency="{sample_rate}""#)?;
+            }
+            if let Some(channels) = file.channels().filter(|count| *count > 0) {
+                write!(output, r#" nrAudioChannels="{channels}""#)?;
+            }
+            if let Some(bits) = file.bits_per_sample().filter(|bits| *bits > 0) {
+                write!(output, r#" bitsPerSample="{bits}""#)?;
+            }
+        }
+        if matches!(
+            context.client,
+            crate::web::client::DlnaClientProfile::LgTv
+                | crate::web::client::DlnaClientProfile::PanasonicTv
+        ) && has_srt
+        {
+            write!(
+                output,
+                r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                context.server_ip, context.server_port, file_id
+            )?;
+        }
+        write!(
+            output,
+            ">http://{}:{}/media/{}</res>",
             context.server_ip, context.server_port, file_id
         )?;
-    }
-    write!(
-        output,
-        ">http://{}:{}/media/{}</res>",
-        context.server_ip, context.server_port, file_id
-    )?;
-    if let Some(advert) = transcoded.filter(|a| !a.first) {
-        advert.write(output, context, file_id, mime, item_duration)?;
+        if let Some(advert) = transcoded.filter(|a| !a.first) {
+            advert.write(output, context, file_id, mime, item_duration)?;
+        }
     }
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
         write!(

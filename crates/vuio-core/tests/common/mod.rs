@@ -54,6 +54,9 @@ pub struct Track {
     pub all_keyframes: bool,
     /// Whether the container marks this the default track of its kind.
     pub is_default: bool,
+    /// Matroska `Language`, an ISO-639-2 code. `None` writes no element, which
+    /// is how a muxer says nothing rather than saying "und".
+    pub language: Option<&'static str>,
 }
 
 pub enum TrackKind {
@@ -97,6 +100,9 @@ pub fn build_mkv(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
             },
         )); // TrackType
         entry.extend(uint_el(0x88, u64::from(track.is_default))); // FlagDefault
+        if let Some(language) = track.language {
+            entry.extend(str_el(0x22B59C, language)); // Language
+        }
         entry.extend(str_el(0x86, track.codec_id)); // CodecID
         if !track.codec_private.is_empty() {
             entry.extend(bin_el(0x63A2, &track.codec_private)); // CodecPrivate

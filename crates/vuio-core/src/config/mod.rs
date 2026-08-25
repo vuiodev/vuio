@@ -21,7 +21,7 @@ use model::{
 pub use model::{
     AppConfig, ConfigOverrides, DatabaseConfig, ManagementConfig, McpConfig, MediaConfig,
     MediaInfoConfig, MonitoredDirectoryConfig, NetworkConfig, NetworkInterfaceConfig, ServerConfig,
-    TranscodeAudioFormat, TranscodeConfig, TranscodePreference, ValidationMode, WebUiConfig,
+    TranscodeAudioFormat, TranscodeConfig, TranscodeMode, ValidationMode, WebUiConfig,
 };
 
 use crate::platform::config::PlatformConfig;

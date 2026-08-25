@@ -137,6 +137,22 @@ impl ConfigOverrides {
                 })
                 .collect();
         }
+        if let Ok(v) = std::env::var("VUIO_TRANSCODE")
+            .or_else(|_| std::env::var("VUIO_TRANSCODE_MODE"))
+            .or_else(|_| std::env::var("VUIO_TRANSCODE_PREFER"))
+        {
+            if let Some(mode) = TranscodeMode::parse(&v) {
+                config.transcode.mode = mode;
+                if mode == TranscodeMode::Disabled {
+                    config.transcode.enabled = false;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("VUIO_TRANSCODE_AUDIO_FORMAT") {
+            if let Some(fmt) = TranscodeAudioFormat::parse(&v) {
+                config.transcode.audio_format = fmt;
+            }
+        }
     }
 
     /// The settings this forces, as dotted config keys and the value in force, so a
@@ -232,18 +248,13 @@ pub struct TranscodeConfig {
     /// Offer a decoded resource beside the original for AC-3/E-AC-3/DTS items.
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Operating mode: enabled (default/auto), forced (transcode always listed first / primary), or disabled.
+    #[serde(default, alias = "prefer")]
+    pub mode: TranscodeMode,
     /// What the decoded resource is delivered as.
     #[serde(default)]
     pub audio_format: TranscodeAudioFormat,
-    /// Which resource is listed first in the DIDL response.
-    #[serde(default)]
-    pub prefer: TranscodePreference,
     /// Ceiling on simultaneous transcode sessions.
-    ///
-    /// Decoding is the only CPU-bound work this server does, and a shared folder
-    /// can be opened by every TV in the house at once. Past this, a request is
-    /// refused rather than joining a queue that would starve the ones already
-    /// playing.
     #[serde(default = "default_transcode_max_concurrent")]
     pub max_concurrent: usize,
 }
@@ -252,8 +263,8 @@ impl Default for TranscodeConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            mode: TranscodeMode::default(),
             audio_format: TranscodeAudioFormat::default(),
-            prefer: TranscodePreference::default(),
             max_concurrent: default_transcode_max_concurrent(),
         }
     }
@@ -303,32 +314,29 @@ impl TranscodeAudioFormat {
     }
 }
 
-/// Which of an item's two resources is listed first.
+/// Operating mode for transcode advertisement and delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TranscodePreference {
-    /// The original file first, the decoded resource second.
-    ///
-    /// The default, because it is the choice that cannot make anything worse. A
-    /// renderer that matches on protocolInfo picks whichever it can actually
-    /// play; one that blindly takes the first resource behaves exactly as it did
-    /// before this feature existed.
+pub enum TranscodeMode {
+    /// Transcoding is enabled and offered alongside the original format.
     #[default]
-    Original,
-    /// The decoded resource first.
-    ///
-    /// For a renderer that takes the first resource without checking and cannot
-    /// play the original — it plays silently otherwise, and no amount of correct
-    /// protocolInfo will change its mind.
-    Transcoded,
+    #[serde(alias = "original", alias = "auto", alias = "true")]
+    Enabled,
+    /// Transcoding is forced: transcoded streams are listed first so any TV is forced to play the transcoded version.
+    #[serde(alias = "transcoded", alias = "force", alias = "always")]
+    Forced,
+    /// Transcoding is disabled.
+    #[serde(alias = "disable", alias = "off", alias = "false")]
+    Disabled,
 }
 
-impl TranscodePreference {
+impl TranscodeMode {
     /// Parse an environment-variable or TOML value, case- and space-insensitively.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "original" | "source" => Some(Self::Original),
-            "transcoded" | "decoded" => Some(Self::Transcoded),
+            "enabled" | "enable" | "auto" | "true" | "original" => Some(Self::Enabled),
+            "forced" | "force" | "always" | "transcoded" => Some(Self::Forced),
+            "disabled" | "disable" | "off" | "false" => Some(Self::Disabled),
             _ => None,
         }
     }
@@ -336,8 +344,9 @@ impl TranscodePreference {
     /// The value as it is written in a config file.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Original => "original",
-            Self::Transcoded => "transcoded",
+            Self::Enabled => "enabled",
+            Self::Forced => "forced",
+            Self::Disabled => "disabled",
         }
     }
 }

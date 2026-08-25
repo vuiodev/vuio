@@ -233,18 +233,25 @@ impl AppConfig {
                 require_auth: env_flag("VUIO_MCP_REQUIRE_AUTH").unwrap_or(false),
             },
             transcode: TranscodeConfig {
-                enabled: env_flag("VUIO_TRANSCODE_ENABLED").unwrap_or(true),
-                // An unrecognised value falls back to the default rather than
-                // refusing to start: this is a container that may have been
-                // handed a typo through a compose file, and a media server that
-                // will not boot is worse than one that plays LPCM.
+                enabled: env_flag("VUIO_TRANSCODE_ENABLED").unwrap_or_else(|| {
+                    if let Ok(v) = std::env::var("VUIO_TRANSCODE") {
+                        !matches!(
+                            v.trim().to_ascii_lowercase().as_str(),
+                            "disabled" | "disable" | "off" | "false"
+                        )
+                    } else {
+                        true
+                    }
+                }),
+                mode: std::env::var("VUIO_TRANSCODE")
+                    .or_else(|_| std::env::var("VUIO_TRANSCODE_MODE"))
+                    .or_else(|_| std::env::var("VUIO_TRANSCODE_PREFER"))
+                    .ok()
+                    .and_then(|v| TranscodeMode::parse(&v))
+                    .unwrap_or_default(),
                 audio_format: std::env::var("VUIO_TRANSCODE_AUDIO_FORMAT")
                     .ok()
                     .and_then(|v| TranscodeAudioFormat::parse(&v))
-                    .unwrap_or_default(),
-                prefer: std::env::var("VUIO_TRANSCODE_PREFER")
-                    .ok()
-                    .and_then(|v| TranscodePreference::parse(&v))
                     .unwrap_or_default(),
                 max_concurrent: std::env::var("VUIO_TRANSCODE_MAX_CONCURRENT")
                     .ok()

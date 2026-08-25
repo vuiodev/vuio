@@ -253,7 +253,19 @@ pub async fn generate_browse_response(
                     !file.mime_type.starts_with("video/")
                         || crate::web::item_can_remux_video(file.stream.video_codec.as_deref())
                 });
-            if let Some(advert) = transcoded.filter(|a| a.first) {
+            let is_dts = !file.mime_type.starts_with("video/")
+                || file
+                    .stream
+                    .codec
+                    .as_deref()
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .map(|c| c == "dca" || c == "dts" || c == "a_dts")
+                    .unwrap_or_else(|| {
+                        file.mime_type.contains("dts")
+                            || file.filename.to_ascii_lowercase().ends_with(".dts")
+                    });
+            let is_forced = transcoded.as_ref().is_some_and(|a| a.first && is_dts);
+            if let Some(advert) = transcoded.filter(|a| a.first && is_dts) {
                 let _ = advert.write_didl(
                     &mut didl,
                     server_ip,
@@ -264,48 +276,50 @@ pub async fn generate_browse_response(
                 );
             }
 
-            let _ = write!(
-                &mut didl,
-                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
-                mime = mime_override,
-                dlna_flags = dlna_flags,
-                size = size_val
-            );
-
-            if let Some(secs) = duration_secs {
-                let _ = write!(&mut didl, r#" duration="{}""#, format_duration(secs));
-            }
-
-            if (client == crate::web::client::DlnaClientProfile::LgTv
-                || client == crate::web::client::DlnaClientProfile::PanasonicTv)
-                && has_srt
-            {
+            if !is_forced {
                 let _ = write!(
                     &mut didl,
-                    r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                    r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
+                    mime = mime_override,
+                    dlna_flags = dlna_flags,
+                    size = size_val
+                );
+
+                if let Some(secs) = duration_secs {
+                    let _ = write!(&mut didl, r#" duration="{}""#, format_duration(secs));
+                }
+
+                if (client == crate::web::client::DlnaClientProfile::LgTv
+                    || client == crate::web::client::DlnaClientProfile::PanasonicTv)
+                    && has_srt
+                {
+                    let _ = write!(
+                        &mut didl,
+                        r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                        server_ip,
+                        state.http_binding.port(),
+                        file_id
+                    );
+                }
+
+                let _ = write!(
+                    &mut didl,
+                    r#">http://{}:{}/media/{}</res>"#,
                     server_ip,
                     state.http_binding.port(),
                     file_id
                 );
-            }
 
-            let _ = write!(
-                &mut didl,
-                r#">http://{}:{}/media/{}</res>"#,
-                server_ip,
-                state.http_binding.port(),
-                file_id
-            );
-
-            if let Some(advert) = transcoded.filter(|a| !a.first) {
-                let _ = advert.write_didl(
-                    &mut didl,
-                    server_ip,
-                    state.http_binding.port(),
-                    file_id,
-                    &file.mime_type,
-                    duration_secs,
-                );
+                if let Some(advert) = transcoded.filter(|a| !a.first) {
+                    let _ = advert.write_didl(
+                        &mut didl,
+                        server_ip,
+                        state.http_binding.port(),
+                        file_id,
+                        &file.mime_type,
+                        duration_secs,
+                    );
+                }
             }
 
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {

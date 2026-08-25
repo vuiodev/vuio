@@ -446,18 +446,16 @@ const TRANSCODE_FIELDS: &[FieldSpec] = &[
     ),
     noted(
         optional(
-            "transcode.prefer",
-            "List first",
+            "transcode.mode",
+            "Transcode Mode",
             FieldKind::Enum {
-                options: &["original", "transcoded"],
+                options: &["enabled", "forced", "disabled"],
                 free_form: false,
             },
             Impact::Live,
-            "Which of the two versions is listed first for a TV that takes whichever it is \
-             given rather than choosing.",
+            "Operating mode: enabled (auto/standard), forced (transcoded stream listed first for all TVs), or disabled.",
         ),
-        "Leave on \u{201c}original\u{201d} unless a TV plays these films silently: that is the \
-         symptom of one that takes the first version without checking whether it can decode it.",
+        "Use \u{201c}forced\u{201d} to force all TVs (even those with native DTS support) to play the transcoded AAC stream.",
     ),
     noted(
         optional(

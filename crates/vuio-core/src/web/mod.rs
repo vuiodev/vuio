@@ -88,9 +88,9 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
     }
     #[cfg(feature = "transcode")]
     {
-        use crate::config::{TranscodeAudioFormat, TranscodePreference};
+        use crate::config::{TranscodeAudioFormat, TranscodeMode};
         let config = state.current_config();
-        if !config.transcode.enabled {
+        if !config.transcode.enabled || config.transcode.mode == TranscodeMode::Disabled {
             return None;
         }
         Some(xml::TranscodeAdvert {
@@ -121,14 +121,14 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
             video: Some(xml::AdvertResource {
                 mime: "video/mp4",
                 path: "transcode/video.mp4",
-                op: "01",
+                op: "10",
             }),
             // With no remuxer or no encoder there is nothing to offer a film.
             // Offering it `audio.wav` instead would replace a silent film with
             // no film at all.
             #[cfg(not(all(feature = "transcode-aac", feature = "casting")))]
             video: None,
-            first: config.transcode.prefer == TranscodePreference::Transcoded,
+            first: config.transcode.mode == TranscodeMode::Forced,
         })
     }
 }
