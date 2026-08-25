@@ -217,14 +217,19 @@ fn ac3_body(
         // A byte offset lands inside some syncframe. Encoding restarts at that
         // frame's first sample and the odd bytes come off the front, so the
         // renderer receives exactly the bytes it asked for.
-        let frame_bytes = u64::from(Ac3Encoder::frame_bytes(rate, channels).unwrap_or(0));
-        let (start_sample, mut skip) = if frame_bytes == 0 {
-            (0u64, 0usize)
-        } else {
-            (
-                (start / frame_bytes) * AC3_FRAME_SAMPLES,
-                (start % frame_bytes) as usize,
-            )
+        //
+        // `None` is a sample rate AC-3 has no frame size for, which is also the
+        // case that reached the lengthless body above — there is no offset to
+        // resolve, so the encode starts where it would have anyway.
+        let (start_sample, mut skip) = match Ac3Encoder::frame_bytes(rate, channels) {
+            Some(frame_bytes) if frame_bytes != 0 => {
+                let frame_bytes = u64::from(frame_bytes);
+                (
+                    (start / frame_bytes) * AC3_FRAME_SAMPLES,
+                    (start % frame_bytes) as usize,
+                )
+            }
+            _ => (0u64, 0usize),
         };
 
         let mut stream = match PcmStream::open(&plan, start_sample) {

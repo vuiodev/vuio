@@ -9,11 +9,11 @@
 
 mod common;
 
-use vuio_core::media::transcode::SoundtrackFormat;
 use common::{build_mkv, video_sample, Track, TrackKind, AVCC};
 use std::sync::Arc;
 use tower::ServiceExt;
 use vuio_core::database::MediaRepository;
+use vuio_core::media::transcode::SoundtrackFormat;
 
 /// The vendored AC-3 conformance fixture: 48 kHz stereo, 440 Hz, 768-byte
 /// frames of 1536 samples each.
@@ -1583,7 +1583,14 @@ fn describe_a_real_film() {
         .into_iter()
         .cloned()
         .collect();
-    let promised = promised_ts_length(size, duration, &info.tracks, &carried, &rates, SoundtrackFormat::default());
+    let promised = promised_ts_length(
+        size,
+        duration,
+        &info.tracks,
+        &carried,
+        &rates,
+        SoundtrackFormat::default(),
+    );
     let old = size + (size / 16);
     eprintln!(
         "  promised {promised} bytes ({:.1}% of source, {:.2} Mbps)\n  \
@@ -1607,7 +1614,7 @@ fn dump_dts_fixture() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60.0);
-    std::fs::write(&out, dts_film(seconds)).unwrap();
+    std::fs::write(&out, dts_film_of(seconds, 6)).unwrap();
     eprintln!("wrote {out}");
 }
 
@@ -2074,8 +2081,12 @@ const DTS_FRAME_MS: f64 = 512.0 / 48.0;
 
 /// A film whose only soundtrack is DTS, which is the case a television shows
 /// the picture of and plays nothing.
+///
+/// `channels` is what the container declares, and the decoder is handed the
+/// same 5.1 fixture frames either way — this is a fixture for what the *muxer*
+/// does with a declared layout, not for what DTS of that layout sounds like.
 #[cfg(feature = "transcode-dts")]
-fn dts_film(seconds: f64) -> Vec<u8> {
+fn dts_film_of(seconds: f64, channels: u8) -> Vec<u8> {
     let frames: Vec<&[u8]> = DTS
         .as_chunks::<DTS_FRAME_LEN>()
         .0
@@ -2123,7 +2134,7 @@ fn dts_film(seconds: f64) -> Vec<u8> {
                 codec_private: Vec::new(),
                 kind: TrackKind::Audio {
                     sample_rate: 48_000.0,
-                    channels: 6,
+                    channels: u64::from(channels),
                 },
                 samples: audio_samples,
                 all_keyframes: true,
@@ -2137,10 +2148,20 @@ fn dts_film(seconds: f64) -> Vec<u8> {
 
 #[cfg(feature = "transcode-dts")]
 async fn scanned_dts_film(seconds: f64) -> (tempfile::TempDir, vuio_core::state::AppState, i64) {
+    scanned_dts_film_of(seconds, 6).await
+}
+
+/// The same, declaring `channels` on the soundtrack — which is what the default
+/// carries through to the AC-3 it re-encodes to.
+#[cfg(feature = "transcode-dts")]
+async fn scanned_dts_film_of(
+    seconds: f64,
+    channels: u8,
+) -> (tempfile::TempDir, vuio_core::state::AppState, i64) {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("media");
     std::fs::create_dir_all(&root).unwrap();
-    std::fs::write(root.join("Film.mkv"), dts_film(seconds)).unwrap();
+    std::fs::write(root.join("Film.mkv"), dts_film_of(seconds, channels)).unwrap();
     let state = common::state_over(temp.path(), &root).await;
     let id = common::scan_into(&state)
         .await
@@ -2150,6 +2171,79 @@ async fn scanned_dts_film(seconds: f64) -> (tempfile::TempDir, vuio_core::state:
         .id
         .unwrap();
     (temp, state, id)
+}
+
+/// One AC-3 syncframe as a television's demuxer reads its header.
+struct Syncframe {
+    /// Bytes from the syncword to the start of the next one.
+    len: usize,
+    /// `acmod`, the channel arrangement. 7 is 3/2 — three front, two surround.
+    acmod: u8,
+    /// Whether the low-frequency channel is present, which is the ".1".
+    lfe: bool,
+}
+
+/// Walk `audio` as AC-3, which is what a soundtrack re-encoded under the
+/// default becomes.
+///
+/// AC-3 is constant-bitrate and every frame carries 1536 samples, so at a known
+/// sample rate the frame size follows from `frmsizecod` alone — this walks 48
+/// kHz, which is what everything in this file is built at, where a frame is
+/// four bytes per kilobit of the declared rate.
+fn ac3_frames(audio: &[u8]) -> Vec<Syncframe> {
+    /// Nominal bitrates in kbps, indexed by `frmsizecod >> 1`.
+    const RATES: [usize; 19] = [
+        32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
+    ];
+
+    let mut frames = Vec::new();
+    let mut at = 0usize;
+    while at + 7 <= audio.len() {
+        assert_eq!(
+            [audio[at], audio[at + 1]],
+            [0x0B, 0x77],
+            "frame {} has no AC-3 syncword",
+            frames.len()
+        );
+        let fscod = audio[at + 4] >> 6;
+        assert_eq!(fscod, 0, "frame {} is not 48 kHz", frames.len());
+        let frmsizecod = usize::from(audio[at + 4] & 0x3F);
+        let len = RATES[frmsizecod >> 1] * 4;
+
+        // `acmod` opens the bit stream information, and `lfeon` is the bit that
+        // follows the channel-mix fields its value selects.
+        let acmod = audio[at + 6] >> 5;
+        let mut bit = 3u32;
+        if acmod & 0x01 != 0 && acmod != 0x01 {
+            bit += 2; // cmixlev
+        }
+        if acmod & 0x04 != 0 {
+            bit += 2; // surmixlev
+        }
+        if acmod == 0x02 {
+            bit += 2; // dsurmod
+        }
+        let lfe = audio[at + 6] & (0x80 >> bit) != 0;
+
+        frames.push(Syncframe { len, acmod, lfe });
+        at += len;
+    }
+    frames
+}
+
+/// The same state, with a film's soundtracks re-encoded to `format` instead of
+/// the AC-3 default.
+fn choosing(
+    state: &vuio_core::state::AppState,
+    format: vuio_core::config::TranscodeAudioFormat,
+) -> vuio_core::state::AppState {
+    let mut state = state.clone();
+    let mut config = (*state.config).clone();
+    config.transcode.audio_format = format;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+    state
 }
 
 /// Whole ADTS frames on `pid`, reassembled across the packets they are split
@@ -2188,11 +2282,12 @@ fn pes_timestamps(body: &[u8], pid: u16) -> Vec<u64> {
         .collect()
 }
 
-/// The deliverable: a DTS soundtrack no television can decode arrives as AAC it
-/// can, in a transport stream it can seek.
+/// The deliverable: a DTS soundtrack no television can decode arrives as one it
+/// does, in a transport stream it can seek — and arrives with its surround
+/// intact, which is the half of the deliverable that stereo AAC gave away.
 #[cfg(feature = "transcode-dts")]
 #[tokio::test]
-async fn a_dts_film_reaches_the_television_as_aac() {
+async fn a_dts_film_reaches_the_television_as_ac3() {
     let (_temp, state, id) = scanned_dts_film(8.0).await;
     let (status, headers, body) = video_ts(&state, id, "", None).await;
 
@@ -2201,7 +2296,7 @@ async fn a_dts_film_reaches_the_television_as_aac() {
     assert_well_formed_ts(&body);
 
     // The programme map declares the picture and one soundtrack, and the
-    // soundtrack is AAC — not the DTS the container held, which is the point.
+    // soundtrack is AC-3 — not the DTS the container held, which is the point.
     let declared = declared_pids(&body);
     assert_eq!(declared, vec![0x0100, 0x0101], "{declared:?}");
     let pmt = body
@@ -2217,31 +2312,32 @@ async fn a_dts_film_reaches_the_television_as_aac() {
     );
     assert_eq!(
         section[12 + info_length + 5],
-        0x0F,
-        "and the soundtrack as AAC, whatever it arrived as"
+        0x81,
+        "and the soundtrack as AC-3, whatever it arrived as"
     );
 
-    // And what arrives on that PID really is AAC: ADTS frames, each one a
-    // syncword and a length that walks to the next.
+    // And what arrives on that PID really is AC-3: syncframes, each one a
+    // syncword and a rate code that walks to the next.
     let audio = elementary_stream(&body, 0x0101);
     assert!(!audio.is_empty(), "the soundtrack PID carried nothing");
-    let mut at = 0usize;
-    let mut frames = 0usize;
-    while at + 7 <= audio.len() {
-        assert_eq!(audio[at], 0xFF, "frame {frames} has no ADTS syncword");
-        assert_eq!(audio[at + 1] & 0xF0, 0xF0);
-        let len = ((usize::from(audio[at + 3]) & 0x03) << 11)
-            | (usize::from(audio[at + 4]) << 3)
-            | (usize::from(audio[at + 5]) >> 5);
-        assert!(len >= 7, "frame {frames} declares {len} bytes");
-        at += len;
-        frames += 1;
+    let frames = ac3_frames(&audio);
+
+    // Six channels in and six channels out. A DTS 5.1 soundtrack folded down to
+    // a stereo pair is what this used to do, and the television it was folded
+    // down for is one with a 5.1 set wired to it.
+    for (index, frame) in frames.iter().enumerate() {
+        assert_eq!(
+            frame.acmod, 7,
+            "frame {index} is not three-front two-surround"
+        );
+        assert!(frame.lfe, "frame {index} has no low-frequency channel");
+        assert_eq!(frame.len, 2560, "frame {index} is not 640 kbps at 48 kHz");
     }
-    // Eight seconds of 1024-sample frames at 48 kHz is around 375 of them.
-    // Eight seconds of 1024-sample frames at 48 kHz is 375 of them, and every
+
+    // Eight seconds of 1536-sample frames at 48 kHz is 250 of them, and every
     // one is accounted for: a decode that drops frames shortens the soundtrack
     // against the picture for the rest of the film.
-    assert_eq!(frames, 375, "eight seconds of AAC is 375 frames");
+    assert_eq!(frames.len(), 250, "eight seconds of AC-3 is 250 frames");
 
     // And they are placed across the whole film rather than bunched at its
     // start, which is the failure mode of a re-encoded run anchored wrongly:
@@ -2255,43 +2351,142 @@ async fn a_dts_film_reaches_the_television_as_aac() {
     let span = last - first;
     // Eight seconds less the final frame, in ninety-kilohertz ticks.
     assert!(
-        span.abs_diff(718_080) < 9_000,
+        span.abs_diff(717_120) < 9_000,
         "the soundtrack spans {span} ticks of an eight-second film"
     );
 }
 
-/// The estimate on the codec it was written for. A DTS soundtrack leaves at a
-/// quarter of the rate it arrived at, so a promise built from the source's own
-/// size is mostly padding — and every byte offset then names a moment far later
-/// than the viewer dragged to.
+/// The same film for an operator who asked for AAC instead, which is also what
+/// a build without the AC-3 encoder falls back to. A third of the bitrate, and
+/// the surround folded down to a stereo pair to get it.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_dts_film_reaches_the_television_as_aac_when_the_operator_asks() {
+    let (_temp, state, id) = scanned_dts_film(8.0).await;
+    let state = choosing(&state, vuio_core::config::TranscodeAudioFormat::Aac);
+    let (status, _, body) = video_ts(&state, id, "", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_well_formed_ts(&body);
+
+    let pmt = body
+        .chunks(TS_PACKET)
+        .find(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1000)
+        .unwrap();
+    let section = &pmt[5..];
+    let info_length = usize::from(u16::from_be_bytes([section[10] & 0x0F, section[11]]));
+    assert_eq!(
+        section[12 + info_length + 5],
+        0x0F,
+        "the soundtrack is declared as AAC"
+    );
+
+    // ADTS frames, each one a syncword and a length that walks to the next.
+    let audio = elementary_stream(&body, 0x0101);
+    assert!(!audio.is_empty(), "the soundtrack PID carried nothing");
+    let mut at = 0usize;
+    let mut frames = 0usize;
+    while at + 7 <= audio.len() {
+        assert_eq!(audio[at], 0xFF, "frame {frames} has no ADTS syncword");
+        assert_eq!(audio[at + 1] & 0xF0, 0xF0);
+        // Two channels, in the configuration the header declares.
+        assert_eq!(
+            ((audio[at + 2] & 0x01) << 2) | (audio[at + 3] >> 6),
+            2,
+            "frame {frames} is not stereo"
+        );
+        let len = ((usize::from(audio[at + 3]) & 0x03) << 11)
+            | (usize::from(audio[at + 4]) << 3)
+            | (usize::from(audio[at + 5]) >> 5);
+        assert!(len >= 7, "frame {frames} declares {len} bytes");
+        at += len;
+        frames += 1;
+    }
+    // Eight seconds of 1024-sample frames at 48 kHz is 375 of them, and every
+    // one is accounted for: a decode that drops frames shortens the soundtrack
+    // against the picture for the rest of the film.
+    assert_eq!(frames, 375, "eight seconds of AAC is 375 frames");
+}
+
+/// A stereo film stays stereo. The default keeps the layout the film declared
+/// rather than imposing one, so 2.0 in is 2.0 out at 192 kbps — upmixing a
+/// stereo pair into six channels would spend three times the bitrate carrying
+/// four channels of nothing.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_stereo_dts_film_is_not_widened_to_five_point_one() {
+    let (_temp, state, id) = scanned_dts_film_of(8.0, 2).await;
+    let (status, _, body) = video_ts(&state, id, "", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_well_formed_ts(&body);
+
+    let audio = elementary_stream(&body, 0x0101);
+    let frames = ac3_frames(&audio);
+    assert!(!frames.is_empty(), "the soundtrack PID carried nothing");
+    for (index, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.acmod, 2, "frame {index} is not a stereo pair");
+        assert!(!frame.lfe, "frame {index} invented a low-frequency channel");
+        assert_eq!(frame.len, 768, "frame {index} is not 192 kbps at 48 kHz");
+    }
+}
+
+/// The estimate on the codec it was written for. A DTS soundtrack does not
+/// reach the renderer at the rate it left the disc at, so a promise built from
+/// the source's own size is mostly padding — and every byte offset then names a
+/// moment later than the viewer dragged to.
+///
+/// How much later depends on what the soundtrack became, which is why this
+/// checks both formats rather than one: stereo AAC is a quarter of the DTS and
+/// AC-3 5.1 is most of the way back to it, and a promise that did not know the
+/// difference would be wrong by that much on one of them.
 #[cfg(feature = "transcode-dts")]
 #[tokio::test]
 async fn the_promise_follows_a_dts_soundtrack_down_to_what_it_becomes() {
     let (_temp, state, id) = scanned_dts_film(12.0).await;
-    let (_, headers, body) = video_ts(&state, id, "", None).await;
+    let source = std::fs::metadata(_temp.path().join("media").join("Film.mkv"))
+        .unwrap()
+        .len();
+
+    for format in [
+        vuio_core::config::TranscodeAudioFormat::Ac3,
+        vuio_core::config::TranscodeAudioFormat::Aac,
+    ] {
+        let state = choosing(&state, format);
+        let (_, headers, body) = video_ts(&state, id, "", None).await;
+        let promised: u64 = headers[header::CONTENT_LENGTH]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert_eq!(body.len() as u64, promised, "{format:?}");
+
+        // Whatever the soundtrack became, the promise is an honest account of
+        // it: the padding that makes the response exactly its promised length
+        // is a trim, not most of what the renderer fetches.
+        let padding = body
+            .chunks(TS_PACKET)
+            .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1FFF)
+            .count() as u64
+            * TS_PACKET as u64;
+        let film = promised - padding;
+        assert!(
+            padding * 4 < film,
+            "{format:?}: {padding} bytes of the {promised} promised are filler \
+             against {film} of film"
+        );
+    }
+
+    // The source's own size is what the promise used to be. Stereo AAC is far
+    // under it — 768 kbps of DTS leaves as 192 — which is the case the estimate
+    // was written for and the one it must not lose.
+    let aac = choosing(&state, vuio_core::config::TranscodeAudioFormat::Aac);
+    let (_, headers, _) = video_ts(&aac, id, "", None).await;
     let promised: u64 = headers[header::CONTENT_LENGTH]
         .to_str()
         .unwrap()
         .parse()
         .unwrap();
-    assert_eq!(body.len() as u64, promised);
-
-    let padding = body
-        .chunks(TS_PACKET)
-        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1FFF)
-        .count() as u64
-        * TS_PACKET as u64;
-    let film = promised - padding;
-    assert!(
-        padding * 4 < film,
-        "{padding} bytes of the {promised} promised are filler against {film} of film"
-    );
-
-    // The source's own size is what the promise used to be, and on this film it
-    // is far more than the stream weighs: 768 kbps of DTS leaves as 192 of AAC.
-    let source = std::fs::metadata(_temp.path().join("media").join("Film.mkv"))
-        .unwrap()
-        .len();
     assert!(
         promised < source,
         "the soundtrack shrank fourfold and the promise did not: {promised} against \
@@ -2325,7 +2520,11 @@ async fn a_dts_film_seeks_by_byte_and_still_carries_its_soundtrack() {
         "a seek into the middle of a DTS film produced {} bytes of soundtrack",
         audio.len()
     );
-    assert_eq!(audio[0], 0xFF, "and it is still framed AAC");
+    // Still AC-3, still 5.1: a seek re-opens the encoder, and one re-opened on
+    // the wrong channel layout is a soundtrack that changes shape mid-film.
+    let frames = ac3_frames(&audio);
+    assert_eq!(frames[0].acmod, 7, "the seek did not resume in 5.1");
+    assert!(frames[0].lfe);
 
     // The picture is there too, and starts on a random-access point — otherwise
     // the renderer has no reference frame to decode the first picture against.

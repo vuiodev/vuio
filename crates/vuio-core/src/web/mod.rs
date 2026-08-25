@@ -129,6 +129,28 @@ pub(crate) fn item_needs_transcode(codec: Option<&str>, mime: &str, filename: &s
     }
 }
 
+/// Whether an item's audio is AC-3 or E-AC-3.
+///
+/// Asked of the same three columns as [`item_needs_transcode`] and resolved the
+/// same way, because it is the same question narrowed: of the codecs that need
+/// decoding here, which are the ones a decoded alternative must not itself be.
+/// Only DTS answers `false`, and only DTS can therefore be offered AC-3.
+#[cfg_attr(not(feature = "transcode"), allow(unused_variables))]
+pub(crate) fn item_audio_is_dolby(codec: Option<&str>, mime: &str, filename: &str) -> bool {
+    #[cfg(not(feature = "transcode"))]
+    {
+        false
+    }
+    #[cfg(feature = "transcode")]
+    {
+        use crate::media::transcode::TranscodeCodec;
+        codec
+            .and_then(TranscodeCodec::from_stored_codec)
+            .or_else(|| transcode_streaming::codec_for(mime, filename))
+            .is_some_and(|codec| matches!(codec, TranscodeCodec::Ac3 | TranscodeCodec::Eac3))
+    }
+}
+
 /// Whether a film's picture can be copied into the remuxed alternative.
 ///
 /// Needing an alternative and being able to produce one are different
@@ -205,6 +227,35 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
                     // A lossy re-encode has no length until it exists, so there
                     // is nothing to seek within.
                     op: "00",
+                    sized: false,
+                },
+            },
+            // And what an item whose audio is *already* Dolby is offered.
+            //
+            // Under `ac3` that cannot be the configured resource: this second
+            // `<res>` exists for a renderer that may have no Dolby licence, and
+            // handing such a renderer an AC-3 file re-encoded to AC-3 offers it
+            // nothing it did not already refuse. LPCM instead — lossless,
+            // seekable, decoded by everything, and what this path produced
+            // before AC-3 became the default. Under `aac` and `lpcm` no such
+            // collision exists and this is simply the configured resource.
+            audio_if_dolby: match config.transcode.audio_format {
+                TranscodeAudioFormat::Ac3 => xml::AdvertResource {
+                    mime: "audio/vnd.wave",
+                    path: "transcode/audio.wav",
+                    op: "11",
+                    sized: false,
+                },
+                TranscodeAudioFormat::Aac => xml::AdvertResource {
+                    mime: "audio/aac",
+                    path: "transcode/audio.aac",
+                    op: "00",
+                    sized: false,
+                },
+                TranscodeAudioFormat::Lpcm => xml::AdvertResource {
+                    mime: "audio/vnd.wave",
+                    path: "transcode/audio.wav",
+                    op: "11",
                     sized: false,
                 },
             },

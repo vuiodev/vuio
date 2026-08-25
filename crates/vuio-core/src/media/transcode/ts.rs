@@ -1294,10 +1294,16 @@ mod tests {
     /// repository is big enough to reproduce.
     ///
     /// A film carrying five DTS soundtracks, which between them are most of what
-    /// it weighs. Every one of them leaves as stereo AAC at an eighth of the
-    /// rate, so the stream is a third of the file — and promising the file's own
-    /// size names every byte offset three times too far along, which is a scrub
-    /// bar that lands nowhere near where it was dragged to.
+    /// it weighs. Not one of them reaches the renderer at the rate it left the
+    /// disc at, so promising the file's own size names every byte offset far
+    /// further along than it belongs — a scrub bar that lands nowhere near where
+    /// it was dragged to.
+    ///
+    /// How much further depends on what the soundtracks become, which is why the
+    /// promise is derived from the output's codecs rather than the input's, and
+    /// why this checks both: 5.1 AC-3 at 640 kbps is three times the stereo AAC
+    /// the path used to produce unconditionally, and a promise that did not know
+    /// the difference would be wrong by that much in one direction or the other.
     #[test]
     fn five_dts_soundtracks_do_not_reach_the_renderer_weighing_what_they_did() {
         let duration = 120.0;
@@ -1313,20 +1319,48 @@ mod tests {
         measured.extend((2..7).map(|id| rate(id, 1_360_000, 93.75)));
         let rates = TrackRates(measured);
 
-        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates, SoundtrackFormat::default());
+        // A megabit and a half of picture, the programme tables, and five
+        // soundtracks at whatever the format in hand costs — each reached
+        // without reference to the source's size, which is the whole point.
+        let promise_of = |format| {
+            promised_ts_length(source, duration, &tracks, &carried, &rates, format)
+        };
+        let weighing = |audio_each: f64| (1_470_000.0 * 1.03 + 5.0 * audio_each + 30_080.0) * duration / 8.0;
+
+        // Folded down to stereo at 192 kbps, five soundtracks shrink eightfold
+        // and the stream is a third of the file.
+        let aac = promise_of(SoundtrackFormat::Aac);
         assert!(
-            promised < source / 2,
-            "five soundtracks shrank eightfold and the promise did not: {promised} \
+            aac < source / 2,
+            "five soundtracks shrank eightfold and the promise did not: {aac} \
              against a {source}-byte source"
         );
-
-        // Five stereo AAC tracks, a megabit and a half of picture and the
-        // programme tables, over two minutes — reached without reference to the
-        // source's size, which is the whole point.
-        let expected = (1_470_000.0 * 1.03 + 5.0 * 211_500.0 + 30_080.0) * duration / 8.0;
+        let expected = weighing(211_500.0);
         assert!(
-            (promised as f64) > expected && (promised as f64) < expected * 1.2,
-            "{promised} is not the {expected} this stream actually weighs"
+            (aac as f64) > expected && (aac as f64) < expected * 1.2,
+            "{aac} is not the {expected} a stereo AAC stream actually weighs"
+        );
+
+        // Kept at 5.1 and re-encoded to AC-3 at 640 kbps — the default, and
+        // three and a half times the AAC — the soundtracks still arrive at half
+        // the rate they left at, so the stream is two thirds of the file rather
+        // than a third. Honest either way is the requirement; identical is not.
+        let ac3 = promise_of(SoundtrackFormat::Ac3.available());
+        let expected = weighing(if cfg!(feature = "transcode-ac3") {
+            705_000.0
+        } else {
+            // No AC-3 encoder in this build, so `available()` has already
+            // turned the default back into stereo AAC.
+            211_500.0
+        });
+        assert!(
+            (ac3 as f64) > expected && (ac3 as f64) < expected * 1.2,
+            "{ac3} is not the {expected} this stream actually weighs"
+        );
+        assert!(
+            ac3 < source,
+            "{ac3} promises more than the {source} the film weighs with its DTS \
+             still on it"
         );
     }
 

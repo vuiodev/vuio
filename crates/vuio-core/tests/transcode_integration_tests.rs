@@ -33,13 +33,37 @@ use vuio_core::web::{create_router, Surface};
 /// really decode.
 const AC3: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 
+/// The DTS conformance fixture: 48 kHz 5.1, five 1024-byte frames of 512
+/// samples. The codec that actually wants an AC-3 alternative — a television
+/// without a Dolby licence has no DTS licence either, but one *with* Dolby and
+/// without DTS is the common set this default is aimed at.
+#[cfg(feature = "transcode-dts")]
+const DTS: &[u8] = include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+
 /// One AC-3 file in a library, and the router over it.
 async fn library() -> (TempDir, AppState, i64) {
+    library_of("sine.ac3", "audio/ac3", AC3.to_vec()).await
+}
+
+/// One DTS file, long enough that a byte range into it means something.
+///
+/// The conformance fixture is five frames — 53 milliseconds — so it is looped.
+/// A decoder walks sync words and neither knows nor cares that it is hearing
+/// the same tenth of a second repeatedly; what matters here is that there are
+/// enough seconds of it to seek into.
+#[cfg(feature = "transcode-dts")]
+async fn dts_library() -> (TempDir, AppState, i64) {
+    let bitstream: Vec<u8> = std::iter::repeat_n(DTS, 200).flatten().copied().collect();
+    library_of("sine.dts", "audio/vnd.dts", bitstream).await
+}
+
+/// One file in a library, and the router over it.
+async fn library_of(name: &str, mime: &str, bitstream: Vec<u8>) -> (TempDir, AppState, i64) {
     let temp = tempdir().unwrap();
     let root = temp.path().join("media");
     std::fs::create_dir_all(&root).unwrap();
-    let path = root.join("sine.ac3");
-    std::fs::write(&path, AC3).unwrap();
+    let path = root.join(name);
+    std::fs::write(&path, &bitstream).unwrap();
 
     let database = Arc::new(
         SqliteDatabase::new(temp.path().join("transcode.db"))
@@ -50,8 +74,8 @@ async fn library() -> (TempDir, AppState, i64) {
     database
         .bulk_store_media_files(&[MediaFile::new(
             path.clone(),
-            AC3.len() as u64,
-            "audio/ac3".to_string(),
+            bitstream.len() as u64,
+            mime.to_string(),
         )])
         .await
         .unwrap();
@@ -193,6 +217,50 @@ fn assert_same_audio(part: &[u8], whole_slice: &[u8], range_start: usize, what: 
         "{what}: samples differ by up to {worst} LSB (first worst at sample {worst_at}) \
          — the seek landed in the wrong place, not merely rounded differently"
     );
+}
+
+/// The same, against the AC-3 resource.
+#[cfg(feature = "transcode-dts")]
+async fn ac3_request(
+    state: &AppState,
+    id: i64,
+    method: Method,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("/media/{id}/transcode/audio.ac3"))
+        .extension(ConnectInfo(peer()));
+    if let Some(range) = range {
+        builder = builder.header(header::RANGE, range);
+    }
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, body)
+}
+
+/// Bytes in every syncframe of an AC-3 stream, read from its first header.
+///
+/// AC-3 is constant-bitrate and the encoder holds one frame-size code for the
+/// whole stream, so the first frame's size is every frame's size — which is the
+/// property the seekable resource is built on. At 48 kHz a frame is four bytes
+/// per kilobit of the declared rate.
+#[cfg(feature = "transcode-dts")]
+fn ac3_frame_len(stream: &[u8]) -> usize {
+    /// Nominal bitrates in kbps, indexed by `frmsizecod >> 1`.
+    const RATES: [usize; 19] = [
+        32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
+    ];
+    assert_eq!(stream[4] >> 6, 0, "the fixture is 48 kHz");
+    RATES[usize::from(stream[4] & 0x3F) >> 1] * 4
 }
 
 fn header_u64(headers: &axum::http::HeaderMap, name: header::HeaderName) -> u64 {
@@ -639,4 +707,176 @@ async fn choosing_aac_advertises_the_aac_resource() {
     );
     assert!(didl.contains("audio/aac"));
     assert!(!didl.contains("audio.wav"));
+}
+
+// ---------------------------------------------------------------------------
+// The Dolby alternative
+// ---------------------------------------------------------------------------
+
+/// The default, on the codec it is for. A DTS file has no Dolby in it, so AC-3
+/// is a real alternative — and the one a television without a DTS licence is
+/// most likely to hold a licence for.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_dts_item_is_offered_the_ac3_resource() {
+    let (_temp, state, id) = dts_library().await;
+    let didl = browse_audio(&state).await;
+
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.ac3")),
+        "the default must offer the AC-3 alternative:\n{didl}"
+    );
+    assert!(didl.contains("audio/ac3"), "{didl}");
+    // Constant-bitrate, so the seeking it advertises is seeking it can do.
+    assert!(
+        didl.contains("DLNA.ORG_OP=11;DLNA.ORG_CI=1"),
+        "the AC-3 resource is seekable and converted:\n{didl}"
+    );
+}
+
+/// And the default on the codec it is *not* for.
+///
+/// The decoded alternative exists for a renderer that may not decode the
+/// original. Offering an AC-3 file an AC-3 alternative offers such a renderer
+/// the codec it already could not play, re-encoded a second time — so a Dolby
+/// source falls back to LPCM however `audio_format` is set.
+#[tokio::test]
+async fn an_ac3_item_is_not_offered_ac3_back() {
+    let (_temp, state, id) = library().await;
+    let didl = browse_audio(&state).await;
+
+    assert!(
+        !didl.contains("transcode/audio.ac3"),
+        "an AC-3 file must not be offered AC-3 as its alternative:\n{didl}"
+    );
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.wav")),
+        "it falls back to LPCM, which every renderer decodes:\n{didl}"
+    );
+}
+
+/// The AC-3 resource states a length before it has encoded a byte, and means
+/// it. That is the difference from the AAC sibling, and the reason AC-3 can be
+/// the default: a renderer that cannot scrub a film cannot scrub, but one that
+/// cannot scrub an album track is a renderer people notice.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn the_ac3_resource_promises_a_length_and_delivers_it() {
+    let (_temp, state, id) = dts_library().await;
+    let (head_status, head_headers, head_body) = ac3_request(&state, id, Method::HEAD, None).await;
+    let (get_status, get_headers, whole) = ac3_request(&state, id, Method::GET, None).await;
+
+    assert_eq!(head_status, StatusCode::OK);
+    assert_eq!(get_status, StatusCode::OK);
+    assert!(head_body.is_empty(), "HEAD carries no body");
+    assert_eq!(head_headers[header::CONTENT_TYPE], "audio/ac3");
+    assert_eq!(head_headers[header::ACCEPT_RANGES], "bytes");
+    let features = head_headers["contentFeatures.dlna.org"].to_str().unwrap();
+    assert!(features.contains("DLNA.ORG_OP=11"), "seekable: {features}");
+
+    let promised = header_u64(&head_headers, header::CONTENT_LENGTH);
+    assert_eq!(
+        promised,
+        header_u64(&get_headers, header::CONTENT_LENGTH),
+        "HEAD and GET must promise the same length"
+    );
+    assert_eq!(
+        whole.len() as u64,
+        promised,
+        "and the body must be exactly that long"
+    );
+
+    // What arrives is AC-3: syncframes of one constant size, which is what let
+    // the length be stated in the first place.
+    assert_eq!([whole[0], whole[1]], [0x0B, 0x77], "AC-3 syncword");
+    let frame = ac3_frame_len(&whole);
+    assert_eq!(
+        promised as usize % frame,
+        0,
+        "a constant-bitrate stream of {frame}-byte frames cannot be {promised} bytes"
+    );
+    for (index, at) in (0..whole.len()).step_by(frame).enumerate() {
+        assert_eq!(
+            [whole[at], whole[at + 1]],
+            [0x0B, 0x77],
+            "frame {index} at {at} has no syncword"
+        );
+    }
+}
+
+/// The seek itself: a byte range returns the audio that lives at that offset of
+/// the whole encode, which is what a scrub bar depends on.
+///
+/// "The audio", not "the bytes". AC-3 frames overlap — each one's transform
+/// covers half of the previous frame's samples — so an encoder restarted at the
+/// seek point has no overlap history to draw on and its first frame quantises
+/// differently. From the frame after that the state has converged and the
+/// output is identical, which is the strongest claim this can make and a
+/// stronger one than it needs: the discrepancy is a single 32-millisecond frame
+/// at the moment the viewer dragged to.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_byte_range_of_the_ac3_resource_is_the_audio_at_that_offset() {
+    let (_temp, state, id) = dts_library().await;
+    let (_, _, whole) = ac3_request(&state, id, Method::GET, None).await;
+    let frame = ac3_frame_len(&whole);
+
+    // Deliberately not on a frame boundary: the encoder has to restart at the
+    // frame containing `start` and drop the bytes before it, or every byte
+    // after the seek is offset against what the renderer asked for.
+    let start = frame * 9 + 137;
+    let end = start + frame * 4;
+    let (status, headers, part) = ac3_request(
+        &state,
+        id,
+        Method::GET,
+        Some(&format!("bytes={start}-{end}")),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        headers[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {start}-{end}/{}", whole.len())
+    );
+    assert_eq!(part.len(), end - start + 1);
+
+    // Everything past the frame the seek landed inside is the whole encode's
+    // own bytes at that offset — which is what makes the byte offset an honest
+    // name for a moment in the audio.
+    let settled = frame - start % frame;
+    assert_eq!(
+        part[settled..],
+        whole[start + settled..=end],
+        "past the frame the seek opened in, a range must be the bytes the whole \
+         encode has at that offset"
+    );
+
+    // And the partial frame at the front is the tail of a real syncframe, not a
+    // frame restarted early: the next syncword lands exactly where the whole
+    // encode's does.
+    assert_eq!(
+        [part[settled], part[settled + 1]],
+        [0x0B, 0x77],
+        "the first whole frame of the range does not begin on a syncword"
+    );
+}
+
+/// A range past the end is refused rather than answered with fewer bytes than
+/// its own `Content-Range` claims.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_range_past_the_end_of_the_ac3_resource_is_refused() {
+    let (_temp, state, id) = dts_library().await;
+    let (_, headers, _) = ac3_request(&state, id, Method::HEAD, None).await;
+    let total = header_u64(&headers, header::CONTENT_LENGTH);
+
+    let (status, _, _) = ac3_request(
+        &state,
+        id,
+        Method::GET,
+        Some(&format!("bytes={}-{}", total + 10, total + 20)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
 }

@@ -92,9 +92,14 @@ enabled = false
 [transcode]
 enabled = true
 # What the decoded version is delivered as.
-#   lpcm  uncompressed, seekable, about 1.5 Mbps
-#   aac   about a tenth of that, lossy, and cannot be scrubbed
-audio_format = "lpcm"
+#   ac3   Dolby Digital, which is what a television was built to decode. The
+#         only one that keeps a film's surround: a DTS 5.1 soundtrack arrives
+#         as AC-3 5.1 at 640 kbps rather than folded down to a stereo pair
+#   aac   about a third of that, lossy, stereo, and cannot be scrubbed
+#   lpcm  uncompressed, seekable, about 1.5 Mbps. Audio files only — a film's
+#         soundtrack shares a transport stream with the picture, where PCM
+#         does not fit, so a film falls back to ac3
+audio_format = "ac3"
 # What is offered, and in what order.
 #   enabled   the original is listed first, the decoded version beside it
 #   forced    the decoded version leads, and for DTS it is the only one offered

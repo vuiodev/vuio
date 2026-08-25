@@ -434,15 +434,17 @@ const TRANSCODE_FIELDS: &[FieldSpec] = &[
             "transcode.audio_format",
             "Decoded audio format",
             FieldKind::Enum {
-                options: &["lpcm", "aac"],
+                options: &["ac3", "aac", "lpcm"],
                 free_form: false,
             },
             Impact::Live,
-            "LPCM is uncompressed and seekable but costs about 1.5 Mbps. AAC is roughly a \
-             tenth of that, at the price of a lossy re-encode and no scrubbing.",
+            "AC-3 is what a television was built to decode, and the only one that keeps a \
+             film's surround channels instead of folding them down to stereo. AAC is about a \
+             third of the bitrate, stereo, and cannot be scrubbed. LPCM is uncompressed and \
+             seekable but costs about 1.5 Mbps and applies to audio files only.",
         ),
-        "LPCM is the better choice on a wired or 5 GHz network, which is where most of these \
-         devices sit.",
+        "AC-3 is the one to leave alone: it is the format the TVs this feature exists for \
+         already decode, and it is the only setting under which a 5.1 film reaches them in 5.1.",
     ),
     noted(
         optional(

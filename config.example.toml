@@ -131,13 +131,22 @@ port = 8090                             # Must differ from server.port
 # A TV that was already fine is unaffected.
 [transcode]
 enabled = true
-# What the decoded version of an *audio* item is delivered as.
-#   lpcm  uncompressed, seekable, about 1.5 Mbps
-#   aac   about a tenth of that, lossy, and cannot be scrubbed
-# A film is always delivered as fragmented MP4 — the picture copied through
-# untouched, the soundtrack re-encoded — and is seekable by time rather than by
-# byte, which works the same whatever its audio codec was.
-audio_format = "lpcm"
+# What the decoded version is delivered as.
+#   ac3   Dolby Digital, which is what a television was built to decode. The
+#         only one that keeps a film's surround: a DTS 5.1 soundtrack arrives
+#         as AC-3 5.1 at 640 kbps rather than folded down to a stereo pair.
+#         Constant-bitrate, so an audio item gets an exact Content-Length and
+#         real byte-range seeking
+#   aac   about a third of that, lossy, and folded down to stereo in every
+#         case. The encoder's output size is not known ahead of time, so an
+#         audio item carries no Content-Length and cannot be scrubbed
+#   lpcm  uncompressed, seekable, about 1.5 Mbps. Audio items only — a film's
+#         soundtrack shares a transport stream with the picture, where PCM at
+#         1.5 Mbps a channel does not fit, so a film falls back to ac3
+# A film's picture is copied through untouched whatever this says. To a
+# television it goes as a transport stream, seekable by byte; to the browser
+# player as fragmented MP4 with AAC, because no browser decodes AC-3.
+audio_format = "ac3"
 # Operating mode for transcode advertisement:
 #   enabled   transcode is available; original stream listed first, transcode as alternative
 #   forced    transcode is forced; only transcoded stream is offered so every TV plays it

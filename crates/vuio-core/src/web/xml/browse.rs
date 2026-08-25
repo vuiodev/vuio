@@ -239,6 +239,11 @@ pub async fn generate_browse_response(
             // with `rendering.rs` deliberately: an item reached through this
             // fallback must not lose the alternative it would have been given
             // through the other.
+            let audio_is_dolby = crate::web::item_audio_is_dolby(
+                file.stream.codec.as_deref(),
+                &file.mime_type,
+                &file.filename,
+            );
             let transcoded = crate::web::transcode_advert(state)
                 .filter(|_| !is_radio)
                 .filter(|_| {
@@ -248,7 +253,7 @@ pub async fn generate_browse_response(
                         &file.filename,
                     )
                 })
-                .filter(|advert| advert.resource_for(&file.mime_type).is_some())
+                .filter(|advert| advert.resource_for(&file.mime_type, audio_is_dolby).is_some())
                 .filter(|_| {
                     !file.mime_type.starts_with("video/")
                         || crate::web::item_can_remux_video(file.stream.video_codec.as_deref())
@@ -283,6 +288,7 @@ pub async fn generate_browse_response(
                         mime: &file.mime_type,
                         duration: duration_secs,
                         source_size: file.size,
+                        audio_is_dolby,
                     },
                 );
             }
@@ -331,6 +337,7 @@ pub async fn generate_browse_response(
                             mime: &file.mime_type,
                             duration: duration_secs,
                             source_size: file.size,
+                            audio_is_dolby,
                         },
                     );
                 }

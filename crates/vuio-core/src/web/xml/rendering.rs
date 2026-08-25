@@ -194,6 +194,9 @@ pub(crate) struct AdvertItem<'a> {
     /// [`AdvertResource::sized`] — and kept because it is what a resource with a
     /// length known from the index would be sized from.
     pub source_size: u64,
+    /// Whether this item's audio is AC-3 or E-AC-3, which decides between
+    /// [`TranscodeAdvert::audio`] and [`TranscodeAdvert::audio_if_dolby`].
+    pub audio_is_dolby: bool,
 }
 
 /// How a decoded alternative resource should be advertised.
@@ -206,6 +209,17 @@ pub(crate) struct AdvertItem<'a> {
 pub struct TranscodeAdvert {
     /// What an audio item is offered instead.
     pub audio: AdvertResource,
+    /// What an audio item already carrying Dolby is offered instead.
+    ///
+    /// The decoded alternative exists because the renderer may not decode the
+    /// original, so offering an AC-3 file an AC-3 alternative offers it the one
+    /// codec it is already known to be stuck on, re-encoded a second time —
+    /// worse than the original and no more playable. Only `audio_format =
+    /// "ac3"` can collide this way, since AC-3 and E-AC-3 are the only sources
+    /// decoded here that AAC and LPCM are not; under the other two settings
+    /// this is the same resource as [`Self::audio`] and the distinction costs
+    /// nothing.
+    pub audio_if_dolby: AdvertResource,
     /// What a video item is offered instead, where this build can produce one.
     ///
     /// `None` in a build with no remuxer or no encoder. A film then gets no
@@ -218,9 +232,17 @@ pub struct TranscodeAdvert {
 
 impl TranscodeAdvert {
     /// The resource to offer for an item of `mime`, if there is one.
-    pub(crate) fn resource_for(&self, mime: &str) -> Option<AdvertResource> {
+    ///
+    /// `is_dolby` is the caller's answer to whether the item's *audio* is AC-3
+    /// or E-AC-3 — decided in `web::item_audio_is_dolby`, because resolving a
+    /// stored codec name is exactly the feature-gated knowledge these writers
+    /// are kept clear of. It is meaningless for video, where the soundtrack is
+    /// re-encoded inside a container either way.
+    pub(crate) fn resource_for(&self, mime: &str, is_dolby: bool) -> Option<AdvertResource> {
         if mime.starts_with("video/") {
             self.video
+        } else if is_dolby {
+            Some(self.audio_if_dolby)
         } else {
             Some(self.audio)
         }
@@ -254,8 +276,9 @@ impl TranscodeAdvert {
             mime,
             duration,
             source_size,
+            audio_is_dolby,
         } = item;
-        let Some(resource) = self.resource_for(mime) else {
+        let Some(resource) = self.resource_for(mime, audio_is_dolby) else {
             return Ok(());
         };
         write!(
@@ -524,11 +547,12 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
     // there is no reliable table of which television model licensed which codec,
     // and guessing wrong is worse than letting it choose. `prefer` decides the
     // order, for the renderers that take the first without looking.
+    let audio_is_dolby = crate::web::item_audio_is_dolby(file.codec(), mime, file.filename());
     let transcoded = context
         .transcode
         .filter(|_| !is_radio)
         .filter(|_| crate::web::item_needs_transcode(file.codec(), mime, file.filename()))
-        .filter(|advert| advert.resource_for(mime).is_some())
+        .filter(|advert| advert.resource_for(mime, audio_is_dolby).is_some())
         .filter(|_| {
             !mime.starts_with("video/") || crate::web::item_can_remux_video(file.video_codec())
         });
@@ -553,6 +577,7 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
                 mime,
                 duration: item_duration,
                 source_size: file.size(),
+                audio_is_dolby,
             },
         )?;
     }
@@ -617,6 +642,7 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
                 mime,
                 duration: item_duration,
                 source_size: file.size(),
+                audio_is_dolby,
             },
         )?;
         }

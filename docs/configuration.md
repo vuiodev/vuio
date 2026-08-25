@@ -183,7 +183,7 @@ silently in a tab.
 ```toml
 [transcode]
 enabled = true         # Offer the decoded alternative
-audio_format = "lpcm"  # "lpcm" or "aac"
+audio_format = "ac3"   # "ac3", "aac" or "lpcm"
 prefer = "original"    # Which resource is listed first: "original" or "transcoded"
 max_concurrent = 2     # Simultaneous decodes; further requests are refused, not queued
 ```
@@ -191,13 +191,23 @@ max_concurrent = 2     # Simultaneous decodes; further requests are refused, not
 | Key | Effect |
 | --- | --- |
 | `enabled` | Live. Off leaves the browse response exactly as it was. |
-| `audio_format` | `lpcm` is uncompressed, carries an exact `Content-Length` and supports byte-range seeking, and costs about 1.5 Mbps. `aac` is roughly a tenth of that, at the price of a lossy re-encode, no `Content-Length` and no scrubbing. |
+| `audio_format` | `ac3` is Dolby Digital, which is what the televisions this feature exists for were built to decode, and the only setting that keeps a film's surround channels. It is constant-bitrate, so an audio item still carries an exact `Content-Length` and real byte ranges. `aac` is about a third of the bitrate and folded down to stereo in every case, at the price of a lossy re-encode, no `Content-Length` and no scrubbing. `lpcm` is uncompressed and seekable, costs about 1.5 Mbps, and applies to audio items only. |
 | `prefer` | Some renderers take the first resource without checking whether they can decode it. The default keeps the original first, which cannot make anything worse. Switch to `transcoded` if a set still plays silently. |
 | `max_concurrent` | Decoding is the only CPU-bound work this server does. Past this ceiling a request gets `503` with `Retry-After` rather than joining a queue that would starve the streams already playing. The browser's HLS renditions draw on the same ceiling, so one number bounds the machine rather than one per delivery path. |
 
-`audio_format` applies to audio items only. A film's alternative is always
-fragmented MP4 with an AAC track, because that is what a television will play
-back as a film.
+`audio_format` decides two different things. For an audio item it is the whole
+answer: the file is decoded and delivered as `ac3`, `aac` or `lpcm`, in stereo,
+because a renderer that needed the decode is not one with a surround set behind
+it.
+
+For a film it decides only what the *soundtrack* becomes; the picture is copied
+through untouched either way. A film going to a television goes as a transport
+stream, and there the soundtrack keeps the layout the film declared — a DTS 5.1
+track becomes AC-3 5.1 at 640 kbps, a 2.0 track becomes AC-3 2.0 at 192. `lpcm`
+is not among a soundtrack's options, since it shares the stream with the
+picture and PCM at 1.5 Mbps a channel will not fit, so a film left on `lpcm`
+falls back to `ac3`. A film going to the browser player is fragmented MP4 with
+an AAC track regardless of this setting, because no browser decodes AC-3.
 
 Environment variables: `VUIO_TRANSCODE_ENABLED`, `VUIO_TRANSCODE_AUDIO_FORMAT`,
 `VUIO_TRANSCODE_PREFER`, `VUIO_TRANSCODE_MAX_CONCURRENT`.
