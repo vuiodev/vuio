@@ -133,14 +133,32 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
         },
     };
 
-    // A renderer sizing the resource up rather than seeking into it. Answered
-    // from the padding, which costs nothing and takes no transcode slot — the
-    // point being that muxing an answer here holds a slot for as long as it
-    // takes to seek into a thirty-gigabyte film, and the set has already opened
-    // the connection it actually wants to play on.
-    if byte_seek.is_some() && super::is_probe_tail(first_byte, promised) {
-        return padding_tail(first_byte, promised);
-    }
+    // A renderer reading the end of the resource rather than seeking into it.
+    //
+    // It has to be given the *film* there, not filler. A television works out
+    // how long a transport stream is by reading its last hundred kilobytes or so
+    // and taking the newest timestamp it finds — there is no header to ask, a
+    // transport stream not having one. Answer that read with null packets and
+    // the set learns nothing: no duration, so no scrub bar, so no seeking, while
+    // the picture and every soundtrack play perfectly. Which is the exact shape
+    // of the fault reported against this resource.
+    //
+    // So it is produced like any other seek. But not from the very last instant:
+    // a stream can only open on a random-access point, and the offset a duration
+    // probe names is past the film's final keyframe, which produces nothing at
+    // all — filler again, by a different route. It is pulled back far enough to
+    // be sure of landing on one, which costs the set a fractionally short
+    // duration and buys it a duration at all.
+    let is_probe = byte_seek.is_some() && super::is_probe_tail(first_byte, promised);
+    let start = match (is_probe, duration) {
+        (true, Some(duration)) => {
+            // Comfortably more than any group of pictures, and small against
+            // any film — a fifth of a per cent of a feature.
+            let backoff = (duration * 0.01).clamp(2.0, 20.0);
+            (duration - backoff).max(0.0).min(start)
+        }
+        _ => start,
+    };
 
     let deliver = ((promised - first_byte) / TS_PACKET_LEN as u64) * TS_PACKET_LEN as u64;
     if deliver == 0 {
@@ -224,6 +242,13 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
     }
 
     let Some(permit) = state.transcode.try_acquire() else {
+        // Nothing left to produce this with. A renderer sizing the resource up
+        // rather than playing it can still be told something true — the padding
+        // is the one part of this resource whose bytes are known without
+        // producing them — and that beats refusing the request outright.
+        if is_probe {
+            return padding_tail(first_byte, promised);
+        }
         return Ok(busy(&state, &filename));
     };
 

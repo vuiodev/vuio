@@ -38,7 +38,15 @@ use crate::media::remux::{
 /// Long enough that the decode timeline can be recovered across any reordering a
 /// real encoder produces, short enough that a renderer starts promptly and a
 /// dropped connection wastes little.
-const BATCH_SECS: f64 = 1.0;
+///
+/// It is the floor on how long a renderer waits for its first byte, and that
+/// turns out to matter far more than it looks. A television seeking a transport
+/// stream binary-searches it: twenty-odd ranged requests, each read only far
+/// enough to find one clock value, each converging on the instant the viewer
+/// dragged to. Every one of them pays this. At a second and a half a probe the
+/// search takes half a minute and the set gives up; at a fifth of that it is a
+/// seek.
+const BATCH_SECS: f64 = 0.4;
 
 /// Channels the re-encoded audio track carries.
 const DECODED_CHANNELS: u16 = 2;
@@ -473,6 +481,9 @@ pub struct TsStream {
     primed: std::collections::VecDeque<PrimedPacket>,
     /// Presentation time of the batch's first picture, in the output clock.
     batch_start: Option<u64>,
+    /// The latest presentation time held in the batch, which is what says
+    /// whether it can be cut here. See [`TsStream::next_chunk`].
+    batch_max_pts: u64,
     started: bool,
     finished: bool,
 }
@@ -568,6 +579,7 @@ impl TsStream {
             specs,
             primed,
             batch_start: None,
+            batch_max_pts: 0,
             started: false,
             finished: false,
         })
@@ -596,11 +608,24 @@ impl TsStream {
                 self.started = true;
                 let ticks = self.rescale(0, pts);
                 let elapsed = ticks.saturating_sub(*self.batch_start.get_or_insert(ticks));
-                // Batches break on keyframes, so every one opens with everything
-                // a decoder needs to start there.
-                if keyframe && elapsed >= batch_ticks && !self.streams[0].pending.is_empty() {
+                // Where the batch may be cut. Not only at a keyframe: a film
+                // with five-second groups of pictures would then hand a renderer
+                // five seconds of decoded soundtrack before its first byte, and
+                // a set binary-searching for a seek point pays that twenty times
+                // over.
+                //
+                // Anywhere the reordering is closed will do, and this frame
+                // being displayed after everything already held is exactly that:
+                // the batch is then a complete run in both orders, so sorting it
+                // recovers its decode times without reference to what follows,
+                // and the next batch's times all fall after this one's. A
+                // keyframe satisfies it too, which is why the old rule worked.
+                let closed = ticks > self.batch_max_pts;
+                if (keyframe || closed) && elapsed >= batch_ticks && !self.streams[0].pending.is_empty()
+                {
                     let chunk = self.emit();
                     self.batch_start = Some(ticks);
+                    self.batch_max_pts = 0;
                     self.push_video(ticks, data, keyframe);
                     if chunk.is_some() {
                         return chunk;
@@ -650,6 +675,7 @@ impl TsStream {
             .clone()
             .unwrap_or_default();
         let codec = self.video_codec;
+        self.batch_max_pts = self.batch_max_pts.max(ticks);
         self.streams[0].pending.push(Unit {
             pts: ticks,
             dts: ticks,

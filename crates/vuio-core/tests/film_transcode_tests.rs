@@ -2480,6 +2480,127 @@ async fn the_promised_length_is_an_honest_account_of_the_stream() {
     );
 }
 
+/// How a television learns how long a transport stream is, and the reason a film
+/// can play perfectly and still have no scrub bar.
+///
+/// There is no header to ask — a transport stream does not have one. So a set
+/// reads the last hundred kilobytes or so of the resource and takes the newest
+/// timestamp it finds; `last - first` is the duration, and until it has one it
+/// publishes no seek map at all. Answering that read with null packets teaches
+/// it nothing: the picture plays, every soundtrack plays, and the film is
+/// unseekable and of unknown length.
+///
+/// So the end of the resource has to carry the end of the film.
+#[tokio::test]
+async fn the_last_bytes_carry_the_films_final_timestamps() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, headers, _) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // The last few kilobytes, which is where a duration reader looks.
+    let first = promised - 4096;
+    let (status, _, body) = video_ts(&state, id, "", Some(&format!("bytes={first}-"))).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_well_formed_ts(&body);
+
+    let filler = body
+        .chunks(TS_PACKET)
+        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1FFF)
+        .count();
+    assert!(
+        filler * 2 < body.len() / TS_PACKET,
+        "the tail is mostly null packets, which name no instant at all"
+    );
+
+    let clocks: Vec<f64> = body
+        .chunks(TS_PACKET)
+        .filter_map(|packet| payload_and_pcr(packet).1)
+        .map(|pcr| pcr as f64 / 90_000.0)
+        .collect();
+    assert!(
+        !clocks.is_empty(),
+        "nothing in the last {} bytes says what time it is",
+        body.len()
+    );
+    let newest = clocks.iter().cloned().fold(f64::MIN, f64::max);
+    assert!(
+        newest > 6.0,
+        "the last bytes of an eight-second film are stamped {newest:.2}s, so a set \
+         reading them would think the film that long"
+    );
+}
+
+/// With nothing left to produce it with, the tail falls back to padding rather
+/// than being refused: a renderer sizing the resource up gets an answer, and the
+/// streams already playing keep their slots.
+#[tokio::test]
+async fn a_tail_probe_still_answers_when_every_slot_is_taken() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, headers, _) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let mut held = Vec::new();
+    while let Some(permit) = state.transcode.try_acquire() {
+        held.push(permit);
+    }
+    let first = promised - 4096;
+    let (status, _, body) = video_ts(&state, id, "", Some(&format!("bytes={first}-"))).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "not 503");
+    assert_eq!(body.len(), 4096);
+}
+
+/// The decode timeline has to be recovered without reference to what follows,
+/// because a batch is written before the next one is read.
+///
+/// Batches are cut wherever the reordering is closed rather than only at
+/// keyframes — a film with ten-second groups of pictures would otherwise hand a
+/// renderer ten seconds of decoded soundtrack before its first byte. The cut is
+/// only safe where every frame held is displayed before the next one read; cut
+/// through a reorder group instead and the batch after it opens with a frame
+/// due *earlier* than the one that closed the batch before, which a decoder
+/// reads as time running backwards.
+#[tokio::test]
+async fn decode_times_never_run_backwards_across_a_batch_seam() {
+    let (_temp, state, id) = scanned_film(12.0).await;
+    let (_, _, body) = video_ts(&state, id, "", None).await;
+
+    let mut previous: Option<u64> = None;
+    let mut seen = 0usize;
+    for packet in body.chunks(TS_PACKET) {
+        let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        if pid != 0x0100 || packet[1] & 0x40 == 0 {
+            continue;
+        }
+        let (payload, Some(pcr)) = payload_and_pcr(packet) else {
+            continue;
+        };
+        if let Some(previous) = previous {
+            assert!(
+                pcr >= previous,
+                "the programme clock went from {previous} back to {pcr} at picture {seen}"
+            );
+        }
+        previous = Some(pcr);
+        // And the picture is never due before it is decoded.
+        if let Some(pts) = pes_pts(&packet[payload..]) {
+            assert!(
+                pts >= pcr,
+                "picture {seen} is due at {pts}, clocked at {pcr}"
+            );
+        }
+        seen += 1;
+    }
+    assert!(seen > 100, "only {seen} pictures were examined");
+}
+
 /// A seek near the end is a seek, not a probe: it still produces film.
 #[tokio::test]
 async fn a_genuine_seek_is_not_mistaken_for_a_probe() {
