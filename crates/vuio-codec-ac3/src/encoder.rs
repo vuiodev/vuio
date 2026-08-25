@@ -675,7 +675,7 @@ impl Ac3Encoder {
                 // is short-block-related.
                 // LFE never short-blocks (no blksw bit per §5.4.3.1).
                 let is_lfe_chan = self.lfeon && ch == lfe_idx;
-                let is_short = if is_lfe_chan || std::env::var("AC3_DISABLE_BLKSW").is_ok() {
+                let is_short = if is_lfe_chan || debug_cfg().disable_blksw {
                     false
                 } else {
                     self.transient_state[ch].process(&in_buf[256..])
@@ -747,7 +747,7 @@ impl Ac3Encoder {
         // re-derives L_recv = cplmant * cplco_L * 8, R_recv = cplmant *
         // cplco_R * 8 — preserving the per-band envelope of each
         // channel without spending bits on per-channel mantissas.
-        let cpl_disabled = std::env::var("AC3_DISABLE_CPL").is_ok();
+        let cpl_disabled = debug_cfg().disable_cpl;
         let mut cpl = CouplingPlan::default();
         // ATSC A/52 §7.4: coupling is allowed for any acmod with ≥ 2 fbw
         // channels. The coupling group can include up to 5 fbw channels
@@ -965,7 +965,7 @@ impl Ac3Encoder {
                 }
             }
 
-            if std::env::var("AC3_TRACE_CPL_ENC").is_ok() {
+            if debug_cfg().trace_cpl_enc {
                 eprintln!(
                     "CPL-ENC begf={} endf={} nsubbnd={} nbnd={} chincpl={:?} mstr={:?}",
                     cpl.begf,
@@ -1073,7 +1073,7 @@ impl Ac3Encoder {
                         let (c0, c1_rest) = coeffs.split_at_mut(1);
                         crate::simd::rematrix_stereo(&mut c0[0][blk][lo..hi], &mut c1_rest[0][blk][lo..hi]);
                     }
-                    if std::env::var("AC3_TRACE_REMAT_ENC").is_ok() {
+                    if debug_cfg().trace_remat_enc {
                         eprintln!(
                             "REMAT-ENC blk={} bnd={} lo={} hi={} e_l={:.3e} e_r={:.3e} e_s={:.3e} e_d={:.3e} flg={}",
                             blk, bnd_idx, lo, hi, e_l, e_r, e_s, e_d, rematflg[blk][bnd_idx]
@@ -1173,7 +1173,7 @@ impl Ac3Encoder {
         // `AC3_DISABLE_EXPSTR_SEL=1` pins every "new" anchor to D15
         // for A/B testing.
         let chexpstr_plan: Vec<[u8; BLOCKS_PER_FRAME]> =
-            if std::env::var("AC3_DISABLE_EXPSTR_SEL").is_ok() {
+            if debug_cfg().disable_expstr_sel {
                 let mut out = vec![[0u8; BLOCKS_PER_FRAME]; self.channels];
                 for ch in 0..self.channels {
                     out[ch] = exp_strategies;
@@ -1285,7 +1285,7 @@ impl Ac3Encoder {
         // tune_snroffst computes use the dba-modified mask. The
         // AC3_DISABLE_DBA env var pins the plan to all-zero (no
         // segments) — useful for A/B-ing the dba contribution.
-        let dba_plan = if std::env::var("AC3_DISABLE_DBA").is_ok() {
+        let dba_plan = if debug_cfg().disable_dba {
             DbaPlan::default()
         } else {
             build_dba_plan(&exps, self.channels, ch_end_mant, &cpl)
@@ -1325,7 +1325,7 @@ impl Ac3Encoder {
         // snroffste so the decoder applies the new values immediately.
         // The AC3_DISABLE_PERBLOCK_SNR env var pins the plan to the
         // flat global one — useful for A/B-ing the contribution.
-        let snr_plan = if std::env::var("AC3_DISABLE_PERBLOCK_SNR").is_ok() {
+        let snr_plan = if debug_cfg().disable_perblock_snr {
             PerBlockSnr::from_global(&tuned_ba)
         } else {
             tune_per_block_snroffst_with_plan(
@@ -2505,14 +2505,8 @@ pub(crate) fn pick_strategy_for_block(exp: &[u8], end: usize) -> u8 {
     // Lower = more aggressive (more D25/D45). Higher = more conservative
     // (more D15). Defaults derived from preserved-PSNR experiments on
     // the round 28 / task #324 fixtures.
-    let d45_thr = std::env::var("AC3_EXPSTR_D45_THR")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(50);
-    let d25_thr = std::env::var("AC3_EXPSTR_D25_THR")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(75);
+    let d45_thr = debug_cfg().expstr_d45_thr;
+    let d25_thr = debug_cfg().expstr_d25_thr;
     // D45 is enabled by default since round 29 — the prior frame-1
     // mantissa-stream desync was caused by `build_dba_plan` letting the
     // chosen DBA band exceed 31 (the 5-bit `deltoffst` field range per
@@ -2522,7 +2516,7 @@ pub(crate) fn pick_strategy_for_block(exp: &[u8], end: usize) -> u8 {
     // The fix clamped `hi_band ≤ 32` in `build_dba_plan`; D45 now
     // round-trips bit-exact through the decoder. Set
     // `AC3_DISABLE_D45=1` to fall back to D25-only for A/B sweeps.
-    let d45_enabled = std::env::var("AC3_DISABLE_D45").is_err();
+    let d45_enabled = !debug_cfg().disable_d45;
     let pick = if d45_enabled && d45_avg_x100 <= d45_thr {
         3
     } else if d25_avg_x100 <= d25_thr {
@@ -2530,7 +2524,7 @@ pub(crate) fn pick_strategy_for_block(exp: &[u8], end: usize) -> u8 {
     } else {
         1
     };
-    if let Ok(force) = std::env::var("AC3_FORCE_EXPSTR") {
+    if let Some(force) = debug_cfg().force_expstr.as_deref() {
         if let Ok(v) = force.parse::<u8>() {
             if (1..=3).contains(&v) {
                 return v;
@@ -2616,6 +2610,63 @@ pub(crate) struct BitAllocParams {
     pub(crate) fgaincod: u8,
     pub(crate) cplfgaincod: u8,
     pub(crate) lfefgaincod: u8,
+}
+
+/// The `AC3_*` environment switches, read once.
+///
+/// These exist to disable individual encoder stages while debugging, and every
+/// one of them is a process-lifetime constant. They used to be read where they
+/// were used, which put `std::env::var` — a global lock, a linear scan of
+/// `environ` and, on a hit, a `String` allocation — inside per-block and
+/// per-candidate loops: about 190 lookups per frame, six thousand a second at
+/// 5.1. Reading them once costs nothing and changes no behaviour.
+pub(crate) struct DebugCfg {
+    pub(crate) disable_blksw: bool,
+    pub(crate) disable_cpl: bool,
+    pub(crate) trace_cpl_enc: bool,
+    pub(crate) trace_remat_enc: bool,
+    pub(crate) disable_expstr_sel: bool,
+    pub(crate) disable_dba: bool,
+    pub(crate) disable_perblock_snr: bool,
+    pub(crate) disable_d45: bool,
+    pub(crate) debug_perch_snr: bool,
+    pub(crate) debug_perblock_snr: bool,
+    pub(crate) expstr_d45_thr: u32,
+    pub(crate) expstr_d25_thr: u32,
+    pub(crate) force_expstr: Option<String>,
+}
+
+impl DebugCfg {
+    fn load() -> Self {
+        let flag = |k: &str| std::env::var(k).is_ok();
+        let num = |k: &str, d: u32| {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse::<u32>().ok())
+                .unwrap_or(d)
+        };
+        Self {
+            disable_blksw: flag("AC3_DISABLE_BLKSW"),
+            disable_cpl: flag("AC3_DISABLE_CPL"),
+            trace_cpl_enc: flag("AC3_TRACE_CPL_ENC"),
+            trace_remat_enc: flag("AC3_TRACE_REMAT_ENC"),
+            disable_expstr_sel: flag("AC3_DISABLE_EXPSTR_SEL"),
+            disable_dba: flag("AC3_DISABLE_DBA"),
+            disable_perblock_snr: flag("AC3_DISABLE_PERBLOCK_SNR"),
+            disable_d45: flag("AC3_DISABLE_D45"),
+            debug_perch_snr: flag("AC3_DEBUG_PERCH_SNR"),
+            debug_perblock_snr: flag("AC3_DEBUG_PERBLOCK_SNR"),
+            expstr_d45_thr: num("AC3_EXPSTR_D45_THR", 50),
+            expstr_d25_thr: num("AC3_EXPSTR_D25_THR", 75),
+            force_expstr: std::env::var("AC3_FORCE_EXPSTR").ok(),
+        }
+    }
+}
+
+/// The process-wide switch set. Read on first use.
+pub(crate) fn debug_cfg() -> &'static DebugCfg {
+    static CFG: std::sync::OnceLock<DebugCfg> = std::sync::OnceLock::new();
+    CFG.get_or_init(DebugCfg::load)
 }
 
 /// The part of §7.2.2 bit allocation that does not depend on `snroffst`.
@@ -2738,6 +2789,86 @@ impl MaskBank {
 #[inline(always)]
 pub(crate) fn snroffset_of(ba: &BitAllocParams) -> i32 {
     (((ba.csnroffst as i32 - 15) << 4) + ba.fsnroffst as i32) << 2
+}
+
+/// One block's mantissa-bit tally, accumulated while bap values are derived.
+///
+/// §7.3.5 packs the three low-precision quantisers in groups — three bap-1
+/// values to a 5-bit word, three bap-2 to 7 bits, two bap-4 to 7 bits — with
+/// the group state running across every channel of a block and reset at each
+/// block boundary. That looks order-dependent, but it is not: a group opens
+/// on every third (or second) value of its class regardless of what sits
+/// between them, so a block's cost is a function of three *counts*, not of the
+/// sequence.
+///
+/// Which means the tuner never has to materialise the bap arrays at all. It
+/// used to write 10.5 KiB of them per candidate and walk the lot back to add
+/// up the bits; now [`bap_bits_from_mask`] tallies as it goes and
+/// [`MantissaTally::bits`] closes the groups at the end.
+#[derive(Default, Clone, Copy)]
+pub(crate) struct MantissaTally {
+    /// Counts for the grouped classes, in bap order 1, 2, 4.
+    grouped: [u32; 3],
+    /// Bits owed by the ungrouped baps, which cost a fixed width each.
+    ungrouped: u32,
+}
+
+impl MantissaTally {
+    /// Total mantissa bits for the block, closing any partial groups.
+    #[inline]
+    pub(crate) fn bits(&self) -> u32 {
+        self.ungrouped
+            + self.grouped[0].div_ceil(3) * 5
+            + self.grouped[1].div_ceil(3) * 7
+            + self.grouped[2].div_ceil(2) * 7
+    }
+}
+
+/// [`bap_from_mask`], but tallying mantissa bits instead of writing bap values.
+///
+/// Used by the rate-control search, which only ever wanted the bit count.
+#[inline]
+pub(crate) fn bap_bits_from_mask(
+    exp: &[u8; N_COEFFS],
+    curve: &MaskCurve,
+    snroffset: i32,
+    ptr_tab: &[u8; 64],
+    tally: &mut MantissaTally,
+) {
+    let (start, end) = (curve.start, curve.end);
+    if end <= start {
+        return;
+    }
+    let floor = curve.floor;
+    let mut i = start;
+    let mut j = MASKTAB[start] as usize;
+    loop {
+        let lastbin = (BNDTAB[j] as usize + BNDSZ[j] as usize).min(end);
+        let mut m = curve.mask[j];
+        m -= snroffset;
+        m -= floor;
+        if m < 0 {
+            m = 0;
+        }
+        m &= 0x1fe0;
+        m += floor;
+        while i < lastbin {
+            let psd = 3072 - ((exp[i] as i32) << 7);
+            let addr = ((psd - m) >> 5).clamp(0, 63) as usize;
+            match ptr_tab[addr] {
+                0 => {}
+                1 => tally.grouped[0] += 1,
+                2 => tally.grouped[1] += 1,
+                4 => tally.grouped[2] += 1,
+                b => tally.ungrouped += QUANTIZATION_BITS[b as usize] as u32,
+            }
+            i += 1;
+        }
+        if i >= end {
+            break;
+        }
+        j += 1;
+    }
 }
 
 /// The final §7.2.2.7 bap lookup: the only part of bit allocation that
@@ -3606,10 +3737,12 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // being tested, computed once for the whole search. See `MaskBank`.
     let bank = MaskBank::build(ba, exps, end, end_ch, nchan, fscod, cpl, dba, lfeon);
 
-    let mut baps: Vec<Vec<[u8; N_COEFFS]>> =
-        vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+    // Whether the coupling channel's bins are billed at all: the mantissa
+    // accounting walks them only via the first fbw channel that is actually
+    // coupled, so an in-use plan with no coupled channel costs nothing.
+    let cpl_billed = cpl.in_use && (0..nchan).any(|c| cpl.chincpl[c]);
 
-    let calc_used = |combined: i32, baps: &mut [Vec<[u8; N_COEFFS]>]| -> (u32, BitAllocParams) {
+    let calc_used = |combined: i32| -> (u32, BitAllocParams) {
         let csnr = (combined / 16).min(63) as u8;
         let fsnr = (combined % 16).min(15) as u8;
         let mut cand = *ba;
@@ -3617,30 +3750,32 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         cand.fsnroffst = fsnr;
         cand.cplfsnroffst = fsnr;
         cand.lfefsnroffst = fsnr;
+        let blocks = exps[0].len();
+        let mut tally = [MantissaTally::default(); BLOCKS_PER_FRAME];
         let fbw_snr = snroffset_of(&cand);
         for ch in 0..nchan {
             for blk in 0..exps[ch].len() {
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[ch][blk],
                     bank.get(ch, blk),
                     fbw_snr,
                     &BAPTAB,
-                    &mut baps[ch][blk],
+                    &mut tally[blk],
                 );
             }
         }
-        if cpl.in_use {
+        if cpl_billed {
             let cpl_idx = nchan;
             let mut cpl_ba = cand;
             cpl_ba.fsnroffst = cand.cplfsnroffst;
             let cpl_snr = snroffset_of(&cpl_ba);
             for blk in 0..exps[cpl_idx].len() {
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[cpl_idx][blk],
                     bank.get(cpl_idx, blk),
                     cpl_snr,
                     &BAPTAB,
-                    &mut baps[cpl_idx][blk],
+                    &mut tally[blk],
                 );
             }
         }
@@ -3650,16 +3785,16 @@ pub(crate) fn tune_snroffst_with_plan_ends(
             lfe_ba.fsnroffst = cand.lfefsnroffst;
             let lfe_snr = snroffset_of(&lfe_ba);
             for blk in 0..exps[lfe_idx].len() {
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[lfe_idx][blk],
                     bank.get(lfe_idx, blk),
                     lfe_snr,
                     &BAPTAB,
-                    &mut baps[lfe_idx][blk],
+                    &mut tally[blk],
                 );
             }
         }
-        let used = mantissa_bits_total_ends(baps, end, end_ch, nchan, cpl, lfeon);
+        let used = tally[..blocks].iter().map(MantissaTally::bits).sum();
         (used, cand)
     };
 
@@ -3670,7 +3805,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
 
     while low <= high {
         let mid = (low + high) / 2;
-        let (used, cand) = calc_used(mid, &mut baps);
+        let (used, cand) = calc_used(mid);
         if used <= budget {
             best_cand_opt = Some(cand);
             low = mid + 1;
@@ -3725,35 +3860,35 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // We don't tune cplfsnroffst / lfefsnroffst per-channel here —
     // they're singletons in the bitstream syntax and the cpl/lfe
     // pseudo-channels don't need it for the current test inputs.
-    let mut scratch_bps: Vec<Vec<[u8; N_COEFFS]>> =
-        vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
-    let mut recompute_used = |ba_in: &BitAllocParams, bps: &mut [Vec<[u8; N_COEFFS]>]| -> u32 {
+    let recompute_used = |ba_in: &BitAllocParams| -> u32 {
+        let blocks = exps[0].len();
+        let mut tally = [MantissaTally::default(); BLOCKS_PER_FRAME];
         for ch in 0..nchan {
             let mut ch_ba = *ba_in;
             ch_ba.fsnroffst = ba_in.fsnroffst_ch[ch];
             let ch_snr = snroffset_of(&ch_ba);
             for blk in 0..exps[ch].len() {
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[ch][blk],
                     bank.get(ch, blk),
                     ch_snr,
                     &BAPTAB,
-                    &mut bps[ch][blk],
+                    &mut tally[blk],
                 );
             }
         }
-        if cpl.in_use {
+        if cpl_billed {
             let cpl_idx = nchan;
             let mut cpl_ba = *ba_in;
             cpl_ba.fsnroffst = ba_in.cplfsnroffst;
             let cpl_snr = snroffset_of(&cpl_ba);
             for blk in 0..exps[cpl_idx].len() {
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[cpl_idx][blk],
                     bank.get(cpl_idx, blk),
                     cpl_snr,
                     &BAPTAB,
-                    &mut bps[cpl_idx][blk],
+                    &mut tally[blk],
                 );
             }
         }
@@ -3763,16 +3898,16 @@ pub(crate) fn tune_snroffst_with_plan_ends(
             lfe_ba.fsnroffst = ba_in.lfefsnroffst;
             let lfe_snr = snroffset_of(&lfe_ba);
             for blk in 0..exps[lfe_idx].len() {
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[lfe_idx][blk],
                     bank.get(lfe_idx, blk),
                     lfe_snr,
                     &BAPTAB,
-                    &mut bps[lfe_idx][blk],
+                    &mut tally[blk],
                 );
             }
         }
-        mantissa_bits_total_ends(bps, end, end_ch, nchan, cpl, lfeon)
+        tally[..blocks].iter().map(MantissaTally::bits).sum()
     };
 
     // Per-channel greedy bumps, **least-served first with fairness
@@ -3830,7 +3965,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         for &ch in &order[..n_eligible] {
             let mut trial = best;
             trial.fsnroffst_ch[ch] += 1;
-            let trial_used = recompute_used(&trial, &mut scratch_bps);
+            let trial_used = recompute_used(&trial);
             if trial_used <= budget {
                 best = trial;
                 bumped = true;
@@ -3877,7 +4012,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         for &ch in &order[..n_eligible] {
             let mut trial = best;
             trial.fsnroffst_ch[ch] += 1;
-            let trial_used = recompute_used(&trial, &mut scratch_bps);
+            let trial_used = recompute_used(&trial);
             if trial_used <= budget {
                 best = trial;
                 bumped = true;
@@ -3887,7 +4022,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
             break;
         }
     }
-    if std::env::var("AC3_DEBUG_PERCH_SNR").is_ok() {
+    if debug_cfg().debug_perch_snr {
         eprintln!(
             "tune_snroffst: csnr={} fsnr={} fsnr_ch={:?} cpl_fsnr={} lfe_fsnr={}",
             best.csnroffst, best.fsnroffst, best.fsnroffst_ch, best.cplfsnroffst, best.lfefsnroffst,
@@ -4107,7 +4242,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     let mut order: [usize; BLOCKS_PER_FRAME] = [0, 1, 2, 3, 4, 5];
     order.sort_by(|&a, &b| demand[b].cmp(&demand[a]));
     let spread = demand[order[0]] - demand[order[BLOCKS_PER_FRAME - 1]];
-    if std::env::var("AC3_DEBUG_PERBLOCK_SNR").is_ok() {
+    if debug_cfg().debug_perblock_snr {
         eprintln!(
             "perblock_snr: demand={:?} order={:?} spread={} ba.csnr={} ba.fsnr_ch={:?}",
             demand, order, spread, ba.csnroffst, ba.fsnroffst_ch
@@ -4123,47 +4258,50 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     // Helper: compute current total mantissa bits across all blocks
     // under the current `plan`, plus per-block snroffste overhead
     // delta vs the pre-#170 baseline (block-0-only emission).
-    let mut scratch_bps: Vec<Vec<[u8; N_COEFFS]>> =
-        vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
     // As in the global tuner: only `snroffst` varies across the trials below,
-    // so the masking curves are computed once for the whole search.
+    // so the masking curves are computed once for the whole search, and the
+    // trials tally mantissa bits directly instead of materialising bap arrays.
     let bank = MaskBank::build(ba, exps, end, None, nchan, fscod, cpl, dba, lfeon);
-    let mut recompute = |plan: &PerBlockSnr, bps: &mut [Vec<[u8; N_COEFFS]>]| -> u32 {
+    let cpl_billed = cpl.in_use && (0..nchan).any(|c| cpl.chincpl[c]);
+    let recompute = |plan: &PerBlockSnr| -> u32 {
+        let mut total = 0u32;
         for blk in 0..BLOCKS_PER_FRAME {
+            let mut tally = MantissaTally::default();
             for ch in 0..nchan {
                 let ch_ba = plan.ba_for_fbw(ba, blk, ch);
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[ch][blk],
                     bank.get(ch, blk),
                     snroffset_of(&ch_ba),
                     &BAPTAB,
-                    &mut bps[ch][blk],
+                    &mut tally,
                 );
             }
-            if cpl.in_use {
+            if cpl_billed {
                 let cpl_idx = nchan;
                 let cpl_ba = plan.ba_for_cpl(ba, blk);
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[cpl_idx][blk],
                     bank.get(cpl_idx, blk),
                     snroffset_of(&cpl_ba),
                     &BAPTAB,
-                    &mut bps[cpl_idx][blk],
+                    &mut tally,
                 );
             }
             if lfeon {
                 let lfe_idx = nchan + 1;
                 let lfe_ba = plan.ba_for_lfe(ba, blk);
-                bap_from_mask(
+                bap_bits_from_mask(
                     &exps[lfe_idx][blk],
                     bank.get(lfe_idx, blk),
                     snroffset_of(&lfe_ba),
                     &BAPTAB,
-                    &mut bps[lfe_idx][blk],
+                    &mut tally,
                 );
             }
+            total += tally.bits();
         }
-        mantissa_bits_total(bps, end, nchan, cpl, lfeon)
+        total
     };
 
     // Per-block snroffste overhead bits when set to 1 (block 0 was
@@ -4185,7 +4323,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
         return plan;
     }
     let baseline_budget = total_bits - baseline_overhead;
-    let baseline_used = recompute(&plan, &mut scratch_bps);
+    let baseline_used = recompute(&plan);
     if baseline_used > baseline_budget {
         // Global tuner should have prevented this; bail rather than
         // make things worse.
@@ -4213,7 +4351,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     let left_demand: i64 = (0..3).map(|b| demand[b]).sum::<i64>() / 3;
     let right_demand: i64 = (3..6).map(|b| demand[b]).sum::<i64>() / 3;
     let half_spread = (left_demand - right_demand).abs();
-    if std::env::var("AC3_DEBUG_PERBLOCK_SNR").is_ok() {
+    if debug_cfg().debug_perblock_snr {
         eprintln!(
             "perblock_snr: left_demand={} right_demand={} half_spread={} baseline_used={}/{}",
             left_demand, right_demand, half_spread, baseline_used, baseline_budget
@@ -4295,10 +4433,10 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                             ((trial.lfefsnroffst[rb] as i32) + up).min(15) as u8;
                     }
                 }
-                let trial_used = recompute(&trial, &mut scratch_bps);
+                let trial_used = recompute(&trial);
                 let trial_overhead = extra_snr_overhead(&trial);
                 let fits = trial_used + trial_overhead <= baseline_budget;
-                if std::env::var("AC3_DEBUG_PERBLOCK_SNR").is_ok() && fits {
+                if debug_cfg().debug_perblock_snr && fits {
                     eprintln!(
                         "  half-transfer down={} up={} used={} overhead={} budget={} accepted",
                         down, up, trial_used, trial_overhead, baseline_budget
@@ -4341,7 +4479,7 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                 let mut trial = plan;
                 trial.fsnroffst_ch[donor][dc] -= 1;
                 trial.fsnroffst_ch[recipient][rc] += 1;
-                let trial_used = recompute(&trial, &mut scratch_bps);
+                let trial_used = recompute(&trial);
                 let trial_overhead = extra_snr_overhead(&trial);
                 if trial_used + trial_overhead <= baseline_budget {
                     plan = trial;
@@ -4357,12 +4495,12 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     // Final guard: the per-block plan must still fit. If somehow the
     // greedy walk overshot (shouldn't happen, but be defensive), fall
     // back to the flat plan.
-    let final_used = recompute(&plan, &mut scratch_bps);
+    let final_used = recompute(&plan);
     let final_overhead = extra_snr_overhead(&plan);
     if final_used + final_overhead > baseline_budget {
         return PerBlockSnr::from_global(ba);
     }
-    if std::env::var("AC3_DEBUG_PERBLOCK_SNR").is_ok() {
+    if debug_cfg().debug_perblock_snr {
         eprintln!(
             "perblock_snr: final csnr={:?} fsnr_ch={:?} extra_overhead={}",
             plan.csnroffst, plan.fsnroffst_ch, final_overhead
@@ -5181,6 +5319,70 @@ mod tests {
     /// If this ever fails, the tuner is choosing different allocations from the
     /// ones the emitted frame is built with, and the bitstream is wrong in a
     /// way no round-trip test would localise.
+    /// [`MantissaTally`] claims a block's mantissa cost depends only on how
+    /// many bap values of each grouped class it holds, not on their order.
+    /// This checks that against the sequential accounting in
+    /// [`mantissa_bits_total_ends`], which walks the bap arrays for real.
+    #[test]
+    fn mantissa_tally_matches_sequential_group_accounting() {
+        let mut state = 0xDEAD_BEEFu32;
+        let mut rand = move |m: u32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state % m
+        };
+
+        let cpl = CouplingPlan::default();
+        for trial in 0..20 {
+            let nchan = 1 + (trial % 5);
+            let lfeon = trial % 2 == 0;
+            let end = [253usize, 120, 40][trial % 3];
+
+            let mut baps: Vec<Vec<[u8; N_COEFFS]>> =
+                vec![vec![[0u8; N_COEFFS]; BLOCKS_PER_FRAME]; nchan + 2];
+            let mut tally = [MantissaTally::default(); BLOCKS_PER_FRAME];
+
+            for blk in 0..BLOCKS_PER_FRAME {
+                for ch in 0..nchan {
+                    for bin in 0..end {
+                        // Bias towards the grouped classes so partial groups at
+                        // the end of a block are common.
+                        let b = [0u8, 1, 1, 2, 2, 4, 4, 3, 5, 9, 15][rand(11) as usize];
+                        baps[ch][blk][bin] = b;
+                        match b {
+                            0 => {}
+                            1 => tally[blk].grouped[0] += 1,
+                            2 => tally[blk].grouped[1] += 1,
+                            4 => tally[blk].grouped[2] += 1,
+                            o => tally[blk].ungrouped += QUANTIZATION_BITS[o as usize] as u32,
+                        }
+                    }
+                }
+                if lfeon {
+                    for bin in 0..LFE_END_MANT {
+                        let b = [0u8, 1, 2, 4, 3, 5][rand(6) as usize];
+                        baps[nchan + 1][blk][bin] = b;
+                        match b {
+                            0 => {}
+                            1 => tally[blk].grouped[0] += 1,
+                            2 => tally[blk].grouped[1] += 1,
+                            4 => tally[blk].grouped[2] += 1,
+                            o => tally[blk].ungrouped += QUANTIZATION_BITS[o as usize] as u32,
+                        }
+                    }
+                }
+            }
+
+            let want = mantissa_bits_total_ends(&baps, end, None, nchan, &cpl, lfeon);
+            let got: u32 = tally.iter().map(MantissaTally::bits).sum();
+            assert_eq!(
+                want, got,
+                "trial {trial}: nchan {nchan} lfeon {lfeon} end {end}"
+            );
+        }
+    }
+
     #[test]
     fn split_bit_allocation_matches_the_monolithic_allocator() {
         let mut state = 0x9E37_79B9u32;
