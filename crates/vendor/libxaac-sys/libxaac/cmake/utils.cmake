@@ -1,8 +1,14 @@
-include(CheckCXXCompilerFlag)
+include(CheckCCompilerFlag)
 set(CMAKE_C_STANDARD 99)
 # Adds compiler options for all targets
 function(libxaac_add_compile_options)
-  if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  if(APPLE OR MSVC OR NOT CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+    if(MSVC)
+      add_compile_options(/O2 /W3)
+    else()
+      add_compile_options(-O3 -Wall -Wsequence-point -Wunused-function -fwrapv)
+    endif()
+  elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
     add_compile_options(-std=gnu99 -march=armv8-a)
   elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch32")
     add_compile_options(
@@ -19,14 +25,16 @@ function(libxaac_add_compile_options)
     add_compile_options(-D_X86_ -O3 -Wall -Wsequence-point -Wunused-function -fwrapv -m32)
   endif()
 
-  set(CMAKE_REQUIRED_FLAGS -fsanitize=fuzzer-no-link)
-  check_cxx_compiler_flag(-fsanitize=fuzzer-no-link
-                          COMPILER_HAS_SANITIZE_FUZZER)
-  unset(CMAKE_REQUIRED_FLAGS)
+  if(BUILD_TESTS)
+    set(CMAKE_REQUIRED_FLAGS -fsanitize=fuzzer-no-link)
+    check_c_compiler_flag(-fsanitize=fuzzer-no-link
+                            COMPILER_HAS_SANITIZE_FUZZER)
+    unset(CMAKE_REQUIRED_FLAGS)
+  endif()
 
   if(DEFINED SANITIZE)
     set(CMAKE_REQUIRED_FLAGS -fsanitize=${SANITIZE})
-    check_cxx_compiler_flag(-fsanitize=${SANITIZE} COMPILER_HAS_SANITIZER)
+    check_c_compiler_flag(-fsanitize=${SANITIZE} COMPILER_HAS_SANITIZER)
     unset(CMAKE_REQUIRED_FLAGS)
 
     if(NOT COMPILER_HAS_SANITIZER)
@@ -41,7 +49,13 @@ endfunction()
 
 # Adds defintions for all targets
 function(libxaac_add_definitions)
-  if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
+  if(APPLE OR MSVC OR NOT CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+    if(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "i686")
+      add_definitions(-DX86 -D_X86_)
+    elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
+      add_definitions(-DX86_64 -D_X86_64_)
+    endif()
+  elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
     add_definitions(-DARMV8)
   elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch32")
     add_definitions(-DARMV7)

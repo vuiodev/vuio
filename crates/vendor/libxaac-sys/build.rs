@@ -45,7 +45,20 @@ fn main() {
             .arg(format!("-DCMAKE_SYSTEM_PROCESSOR={processor}"))
             .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON");
 
-        if target != host {
+        let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+        let is_msvc = env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+        let generator = env::var("CMAKE_GENERATOR").unwrap_or_default();
+
+        if is_msvc && (generator.is_empty() || generator.starts_with("Visual Studio")) {
+            let vs_arch = match target_arch.as_str() {
+                "x86_64" => "x64",
+                "aarch64" => "ARM64",
+                "x86" | "i686" | "i586" => "Win32",
+                "arm" | "thumbv7a" | "thumbv7neon" => "ARM",
+                other => other,
+            };
+            cmake_cmd.arg("-A").arg(vs_arch);
+        } else if target != host {
             let system_name = match target_os.as_str() {
                 "linux" => "Linux",
                 "windows" => "Windows",
@@ -56,7 +69,6 @@ fn main() {
             };
             cmake_cmd.arg(format!("-DCMAKE_SYSTEM_NAME={system_name}"));
             cmake_cmd.arg(format!("-DCMAKE_C_COMPILER={}", c_compiler.display()));
-            cmake_cmd.arg(format!("-DCMAKE_CXX_COMPILER={}", c_compiler.display()));
             cmake_cmd.arg(format!("-DCMAKE_ASM_COMPILER={}", c_compiler.display()));
         }
 

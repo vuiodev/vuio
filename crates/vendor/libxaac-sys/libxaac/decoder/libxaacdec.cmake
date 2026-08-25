@@ -128,7 +128,9 @@ include_directories(${LIBXAACDEC_INCLUDES})
 
 include("${XAAC_ROOT}/decoder/drc_src/libxaacdec_drc.cmake")
 
-if("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch32")
+if(APPLE OR MSVC OR NOT CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
+  include("${XAAC_ROOT}/decoder/x86/libxaacdec_x86.cmake")
+elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch32")
   include("${XAAC_ROOT}/decoder/armv7/libxaacdec_armv7.cmake")
 elseif("${CMAKE_SYSTEM_PROCESSOR}" STREQUAL "aarch64")
   include("${XAAC_ROOT}/decoder/armv8/libxaacdec_armv8.cmake")

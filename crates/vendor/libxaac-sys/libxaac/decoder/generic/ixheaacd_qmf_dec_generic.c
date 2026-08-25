@@ -48,7 +48,7 @@
 
 #include "ixheaacd_function_selector.h"
 #include "ixheaacd_audioobjtypes.h"
-#if !__ARM_NEON__
+#if !__ARM_NEON__ || defined(__APPLE__) || defined(_MSC_VER) || !defined(__ELF__)
 
 #define DCT3_LEN (32)
 #define DCT2_LEN (64)

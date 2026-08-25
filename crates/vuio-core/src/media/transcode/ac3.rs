@@ -130,8 +130,10 @@ mod tests {
         let pcm: Vec<u8> = (0i16..6).flat_map(|c| c.to_le_bytes()).collect();
         let out = to_bitstream_order(&pcm, 6);
         let slots: Vec<i16> = out
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&b| i16::from_le_bytes(b))
             .collect();
         // L, C, R, Ls, Rs, LFE — read as the WAVE slot each came from.
         assert_eq!(slots, vec![0, 2, 1, 4, 5, 3]);

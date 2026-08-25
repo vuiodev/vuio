@@ -20,6 +20,10 @@ path = "src/main.rs"
 name = "aac-bench"
 path = "src/aac_bench.rs"
 
+[[bin]]
+name = "ac3-bench"
+path = "src/ac3_bench.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
