@@ -437,15 +437,33 @@ struct Stream {
     parameter_sets: Option<ParameterSets>,
     /// The rate a re-encoded track runs at, from the container's declaration.
     sample_rate: u32,
-    decode: Option<Decode>,
+    /// The decoder for a re-encoded track, kept apart from the rest of its
+    /// chain because it is the half that can be run beside the other tracks'.
+    /// See [`TsStream::decode_held`].
+    decoder: Option<PcmDecoder>,
+    /// Everything downstream of the decoder.
+    encode: Option<Encode>,
+    /// Packets read but not yet decoded, with the instant each arrived at.
+    ///
+    /// Held rather than decoded where they are read, so that every soundtrack
+    /// can be decoded at once when the batch is written. A film with four DTS
+    /// tracks decodes four of them, and doing that one after another on the
+    /// muxing thread is most of what a renderer waits through before its first
+    /// byte.
+    held: Vec<(u64, Vec<u8>)>,
+    /// What the decoder produced, waiting for the encoder.
+    pcm: Vec<(u64, Vec<u8>)>,
     /// Access units waiting for the batch to be written.
     pending: Vec<Unit>,
 }
 
-/// The state of one track's decode-and-re-encode chain.
-struct Decode {
-    codec: TranscodeCodec,
-    decoder: PcmDecoder,
+/// The state of one track's re-encoding, downstream of its decoder.
+///
+/// The decoder is not here. It lives on the [`Stream`] so that the decoding of
+/// every soundtrack can be run side by side, which the rest of this cannot be:
+/// the AAC encoder wraps a C library holding raw pointers and does not cross a
+/// thread boundary at all.
+struct Encode {
     encoder: AacEncoder,
     decoded_channels: u16,
     sample_rate: u32,
@@ -479,6 +497,13 @@ pub struct TsStream {
     /// Packets read while priming the decoders, replayed ahead of anything
     /// further from the demuxer. See [`prime_decoders`].
     primed: std::collections::VecDeque<PrimedPacket>,
+    /// Where the demuxer actually landed, in the source's own units.
+    ///
+    /// Not where it was asked to land. A coarse seek snaps back to the nearest
+    /// random-access point, so every byte offset inside one group of pictures
+    /// opens the same stream and produces the same first batch — which is what
+    /// makes that batch worth remembering. See `web::ts_streaming`.
+    origin: u64,
     /// Presentation time of the batch's first picture, in the output clock.
     batch_start: Option<u64>,
     /// The latest presentation time held in the batch, which is what says
@@ -504,11 +529,12 @@ impl TsStream {
         use symphonia::core::units::Time;
 
         let mut format = super::source::open_format(path)?;
+        let mut origin = 0u64;
         if start_secs > 0.0 {
             // Coarse, not Accurate: a stream has to open on a random-access
             // point or the renderer has no reference frame to decode the first
             // picture against.
-            let _ = format.seek(
+            let seeked = format.seek(
                 SeekMode::Coarse,
                 SeekTo::Time {
                     time: Time::try_from_secs_f64(super::seek_target(start_secs))
@@ -516,6 +542,9 @@ impl TsStream {
                     track_id: Some(video.id),
                 },
             );
+            if let Ok(seeked) = seeked {
+                origin = seeked.actual_ts.get().max(0) as u64;
+            }
         }
 
         let parameter_sets = ParameterSets::parse(video.codec_kind, &video.extra_data)
@@ -530,7 +559,10 @@ impl TsStream {
             codec: None,
             parameter_sets: Some(parameter_sets),
             sample_rate: 0,
-            decode: None,
+            decoder: None,
+            encode: None,
+            held: Vec::new(),
+            pcm: Vec::new(),
             pending: Vec::new(),
         });
 
@@ -555,7 +587,10 @@ impl TsStream {
                 codec,
                 parameter_sets: None,
                 sample_rate: track.sample_rate.unwrap_or(48_000),
-                decode: None,
+                decoder: None,
+                encode: None,
+                held: Vec::new(),
+                pcm: Vec::new(),
                 pending: Vec::new(),
             });
         }
@@ -578,11 +613,18 @@ impl TsStream {
             streams,
             specs,
             primed,
+            origin,
             batch_start: None,
             batch_max_pts: 0,
             started: false,
             finished: false,
         })
+    }
+
+    /// Where the demuxer landed, which is the same for every byte offset inside
+    /// one group of pictures.
+    pub fn origin(&self) -> u64 {
+        self.origin
     }
 
     /// The next run of transport packets, or `None` at the end of the film.
@@ -595,6 +637,7 @@ impl TsStream {
         loop {
             let Some((id, pts, data)) = self.next_source_packet() else {
                 self.finished = true;
+                self.decode_held();
                 self.flush_encoders();
                 return self.emit();
             };
@@ -696,8 +739,9 @@ impl TsStream {
         let ticks = self.rescale(index, pts);
         let stream = &mut self.streams[index];
 
-        let Some(codec) = stream.codec else {
-            // Passed through: the container's frame is the access unit.
+        if stream.codec.is_none() {
+            // Passed through: the container's frame is the access unit, and
+            // there is no work to put off.
             stream.pending.push(Unit {
                 pts: ticks,
                 dts: ticks,
@@ -705,44 +749,55 @@ impl TsStream {
                 data: data.to_vec(),
             });
             return Ok(());
-        };
-
-        let sample_rate = stream.sample_rate;
-        let decode = match stream.decode.as_mut() {
-            Some(decode) => decode,
-            None => {
-                let (decoder, mut primed) =
-                    PcmDecoder::open(codec, sample_rate, Some(DECODED_CHANNELS), data)?;
-                let decoded_channels = decoder.channels();
-                let encoder = AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
-                if let Some(samples) = super::frames::frame_samples(codec, data) {
-                    primed.resize(samples as usize * decoded_channels as usize * 2, 0);
-                }
-                stream.decode = Some(Decode {
-                    codec,
-                    decoder,
-                    encoder,
-                    decoded_channels,
-                    sample_rate,
-                    next_pts: None,
-                    anchors: Vec::new(),
-                    decoded: 0,
-                    held: Vec::new(),
-                });
-                let decode = stream.decode.as_mut().unwrap();
-                take_decoded(&mut stream.pending, decode, ticks, primed)?;
-                return Ok(());
-            }
-        };
-        let expect = super::frames::frame_samples(decode.codec, data);
-        let pcm = decode.decoder.decode_or_silence(data, expect);
-        take_decoded(&mut stream.pending, decode, ticks, pcm)?;
+        }
+        stream.held.push((ticks, data.to_vec()));
         Ok(())
+    }
+
+    /// Turn every held packet into access units, decoding all the soundtracks
+    /// at once.
+    ///
+    /// Two phases, and the split is forced by what can cross a thread boundary.
+    /// A decoder owns nothing shared and is `Send`, so one thread per soundtrack
+    /// makes the wait the slowest track rather than the sum of them all — which
+    /// on a film with four DTS soundtracks is most of the wait. The AAC encoder
+    /// wraps a C library holding raw pointers, is not `Send`, and stays here.
+    fn decode_held(&mut self) {
+        std::thread::scope(|scope| {
+            for stream in self.streams.iter_mut().skip(1) {
+                if stream.held.is_empty() {
+                    continue;
+                }
+                let (Some(codec), Some(decoder)) = (stream.codec, stream.decoder.as_mut()) else {
+                    continue;
+                };
+                let held = std::mem::take(&mut stream.held);
+                let pcm = &mut stream.pcm;
+                scope.spawn(move || {
+                    for (ticks, frame) in held {
+                        let expect = super::frames::frame_samples(codec, &frame);
+                        pcm.push((ticks, decoder.decode_or_silence(&frame, expect)));
+                    }
+                });
+            }
+        });
+
+        for stream in self.streams.iter_mut().skip(1) {
+            let Some(encode) = stream.encode.as_mut() else {
+                stream.pcm.clear();
+                continue;
+            };
+            for (ticks, pcm) in std::mem::take(&mut stream.pcm) {
+                if let Err(error) = take_decoded(&mut stream.pending, encode, ticks, pcm) {
+                    tracing::debug!(%error, "dropping an audio packet that would not re-encode");
+                }
+            }
+        }
     }
 
     fn flush_encoders(&mut self) {
         for stream in &mut self.streams {
-            if let Some(decode) = stream.decode.as_mut() {
+            if let Some(decode) = stream.encode.as_mut() {
                 let tail = decode.encoder.finish();
                 place_frames(&mut stream.pending, decode, &tail, true);
             }
@@ -751,10 +806,11 @@ impl TsStream {
 
     /// Write everything held as transport packets, interleaved by decode time.
     fn emit(&mut self) -> Option<Vec<u8>> {
+        self.decode_held();
         // A batch about to be written cannot wait for more packets before
         // deciding where a re-encoded run sits, so this is where it is forced.
         for stream in &mut self.streams {
-            if let Some(decode) = stream.decode.as_mut() {
+            if let Some(decode) = stream.encode.as_mut() {
                 place_frames(&mut stream.pending, decode, &[], true);
             }
         }
@@ -881,7 +937,7 @@ fn prime_decoders(
         }
     }
 
-    streams.retain(|stream| {
+    streams.retain_mut(|stream| {
         if stream.spec.pid == FIRST_ES_PID {
             return true;
         }
@@ -896,7 +952,7 @@ fn prime_decoders(
         let Some(codec) = stream.codec else {
             return true;
         };
-        match decode_chain_opens(codec, stream.sample_rate, frame) {
+        match open_chain(stream, codec, frame) {
             Ok(()) => true,
             Err(error) => {
                 tracing::warn!(
@@ -910,16 +966,34 @@ fn prime_decoders(
     primed
 }
 
-/// Whether both halves of a re-encode can be built for this track.
-fn decode_chain_opens(codec: TranscodeCodec, sample_rate: u32, frame: &[u8]) -> Result<()> {
+/// Build both halves of one track's re-encoding, on its first frame.
+///
+/// Kept rather than proved and thrown away: the frame is decoded once here to
+/// find out whether the chain works and what shape its output is, and the
+/// decoder that did it is the one the film then runs through. The frame itself
+/// is decoded again when the priming read is replayed, which for these codecs —
+/// where every frame stands alone — costs one frame and keeps the packet path
+/// with no special case in it.
+fn open_chain(stream: &mut Stream, codec: TranscodeCodec, frame: &[u8]) -> Result<()> {
+    let sample_rate = stream.sample_rate;
     let (decoder, _) = PcmDecoder::open(codec, sample_rate, Some(DECODED_CHANNELS), frame)?;
-    AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
-    drop(decoder);
+    let decoded_channels = decoder.channels();
+    let encoder = AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
+    stream.decoder = Some(decoder);
+    stream.encode = Some(Encode {
+        encoder,
+        decoded_channels,
+        sample_rate,
+        next_pts: None,
+        anchors: Vec::new(),
+        decoded: 0,
+        held: Vec::new(),
+    });
     Ok(())
 }
 
 /// Take one frame's decoded PCM and encode it.
-fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Decode, ticks: u64, pcm: Vec<u8>) -> Result<()> {
+fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Encode, ticks: u64, pcm: Vec<u8>) -> Result<()> {
     // Where this run starts, if it is contiguous — asked of every packet, so
     // that one rounded container timestamp cannot place the whole run.
     let samples = (ticks as i128 * i64::from(decode.sample_rate) as i128
@@ -938,7 +1012,7 @@ fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Decode, ticks: u64, pcm: V
 /// The ADTS headers stay on, unlike the MP4 path which strips them: a transport
 /// stream carries AAC exactly as the encoder framed it, because there is no
 /// sample entry alongside to repeat what the header says.
-fn place_frames(pending: &mut Vec<Unit>, decode: &mut Decode, adts: &[u8], settle: bool) {
+fn place_frames(pending: &mut Vec<Unit>, decode: &mut Encode, adts: &[u8], settle: bool) {
     for frame in adts_frames(adts) {
         decode.held.push(frame.to_vec());
     }

@@ -276,3 +276,21 @@ mod tests {
         assert!(out.iter().all(|&b| b == 0));
     }
 }
+
+#[cfg(test)]
+mod thread_safety {
+    /// The transport-stream muxer decodes a film's soundtracks side by side —
+    /// on a film with four DTS tracks that is most of what a renderer waits
+    /// through before its first byte. It can only do that while a decoder can
+    /// cross a thread boundary.
+    ///
+    /// The AAC encoder deliberately cannot: it wraps a C library holding raw
+    /// pointers, and stays on the muxing thread. So this is asserted of the
+    /// decoder alone, and it is a real constraint rather than a formality —
+    /// `media::transcode::ts::TsStream::decode_held` stops compiling without it.
+    #[test]
+    fn a_decoder_can_move_between_threads() {
+        fn require_send<T: Send>() {}
+        require_send::<super::PcmDecoder>();
+    }
+}

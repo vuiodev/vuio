@@ -47,7 +47,7 @@ pub use plan::{AudioPlan, Seeked};
 pub use rendition::{
     fit_channels, reencode_to_aac, run_anchor, AacWindow, AAC_FRAME_SAMPLES, ENCODER_DELAY,
 };
-pub use session::{IndexKey, SegmentKey, TranscodeState};
+pub use session::{ChunkKey, IndexKey, SegmentKey, TranscodeState};
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
 #[allow(unused_imports)]
 pub use ts::{

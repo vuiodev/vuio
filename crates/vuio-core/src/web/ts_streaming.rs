@@ -48,8 +48,8 @@ use tracing::{debug, warn};
 
 use crate::media::remux::{browser_video_track, MkvDemuxer, TrackInfo, TS_PACKET_LEN};
 use crate::media::transcode::{
-    audio_disposition, measure_track_rates, promised_ts_length, AudioDisposition, IndexKey,
-    TrackRates, TsStream,
+    audio_disposition, measure_track_rates, promised_ts_length, AudioDisposition, ChunkKey,
+    IndexKey, TrackRates, TranscodeState, TsStream,
 };
 use crate::{database::DatabaseManager, error::AppError, state::AppState};
 
@@ -85,7 +85,9 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
         &method,
         &headers,
     );
+    let began = std::time::Instant::now();
     let (file_id, path, size, filename, info) = resolve(&state, &id).await?;
+    let inspected = began.elapsed();
     let video = browser_video_track(&info.tracks)
         .ok_or(AppError::NotFound)?
         .clone();
@@ -177,7 +179,9 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
     // one this build handles — neither of which is visible from a track id.
     debug!(
         "transcoded ts: id={id}, file={filename}, start={start:.3}s, byte={first_byte}, \
-         promised={promised}, video={} ({:?}), audio=[{}]",
+         promised={promised}, inspect={:.0}ms, plan={:.0}ms, video={} ({:?}), audio=[{}]",
+        inspected.as_secs_f64() * 1000.0,
+        (began.elapsed() - inspected).as_secs_f64() * 1000.0,
         video.codec,
         video.codec_kind,
         audio
@@ -252,7 +256,15 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
         return Ok(busy(&state, &filename));
     };
 
-    Ok(response.body(ts_body(path, video, audio, start, deliver, permit))?)
+    // Everything the opening run of packets depends on except where the seek
+    // lands, which only the demuxer can say. See [`ts_body`].
+    let cache = file_key(file_id, &path)
+        .await
+        .map(|file| (state.transcode.clone(), file, track_signature(&audio)));
+
+    Ok(response.body(ts_body(
+        path, video, audio, start, deliver, permit, cache,
+    ))?)
 }
 
 /// Mux the film on a blocking thread, handing packets over a bounded channel.
@@ -261,6 +273,7 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
 /// packets, which is transport stream's own filler and what a decoder is already
 /// built to skip; long output is cut at the promise, on a packet boundary so
 /// that what arrives is never half a packet.
+#[allow(clippy::too_many_arguments)]
 fn ts_body(
     path: std::path::PathBuf,
     video: TrackInfo,
@@ -268,6 +281,7 @@ fn ts_body(
     start: f64,
     deliver: u64,
     permit: tokio::sync::OwnedSemaphorePermit,
+    cache: Option<(Arc<TranscodeState>, IndexKey, u64)>,
 ) -> Body {
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(PIPELINE_DEPTH);
 
@@ -275,7 +289,14 @@ fn ts_body(
         let _permit = permit;
         let mut sent: u64 = 0;
         let opened = std::time::Instant::now();
-        let mut stream = match TsStream::open(&path, &video, &audio, start) {
+        let stream = TsStream::open(&path, &video, &audio, start);
+        debug!(
+            "opened {} at {start:.3}s in {:.0}ms",
+            path.display(),
+            opened.elapsed().as_secs_f64() * 1000.0
+        );
+        let muxing = std::time::Instant::now();
+        let mut stream = match stream {
             Ok(stream) => stream,
             Err(error) => {
                 // Loud, because the renderer's only symptom is a film that will
@@ -287,19 +308,75 @@ fn ts_body(
             }
         };
 
+        // The run this response opens with, which every byte offset inside the
+        // same group of pictures produces identically. A television seeking
+        // this film asks for twenty-odd of them and reads a few kilobytes of
+        // each, so most of a search is the same answer over again.
+        let key = cache.as_ref().map(|(_, file, tracks)| ChunkKey {
+            file: *file,
+            origin: stream.origin(),
+            tracks: *tracks,
+        });
+        let mut replay = false;
+        if let (Some((state, ..)), Some(key)) = (cache.as_ref(), key) {
+            if let Some(ready) = state.cached_chunk(&key) {
+                debug!(
+                    "opening run for {} at origin {} served from memory in {:.0}ms",
+                    path.display(),
+                    key.origin,
+                    opened.elapsed().as_secs_f64() * 1000.0
+                );
+                if !send_capped(&tx, &mut sent, deliver, ready.to_vec()) {
+                    return;
+                }
+                // Produced again only if the renderer wants more than the run
+                // it just got — a seek probe reads a little and goes away.
+                if tx.is_closed() {
+                    return;
+                }
+                replay = true;
+            }
+        }
+
         let mut chunks = 0usize;
-        while let Some(chunk) = stream.next_chunk() {
+        loop {
+            // Nothing to produce this for. A renderer seeking a film opens a
+            // connection per probe and abandons it after a few kilobytes, so
+            // without this each one leaves a muxer decoding four soundtracks
+            // into a socket that closed — twenty-seven of them during one seek.
+            if tx.is_closed() {
+                debug!(
+                    "{} abandoned after {chunks} chunks, {sent} bytes",
+                    path.display()
+                );
+                return;
+            }
+            let Some(chunk) = stream.next_chunk() else {
+                break;
+            };
+            if replay {
+                // The muxer's own first run, which is the one already sent.
+                replay = false;
+                chunks += 1;
+                continue;
+            }
             if chunks == 0 {
                 // How long a renderer waited before its first byte, which is
                 // the other way this fails: a set that gives up before the
                 // first group of pictures has been muxed shows the same nothing
                 // as one that was handed something it could not decode.
                 debug!(
-                    "first chunk for {}: {} bytes after {:.2}s",
+                    "first chunk for {}: {} bytes after {:.0}ms of muxing ({:.0}ms total)",
                     path.display(),
                     chunk.len(),
-                    opened.elapsed().as_secs_f64()
+                    muxing.elapsed().as_secs_f64() * 1000.0,
+                    opened.elapsed().as_secs_f64() * 1000.0
                 );
+            }
+            if chunks == 0 {
+                if let (Some((state, ..)), Some(key)) = (cache.as_ref(), key) {
+                    state.remember_chunk(key, Arc::new(chunk.clone()));
+                }
             }
             chunks += 1;
             if !send_capped(&tx, &mut sent, deliver, chunk) {
@@ -424,6 +501,31 @@ fn padding_tail(first: u64, promised: u64) -> Result<Response, AppError> {
         .body(Body::from_stream(zeroes))?)
 }
 
+/// Which soundtracks a response carries, as one number.
+///
+/// `?audio_track=` produces a different stream from the same instant, so the
+/// remembered opening run has to be told apart by it.
+fn track_signature(audio: &[TrackInfo]) -> u64 {
+    audio.iter().fold(0u64, |signature, track| {
+        signature.wrapping_mul(31).wrapping_add(u64::from(track.id))
+    })
+}
+
+/// The file's identity, as the caches key on it.
+async fn file_key(file_id: i64, path: &std::path::Path) -> Option<IndexKey> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    Some(IndexKey {
+        id: file_id,
+        size: metadata.len(),
+        modified: metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    })
+}
+
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers.get(name).and_then(|value| value.to_str().ok())
 }
@@ -485,18 +587,8 @@ async fn track_rates<D: DatabaseManager>(
     path: &std::path::Path,
     tracks: &[TrackInfo],
 ) -> Arc<TrackRates> {
-    let key = match tokio::fs::metadata(path).await {
-        Ok(metadata) => IndexKey {
-            id: file_id,
-            size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0),
-        },
-        Err(_) => return Arc::new(TrackRates::default()),
+    let Some(key) = file_key(file_id, path).await else {
+        return Arc::new(TrackRates::default());
     };
     if let Some(rates) = state.transcode.cached_rates(&key).await {
         return rates;

@@ -59,6 +59,34 @@ pub struct SegmentKey {
 const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_CACHED_SEGMENT_BYTES: usize = 48 * 1024 * 1024;
 
+/// Identifies the first run of packets a seeked response opens with.
+///
+/// Worth remembering because a television seeking a transport stream
+/// binary-searches it — twenty-odd ranged requests, each read only far enough to
+/// find one clock value — and a coarse seek snaps every byte offset inside one
+/// group of pictures back to the same random-access point. On a film with
+/// ten-second groups that is most of the search asking, in different words, for
+/// bytes that have already been produced: twenty-nine requests, eight distinct
+/// answers, measured.
+///
+/// The soundtracks are part of the key because `?audio_track=` produces a
+/// different stream from the same instant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ChunkKey {
+    pub file: IndexKey,
+    /// Where the demuxer landed, in the source's own units.
+    pub origin: u64,
+    /// Which soundtracks the response carries.
+    pub tracks: u64,
+}
+
+/// How many opening runs to keep, and how much memory they may occupy.
+///
+/// One is a fraction of a second of film, so single-digit megabytes each on a
+/// high-bitrate feature — a count alone would bound the wrong thing.
+const MAX_CACHED_CHUNKS: usize = 32;
+const MAX_CACHED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+
 /// How many films' soundtrack measurements to keep.
 ///
 /// Two numbers per soundtrack, so this is bytes rather than megabytes and the
@@ -71,7 +99,17 @@ pub struct TranscodeState {
     cache: Mutex<Cache>,
     segments: Mutex<SegmentCache>,
     rates: Mutex<RateCache>,
+    /// A plain lock, not the async one the others use: this is read and written
+    /// from the blocking thread that does the muxing, which cannot await.
+    chunks: std::sync::Mutex<ChunkCache>,
     permits: Arc<Semaphore>,
+}
+
+#[derive(Debug, Default)]
+struct ChunkCache {
+    entries: HashMap<ChunkKey, Arc<Vec<u8>>>,
+    order: Vec<ChunkKey>,
+    bytes: usize,
 }
 
 /// What each film's tracks were measured to cost.
@@ -120,6 +158,7 @@ impl TranscodeState {
             cache: Mutex::new(Cache::default()),
             segments: Mutex::new(SegmentCache::default()),
             rates: Mutex::new(RateCache::default()),
+            chunks: std::sync::Mutex::new(ChunkCache::default()),
             permits: Arc::new(Semaphore::new(max_concurrent.max(1))),
         }
     }
@@ -165,6 +204,36 @@ impl TranscodeState {
             while cache.order.len() > MAX_CACHED_RATES {
                 let oldest = cache.order.remove(0);
                 cache.entries.remove(&oldest);
+            }
+        }
+    }
+
+    /// The opening run of packets for `key`, if it was produced recently.
+    ///
+    /// Synchronous, because the caller is the blocking thread doing the muxing.
+    /// A poisoned lock is treated as a miss: the worst that costs is producing
+    /// the run again.
+    pub fn cached_chunk(&self, key: &ChunkKey) -> Option<Arc<Vec<u8>>> {
+        self.chunks.lock().ok()?.entries.get(key).cloned()
+    }
+
+    /// Remember an opening run, evicting oldest-first past either ceiling.
+    pub fn remember_chunk(&self, key: ChunkKey, chunk: Arc<Vec<u8>>) {
+        let Ok(mut cache) = self.chunks.lock() else {
+            return;
+        };
+        let len = chunk.len();
+        if len > MAX_CACHED_CHUNK_BYTES {
+            return;
+        }
+        if cache.entries.insert(key, chunk).is_none() {
+            cache.order.push(key);
+            cache.bytes += len;
+            while cache.order.len() > MAX_CACHED_CHUNKS || cache.bytes > MAX_CACHED_CHUNK_BYTES {
+                let oldest = cache.order.remove(0);
+                if let Some(gone) = cache.entries.remove(&oldest) {
+                    cache.bytes = cache.bytes.saturating_sub(gone.len());
+                }
             }
         }
     }
