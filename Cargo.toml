@@ -8,14 +8,20 @@ members = [
     # ships the binary does not carry its dependencies.
     "crates/vuio-bench",
 
-    # The AC-3 / E-AC-3 / DTS decoders, vendored verbatim from github.com/OxideAV
-    # by `scripts/vendor-oxideav.sh`. Members so cargo resolves the path deps and
-    # `cargo test -p oxideav-ac3` works; deliberately not default members, so
-    # their own test and bench targets stay off the release path — the same
-    # reasoning that keeps `vuio-bench` out, and the reason a plain `cargo build`
-    # still compiles them (vuio-core depends on them) without building their tests.
+    # Our AC-3 / E-AC-3 codec — forked from oxideav-ac3, now maintained here.
+    # Not a default member for the same reason the vendored crates are not: its
+    # 100-plus tests (several of which shell out to ffmpeg) stay off the release
+    # path, while `cargo build` still compiles the library via vuio-core.
+    "crates/vuio-codec-ac3",
+
+    # The DTS decoder and the shared codec runtime, vendored verbatim from
+    # github.com/OxideAV by `scripts/vendor-oxideav.sh`. Members so cargo
+    # resolves the path deps and `cargo test -p oxideav-dts` works; deliberately
+    # not default members, so their own test and bench targets stay off the
+    # release path — the same reasoning that keeps `vuio-bench` out, and the
+    # reason a plain `cargo build` still compiles them (vuio-core depends on
+    # them) without building their tests.
     "crates/vendor/oxideav-core",
-    "crates/vendor/oxideav-ac3",
     "crates/vendor/oxideav-dts",
     "crates/vendor/libxaac-sys",
     "crates/vendor/xaac-rs",
@@ -42,7 +48,7 @@ xaac-rs = { path = "crates/vendor/xaac-rs" }
 # audio decoding and encoding without requiring release rebuilds.
 [profile.dev.package.oxideav-core]
 opt-level = 3
-[profile.dev.package.oxideav-ac3]
+[profile.dev.package.vuio-codec-ac3]
 opt-level = 3
 [profile.dev.package.oxideav-dts]
 opt-level = 3

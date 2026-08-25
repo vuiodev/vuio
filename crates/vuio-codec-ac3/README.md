@@ -1,6 +1,15 @@
-# oxideav-ac3
+# vuio-codec-ac3
 
-[![CI](https://github.com/OxideAV/oxideav-ac3/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-ac3/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-ac3.svg)](https://crates.io/crates/oxideav-ac3) [![docs.rs](https://docs.rs/oxideav-ac3/badge.svg)](https://docs.rs/oxideav-ac3) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+VuIO's AC-3 / E-AC-3 decoder and encoder.
+
+Forked from [oxideav-ac3](https://github.com/OxideAV/oxideav-ac3) at
+`8acf106` (v0.0.10-23-g8acf106) by Mark Karpeles, MIT licensed — see `LICENSE`,
+which is retained unchanged. VuIO maintains it here rather than vendoring it
+because the encoder has diverged: `crates/vendor/` is for verbatim upstream
+copies, and this is no longer one.
+
+The documentation below is inherited from the fork point and describes the
+codec itself, which is unchanged in behaviour.
 
 Pure-Rust **AC-3 (Dolby Digital)** + **E-AC-3 (Enhanced AC-3 / Dolby
 Digital Plus)** audio decoder + encoder — elementary streams per
@@ -358,7 +367,7 @@ fixture (`tests/robustness.rs`).
 [dependencies]
 oxideav-core = "0.1"
 oxideav-codec = "0.1"
-oxideav-ac3 = "0.0"
+vuio-codec-ac3 = { path = "crates/vuio-codec-ac3" }
 ```
 
 ## Codec ID

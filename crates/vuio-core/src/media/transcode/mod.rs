@@ -175,8 +175,8 @@ pub(crate) fn make_decoder(
             // eac3 factory registers the eac3 codec id, which is what the frame's
             // own reported id has to match for the registry-facing accessors.
             match codec {
-                TranscodeCodec::Eac3 => oxideav_ac3::decoder::make_eac3_decoder(&params),
-                _ => oxideav_ac3::decoder::make_decoder(&params),
+                TranscodeCodec::Eac3 => vuio_codec_ac3::decoder::make_eac3_decoder(&params),
+                _ => vuio_codec_ac3::decoder::make_decoder(&params),
             }
             .map_err(|e| anyhow::anyhow!("AC-3 decoder: {e}"))
         }

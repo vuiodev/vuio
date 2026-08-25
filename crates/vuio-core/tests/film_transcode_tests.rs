@@ -16,7 +16,7 @@ use vuio_core::database::MediaRepository;
 
 /// The vendored AC-3 conformance fixture: 48 kHz stereo, 440 Hz, 768-byte
 /// frames of 1536 samples each.
-const AC3: &[u8] = include_bytes!("../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+const AC3: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 const AC3_FRAME_LEN: usize = 768;
 const AC3_FRAME_SAMPLES: u64 = 1536;
 const AC3_FRAME_MS: f64 = AC3_FRAME_SAMPLES as f64 / 48.0;

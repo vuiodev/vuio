@@ -196,7 +196,7 @@ mod tests {
 
     #[cfg(feature = "transcode-ac3")]
     const AC3_FIXTURE: &[u8] =
-        include_bytes!("../../../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+        include_bytes!("../../../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 
     #[cfg(feature = "transcode-ac3")]
     fn fixture_plan() -> (AudioPlan, tempfile::TempDir) {

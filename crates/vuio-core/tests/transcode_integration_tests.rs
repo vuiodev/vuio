@@ -31,7 +31,7 @@ use vuio_core::web::{create_router, Surface};
 /// vendored decoder validates itself against. Using it here rather than a
 /// synthetic stub is the point: the response is only meaningful if the bytes
 /// really decode.
-const AC3: &[u8] = include_bytes!("../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+const AC3: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 
 /// One AC-3 file in a library, and the router over it.
 async fn library() -> (TempDir, AppState, i64) {

@@ -1,16 +1,20 @@
 #!/bin/bash
-# Vendor the OxideAV audio decoders into crates/vendor.
+# Vendor the OxideAV codec runtime and DTS decoder into crates/vendor.
 #
 # VuIO decodes AC-3, E-AC-3 and DTS so a TV without those licences gets sound.
-# The decoders come from github.com/OxideAV, and this repository carries a copy
-# rather than a dependency: oxideav-dts is published to crates.io only as a
-# yanked 0.0.1, so a registry dependency cannot ship DTS at all, and the rest of
-# the family moves fast enough that a floating version would change what a
-# release decodes without anyone choosing it.
+# oxideav-core and oxideav-dts come from github.com/OxideAV, and this repository
+# carries a copy rather than a dependency: oxideav-dts is published to crates.io
+# only as a yanked 0.0.1, so a registry dependency cannot ship DTS at all, and
+# the rest of the family moves fast enough that a floating version would change
+# what a release decodes without anyone choosing it.
 #
-# The copies are verbatim — same crate names, same file layout, no patches — so
-# `diff -r crates/vendor/oxideav-ac3/src <upstream>/src` stays meaningful and a
-# refresh is a re-run of this script rather than a merge. Never hand-edit
+# AC-3 and E-AC-3 are NOT vendored. They were, until VuIO took the encoder
+# somewhere upstream had not gone; that crate is now a fork we maintain, at
+# crates/vuio-codec-ac3, and this script deliberately leaves it alone.
+#
+# The copies here are verbatim — same crate names, same file layout, no patches
+# — so `diff -r crates/vendor/oxideav-dts/src <upstream>/src` stays meaningful
+# and a refresh is a re-run of this script rather than a merge. Never hand-edit
 # anything under crates/vendor: change it upstream and re-vendor.
 #
 # Usage:
@@ -35,10 +39,9 @@ SELF="$ROOT/scripts/vendor-oxideav.sh"
 
 # The pinned revisions. `--update` rewrites these lines in place.
 PIN_oxideav_core=defa866dffdd224424d75ac7a38be868723395a5
-PIN_oxideav_ac3=8acf106d50d58f359946c086d1b393a060eaf5f6
 PIN_oxideav_dts=528203ed608223c5137843009054e05920af5c50
 
-CRATES="oxideav-core oxideav-ac3 oxideav-dts"
+CRATES="oxideav-core oxideav-dts"
 
 UPDATE=0
 [ "${1:-}" = "--update" ] && UPDATE=1

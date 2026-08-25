@@ -24,6 +24,10 @@ path = "src/aac_bench.rs"
 name = "ac3-bench"
 path = "src/ac3_bench.rs"
 
+[[bin]]
+name = "ac3-golden"
+path = "src/ac3_golden.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.6", features = ["derive"] }
@@ -34,7 +38,7 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 # crate is `publish = false` and exists only to drive the database from the
 # inside, which is the same category as core's own dev-dependency on itself.
 vuio-core = { path = "../vuio-core", version = "0.0.45", features = ["unstable-internals", "transcode-aac", "transcode-ac3", "transcode-dts"] }
-oxideav-ac3 = { path = "../vendor/oxideav-ac3" }
+vuio-codec-ac3 = { path = "../vuio-codec-ac3" }
 oxideav-dts = { path = "../vendor/oxideav-dts" }
 oxideav-core = { path = "../vendor/oxideav-core" }
 xaac-rs = "0.2"

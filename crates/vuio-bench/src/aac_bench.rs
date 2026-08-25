@@ -1,6 +1,6 @@
 //! Benchmark for audio decoders and encoders in VuIO:
-//! - AC-3 Decoder (oxideav-ac3)
-//! - E-AC-3 Decoder (oxideav-ac3)
+//! - AC-3 Decoder (vuio-codec-ac3)
+//! - E-AC-3 Decoder (vuio-codec-ac3)
 //! - DTS Decoder (oxideav-dts)
 //! - AAC Encoder (xaac-rs vs Apple Native vs oxideav-aac)
 
@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use vuio_core::media::transcode::{PcmDecoder, TranscodeCodec};
 
 const AC3_FIXTURE: &[u8] =
-    include_bytes!("../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+    include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 const DTS_FIXTURE: &[u8] =
     include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
 
@@ -69,7 +69,7 @@ fn bench_ac3_decode(iterations: usize) -> (Duration, f64, usize) {
 
 /// Benchmark E-AC-3 (Dolby Digital Plus) Decoding
 fn bench_eac3_decode(iterations: usize) -> (Duration, f64, usize) {
-    // Generate a compliant E-AC-3 bitstream via oxideav-ac3's EAC-3 encoder
+    // Generate a compliant E-AC-3 bitstream via vuio-codec-ac3's E-AC-3 encoder
     use oxideav_core::{AudioFrame, CodecId, CodecParameters, Frame, SampleFormat};
 
     let sample_rate = 48000;
@@ -79,7 +79,7 @@ fn bench_eac3_decode(iterations: usize) -> (Duration, f64, usize) {
     params.channels = Some(channels);
     params.sample_format = Some(SampleFormat::S16);
 
-    let mut enc = oxideav_ac3::eac3::make_encoder(&params).expect("init Eac3Encoder");
+    let mut enc = vuio_codec_ac3::eac3::make_encoder(&params).expect("init Eac3Encoder");
     let test_pcm = generate_sine_wave(sample_rate, channels, 1.0);
     let test_bytes = pcm_i16_to_u8_le(&test_pcm);
 
@@ -430,7 +430,7 @@ fn main() {
 
     // 1. AC-3 Decode Benchmark
     {
-        print!("Benchmarking AC-3 Decoder (oxideav-ac3)... ");
+        print!("Benchmarking AC-3 Decoder (vuio-codec-ac3)... ");
         let iterations = 1000; // ~512 seconds of audio
         let (dur, audio_secs, out_bytes) = bench_ac3_decode(iterations);
         let speed = audio_secs / dur.as_secs_f64();
@@ -445,7 +445,7 @@ fn main() {
 
     // 2. E-AC-3 Decode Benchmark
     {
-        print!("Benchmarking E-AC-3 Decoder (oxideav-ac3)... ");
+        print!("Benchmarking E-AC-3 Decoder (vuio-codec-ac3)... ");
         let iterations = 5000; // ~160 seconds of audio
         let (dur, audio_secs, out_bytes) = bench_eac3_decode(iterations);
         let speed = audio_secs / dur.as_secs_f64();

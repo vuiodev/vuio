@@ -1,0 +1,31 @@
+[package]
+name = "vuio-codec-ac3"
+publish = false
+version = "0.0.45"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/vuiodev/vuio"
+# Forked from github.com/OxideAV/oxideav-ac3 at commit
+# 8acf106d50d58f359946c086d1b393a060eaf5f6 (v0.0.10-23-g8acf106), MIT, by
+# Mark Karpeles. VuIO carries the encoder forward independently — see the
+# "Our AC-3 codec" section of CLAUDE.md — so this is no longer a verbatim
+# vendored copy and `scripts/vendor-oxideav.sh` no longer touches it.
+authors = ["Mark Karpeles", "vyrti"]
+description = "AC-3 / E-AC-3 decoder and encoder. Forked from oxideav-ac3."
+
+readme = "README.md"
+keywords = ["multimedia", "audio", "ac3", "dolby", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav-core = { path = "../vendor/oxideav-core" }
+
+# Inherited from the fork point: 13.7k lines that do not build under this
+# repository's `-D warnings`. Tightening this is its own chore, deliberately
+# kept off the performance work so that diff stays readable.
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

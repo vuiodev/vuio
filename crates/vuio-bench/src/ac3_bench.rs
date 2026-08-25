@@ -1,4 +1,4 @@
-//! AC-3 Encoder Benchmark & Quality Suite: oxideav-ac3 vs FFmpeg & Apple Native
+//! AC-3 Encoder Benchmark & Quality Suite: vuio-codec-ac3 vs FFmpeg & Apple Native
 //!
 //! Measures encoding throughput, real-time speedup factor, latency, and
 //! reconstruction fidelity (SNR, PSNR, RMS error) for multi-channel AC-3 encoding.
@@ -87,8 +87,8 @@ impl BenchResult {
     }
 }
 
-/// Benchmark oxideav-ac3 encoder
-pub fn bench_oxideav_ac3(
+/// Benchmark our AC-3 encoder (vuio-codec-ac3)
+pub fn bench_vuio_ac3(
     pcm_bytes: &[u8],
     sample_rate: u32,
     channels: u16,
@@ -125,7 +125,7 @@ pub fn bench_oxideav_ac3(
     let output_bytes = out_data.len();
 
     Ok(BenchResult {
-        name: "oxideav-ac3".to_string(),
+        name: "vuio-codec-ac3".to_string(),
         duration,
         audio_duration_secs,
         pcm_bytes: pcm_bytes.len(),
@@ -562,9 +562,9 @@ fn main() {
     let pcm_bytes_5ch = pcm_i16_to_u8_le(&pcm_5ch);
     println!("  Generated PCM: {} samples ({:.2} MB)", pcm_5ch.len(), pcm_bytes_5ch.len() as f64 / (1024.0 * 1024.0));
 
-    // 1. oxideav-ac3
-    println!("\n[1] oxideav-ac3 Encoder (Pure Rust SIMD-accelerated):");
-    let ox_res_5 = bench_oxideav_ac3(&pcm_bytes_5ch, sample_rate, channels_5, bitrate_640k);
+    // 1. vuio-codec-ac3
+    println!("\n[1] vuio-codec-ac3 Encoder (pure Rust):");
+    let ox_res_5 = bench_vuio_ac3(&pcm_bytes_5ch, sample_rate, channels_5, bitrate_640k);
     match &ox_res_5 {
         Ok(res) => res.print_summary(),
         Err(e) => println!("  ERROR: {e}"),
@@ -593,7 +593,7 @@ fn main() {
     if let Ok(ox) = &ox_res_5 {
         if let Ok(dec_pcm) = decode_ac3_with_ffmpeg(&ox.encoded_data, sample_rate, channels_5) {
             let report = evaluate_quality(&pcm_5ch, &dec_pcm, channels_5);
-            print_quality_table(&report, "oxideav-ac3");
+            print_quality_table(&report, "vuio-codec-ac3");
         }
     }
     if let Ok(ff) = &ff_res_5 {
@@ -614,8 +614,8 @@ fn main() {
     let pcm_bytes_6ch = pcm_i16_to_u8_le(&pcm_6ch);
     println!("  Generated PCM: {} samples ({:.2} MB)", pcm_6ch.len(), pcm_bytes_6ch.len() as f64 / (1024.0 * 1024.0));
 
-    println!("\n[1] oxideav-ac3 Encoder (Pure Rust SIMD-accelerated):");
-    let ox_res_6 = bench_oxideav_ac3(&pcm_bytes_6ch, sample_rate, channels_6, bitrate_640k);
+    println!("\n[1] vuio-codec-ac3 Encoder (pure Rust):");
+    let ox_res_6 = bench_vuio_ac3(&pcm_bytes_6ch, sample_rate, channels_6, bitrate_640k);
     match &ox_res_6 {
         Ok(res) => res.print_summary(),
         Err(e) => println!("  ERROR: {e}"),
@@ -632,7 +632,7 @@ fn main() {
     if let Ok(ox) = &ox_res_6 {
         if let Ok(dec_pcm) = decode_ac3_with_ffmpeg(&ox.encoded_data, sample_rate, channels_6) {
             let report = evaluate_quality(&pcm_6ch, &dec_pcm, channels_6);
-            print_quality_table(&report, "oxideav-ac3");
+            print_quality_table(&report, "vuio-codec-ac3");
         }
     }
     if let Ok(ff) = &ff_res_6 {
@@ -654,8 +654,8 @@ fn main() {
     let pcm_bytes_2ch = pcm_i16_to_u8_le(&pcm_2ch);
     println!("  Generated PCM: {} samples ({:.2} MB)", pcm_2ch.len(), pcm_bytes_2ch.len() as f64 / (1024.0 * 1024.0));
 
-    println!("\n[1] oxideav-ac3 Encoder (Pure Rust SIMD-accelerated):");
-    let ox_res_2 = bench_oxideav_ac3(&pcm_bytes_2ch, sample_rate, channels_2, bitrate_192k);
+    println!("\n[1] vuio-codec-ac3 Encoder (pure Rust):");
+    let ox_res_2 = bench_vuio_ac3(&pcm_bytes_2ch, sample_rate, channels_2, bitrate_192k);
     match &ox_res_2 {
         Ok(res) => res.print_summary(),
         Err(e) => println!("  ERROR: {e}"),
@@ -672,7 +672,7 @@ fn main() {
     if let Ok(ox) = &ox_res_2 {
         if let Ok(dec_pcm) = decode_ac3_with_ffmpeg(&ox.encoded_data, sample_rate, channels_2) {
             let report = evaluate_quality(&pcm_2ch, &dec_pcm, channels_2);
-            print_quality_table(&report, "oxideav-ac3");
+            print_quality_table(&report, "vuio-codec-ac3");
         }
     }
     if let Ok(ff) = &ff_res_2 {

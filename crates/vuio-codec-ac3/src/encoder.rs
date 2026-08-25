@@ -172,6 +172,9 @@ pub fn make_encoder_with_metadata(
         fscod,
         frmsizecod,
         frame_bytes: frame_bytes as usize,
+        crc1_multiplier: crate::crc::ac3_crc_prefix_multiplier(
+            crc1_region_len(frame_bytes as usize),
+        ),
         // 256 samples of left-context per channel feed the first MDCT.
         // Includes the LFE channel (last interleaved slot when lfeon=1).
         delay_line: vec![vec![0.0f32; SAMPLES_PER_BLOCK]; total_chans],
@@ -476,6 +479,11 @@ struct Ac3Encoder {
     fscod: u8,
     frmsizecod: u8,
     frame_bytes: usize,
+    /// The GF(2) multiplier that solves `crc1` (§7.10.1). It depends only on
+    /// the length of the 5/8 region, which is fixed by `frame_bytes`, so it is
+    /// computed once here rather than per frame — see
+    /// [`crate::crc::ac3_crc_prefix_multiplier`].
+    crc1_multiplier: u16,
     /// Last block's right-half (256 samples) per channel, forming the
     /// left context for the next MDCT window. Includes the LFE channel
     /// at index `channels` when `lfeon`.
@@ -1886,7 +1894,8 @@ impl Ac3Encoder {
         let frame_words = self.frame_bytes / 2;
         let five_eighths_words = (frame_words >> 1) + (frame_words >> 3);
         let five_eighths_bytes = five_eighths_words * 2;
-        let crc1_val = ac3_crc_solve_prefix(&frame[2..five_eighths_bytes]);
+        let crc1_val =
+            ac3_crc_solve_prefix_with(&frame[2..five_eighths_bytes], self.crc1_multiplier);
         frame[2] = (crc1_val >> 8) as u8;
         frame[3] = (crc1_val & 0xFF) as u8;
         debug_assert_eq!(
@@ -2609,6 +2618,172 @@ pub(crate) struct BitAllocParams {
     pub(crate) lfefgaincod: u8,
 }
 
+/// The part of §7.2.2 bit allocation that does not depend on `snroffst`.
+///
+/// PSD, band PSD, the excitation leak filters, the hearing-threshold floor and
+/// any §7.2.2.6 delta bit allocation all depend only on the exponents and the
+/// fixed allocation parameters. `snroffst` enters at the very last step, in
+/// [`bap_from_mask`], as a constant subtracted from every band's masking level.
+///
+/// That matters because the rate-control tuner evaluates on the order of 250
+/// candidate `snroffst` values per frame, and computing this whole chain for
+/// each of them — which is what the encoder used to do — was the single
+/// largest cost in the encoder. Computed once per channel-block per frame, it
+/// is a rounding error.
+///
+/// `psd` is deliberately *not* cached: it is `3072 - (exp << 7)`, two
+/// instructions from an exponent array [`bap_from_mask`] already has, and
+/// caching it would mean 1 KiB per channel-block instead of 200 bytes.
+#[derive(Clone, Copy)]
+pub(crate) struct MaskCurve {
+    mask: [i32; 50],
+    floor: i32,
+    start: usize,
+    end: usize,
+}
+
+impl MaskCurve {
+    /// An empty curve, for a channel with no coefficients to allocate.
+    pub(crate) fn empty() -> Self {
+        Self {
+            mask: [0; 50],
+            floor: 0,
+            start: 0,
+            end: 0,
+        }
+    }
+}
+
+/// Every channel-slot's masking curve for every block of one frame.
+///
+/// Slot layout matches the `baps` arrays the tuners carry: `0..nchan` are the
+/// full-bandwidth channels, `nchan` is the coupling pseudo-channel, and
+/// `nchan + 1` is the LFE.
+///
+/// Built once per tuner invocation. The rate-control search then evaluates its
+/// couple of hundred candidates with [`bap_from_mask`] alone, which is the
+/// point of the split — see [`MaskCurve`].
+///
+/// Every field the candidates vary (`csnroffst`, `fsnroffst`, `cplfsnroffst`,
+/// `lfefsnroffst`) reaches bit allocation only through
+/// [`snroffset_of`], so the curves stay valid for the whole search.
+/// `cplfgaincod` and `lfefgaincod` *do* affect a curve, which is why they are
+/// substituted here at build time — but they are fixed for the frame.
+pub(crate) struct MaskBank {
+    curves: Vec<MaskCurve>,
+    blocks: usize,
+}
+
+impl MaskBank {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn build(
+        ba: &BitAllocParams,
+        exps: &[Vec<[u8; N_COEFFS]>],
+        end: usize,
+        end_ch: Option<&[usize]>,
+        nchan: usize,
+        fscod: u8,
+        cpl: &CouplingPlan,
+        dba: &DbaPlan,
+        lfeon: bool,
+    ) -> Self {
+        let blocks = exps[0].len();
+        let mut curves = vec![MaskCurve::empty(); (nchan + 2) * blocks];
+
+        for ch in 0..nchan {
+            let ch_end = end_ch.map_or(end, |e| e[ch]);
+            for blk in 0..exps[ch].len() {
+                curves[ch * blocks + blk] =
+                    compute_mask_fbw(&exps[ch][blk], ch_end, fscod, ba, Some((dba, ch)));
+            }
+        }
+
+        if cpl.in_use {
+            let cpl_idx = nchan;
+            let mut cpl_ba = *ba;
+            cpl_ba.fgaincod = ba.cplfgaincod;
+            let (begf_mant, endf_mant) = (cpl.begf_mant(), cpl.endf_mant());
+            for blk in 0..exps[cpl_idx].len() {
+                curves[cpl_idx * blocks + blk] = compute_mask_cpl(
+                    &exps[cpl_idx][blk],
+                    begf_mant,
+                    endf_mant,
+                    fscod,
+                    &cpl_ba,
+                    Some((dba, MAX_FBW)),
+                );
+            }
+        }
+
+        if lfeon {
+            let lfe_idx = nchan + 1;
+            let mut lfe_ba = *ba;
+            lfe_ba.fgaincod = ba.lfefgaincod;
+            for blk in 0..exps[lfe_idx].len() {
+                curves[lfe_idx * blocks + blk] =
+                    compute_mask_fbw(&exps[lfe_idx][blk], LFE_END_MANT, fscod, &lfe_ba, None);
+            }
+        }
+
+        Self { curves, blocks }
+    }
+
+    #[inline(always)]
+    pub(crate) fn get(&self, slot: usize, blk: usize) -> &MaskCurve {
+        &self.curves[slot * self.blocks + blk]
+    }
+}
+
+/// The `snroffst` value §7.2.2.5 derives from the coarse and fine fields.
+#[inline(always)]
+pub(crate) fn snroffset_of(ba: &BitAllocParams) -> i32 {
+    (((ba.csnroffst as i32 - 15) << 4) + ba.fsnroffst as i32) << 2
+}
+
+/// The final §7.2.2.7 bap lookup: the only part of bit allocation that
+/// `snroffset` reaches.
+///
+/// Shared by the full-bandwidth and coupling paths, which differ in this step
+/// only by where they start and which 64-entry pointer table they read.
+#[inline]
+pub(crate) fn bap_from_mask(
+    exp: &[u8; N_COEFFS],
+    curve: &MaskCurve,
+    snroffset: i32,
+    ptr_tab: &[u8; 64],
+    bap_out: &mut [u8; N_COEFFS],
+) {
+    let (start, end) = (curve.start, curve.end);
+    if end <= start {
+        return;
+    }
+    let floor = curve.floor;
+    let mut i = start;
+    let mut j = MASKTAB[start] as usize;
+    loop {
+        let lastbin = (BNDTAB[j] as usize + BNDSZ[j] as usize).min(end);
+        let mut m = curve.mask[j];
+        m -= snroffset;
+        m -= floor;
+        if m < 0 {
+            m = 0;
+        }
+        m &= 0x1fe0;
+        m += floor;
+        while i < lastbin {
+            // psd[i], recomputed rather than stored — see `MaskCurve`.
+            let psd = 3072 - ((exp[i] as i32) << 7);
+            let addr = ((psd - m) >> 5).clamp(0, 63) as usize;
+            bap_out[i] = ptr_tab[addr];
+            i += 1;
+        }
+        if i >= end {
+            break;
+        }
+        j += 1;
+    }
+}
+
 /// Run the parametric bit allocator for one channel (start=0..end)
 /// and fill `bap_out` with the resulting pointers.
 ///
@@ -2645,8 +2820,23 @@ pub(crate) fn compute_bap_table(
     dba: Option<(&DbaPlan, usize)>,
     ptr_tab: &[u8; 64],
 ) {
+    let curve = compute_mask_fbw(exp, end, fscod, ba, dba);
+    bap_from_mask(exp, &curve, snroffset_of(ba), ptr_tab, bap_out);
+}
+
+/// The `snroffst`-independent half of the full-bandwidth allocator: §7.2.2.1
+/// through §7.2.2.6, stopping just before the bap lookup.
+///
+/// See [`MaskCurve`] for why this is split out.
+pub(crate) fn compute_mask_fbw(
+    exp: &[u8; N_COEFFS],
+    end: usize,
+    fscod: u8,
+    ba: &BitAllocParams,
+    dba: Option<(&DbaPlan, usize)>,
+) -> MaskCurve {
     if end == 0 {
-        return;
+        return MaskCurve::empty();
     }
     // PSD
     let mut psd = [0i32; N_COEFFS];
@@ -2681,7 +2871,6 @@ pub(crate) fn compute_bap_table(
     let dbknee = DBPBTAB[ba.dbpbcod as usize];
     let floor = FLOORTAB[ba.floorcod as usize];
     let fgain = FASTGAIN[ba.fgaincod as usize];
-    let snroffset = (((ba.csnroffst as i32 - 15) << 4) + ba.fsnroffst as i32) << 2;
 
     let mut excite = [0i32; 50];
     let mut lowcomp = 0i32;
@@ -2750,28 +2939,11 @@ pub(crate) fn compute_bap_table(
     if let Some((plan, idx)) = dba {
         apply_dba_segments(plan, idx, &mut mask);
     }
-    // bap.
-    let mut i = 0usize;
-    let mut j = MASKTAB[0] as usize;
-    loop {
-        let lastbin = (BNDTAB[j] as usize + BNDSZ[j] as usize).min(end);
-        let mut m = mask[j];
-        m -= snroffset;
-        m -= floor;
-        if m < 0 {
-            m = 0;
-        }
-        m &= 0x1fe0;
-        m += floor;
-        while i < lastbin {
-            let addr = ((psd[i] - m) >> 5).clamp(0, 63) as usize;
-            bap_out[i] = ptr_tab[addr];
-            i += 1;
-        }
-        if i >= end {
-            break;
-        }
-        j += 1;
+    MaskCurve {
+        mask,
+        floor,
+        start: 0,
+        end,
     }
 }
 
@@ -2798,8 +2970,22 @@ pub(crate) fn compute_bap_cpl(
     bap_out: &mut [u8; N_COEFFS],
     dba: Option<(&DbaPlan, usize)>,
 ) {
+    let curve = compute_mask_cpl(exp, start, end, fscod, ba, dba);
+    bap_from_mask(exp, &curve, snroffset_of(ba), &BAPTAB, bap_out);
+}
+
+/// The `snroffst`-independent half of the coupling allocator. See
+/// [`MaskCurve`] and [`compute_mask_fbw`].
+pub(crate) fn compute_mask_cpl(
+    exp: &[u8; N_COEFFS],
+    start: usize,
+    end: usize,
+    fscod: u8,
+    ba: &BitAllocParams,
+    dba: Option<(&DbaPlan, usize)>,
+) -> MaskCurve {
     if end <= start {
-        return;
+        return MaskCurve::empty();
     }
     let mut psd = [0i32; N_COEFFS];
     for bin in start..end {
@@ -2831,7 +3017,6 @@ pub(crate) fn compute_bap_cpl(
     let dbknee = DBPBTAB[ba.dbpbcod as usize];
     let floor = FLOORTAB[ba.floorcod as usize];
     let fgain = FASTGAIN[ba.fgaincod as usize];
-    let snroffset = (((ba.csnroffst as i32 - 15) << 4) + ba.fsnroffst as i32) << 2;
     // §7.2.2.4 cpl path. cpl_fleak / cpl_sleak default to 0 (no
     // cplleake transmitted), giving fastleak_init = slowleak_init = 0
     // and the +768 offset applied in the decoder.
@@ -2861,27 +3046,11 @@ pub(crate) fn compute_bap_cpl(
     if let Some((plan, idx)) = dba {
         apply_dba_segments(plan, idx, &mut mask);
     }
-    let mut i = start;
-    let mut j = MASKTAB[start] as usize;
-    loop {
-        let lastbin = (BNDTAB[j] as usize + BNDSZ[j] as usize).min(end);
-        let mut m = mask[j];
-        m -= snroffset;
-        m -= floor;
-        if m < 0 {
-            m = 0;
-        }
-        m &= 0x1fe0;
-        m += floor;
-        while i < lastbin {
-            let addr = ((psd[i] - m) >> 5).clamp(0, 63) as usize;
-            bap_out[i] = BAPTAB[addr];
-            i += 1;
-        }
-        if i >= end {
-            break;
-        }
-        j += 1;
+    MaskCurve {
+        mask,
+        floor,
+        start,
+        end,
     }
 }
 
@@ -3433,6 +3602,10 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // tie cplfsnr ≡ fsnr (the cpl pseudo-channel and the fbw channels
     // share the same sub-band SNR offset). This is sub-optimal but
     // adequate for an initial coupling-encode implementation.
+    // Everything about bit allocation that does not depend on the candidate
+    // being tested, computed once for the whole search. See `MaskBank`.
+    let bank = MaskBank::build(ba, exps, end, end_ch, nchan, fscod, cpl, dba, lfeon);
+
     let mut baps: Vec<Vec<[u8; N_COEFFS]>> =
         vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
 
@@ -3444,35 +3617,30 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         cand.fsnroffst = fsnr;
         cand.cplfsnroffst = fsnr;
         cand.lfefsnroffst = fsnr;
+        let fbw_snr = snroffset_of(&cand);
         for ch in 0..nchan {
-            let ch_end = end_ch.map_or(end, |e| e[ch]);
             for blk in 0..exps[ch].len() {
-                compute_bap(
+                bap_from_mask(
                     &exps[ch][blk],
-                    ch_end,
-                    fscod,
-                    &cand,
+                    bank.get(ch, blk),
+                    fbw_snr,
+                    &BAPTAB,
                     &mut baps[ch][blk],
-                    Some((dba, ch)),
                 );
             }
         }
         if cpl.in_use {
             let cpl_idx = nchan;
-            let begf_mant = cpl.begf_mant();
-            let endf_mant = cpl.endf_mant();
             let mut cpl_ba = cand;
             cpl_ba.fsnroffst = cand.cplfsnroffst;
-            cpl_ba.fgaincod = cand.cplfgaincod;
+            let cpl_snr = snroffset_of(&cpl_ba);
             for blk in 0..exps[cpl_idx].len() {
-                compute_bap_cpl(
+                bap_from_mask(
                     &exps[cpl_idx][blk],
-                    begf_mant,
-                    endf_mant,
-                    fscod,
-                    &cpl_ba,
+                    bank.get(cpl_idx, blk),
+                    cpl_snr,
+                    &BAPTAB,
                     &mut baps[cpl_idx][blk],
-                    Some((dba, MAX_FBW)),
                 );
             }
         }
@@ -3480,15 +3648,14 @@ pub(crate) fn tune_snroffst_with_plan_ends(
             let lfe_idx = nchan + 1;
             let mut lfe_ba = cand;
             lfe_ba.fsnroffst = cand.lfefsnroffst;
-            lfe_ba.fgaincod = cand.lfefgaincod;
+            let lfe_snr = snroffset_of(&lfe_ba);
             for blk in 0..exps[lfe_idx].len() {
-                compute_bap(
+                bap_from_mask(
                     &exps[lfe_idx][blk],
-                    LFE_END_MANT,
-                    fscod,
-                    &lfe_ba,
+                    bank.get(lfe_idx, blk),
+                    lfe_snr,
+                    &BAPTAB,
                     &mut baps[lfe_idx][blk],
-                    None,
                 );
             }
         }
@@ -3564,34 +3731,29 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         for ch in 0..nchan {
             let mut ch_ba = *ba_in;
             ch_ba.fsnroffst = ba_in.fsnroffst_ch[ch];
-            let ch_end = end_ch.map_or(end, |e| e[ch]);
+            let ch_snr = snroffset_of(&ch_ba);
             for blk in 0..exps[ch].len() {
-                compute_bap(
+                bap_from_mask(
                     &exps[ch][blk],
-                    ch_end,
-                    fscod,
-                    &ch_ba,
+                    bank.get(ch, blk),
+                    ch_snr,
+                    &BAPTAB,
                     &mut bps[ch][blk],
-                    Some((dba, ch)),
                 );
             }
         }
         if cpl.in_use {
             let cpl_idx = nchan;
-            let begf_mant = cpl.begf_mant();
-            let endf_mant = cpl.endf_mant();
             let mut cpl_ba = *ba_in;
             cpl_ba.fsnroffst = ba_in.cplfsnroffst;
-            cpl_ba.fgaincod = ba_in.cplfgaincod;
+            let cpl_snr = snroffset_of(&cpl_ba);
             for blk in 0..exps[cpl_idx].len() {
-                compute_bap_cpl(
+                bap_from_mask(
                     &exps[cpl_idx][blk],
-                    begf_mant,
-                    endf_mant,
-                    fscod,
-                    &cpl_ba,
+                    bank.get(cpl_idx, blk),
+                    cpl_snr,
+                    &BAPTAB,
                     &mut bps[cpl_idx][blk],
-                    Some((dba, MAX_FBW)),
                 );
             }
         }
@@ -3599,15 +3761,14 @@ pub(crate) fn tune_snroffst_with_plan_ends(
             let lfe_idx = nchan + 1;
             let mut lfe_ba = *ba_in;
             lfe_ba.fsnroffst = ba_in.lfefsnroffst;
-            lfe_ba.fgaincod = ba_in.lfefgaincod;
+            let lfe_snr = snroffset_of(&lfe_ba);
             for blk in 0..exps[lfe_idx].len() {
-                compute_bap(
+                bap_from_mask(
                     &exps[lfe_idx][blk],
-                    LFE_END_MANT,
-                    fscod,
-                    &lfe_ba,
+                    bank.get(lfe_idx, blk),
+                    lfe_snr,
+                    &BAPTAB,
                     &mut bps[lfe_idx][blk],
-                    None,
                 );
             }
         }
@@ -3964,42 +4125,41 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     // delta vs the pre-#170 baseline (block-0-only emission).
     let mut scratch_bps: Vec<Vec<[u8; N_COEFFS]>> =
         vec![vec![[0u8; N_COEFFS]; exps[0].len()]; nchan + 2];
+    // As in the global tuner: only `snroffst` varies across the trials below,
+    // so the masking curves are computed once for the whole search.
+    let bank = MaskBank::build(ba, exps, end, None, nchan, fscod, cpl, dba, lfeon);
     let mut recompute = |plan: &PerBlockSnr, bps: &mut [Vec<[u8; N_COEFFS]>]| -> u32 {
         for blk in 0..BLOCKS_PER_FRAME {
             for ch in 0..nchan {
                 let ch_ba = plan.ba_for_fbw(ba, blk, ch);
-                compute_bap(
+                bap_from_mask(
                     &exps[ch][blk],
-                    end,
-                    fscod,
-                    &ch_ba,
+                    bank.get(ch, blk),
+                    snroffset_of(&ch_ba),
+                    &BAPTAB,
                     &mut bps[ch][blk],
-                    Some((dba, ch)),
                 );
             }
             if cpl.in_use {
                 let cpl_idx = nchan;
                 let cpl_ba = plan.ba_for_cpl(ba, blk);
-                compute_bap_cpl(
+                bap_from_mask(
                     &exps[cpl_idx][blk],
-                    cpl.begf_mant(),
-                    cpl.endf_mant(),
-                    fscod,
-                    &cpl_ba,
+                    bank.get(cpl_idx, blk),
+                    snroffset_of(&cpl_ba),
+                    &BAPTAB,
                     &mut bps[cpl_idx][blk],
-                    Some((dba, MAX_FBW)),
                 );
             }
             if lfeon {
                 let lfe_idx = nchan + 1;
                 let lfe_ba = plan.ba_for_lfe(ba, blk);
-                compute_bap(
+                bap_from_mask(
                     &exps[lfe_idx][blk],
-                    LFE_END_MANT,
-                    fscod,
-                    &lfe_ba,
+                    bank.get(lfe_idx, blk),
+                    snroffset_of(&lfe_ba),
+                    &BAPTAB,
                     &mut bps[lfe_idx][blk],
-                    None,
                 );
             }
         }
@@ -4492,7 +4652,19 @@ fn write_mantissa(bw: &mut BitWriter, bap: u8, code: u32, ctx: &mut MantGroupCtx
 // CRC-16 primitives live in `crate::crc` so the decoder can use the
 // same residue check (§7.10.1). Re-exported below for the existing
 // in-crate `use crate::encoder::ac3_crc_update;` sites (eac3/encoder.rs).
-pub(crate) use crate::crc::{ac3_crc_solve_prefix, ac3_crc_update};
+pub(crate) use crate::crc::{ac3_crc_solve_prefix, ac3_crc_solve_prefix_with, ac3_crc_update};
+
+/// Length in bytes of the region `crc1` protects: the first 5/8 of the
+/// syncframe, less the two-byte syncword that sits outside it (§7.10.1).
+///
+/// Kept next to the constructor because the encoder derives its
+/// `crc1_multiplier` from it, and `emit_syncframe` must slice exactly the same
+/// region or the multiplier will not cancel the residue.
+fn crc1_region_len(frame_bytes: usize) -> usize {
+    let frame_words = frame_bytes / 2;
+    let five_eighths_bytes = ((frame_words >> 1) + (frame_words >> 3)) * 2;
+    five_eighths_bytes - 2
+}
 
 // ---------------------------------------------------------------------------
 // Coupling (§7.4) — encoder-side helpers
@@ -5001,6 +5173,133 @@ mod tests {
     /// (encoder side, post-quantise) and the decoder (post-grpsize
     /// expansion) see the same per-bin exponents — without this, bap[]
     /// disagreement causes mantissa-stream byte drift.
+    /// The identity the rate-control tuner's speed rests on: splitting bit
+    /// allocation into an `snroffst`-independent masking curve and a cheap
+    /// final lookup must reproduce the monolithic allocator exactly, for every
+    /// `snroffst` the search can reach.
+    ///
+    /// If this ever fails, the tuner is choosing different allocations from the
+    /// ones the emitted frame is built with, and the bitstream is wrong in a
+    /// way no round-trip test would localise.
+    #[test]
+    fn split_bit_allocation_matches_the_monolithic_allocator() {
+        let mut state = 0x9E37_79B9u32;
+        let mut rand = move |m: u32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state % m
+        };
+
+        for trial in 0..24 {
+            let mut exp = [0u8; N_COEFFS];
+            for e in exp.iter_mut() {
+                *e = rand(25) as u8;
+            }
+            let fscod = (trial % 3) as u8;
+            let end = [253usize, 120, 7, 200][trial % 4];
+
+            let mut ba = BitAllocParams {
+                sdcycod: 0,
+                fdcycod: 0,
+                sgaincod: 0,
+                dbpbcod: 0,
+                floorcod: 0,
+                csnroffst: 0,
+                fsnroffst: 0,
+                fsnroffst_ch: [0; MAX_FBW],
+                cplfsnroffst: 0,
+                lfefsnroffst: 0,
+                fgaincod: 0,
+                cplfgaincod: 0,
+                lfefgaincod: 0,
+            };
+            ba.sdcycod = rand(4) as u8;
+            ba.fdcycod = rand(4) as u8;
+            ba.sgaincod = rand(4) as u8;
+            ba.dbpbcod = rand(4) as u8;
+            ba.floorcod = rand(8) as u8;
+            ba.fgaincod = rand(8) as u8;
+
+            let curve = compute_mask_fbw(&exp, end, fscod, &ba, None);
+
+            // Every (csnroffst, fsnroffst) the tuner's 0..1023 combined search
+            // can produce, plus the extremes.
+            for combined in (0..1024).step_by(7).chain([0, 1, 1022, 1023]) {
+                let mut cand = ba;
+                cand.csnroffst = (combined / 16).min(63) as u8;
+                cand.fsnroffst = (combined % 16).min(15) as u8;
+
+                let mut want = [0u8; N_COEFFS];
+                compute_bap(&exp, end, fscod, &cand, &mut want, None);
+
+                let mut got = [0u8; N_COEFFS];
+                bap_from_mask(&exp, &curve, snroffset_of(&cand), &BAPTAB, &mut got);
+
+                assert_eq!(
+                    want[..end],
+                    got[..end],
+                    "fbw mismatch: trial {trial} end {end} combined {combined}"
+                );
+            }
+        }
+    }
+
+    /// The same identity for the coupling pseudo-channel, whose allocator
+    /// starts mid-spectrum and initialises its leak filters differently.
+    #[test]
+    fn split_bit_allocation_matches_for_coupling() {
+        let mut state = 0x1357_9BDFu32;
+        let mut rand = move |m: u32| {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            state % m
+        };
+        for trial in 0..16 {
+            let mut exp = [0u8; N_COEFFS];
+            for e in exp.iter_mut() {
+                *e = rand(25) as u8;
+            }
+            let (start, end) = (73usize, 253usize);
+            let fscod = (trial % 3) as u8;
+            let mut ba = BitAllocParams {
+                sdcycod: 0,
+                fdcycod: 0,
+                sgaincod: 0,
+                dbpbcod: 0,
+                floorcod: 0,
+                csnroffst: 0,
+                fsnroffst: 0,
+                fsnroffst_ch: [0; MAX_FBW],
+                cplfsnroffst: 0,
+                lfefsnroffst: 0,
+                fgaincod: 0,
+                cplfgaincod: 0,
+                lfefgaincod: 0,
+            };
+            ba.floorcod = rand(8) as u8;
+            ba.fgaincod = rand(8) as u8;
+
+            let curve = compute_mask_cpl(&exp, start, end, fscod, &ba, None);
+            for combined in (0..1024).step_by(11) {
+                let mut cand = ba;
+                cand.csnroffst = (combined / 16).min(63) as u8;
+                cand.fsnroffst = (combined % 16).min(15) as u8;
+
+                let mut want = [0u8; N_COEFFS];
+                compute_bap_cpl(&exp, start, end, fscod, &cand, &mut want, None);
+                let mut got = [0u8; N_COEFFS];
+                bap_from_mask(&exp, &curve, snroffset_of(&cand), &BAPTAB, &mut got);
+                assert_eq!(
+                    want[start..end],
+                    got[start..end],
+                    "cpl mismatch: trial {trial} combined {combined}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn quantise_grpsize_roundtrip_parity_d25_d45() {
         for (label, mut exp_init) in [
@@ -5480,8 +5779,8 @@ mod tests {
                 Err(e) => panic!("receive_packet: {e:?}"),
             }
         }
-        let in_path = std::env::temp_dir().join("oxideav_ac3_blksw_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_blksw_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_blksw_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_blksw_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -5629,8 +5928,8 @@ mod tests {
         );
 
         // Gate (b)/(c): ffmpeg cross-decode.
-        let in_path = std::env::temp_dir().join("oxideav_ac3_d25_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_d25_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_d25_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_d25_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -5823,8 +6122,8 @@ mod tests {
         );
 
         // Gate (c): ffmpeg cross-decode.
-        let in_path = std::env::temp_dir().join("oxideav_ac3_d45_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_d45_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_d45_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_d45_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -6023,8 +6322,8 @@ mod tests {
         for p in &pkts {
             ac3_bytes.extend_from_slice(&p.data);
         }
-        let in_path = std::env::temp_dir().join("oxideav_ac3_cpl_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_cpl_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_cpl_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_cpl_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -6188,8 +6487,8 @@ mod tests {
         for p in &pkts {
             ac3_bytes.extend_from_slice(&p.data);
         }
-        let in_path = std::env::temp_dir().join("oxideav_ac3_dba_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_dba_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_dba_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_dba_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -6818,8 +7117,8 @@ mod tests {
                 Err(e) => panic!("receive_packet: {e:?}"),
             }
         }
-        let in_path = std::env::temp_dir().join("oxideav_ac3_21_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_21_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_21_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_21_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -6918,8 +7217,8 @@ mod tests {
                 Err(e) => panic!("receive_packet: {e:?}"),
             }
         }
-        let in_path = std::env::temp_dir().join("oxideav_ac3_51_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_51_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_51_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_51_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -7638,8 +7937,8 @@ mod tests {
                 Err(e) => panic!("receive_packet: {e:?}"),
             }
         }
-        let in_path = std::env::temp_dir().join("oxideav_ac3_perblock_snr_enc.ac3");
-        let out_path = std::env::temp_dir().join("oxideav_ac3_perblock_snr_dec.pcm");
+        let in_path = std::env::temp_dir().join("vuio_ac3_perblock_snr_enc.ac3");
+        let out_path = std::env::temp_dir().join("vuio_ac3_perblock_snr_dec.pcm");
         std::fs::write(&in_path, &ac3_bytes).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let out = Command::new("ffmpeg")
@@ -7972,8 +8271,8 @@ mod tests {
     /// is unavailable.
     fn ffmpeg_decode_rms(stream: &[u8], tag: &str, dec_args: &[&str]) -> Option<f64> {
         use std::process::Command;
-        let in_path = std::env::temp_dir().join(format!("oxideav_ac3_meta_{tag}.ac3"));
-        let out_path = std::env::temp_dir().join(format!("oxideav_ac3_meta_{tag}.pcm"));
+        let in_path = std::env::temp_dir().join(format!("vuio_ac3_meta_{tag}.ac3"));
+        let out_path = std::env::temp_dir().join(format!("vuio_ac3_meta_{tag}.pcm"));
         std::fs::write(&in_path, stream).expect("write ac3");
         let _ = std::fs::remove_file(&out_path);
         let mut cmd = Command::new("ffmpeg");

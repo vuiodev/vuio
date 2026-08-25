@@ -39,16 +39,71 @@
 /// implicit `x^16` term) — see §7.10.1.
 pub(crate) const AC3_CRC_POLY: u16 = 0x8005;
 
+/// Byte-wise CRC-16 table for `AC3_CRC_POLY`, MSB-first.
+///
+/// `CRC_TAB[h]` is eight input-free LFSR steps applied to `h << 8` — the
+/// feedback the register's high byte generates as it shifts out.
+///
+/// Note this register is not the textbook MSB-first arrangement. §7.10.1's
+/// recurrence shifts the *data bit into the low bit*
+/// (`c' = (c << 1) | bit`, then feedback), so a byte enters at the bottom
+/// rather than being XORed into the table index:
+///
+/// ```text
+///   textbook:  c' = (c << 8) ^ TAB[(c >> 8) ^ byte]
+///   here:      c' = (c << 8) ^ TAB[c >> 8] ^ byte
+/// ```
+///
+/// Both absorb a byte per lookup instead of eight shift-and-branch steps;
+/// using the wrong one silently produces a bitstream no decoder accepts,
+/// which is what `table_crc_matches_the_bitwise_lfsr` guards against.
+/// Built at compile time, so it costs no initialisation and lives in
+/// `.rodata`.
+const CRC_TAB: [u16; 256] = {
+    let mut tab = [0u16; 256];
+    let mut b = 0usize;
+    while b < 256 {
+        let mut crc = (b as u16) << 8;
+        let mut i = 0;
+        while i < 8 {
+            crc = if crc & 0x8000 != 0 {
+                (crc << 1) ^ AC3_CRC_POLY
+            } else {
+                crc << 1
+            };
+            i += 1;
+        }
+        tab[b] = crc;
+        b += 1;
+    }
+    tab
+};
+
 /// Plain MSB-first CRC-16 over a byte slice using `AC3_CRC_POLY`.
 ///
-/// The register is updated one bit at a time by shifting left and
-/// XORing the feedback mask whenever the outgoing MSB is `1`. The
-/// bit order of each byte is MSB-first to match the AC-3 bitstream
-/// orientation (§5.3 transmission rule).
+/// Bit order within each byte is MSB-first to match the AC-3 bitstream
+/// orientation (§5.3 transmission rule). Driven a byte at a time through
+/// [`CRC_TAB`]; see [`ac3_crc_update_bitwise`] for the one-bit-at-a-time
+/// definition this is equivalent to, which the tests check it against.
 ///
 /// `init` lets callers chain partial updates — most call-sites use
 /// `init = 0` so the LFSR starts cleared per §7.10.1.
+#[inline]
 pub(crate) fn ac3_crc_update(init: u16, data: &[u8]) -> u16 {
+    let mut crc = init;
+    for &b in data {
+        crc = (crc << 8) ^ CRC_TAB[(crc >> 8) as usize] ^ b as u16;
+    }
+    crc
+}
+
+/// The literal §7.10.1 LFSR, one bit at a time.
+///
+/// Kept as the definition [`ac3_crc_update`] is tested against — the table
+/// version is an optimisation of exactly this, and a table built wrong would
+/// otherwise be invisible until a decoder rejected our frames.
+#[cfg(test)]
+pub(crate) fn ac3_crc_update_bitwise(init: u16, data: &[u8]) -> u16 {
     let mut crc: u32 = init as u32;
     for &b in data {
         for i in (0..8).rev() {
@@ -62,6 +117,68 @@ pub(crate) fn ac3_crc_update(init: u16, data: &[u8]) -> u16 {
     }
     crc as u16
 }
+
+/// Carry-less multiply of two GF(2) polynomials modulo `poly`.
+///
+/// `a` and `b` are degree-15 polynomials held in a `u16`, with the
+/// implicit `x^16` term supplied by `poly` (= `AC3_CRC_POLY`). Used to
+/// undo the shift that `crc1`'s position in the frame imposes — see
+/// [`ac3_crc_solve_prefix`].
+fn mul_poly(mut a: u16, mut b: u16, poly: u16) -> u16 {
+    let mut acc: u16 = 0;
+    while a != 0 {
+        if a & 1 != 0 {
+            acc ^= b;
+        }
+        a >>= 1;
+        // b *= x, reducing mod poly when it overflows degree 15.
+        let carry = b & 0x8000;
+        b <<= 1;
+        if carry != 0 {
+            b ^= poly;
+        }
+    }
+    acc
+}
+
+/// `a^n mod poly`, by square-and-multiply over GF(2)[x].
+fn pow_poly(a: u16, mut n: usize, poly: u16) -> u16 {
+    let mut r: u16 = 1;
+    let mut base = a;
+    while n != 0 {
+        if n & 1 != 0 {
+            r = mul_poly(r, base, poly);
+        }
+        base = mul_poly(base, base, poly);
+        n >>= 1;
+    }
+    r
+}
+
+/// The multiplier that moves a residue back across `region_len` bytes.
+///
+/// `crc1` sits at the *front* of the region it protects, so the encoder needs
+/// the value which, after being shifted through the remaining
+/// `8*region_len - 16` bit positions, cancels the region's residue. That
+/// multiplier is `(x^-1)^(8*region_len - 16)`.
+///
+/// It depends only on the region length, so an encoder emitting many frames of
+/// one size computes it once at construction rather than per frame.
+pub(crate) fn ac3_crc_prefix_multiplier(region_len: usize) -> u16 {
+    debug_assert!(region_len >= 2);
+    pow_poly(X_INVERSE, 8 * region_len - 16, AC3_CRC_POLY)
+}
+
+/// `x^-1` modulo the generator, in the same implicit-`x^16` representation as
+/// [`AC3_CRC_POLY`].
+///
+/// From `x^16 + x^15 + x^2 + 1 = 0` we get `1 = x·(x^15 + x^14 + x)`, so
+/// `x^-1 = x^15 + x^14 + x = 0xC002`. Equivalently it is the *full* 17-bit
+/// generator shifted right by one — which is why libavcodec writes it as
+/// `CRC16_POLY >> 1`, its `CRC16_POLY` being 0x18005 where ours drops the
+/// implicit top bit. Dropping that bit here would give 0x4002 and a silently
+/// wrong `crc1`.
+const X_INVERSE: u16 = (AC3_CRC_POLY >> 1) | 0x8000;
 
 /// Find a 16-bit value for the *first* 2 bytes of `region` such that
 /// the running CRC of the entire region ends at zero. Used by the
@@ -80,26 +197,27 @@ pub(crate) fn ac3_crc_update(init: u16, data: &[u8]) -> u16 {
 ///
 /// The region must be at least 2 bytes (the 16-bit CRC field).
 pub(crate) fn ac3_crc_solve_prefix(region: &[u8]) -> u16 {
-    assert!(region.len() >= 2);
-    // R = CRC(zeroed-prefix || rest-of-region).
-    let mut zeroed = region.to_vec();
-    zeroed[0] = 0;
-    zeroed[1] = 0;
-    let r = ac3_crc_update(0, &zeroed);
+    ac3_crc_solve_prefix_with(region, ac3_crc_prefix_multiplier(region.len()))
+}
 
-    // Build 16 columns of E: column i is CRC(prefix-has-bit-i-set, rest=0).
-    // CRC over the zero-tail is 0, so each column reduces to the LFSR
-    // state after a single one-bit perturbation of the 2-byte prefix.
-    let mut cols = [0u16; 16];
-    for i in 0..16 {
-        let prefix_val: u16 = 1 << (15 - i); // bit i MSB-first in first 2 bytes
-        let mut buf = vec![0u8; region.len()];
-        buf[0] = (prefix_val >> 8) as u8;
-        buf[1] = (prefix_val & 0xFF) as u8;
-        cols[i] = ac3_crc_update(0, &buf);
-    }
-    // Solve cols * X = R over GF(2) for 16-bit X.
-    gauss_gf2_16(&cols, r)
+/// [`ac3_crc_solve_prefix`] with the length-dependent multiplier supplied.
+///
+/// The encoder emits thousands of frames of one fixed size, so it computes
+/// the multiplier once at construction and calls this.
+///
+/// Closed form rather than a linear solve. The CRC is linear over GF(2), so
+/// with the prefix zeroed the region has some residue `R`, and a prefix value
+/// `X` contributes `X · x^(8·len - 16)` on top of it. Setting the total to
+/// zero gives `X = R · (x^-1)^(8·len - 16)` — one multiply, where the
+/// Gaussian elimination this replaced cost seventeen passes over the whole
+/// region (one for `R`, sixteen to build the basis) plus sixteen heap
+/// allocations, per frame. This is what libavcodec's `ac3_encode_frame` does.
+pub(crate) fn ac3_crc_solve_prefix_with(region: &[u8], multiplier: u16) -> u16 {
+    assert!(region.len() >= 2);
+    // R = CRC(zeroed-prefix || rest-of-region), without materialising the
+    // zeroed copy: feed two zero bytes, then the region's tail.
+    let r = ac3_crc_update(ac3_crc_update(0, &[0, 0]), &region[2..]);
+    mul_poly(r, multiplier, AC3_CRC_POLY)
 }
 
 /// Solve `A · x = b` over GF(2) where `A` is a 16×16 matrix
@@ -112,6 +230,11 @@ pub(crate) fn ac3_crc_solve_prefix(region: &[u8]) -> u16 {
 /// `15 - i` (MSB-first), because `ac3_crc_solve_prefix` builds
 /// column `i` from `prefix_val = 1 << (15 - i)`. The returned
 /// `u16` is the reassembled prefix word.
+///
+/// This was how `crc1` was solved for until the closed form in
+/// [`ac3_crc_solve_prefix_with`] replaced it. Retained as the test oracle
+/// that the closed form is checked against, via `gauss_solve_prefix`.
+#[cfg(test)]
 fn gauss_gf2_16(cols: &[u16; 16], b: u16) -> u16 {
     // Build an augmented matrix as rows: each row is 17 bits (16 cols + 1 b).
     let mut rows = [0u32; 16];
@@ -550,5 +673,109 @@ mod tests {
         assert!(verify_eac3_syncframe(&frame, frame_bytes).all_ok());
         frame[100] ^= 0x10;
         assert!(!verify_eac3_syncframe(&frame, frame_bytes).all_ok());
+    }
+
+    /// The pre-optimisation `crc1` solver: build the 16 basis columns by
+    /// running a full CRC per perturbed prefix, then Gaussian-eliminate.
+    fn gauss_solve_prefix(region: &[u8]) -> u16 {
+        let mut zeroed = region.to_vec();
+        zeroed[0] = 0;
+        zeroed[1] = 0;
+        let r = ac3_crc_update(0, &zeroed);
+        let mut cols = [0u16; 16];
+        for i in 0..16 {
+            let prefix_val: u16 = 1 << (15 - i);
+            let mut buf = vec![0u8; region.len()];
+            buf[0] = (prefix_val >> 8) as u8;
+            buf[1] = (prefix_val & 0xFF) as u8;
+            cols[i] = ac3_crc_update(0, &buf);
+        }
+        gauss_gf2_16(&cols, r)
+    }
+
+    fn pseudorandom(len: usize, seed: u64) -> Vec<u8> {
+        let mut x = seed | 1;
+        (0..len)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                (x >> 24) as u8
+            })
+            .collect()
+    }
+
+    #[test]
+    fn table_crc_matches_the_bitwise_lfsr() {
+        for seed in 1..=8u64 {
+            for len in [2usize, 3, 7, 64, 255, 800, 1598, 2558] {
+                let data = pseudorandom(len, seed * 0x9E37_79B9);
+                assert_eq!(
+                    ac3_crc_update(0, &data),
+                    ac3_crc_update_bitwise(0, &data),
+                    "len={len} seed={seed}"
+                );
+                // Chained updates must agree with a single pass, which is what
+                // the encoder relies on when it resumes at the 5/8 boundary.
+                let (head, tail) = data.split_at(len / 2);
+                assert_eq!(
+                    ac3_crc_update(ac3_crc_update(0, head), tail),
+                    ac3_crc_update_bitwise(0, &data),
+                    "chained len={len}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn closed_form_crc1_matches_the_gaussian_solver() {
+        // Frame sizes that occur in practice: the 5/8 regions of 128..3840-byte
+        // syncframes, plus the degenerate minimum.
+        for frame_bytes in [128usize, 384, 640, 1280, 1792, 2560, 3840] {
+            let boundary = crc1_boundary_bytes(frame_bytes).unwrap();
+            let region_len = boundary - 2;
+            for seed in 1..=4u64 {
+                let mut region = pseudorandom(region_len, seed * 0x2545_F491);
+                let closed = ac3_crc_solve_prefix(&region);
+                assert_eq!(
+                    closed,
+                    gauss_solve_prefix(&region),
+                    "frame_bytes={frame_bytes} seed={seed}"
+                );
+                // And the property both are solving for: with the solved value
+                // in place, the region's residue is zero.
+                region[0] = (closed >> 8) as u8;
+                region[1] = (closed & 0xFF) as u8;
+                assert_eq!(ac3_crc_update(0, &region), 0, "residue not cancelled");
+            }
+        }
+    }
+
+    #[test]
+    fn prefix_multiplier_is_reusable_across_frames_of_one_size() {
+        let region_len = crc1_boundary_bytes(2560).unwrap() - 2;
+        let mult = ac3_crc_prefix_multiplier(region_len);
+        for seed in 1..=6u64 {
+            let region = pseudorandom(region_len, seed * 0x85EB_CA6B);
+            assert_eq!(
+                ac3_crc_solve_prefix_with(&region, mult),
+                ac3_crc_solve_prefix(&region)
+            );
+        }
+    }
+
+    #[test]
+    fn mul_poly_and_pow_poly_agree_with_repeated_multiplication() {
+        let a = X_INVERSE;
+        let mut acc: u16 = 1;
+        for n in 0..40usize {
+            assert_eq!(pow_poly(a, n, AC3_CRC_POLY), acc, "n={n}");
+            acc = mul_poly(acc, a, AC3_CRC_POLY);
+        }
+        // x · x^-1 = 1, which is the identity the crc1 derivation rests on.
+        // Note `AC3_CRC_POLY >> 1` is *not* x^-1 here — it drops the implicit
+        // x^16 term — and using it would make crc1 silently wrong.
+        assert_eq!(mul_poly(2, X_INVERSE, AC3_CRC_POLY), 1);
+        assert_ne!(mul_poly(2, AC3_CRC_POLY >> 1, AC3_CRC_POLY), 1);
     }
 }

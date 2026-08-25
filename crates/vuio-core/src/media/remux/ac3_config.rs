@@ -200,7 +200,7 @@ mod tests {
     /// The vendored conformance stream: 48 kHz stereo, no LFE.
     #[cfg(feature = "transcode-ac3")]
     const AC3: &[u8] =
-        include_bytes!("../../../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+        include_bytes!("../../../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 
     #[cfg(feature = "transcode-ac3")]
     #[test]

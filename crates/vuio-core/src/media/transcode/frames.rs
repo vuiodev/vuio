@@ -251,9 +251,9 @@ fn parse_ac3_family(data: &[u8]) -> Result<Option<Header>> {
     }
     let bsid = data[5] >> 3;
 
-    if bsid <= oxideav_ac3::eac3::bsi::BSID_BASE_AC3_MAX {
+    if bsid <= vuio_codec_ac3::eac3::bsi::BSID_BASE_AC3_MAX {
         // Base AC-3: the vendored parser owns Table 5.18.
-        let si = oxideav_ac3::syncinfo::parse(data)
+        let si = vuio_codec_ac3::syncinfo::parse(data)
             .map_err(|e| anyhow::anyhow!("ac3 syncinfo: {e}"))?;
         return Ok(Some(Header {
             len: si.frame_length,
@@ -314,7 +314,7 @@ fn next_sync(codec: TranscodeCodec, data: &[u8]) -> Option<usize> {
     match codec {
         #[cfg(feature = "transcode-ac3")]
         TranscodeCodec::Ac3 | TranscodeCodec::Eac3 => {
-            oxideav_ac3::syncinfo::find_syncword(data, 0)
+            vuio_codec_ac3::syncinfo::find_syncword(data, 0)
         }
         #[cfg(feature = "transcode-dts")]
         TranscodeCodec::Dts => oxideav_dts::find_next_sync(data, 0).map(|m| m.offset),
@@ -329,7 +329,7 @@ mod tests {
 
     #[cfg(feature = "transcode-ac3")]
     const AC3_FIXTURE: &[u8] =
-        include_bytes!("../../../../vendor/oxideav-ac3/tests/fixtures/sine440_stereo.ac3");
+        include_bytes!("../../../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
     #[cfg(feature = "transcode-dts")]
     const DTS_FIXTURE: &[u8] =
         include_bytes!("../../../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");

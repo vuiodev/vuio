@@ -124,7 +124,7 @@ transcode = ["dep:oxideav-core"]
 # One crate, one decoder, both codecs: E-AC-3 is Annex E of the same A/52
 # specification and `Ac3Decoder` dispatches on the per-packet bsid. A separate
 # `eac3` flag would gate a match arm and save nothing.
-transcode-ac3 = ["transcode", "dep:oxideav-ac3"]
+transcode-ac3 = ["transcode", "dep:vuio-codec-ac3"]
 transcode-dts = ["transcode", "dep:oxideav-dts"]
 
 # The AAC-LC encoder, for `[transcode] audio_format = "aac"`. LPCM is the
@@ -191,7 +191,7 @@ hex = { version = "0.4", optional = true }
 # so. They add no external crates — thiserror, serde_json and bytemuck were
 # already in the tree.
 oxideav-core = { path = "../vendor/oxideav-core", optional = true }
-oxideav-ac3 = { path = "../vendor/oxideav-ac3", optional = true }
+vuio-codec-ac3 = { path = "../vuio-codec-ac3", optional = true }
 oxideav-dts = { path = "../vendor/oxideav-dts", optional = true }
 xaac-rs = { version = "0.2", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }

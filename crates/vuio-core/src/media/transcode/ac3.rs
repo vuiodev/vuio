@@ -51,7 +51,7 @@ impl Ac3Encoder {
         params.channels = Some(channels);
         params.sample_format = Some(SampleFormat::S16);
         params.bit_rate = Some(u64::from(Self::bitrate_for(channels)));
-        let inner = oxideav_ac3::encoder::make_encoder(&params)
+        let inner = vuio_codec_ac3::encoder::make_encoder(&params)
             .map_err(|e| anyhow::anyhow!("AC-3 encoder: {e}"))
             .context("configuring the AC-3 encoder")?;
         Ok(Self { inner, channels })
