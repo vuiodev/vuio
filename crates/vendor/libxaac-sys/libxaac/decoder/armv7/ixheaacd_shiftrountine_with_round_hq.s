@@ -1,3 +1,10 @@
+@ These files are written in unified (UAL) syntax: the condition code goes
+@ after the S flag and after an LDM/STM addressing mode, so SUBSNE and
+@ LDMFDLE rather than the divided syntax's SUBNES and LDMLEFD. GNU as still
+@ defaults to divided and rejects them outright; clang's integrated
+@ assembler, which upstream builds with, defaults to unified and so never
+@ noticed. Say which dialect these are.
+.syntax unified
         .code 32
        .eabi_attribute 24, 1            @Tag_ABI_align_needed
        .eabi_attribute 25, 1            @Tag_ABI_align_preserved

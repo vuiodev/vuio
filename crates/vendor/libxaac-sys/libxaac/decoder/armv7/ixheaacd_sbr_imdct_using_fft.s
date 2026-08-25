@@ -19,6 +19,13 @@
 @*/
 
 
+@ These files are written in unified (UAL) syntax: the condition code goes
+@ after the S flag and after an LDM/STM addressing mode, so SUBSNE and
+@ LDMFDLE rather than the divided syntax's SUBNES and LDMLEFD. GNU as still
+@ defaults to divided and rejects them outright; clang's integrated
+@ assembler, which upstream builds with, defaults to unified and so never
+@ noticed. Say which dialect these are.
+.syntax unified
 .text
 .p2align 2
 
@@ -460,7 +467,7 @@ RADIX_8_FIRST_LOOP:
     BNE             RADIX_8_FIRST_LOOP
 
     LSR             r1, r1, #1
-    SUB             r3, r1, LSL #3
+    SUB             r3, r3, r1, LSL #3
 
     MOV             r5, #8
     MOV             r4, #32
@@ -615,7 +622,7 @@ RADIX_4_LOOP:
     BNE             RADIX_4_LOOP
 
     LSR             r1, r1, #1
-    SUB             r3, r1, LSL #3
+    SUB             r3, r3, r1, LSL #3
     MOV             r5, #4
     MOV             r4, #64
     LSR             r6, r1, #4
