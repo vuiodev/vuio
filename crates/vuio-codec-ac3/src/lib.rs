@@ -45,6 +45,19 @@
 //! See `README.md` for the round-by-round status checklist and the
 //! per-feature dB measurements.
 
+// Inherited from the fork point: 13.7k lines that do not build under this
+// repository's `-D warnings`. Tightening this is its own chore, deliberately
+// kept off the performance work so that diff stays readable — see the "Our
+// AC-3 codec" section of CLAUDE.md.
+//
+// `[lints]` in Cargo.toml says the same thing and is the right place for it,
+// but it cannot be the only place: cargo passes a `cargo clippy -- -D
+// clippy::all` from the workspace root to every member unit it builds,
+// including this one, and a command-line `-D` outranks the manifest. A lint
+// level set by an attribute outranks both, so the exemption has to be stated
+// here to actually hold. Without it a new clippy release breaks CI on code
+// nobody touched.
+#![allow(warnings, clippy::all, clippy::pedantic)]
 #![allow(clippy::needless_range_loop)]
 
 // internal — exposed for tests/fuzz; not part of the stable API
