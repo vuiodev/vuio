@@ -1,0 +1,3 @@
+# owners for external/libxaac
+include platform/frameworks/av:/media/janitors/codec_OWNERS
+essick@google.com

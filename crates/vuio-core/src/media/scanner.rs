@@ -388,6 +388,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
     /// the file is opened rather than after. Every rule is answerable from
     /// metadata the filesystem already has, which is what makes an unchanged
     /// library nearly free to re-scan.
+    #[allow(clippy::absurd_extreme_comparisons)]
     fn stat_needs_update(existing: &IndexedFile, metadata: &std::fs::Metadata) -> bool {
         if existing.size != metadata.len() {
             return true;

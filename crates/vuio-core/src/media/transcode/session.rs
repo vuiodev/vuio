@@ -98,6 +98,7 @@ const MAX_CACHED_RATES: usize = 64;
 pub struct TranscodeState {
     cache: Mutex<Cache>,
     segments: Mutex<SegmentCache>,
+    #[cfg(all(feature = "transcode-aac", feature = "casting"))]
     rates: Mutex<RateCache>,
     /// A plain lock, not the async one the others use: this is read and written
     /// from the blocking thread that does the muxing, which cannot await.
@@ -119,6 +120,7 @@ struct ChunkCache {
 /// has to state the same promised length or the byte offsets stop meaning the
 /// same instants. Measuring once is both cheaper and the only way the answer is
 /// guaranteed to be identical each time.
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
 #[derive(Debug, Default)]
 struct RateCache {
     entries: HashMap<IndexKey, Arc<TrackRates>>,
@@ -157,6 +159,7 @@ impl TranscodeState {
         Self {
             cache: Mutex::new(Cache::default()),
             segments: Mutex::new(SegmentCache::default()),
+            #[cfg(all(feature = "transcode-aac", feature = "casting"))]
             rates: Mutex::new(RateCache::default()),
             chunks: std::sync::Mutex::new(ChunkCache::default()),
             permits: Arc::new(Semaphore::new(max_concurrent.max(1))),

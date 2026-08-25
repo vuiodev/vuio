@@ -1,0 +1,5 @@
+This xaac codec (external/xaac) is experimental; it is not yet intended
+to be used on production devices.
+
+This codec should not be configured into any production Android device
+that is intended to be shipped.

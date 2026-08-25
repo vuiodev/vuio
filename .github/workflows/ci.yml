@@ -393,7 +393,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git
+            pkg install -y curl bash git cmake
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           run: |
             set -e
@@ -431,7 +431,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git rust
+            pkg install -y curl bash git rust cmake
           run: |
             set -e
             rustc -vV
@@ -552,7 +552,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git
+            pkg install -y curl bash git cmake
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           run: |
             set -e
@@ -623,7 +623,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git rust
+            pkg install -y curl bash git rust cmake
           run: |
             set -e
             rustc -vV

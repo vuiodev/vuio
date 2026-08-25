@@ -24,7 +24,12 @@ const AC3_FRAME_MS: f64 = AC3_FRAME_SAMPLES as f64 / 48.0;
 /// Build a film: `AC3` looped to fill `seconds`, beside a 25 fps video track
 /// with a keyframe every second.
 pub fn film(seconds: f64) -> Vec<u8> {
-    let frames: Vec<&[u8]> = AC3.chunks_exact(AC3_FRAME_LEN).collect();
+    let frames: Vec<&[u8]> = AC3
+        .as_chunks::<AC3_FRAME_LEN>()
+        .0
+        .iter()
+        .map(|f| f.as_slice())
+        .collect();
     let audio_count = (seconds * 1000.0 / AC3_FRAME_MS).round() as usize;
     let audio_samples: Vec<(u64, Vec<u8>)> = (0..audio_count)
         .map(|i| {
@@ -1255,7 +1260,12 @@ fn audio_track_ids(body: &[u8]) -> Vec<u32> {
 /// and "the rest keep container order" are distinguishable assertions rather
 /// than the same one.
 fn multi_audio_film(seconds: f64, default_track: u64) -> Vec<u8> {
-    let frames: Vec<&[u8]> = AC3.chunks_exact(AC3_FRAME_LEN).collect();
+    let frames: Vec<&[u8]> = AC3
+        .as_chunks::<AC3_FRAME_LEN>()
+        .0
+        .iter()
+        .map(|f| f.as_slice())
+        .collect();
     let audio_count = (seconds * 1000.0 / AC3_FRAME_MS).round() as usize;
     let audio_samples = |offset: usize| -> Vec<(u64, Vec<u8>)> {
         (0..audio_count)
@@ -2065,7 +2075,12 @@ const DTS_FRAME_MS: f64 = 512.0 / 48.0;
 /// the picture of and plays nothing.
 #[cfg(feature = "transcode-dts")]
 fn dts_film(seconds: f64) -> Vec<u8> {
-    let frames: Vec<&[u8]> = DTS.chunks_exact(DTS_FRAME_LEN).collect();
+    let frames: Vec<&[u8]> = DTS
+        .as_chunks::<DTS_FRAME_LEN>()
+        .0
+        .iter()
+        .map(|f| f.as_slice())
+        .collect();
     let audio_count = (seconds * 1000.0 / DTS_FRAME_MS).round() as usize;
     let audio_samples: Vec<(u64, Vec<u8>)> = (0..audio_count)
         .map(|i| {
@@ -2328,7 +2343,12 @@ async fn a_dts_film_seeks_by_byte_and_still_carries_its_soundtrack() {
 /// A film with a soundtrack that cannot produce a single packet: one declared in
 /// the container and never written, and one whose frames no decoder will open.
 fn film_with_broken_soundtracks(seconds: f64) -> Vec<u8> {
-    let frames: Vec<&[u8]> = AC3.chunks_exact(AC3_FRAME_LEN).collect();
+    let frames: Vec<&[u8]> = AC3
+        .as_chunks::<AC3_FRAME_LEN>()
+        .0
+        .iter()
+        .map(|f| f.as_slice())
+        .collect();
     let audio_count = (seconds * 1000.0 / AC3_FRAME_MS).round() as usize;
     let stamp = |i: usize| (i as f64 * AC3_FRAME_MS).round() as u64;
 

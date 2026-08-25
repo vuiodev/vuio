@@ -89,6 +89,85 @@ const PRIME_BYTES: usize = 8 * 1024 * 1024;
 /// A packet read during priming, waiting to be replayed.
 type PrimedPacket = (u32, i64, Vec<u8>);
 
+// ── An experiment, off unless asked for ─────────────────────────────────────
+//
+// `VUIO_TS_AUDIO=ac3` re-encodes a DTS soundtrack as 5.1 AC-3 at 640 kbps
+// instead of stereo AAC at 192. Two things are being asked at once: whether a
+// television handles a format it decodes natively better than one it does not,
+// and what keeping the surround channels costs. Delete this and its call sites
+// to remove the experiment.
+
+fn ac3_experiment() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        cfg!(feature = "transcode-ac3")
+            && std::env::var("VUIO_TS_AUDIO")
+                .map(|v| v.trim().eq_ignore_ascii_case("ac3"))
+                .unwrap_or(false)
+    })
+}
+
+/// Channels the re-encoded soundtrack carries: the surround the AC-3 path keeps,
+/// or the stereo the AAC path downmixes to.
+fn target_channels() -> u16 {
+    if ac3_experiment() {
+        6
+    } else {
+        DECODED_CHANNELS
+    }
+}
+
+/// Whichever encoder this build of the stream is re-encoding through.
+enum Reencoder {
+    Aac(Box<AacEncoder>),
+    #[cfg(feature = "transcode-ac3")]
+    Ac3(super::Ac3Encoder),
+}
+
+impl Reencoder {
+    /// Samples one output frame covers, which is what the run advances by.
+    fn frame_samples(&self) -> u64 {
+        match self {
+            Self::Aac(_) => super::AAC_FRAME_SAMPLES,
+            #[cfg(feature = "transcode-ac3")]
+            Self::Ac3(_) => super::AC3_FRAME_SAMPLES,
+        }
+    }
+
+    /// How far the encoder's output trails its input.
+    fn delay(&self) -> i64 {
+        match self {
+            Self::Aac(_) => super::ENCODER_DELAY as i64,
+            // Measured against its own input rather than assumed, and this
+            // encoder emits the frame it was given.
+            #[cfg(feature = "transcode-ac3")]
+            Self::Ac3(_) => 0,
+        }
+    }
+
+    fn push(&mut self, pcm: &[u8]) -> Result<Vec<Vec<u8>>> {
+        match self {
+            Self::Aac(encoder) => Ok(adts_frames(&encoder.push(pcm)?)
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect()),
+            #[cfg(feature = "transcode-ac3")]
+            Self::Ac3(encoder) => encoder.push(pcm),
+        }
+    }
+
+    fn finish(&mut self) -> Vec<Vec<u8>> {
+        match self {
+            Self::Aac(encoder) => adts_frames(&encoder.finish())
+                .into_iter()
+                .map(<[u8]>::to_vec)
+                .collect(),
+            #[cfg(feature = "transcode-ac3")]
+            Self::Ac3(encoder) => encoder.finish(),
+        }
+    }
+}
+
 /// What becomes of one soundtrack on its way into a transport stream.
 ///
 /// Asked in two places that must agree — [`TsStream::open`], which carries the
@@ -385,9 +464,20 @@ fn stream_bitrate(
                 }
                 AudioDisposition::Reencoded => {
                     let sample_rate = f64::from(track.sample_rate.unwrap_or(48_000));
+                    let channels = target_channels();
+                    #[cfg(feature = "transcode-ac3")]
+                    if ac3_experiment() {
+                        return_ac3_cost(sample_rate, channels)
+                    } else {
+                        transport_cost(
+                            u64::from(AacEncoder::bitrate_for(channels)),
+                            sample_rate / super::AAC_FRAME_SAMPLES as f64,
+                        )
+                    }
+                    #[cfg(not(feature = "transcode-ac3"))]
                     transport_cost(
-                        u64::from(AacEncoder::bitrate_for(DECODED_CHANNELS)),
-                        sample_rate / f64::from(super::AAC_FRAME_SAMPLES as u32),
+                        u64::from(AacEncoder::bitrate_for(channels)),
+                        sample_rate / super::AAC_FRAME_SAMPLES as f64,
                     )
                 }
                 AudioDisposition::Dropped => 0,
@@ -396,6 +486,15 @@ fn stream_bitrate(
         .sum();
 
     transport_cost(video_bits, video_fps) + carried_bits + TABLE_BITS
+}
+
+/// What the AC-3 experiment's soundtracks cost in the stream.
+#[cfg(feature = "transcode-ac3")]
+fn return_ac3_cost(sample_rate: f64, channels: u16) -> u64 {
+    transport_cost(
+        u64::from(super::Ac3Encoder::bitrate_for(channels)),
+        sample_rate / super::AC3_FRAME_SAMPLES as f64,
+    )
 }
 
 /// The length a transport stream of this film commits to, in bytes.
@@ -464,7 +563,7 @@ struct Stream {
 /// the AAC encoder wraps a C library holding raw pointers and does not cross a
 /// thread boundary at all.
 struct Encode {
-    encoder: AacEncoder,
+    encoder: Reencoder,
     decoded_channels: u16,
     sample_rate: u32,
     /// Where the re-encoded run sits, in samples. `None` until enough packets
@@ -573,7 +672,12 @@ impl TsStream {
             let (carried, codec) = match audio_disposition(track) {
                 AudioDisposition::Passthrough => (track.codec_kind, None),
                 AudioDisposition::Reencoded => {
-                    (TrackCodec::Aac, track.codec_kind.transcode_codec())
+                    let becomes = if ac3_experiment() {
+                        TrackCodec::Ac3
+                    } else {
+                        TrackCodec::Aac
+                    };
+                    (becomes, track.codec_kind.transcode_codec())
                 }
                 AudioDisposition::Dropped => continue,
             };
@@ -799,7 +903,7 @@ impl TsStream {
         for stream in &mut self.streams {
             if let Some(decode) = stream.encode.as_mut() {
                 let tail = decode.encoder.finish();
-                place_frames(&mut stream.pending, decode, &tail, true);
+                place_frames(&mut stream.pending, decode, tail, true);
             }
         }
     }
@@ -811,7 +915,7 @@ impl TsStream {
         // deciding where a re-encoded run sits, so this is where it is forced.
         for stream in &mut self.streams {
             if let Some(decode) = stream.encode.as_mut() {
-                place_frames(&mut stream.pending, decode, &[], true);
+                place_frames(&mut stream.pending, decode, Vec::new(), true);
             }
         }
 
@@ -976,9 +1080,21 @@ fn prime_decoders(
 /// with no special case in it.
 fn open_chain(stream: &mut Stream, codec: TranscodeCodec, frame: &[u8]) -> Result<()> {
     let sample_rate = stream.sample_rate;
-    let (decoder, _) = PcmDecoder::open(codec, sample_rate, Some(DECODED_CHANNELS), frame)?;
+    let want = target_channels();
+    let (decoder, _) = PcmDecoder::open(codec, sample_rate, Some(want), frame)?;
     let decoded_channels = decoder.channels();
-    let encoder = AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
+    let encoder = if ac3_experiment() {
+        #[cfg(feature = "transcode-ac3")]
+        {
+            Reencoder::Ac3(super::Ac3Encoder::new(sample_rate, want)?)
+        }
+        #[cfg(not(feature = "transcode-ac3"))]
+        {
+            Reencoder::Aac(Box::new(AacEncoder::new(sample_rate, want)?))
+        }
+    } else {
+        Reencoder::Aac(Box::new(AacEncoder::new(sample_rate, want)?))
+    };
     stream.decoder = Some(decoder);
     stream.encode = Some(Encode {
         encoder,
@@ -1000,9 +1116,9 @@ fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Encode, ticks: u64, pcm: V
         / TS_CLOCK_HZ as i128) as i64;
     decode.anchors.push(samples - decode.decoded as i64);
     decode.decoded += (pcm.len() / (decode.decoded_channels as usize * 2)) as u64;
-    let pcm = super::fit_channels(&pcm, decode.decoded_channels, DECODED_CHANNELS);
-    let adts = decode.encoder.push(&pcm)?;
-    place_frames(pending, decode, &adts, false);
+    let pcm = super::fit_channels(&pcm, decode.decoded_channels, target_channels());
+    let frames = decode.encoder.push(&pcm)?;
+    place_frames(pending, decode, frames, false);
     Ok(())
 }
 
@@ -1012,10 +1128,8 @@ fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Encode, ticks: u64, pcm: V
 /// The ADTS headers stay on, unlike the MP4 path which strips them: a transport
 /// stream carries AAC exactly as the encoder framed it, because there is no
 /// sample entry alongside to repeat what the header says.
-fn place_frames(pending: &mut Vec<Unit>, decode: &mut Encode, adts: &[u8], settle: bool) {
-    for frame in adts_frames(adts) {
-        decode.held.push(frame.to_vec());
-    }
+fn place_frames(pending: &mut Vec<Unit>, decode: &mut Encode, frames: Vec<Vec<u8>>, settle: bool) {
+    decode.held.extend(frames);
     if decode.next_pts.is_none() {
         if !settle && decode.anchors.len() < ANCHOR_PACKETS {
             return;
@@ -1026,10 +1140,10 @@ fn place_frames(pending: &mut Vec<Unit>, decode: &mut Encode, adts: &[u8], settl
         let mut anchors = std::mem::take(&mut decode.anchors);
         // Placed early by the encoder's own delay, which is what a decoder's
         // output trails its input by.
-        let anchor =
-            super::run_anchor(&mut anchors).saturating_sub(super::ENCODER_DELAY as i64);
+        let anchor = super::run_anchor(&mut anchors).saturating_sub(decode.encoder.delay());
         decode.next_pts = Some(anchor.max(0) as u64);
     }
+    let frame_samples = decode.encoder.frame_samples();
     let mut samples = decode.next_pts.unwrap_or(0);
     for frame in decode.held.drain(..) {
         let ticks = samples * TS_CLOCK_HZ / u64::from(decode.sample_rate);
@@ -1039,7 +1153,7 @@ fn place_frames(pending: &mut Vec<Unit>, decode: &mut Encode, adts: &[u8], settl
             keyframe: true,
             data: frame,
         });
-        samples += super::AAC_FRAME_SAMPLES;
+        samples += frame_samples;
     }
     decode.next_pts = Some(samples);
 }

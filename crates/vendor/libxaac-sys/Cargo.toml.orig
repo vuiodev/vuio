@@ -1,0 +1,38 @@
+[package]
+name = "libxaac-sys"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Yehor Smoliakov <egorsmkv@gmail.com>"]
+description = "Rust FFI bindings to the libxaac AAC/xHE-AAC encoder and decoder library"
+readme = "README.md"
+license = "Apache-2.0"
+documentation = "https://docs.rs/libxaac-sys"
+keywords = ["aac", "xhe-aac", "ffi", "bindings", "audio"]
+categories = ["external-ffi-bindings", "multimedia::audio"]
+links = "xaac"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "build.rs",
+    "wrapper.h",
+    "examples/**",
+    "src/**",
+    "libxaac/**",
+]
+
+[features]
+default = ["bundled", "static"]
+bundled = []
+static = []
+dynamic = []
+
+[dependencies]
+
+[build-dependencies]
+bindgen = "0.72"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

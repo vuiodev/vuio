@@ -15,6 +15,8 @@
 
 #[cfg(feature = "transcode-aac")]
 mod aac;
+#[cfg(feature = "transcode-ac3")]
+mod ac3;
 #[cfg(feature = "transcode-dts")]
 mod dts;
 mod frames;
@@ -32,6 +34,9 @@ mod wav;
 
 #[cfg(feature = "transcode-aac")]
 pub use aac::{adts_payloads, audio_specific_config, AacEncoder};
+#[cfg(feature = "transcode-ac3")]
+#[allow(unused_imports)]
+pub use ac3::{Ac3Encoder, AC3_FRAME_SAMPLES};
 // These are the vocabulary of this module's public surface — the element type
 // of `FrameIndex::frames`, the result of `AudioPlan::seek`, the header length a
 // caller subtracts from an offset. Nothing inside the crate spells some of them
@@ -47,6 +52,7 @@ pub use plan::{AudioPlan, Seeked};
 pub use rendition::{
     fit_channels, reencode_to_aac, run_anchor, AacWindow, AAC_FRAME_SAMPLES, ENCODER_DELAY,
 };
+#[allow(unused_imports)]
 pub use session::{ChunkKey, IndexKey, SegmentKey, TranscodeState};
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
 #[allow(unused_imports)]

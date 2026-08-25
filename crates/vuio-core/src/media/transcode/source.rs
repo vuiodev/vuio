@@ -12,6 +12,7 @@
 //! sample, then pull blocks — and the two variants below are the two ways of
 //! honouring it.
 
+#[allow(unused_imports)]
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 

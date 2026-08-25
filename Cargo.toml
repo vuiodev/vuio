@@ -17,6 +17,8 @@ members = [
     "crates/vendor/oxideav-core",
     "crates/vendor/oxideav-ac3",
     "crates/vendor/oxideav-dts",
+    "crates/vendor/libxaac-sys",
+    "crates/vendor/xaac-rs",
 ]
 
 # `vuio-bench` is deliberately not a default member. Cargo unifies features across
@@ -31,6 +33,10 @@ default-members = [
     "crates/vuio-web",
 ]
 resolver = "2"
+
+[patch.crates-io]
+libxaac-sys = { path = "crates/vendor/libxaac-sys" }
+xaac-rs = { path = "crates/vendor/xaac-rs" }
 
 # Optimizing codecs, encoders, and demuxers in dev profile gives fast real-time
 # audio decoding and encoding without requiring release rebuilds.

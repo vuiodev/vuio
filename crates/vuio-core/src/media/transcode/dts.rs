@@ -279,7 +279,7 @@ mod tests {
         // Frame boundaries: the fixture is five 1024-byte frames.
         let mut peak = 0i32;
         let mut frames = 0;
-        for frame in FIXTURE.chunks_exact(1024) {
+        for frame in FIXTURE.as_chunks::<1024>().0 {
             let (pcm, samples) = decoder.decode(frame).expect("a fixture frame decodes");
             assert_eq!(pcm.len(), samples as usize * 2 * BYTES_PER_SAMPLE);
             for pair in pcm.as_chunks::<2>().0 {

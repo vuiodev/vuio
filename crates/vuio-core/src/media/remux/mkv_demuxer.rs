@@ -1,5 +1,6 @@
 //! Matroska (.mkv) track inspection and sample packet demuxing via Symphonia.
 
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
