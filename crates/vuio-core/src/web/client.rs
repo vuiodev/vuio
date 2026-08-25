@@ -79,6 +79,44 @@ tokio::task_local! {
     pub static CURRENT_CLIENT: DlnaClientProfile;
 }
 
+/// One line saying what a renderer asked for, and how it asked.
+///
+/// A television that will not seek is nearly always a disagreement about one of
+/// two things: which `<res>` it actually fetched, and which seek mechanism it
+/// used to scrub. Neither is visible from this end unless it is written down —
+/// the DIDL offers two resources and says both are seekable, and what the set
+/// arrives at is its own business until it makes a request. So this records the
+/// request as it came in: who sent it, what they asked for, and every header
+/// that bears on seeking, including the ones we do not honour. A `Range: bytes=`
+/// on a resource advertised as time-seek-only is not a bug in the renderer; it
+/// is the answer to why the scrub bar does nothing.
+pub fn log_renderer_request(
+    resource: &str,
+    method: &axum::http::Method,
+    headers: &HeaderMap,
+) -> DlnaClientProfile {
+    let profile = detect_client(headers);
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("-")
+            .to_string()
+    };
+    tracing::info!(
+        target: "vuio::renderer",
+        "{method} {resource} | profile={profile:?} | ua={:?} | av-client={:?} | \
+         TimeSeekRange={:?} | Range={:?} | getcontentFeatures={:?} | transferMode={:?}",
+        header("user-agent"),
+        header("x-av-client-info"),
+        header("timeseekrange.dlna.org"),
+        header("range"),
+        header("getcontentfeatures.dlna.org"),
+        header("transfermode.dlna.org"),
+    );
+    profile
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

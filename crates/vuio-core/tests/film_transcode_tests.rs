@@ -356,7 +356,7 @@ fn boxes(data: &[u8]) -> Vec<(String, &[u8])> {
 fn find_box<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
     const CONTAINERS: &[&str] = &[
         "moov", "trak", "mdia", "minf", "stbl", "stsd", "mvex", "moof", "traf", "avc1", "hvc1",
-        "mp4a",
+        "mp4a", "ac-3", "ec-3",
     ];
     for (found, body) in boxes(data) {
         if found == name {
@@ -368,7 +368,9 @@ fn find_box<'a>(data: &'a [u8], name: &str) -> Option<&'a [u8]> {
             let inner = match found.as_str() {
                 "stsd" => &body[8..],
                 "avc1" | "hvc1" => &body[78..],
-                "mp4a" => &body[28..],
+                // Every audio sample entry shares the same 28-byte preamble
+                // before its own configuration box.
+                "mp4a" | "ac-3" | "ec-3" => &body[28..],
                 _ => body,
             };
             if let Some(hit) = find_box(inner, name) {
@@ -652,20 +654,40 @@ async fn the_remuxed_film_is_a_parseable_fmp4_with_both_tracks() {
     assert!(features.contains("DLNA.ORG_CI=1"), "{features}");
     assert!(
         features.contains("DLNA.ORG_OP=10"),
-        "time seek yes, byte seek no: {features}"
+        "time seek yes, byte seek no — a byte offset into a stream produced on          demand does not name a fixed place in it: {features}"
     );
-    assert!(
-        !headers.contains_key(header::ACCEPT_RANGES),
-        "claiming byte ranges and then refusing them is worse than never claiming"
+    assert_eq!(
+        headers[header::ACCEPT_RANGES],
+        "none",
+        "stated rather than merely omitted: a client that probes with a range          request and gets a positional-looking answer concludes ranges work,          then seeks while parsing and splices two generations of the stream"
     );
-    assert!(
-        !headers.contains_key(header::CONTENT_LENGTH),
-        "the length of this resource is not knowable before it exists"
+    // The length is a promise the body is then made to keep exactly.
+    let promised: usize = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        body.len(),
+        promised,
+        "the body must be exactly as long as the response promised"
     );
 
     let top: Vec<String> = boxes(&body).into_iter().map(|(name, _)| name).collect();
     assert_eq!(&top[..2], &["ftyp", "moov"], "an init segment comes first");
-    let fragments = top[2..].chunks(2).collect::<Vec<_>>();
+    // Then moof/mdat pairs, and then however many `free` boxes it takes to
+    // reach the length the response promised. The padding is what lets this
+    // resource state a length at all, and a renderer skips it — mostly without
+    // fetching it, since it stops at the duration the `moov` declared.
+    let padding = top
+        .iter()
+        .position(|name| name == "free")
+        .unwrap_or(top.len());
+    assert!(
+        top[padding..].iter().all(|name| name == "free"),
+        "nothing may follow the padding: {top:?}"
+    );
+    let fragments = top[2..padding].chunks(2).collect::<Vec<_>>();
     assert!(
         fragments.len() >= 2,
         "expected several moof/mdat pairs, got {top:?}"
@@ -673,6 +695,7 @@ async fn the_remuxed_film_is_a_parseable_fmp4_with_both_tracks() {
     for pair in &fragments {
         assert_eq!(pair, &["moof", "mdat"], "in {top:?}");
     }
+    assert!(padding < top.len(), "this film should be padded: {top:?}");
 
     // Two tracks, and the picture must arrive as the picture: the source's own
     // decoder configuration record, byte for byte. That is what "passthrough"
@@ -689,9 +712,20 @@ async fn the_remuxed_film_is_a_parseable_fmp4_with_both_tracks() {
         Some(AVCC),
         "the video track is copied, not re-encoded"
     );
+    // AC-3 is handed over as AC-3: a television is what Dolby Digital was
+    // built for, and a stereo AAC downmix would throw away the 5.1 it plays.
     assert!(
-        find_box(&body, "mp4a").is_some(),
-        "the AC-3 track must arrive as AAC — nothing else would play"
+        find_box(&body, "ac-3").is_some(),
+        "the AC-3 track must be passed through, not re-encoded"
+    );
+    assert_eq!(
+        find_box(&body, "dac3").map(<[u8]>::len),
+        Some(3),
+        "an ac-3 sample entry is nothing without the record describing it"
+    );
+    assert!(
+        find_box(&body, "mp4a").is_none(),
+        "nothing here needed re-encoding"
     );
     // `mehd` is what a fragmented file carries its total duration in, and what a
     // renderer with no Content-Length draws a scrub bar from.
@@ -710,6 +744,17 @@ async fn a_head_describes_the_film_without_decoding_it() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.is_empty());
     assert_eq!(headers[header::CONTENT_TYPE], "video/mp4");
+    // A renderer probes with HEAD before it plays, and a resource with no
+    // length — or worse, a length of zero — is one it mostly declines to draw a
+    // scrub bar for. The promise made here is the one a GET then keeps.
+    let promised = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(promised, "0", "HEAD must not describe an empty resource");
+    let (_, get_headers, get_body) = video_mp4(&state, id, Method::GET, None).await;
+    assert_eq!(get_headers[header::CONTENT_LENGTH], promised);
+    assert_eq!(get_body.len().to_string(), promised);
     assert_eq!(
         headers["X-Content-Duration"]
             .to_str()
@@ -760,6 +805,116 @@ async fn a_time_seek_starts_the_film_where_it_was_asked_to() {
         "seeking to the middle produced {} bytes against {} for the whole film",
         body.len(),
         whole.len()
+    );
+}
+
+/// What an Android television does before it plays anything: read sixteen bytes
+/// off the end of the file, looking for the `moov` a progressive MP4 carries at
+/// its tail.
+///
+/// Answering that by producing the film would take a transcode slot and, on a
+/// thirty-gigabyte remux, an enormous amount of work to hand back sixteen bytes.
+/// Answering it with the whole film from the beginning — which is what ignoring
+/// the range does — is a reply the set cannot make sense of, and it gives up
+/// before playing a frame. So it is answered from the padding, which is the one
+/// part of this resource whose contents are known without muxing anything.
+#[tokio::test]
+async fn the_tail_a_renderer_probes_is_answered_without_producing_the_film() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+
+    // The length the resource commits to, which is what the renderer counts
+    // back from.
+    let (_, headers, whole) = video_mp4(&state, id, Method::GET, None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let first = promised - 16;
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/media/{id}/transcode/video.mp4"))
+                .header(header::RANGE, format!("bytes={first}-"))
+                .extension(ConnectInfo::<std::net::SocketAddr>(
+                    "127.0.0.1:50000".parse().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        response.headers()[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {first}-{}/{promised}", promised - 1)
+    );
+    let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert_eq!(body.len(), 16);
+    // And it is the truth rather than a convenient reply: these are the bytes a
+    // whole download really ends with.
+    assert_eq!(
+        &body[..],
+        &whole[whole.len() - 16..],
+        "the padding answer must match what the stream actually ends with"
+    );
+}
+
+/// The defect that made three rounds of seek fixes pointless: a byte offset into
+/// this resource does not name a fixed place in it, because the bytes are
+/// produced on demand and offset X is whatever the muxer emitted that time.
+///
+/// Answering a `Range` positionally therefore hands the client a fresh
+/// `ftyp`/`moov` where it expected the continuation of what it was already
+/// reading, and it decodes the join as noise. Worse, a client told
+/// `Accept-Ranges: bytes` seeks while merely *parsing*, so straight playback
+/// comes apart too — the stream is corrupt before anyone touches a scrub bar.
+///
+/// So a range is answered from the beginning, which HTTP explicitly allows, and
+/// the refusal is advertised rather than left to be discovered.
+#[tokio::test]
+async fn a_byte_range_is_answered_from_the_beginning_rather_than_positionally() {
+    let (_temp, state, id) = scanned_film(12.0).await;
+
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/media/{id}/transcode/video.mp4"))
+                .header(header::RANGE, "bytes=100000-")
+                .extension(ConnectInfo::<std::net::SocketAddr>(
+                    "127.0.0.1:50000".parse().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "a range this resource cannot honour must not be answered as though it          had been"
+    );
+    assert!(
+        !response.headers().contains_key(header::CONTENT_RANGE),
+        "no positional claim may be made about a stream produced on demand"
+    );
+
+    let body = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert_eq!(&body[4..8], b"ftyp", "a whole stream, from its start");
+    let tfdt = find_box(&body, "tfdt").expect("a tfdt in the first fragment");
+    let seconds = u64::from_be_bytes(tfdt[4..12].try_into().unwrap()) as f64 / 90_000.0;
+    assert!(
+        seconds < 0.5,
+        "the range was honoured positionally after all: started at {seconds:.3}s"
     );
 }
 
@@ -1006,14 +1161,15 @@ async fn every_soundtrack_carries_samples_through_the_whole_film() {
         fragments >= 2,
         "expected several fragments, got {fragments}"
     );
-    // Six seconds of 48 kHz audio is 281 AAC frames of 1024 samples, and each
-    // track should carry very nearly all of them — the first fragment or two
-    // are lost to the wait for the video's first keyframe.
+    // These are AC-3 syncframes now, passed through rather than re-encoded:
+    // 1536 samples each, so six seconds of 48 kHz is 187 or 188 of them, and
+    // each track should carry very nearly all of them — the first fragment or
+    // two are lost to the wait for the video's first keyframe.
     for track_id in [2u32, 3, 4] {
         let count = samples.get(&track_id).copied().unwrap_or(0);
         assert!(
-            (200..=290).contains(&count),
-            "track {track_id} carried {count} AAC frames across the film: {samples:?}"
+            (170..=190).contains(&count),
+            "track {track_id} carried {count} frames across the film: {samples:?}"
         );
     }
     let video = samples.get(&1).copied().unwrap_or(0);
@@ -1062,7 +1218,12 @@ fn traks_by_kind(body: &[u8]) -> Vec<(&'static str, &[u8])> {
         .into_iter()
         .filter(|(name, _)| name == "trak")
         .map(|(_, trak)| {
-            let kind = if find_box(trak, "mp4a").is_some() {
+            // From the `hdlr` handler type, not the sample entry: which sample
+            // entry an audio track carries is the thing under test — `mp4a` for
+            // one re-encoded, `ac-3` or `ec-3` for one passed through.
+            let hdlr = find_box(trak, "hdlr").expect("a hdlr");
+            // version+flags(4) + pre_defined(4), then the handler type.
+            let kind = if &hdlr[8..12] == b"soun" {
                 "audio"
             } else {
                 "video"
@@ -1159,7 +1320,7 @@ async fn a_film_advertises_the_remuxed_film_and_not_its_soundtrack() {
     let didl = browse_didl(&state).await;
 
     assert!(
-        didl.contains(&format!("/media/{id}/transcode/video.mp4")),
+        didl.contains(&format!("/media/{id}/transcode/video.ts")),
         "a film's alternative is the film:\n{didl}"
     );
     assert!(
@@ -1167,15 +1328,15 @@ async fn a_film_advertises_the_remuxed_film_and_not_its_soundtrack() {
         "offering a film's soundtrack in place of the film would lose the picture:\n{didl}"
     );
     assert!(
-        didl.contains("DLNA.ORG_OP=10;DLNA.ORG_CI=1"),
-        "the advertised operations must be the ones the resource honours:\n{didl}"
+        didl.contains("DLNA.ORG_OP=11;DLNA.ORG_CI=1"),
+        "a transport stream resynchronises wherever it is joined, so both seek          modes are honest here:\n{didl}"
     );
     // The original stays, and stays first by default, so a television that can
     // decode AC-3 keeps its byte-seekable direct-play resource.
     let original = didl
         .find(&format!("/media/{id}</res>"))
         .unwrap_or_else(|| panic!("no direct-play resource in:\n{didl}"));
-    let transcoded = didl.find("transcode/video.mp4").unwrap();
+    let transcoded = didl.find("transcode/video.ts").unwrap();
     assert!(
         original < transcoded,
         "the original is listed first:\n{didl}"
@@ -1232,6 +1393,44 @@ async fn with_the_feature_off_a_film_has_exactly_one_resource() {
 
     let didl = browse_didl(&state).await;
     assert!(!didl.contains("transcode/"), "{didl}");
+}
+
+/// `mode = "forced"` must still offer the decoded resource for a film whose
+/// audio is not DTS.
+///
+/// The forcing rule is about whether to *hide* the original, and only DTS earns
+/// that — a television that cannot license DTS certainly has no decoder for it,
+/// where AC-3 is common enough that hiding the original would take away a
+/// working choice. Gating the decoded resource itself on the same test left an
+/// AC-3 film in forced mode with no decoded resource at all, which is the exact
+/// case this whole path exists for.
+#[tokio::test]
+async fn a_forced_film_still_offers_the_transcode_when_its_audio_is_not_dts() {
+    let (_temp, mut state, _) = scanned_film(4.0).await;
+    let mut config = (*state.config).clone();
+    config.transcode.mode = vuio_core::config::TranscodeMode::Forced;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_didl(&state).await;
+    assert!(
+        didl.contains("transcode/video.ts"),
+        "an AC-3 film in forced mode must still be offered the remux:\n{didl}"
+    );
+    // And the original stays beside it, because AC-3 is not DTS.
+    assert!(
+        didl.contains("video/x-matroska") || didl.contains("video/x-mkv"),
+        "the original must not be hidden for AC-3:\n{didl}"
+    );
+    // Forced means the decoded resource leads. `DLNA.ORG_CI` is what separates
+    // them: 1 is converted, 0 is the file as it is stored.
+    let converted = didl.find("DLNA.ORG_CI=1").expect("the decoded resource");
+    let stored = didl.find("DLNA.ORG_CI=0").expect("the original");
+    assert!(
+        converted < stored,
+        "the forced resource must be listed first:\n{didl}"
+    );
 }
 
 /// Browse the root folder as a television would, and return the DIDL.
@@ -1311,6 +1510,96 @@ fn dump_fixture() {
     eprintln!("wrote {out}");
 }
 
+/// Not a test: prints what this server would commit to for a film on disk, so a
+/// real library can be checked without a television in the room.
+/// `VUIO_FILM=/path/to/Film.mkv cargo test --all-features describe_a_real_film -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn describe_a_real_film() {
+    use vuio_core::media::remux::{
+        browser_video_track, television_audio_tracks, MkvDemuxer, TrackKind,
+    };
+    use vuio_core::media::transcode::{audio_disposition, measure_track_rates, promised_ts_length};
+
+    let path = std::env::var("VUIO_FILM").expect("set VUIO_FILM to the film to describe");
+    let path = std::path::PathBuf::from(path);
+    let size = std::fs::metadata(&path).unwrap().len();
+
+    let probed = std::time::Instant::now();
+    let info = MkvDemuxer::inspect(&path).expect("inspect the film");
+    let duration = info.duration_secs.unwrap_or(0.0);
+    eprintln!(
+        "{}\n  {size} bytes, {duration:.1}s, inspected in {:.2}s",
+        path.display(),
+        probed.elapsed().as_secs_f64()
+    );
+
+    let video = browser_video_track(&info.tracks);
+    match video {
+        Some(track) => eprintln!("  video: {} ({:?})", track.codec, track.codec_kind),
+        None => eprintln!("  video: NONE this build can copy through — no .ts is offered"),
+    }
+
+    let measured = std::time::Instant::now();
+    let rates = measure_track_rates(&path, &info.tracks).expect("measure the film");
+    eprintln!("  measured in {:.2}s", measured.elapsed().as_secs_f64());
+
+    for track in &info.tracks {
+        let rate = rates.get(track.id);
+        let shape = match rate {
+            Some(rate) => format!(
+                "{:.0} kbps, {:.2} fps",
+                rate.bits_per_second as f64 / 1000.0,
+                rate.frames_per_second
+            ),
+            None => "not measured".to_string(),
+        };
+        let role = if track.track_kind == TrackKind::Audio {
+            format!("{:?}", audio_disposition(track))
+        } else {
+            format!("{:?}", track.track_kind)
+        };
+        eprintln!(
+            "  track {} {:?} {}ch lang={} — {role}, {shape}",
+            track.id,
+            track.codec_kind,
+            track.channels.unwrap_or(0),
+            track.language.as_deref().unwrap_or("und")
+        );
+    }
+
+    let carried: Vec<_> = television_audio_tracks(&info.tracks)
+        .into_iter()
+        .cloned()
+        .collect();
+    let promised = promised_ts_length(size, duration, &info.tracks, &carried, &rates);
+    let old = size + (size / 16);
+    eprintln!(
+        "  promised {promised} bytes ({:.1}% of source, {:.2} Mbps)\n  \
+         the source-sized promise would have been {old} ({:.1}%), so a byte offset \
+         would have named a moment {:.2}x too far along",
+        promised as f64 * 100.0 / size as f64,
+        promised as f64 * 8.0 / duration / 1e6,
+        old as f64 * 100.0 / size as f64,
+        old as f64 / promised as f64,
+    );
+}
+
+/// Not a test: writes a DTS film out so a real server can be pointed at it.
+/// `cargo test --all-features dump_dts_fixture -- --ignored`
+#[cfg(feature = "transcode-dts")]
+#[test]
+#[ignore]
+fn dump_dts_fixture() {
+    let out = std::env::var("VUIO_FIXTURE_OUT").unwrap_or_else(|_| "/tmp/vuio-dts.mkv".into());
+    let seconds: f64 = std::env::var("VUIO_FIXTURE_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60.0);
+    std::fs::write(&out, dts_film(seconds)).unwrap();
+    eprintln!("wrote {out}");
+}
+
 #[test]
 #[ignore]
 fn dump_long_fixture() {
@@ -1329,4 +1618,885 @@ async fn dump_multi_audio() {
     let out = std::env::var("VUIO_DUMP").unwrap_or_else(|_| "/tmp/multi_audio.mp4".into());
     std::fs::write(&out, &body).unwrap();
     eprintln!("wrote {} bytes to {out}", body.len());
+}
+
+// ── Step 6: the transport stream a television can seek ────────────────────
+
+async fn video_ts(
+    state: &vuio_core::state::AppState,
+    id: i64,
+    query: &str,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/media/{id}/transcode/video.ts{query}"))
+        .extension(ConnectInfo::<std::net::SocketAddr>(
+            "127.0.0.1:50000".parse().unwrap(),
+        ));
+    if let Some(range) = range {
+        builder = builder.header(header::RANGE, range);
+    }
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 256 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, body)
+}
+
+const TS_PACKET: usize = 188;
+
+/// Every packet in a transport stream begins with a sync byte, and that is the
+/// whole reason a decoder can join one part way through.
+fn assert_well_formed_ts(body: &[u8]) {
+    assert_eq!(body.len() % TS_PACKET, 0, "packets must tile the stream");
+    for (index, packet) in body.chunks(TS_PACKET).enumerate() {
+        assert_eq!(packet[0], 0x47, "packet {index} has no sync byte");
+    }
+}
+
+/// PIDs that carry a payload, in order of first appearance.
+fn pids(body: &[u8]) -> Vec<u16> {
+    let mut seen = Vec::new();
+    for packet in body.chunks(TS_PACKET) {
+        let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        if !seen.contains(&pid) {
+            seen.push(pid);
+        }
+    }
+    seen
+}
+
+#[tokio::test]
+async fn a_film_is_served_as_a_well_formed_transport_stream() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (status, headers, body) = video_ts(&state, id, "", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "video/mpeg");
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+    let features = headers["contentFeatures.dlna.org"].to_str().unwrap();
+    assert!(
+        features.contains("DLNA.ORG_OP=11"),
+        "a transport stream resynchronises wherever it is joined, so byte          seeking is an honest claim here: {features}"
+    );
+    assert_well_formed_ts(&body);
+
+    // The tables come first, because a decoder that joined here has to be told
+    // what the programme contains before anything else means anything.
+    let seen = pids(&body);
+    assert_eq!(seen[0], 0x0000, "the programme association table leads");
+    assert_eq!(seen[1], 0x1000, "then the programme map");
+    assert!(
+        seen.contains(&0x0100) && seen.contains(&0x0101),
+        "a video stream and a soundtrack: {seen:?}"
+    );
+
+    // And the body is exactly the length it promised.
+    let promised: usize = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(body.len(), promised);
+}
+
+/// The tables are repeated rather than written once, which is the difference
+/// between a stream that can be joined and one that cannot.
+#[tokio::test]
+async fn the_programme_tables_repeat_throughout_the_stream() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, _, body) = video_ts(&state, id, "", None).await;
+
+    let pat_packets = body
+        .chunks(TS_PACKET)
+        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x0000)
+        .count();
+    assert!(
+        pat_packets >= 4,
+        "an eight-second film should carry the tables several times over, not          once at the front: found {pat_packets}"
+    );
+}
+
+/// What the whole transport stream exists for: a byte offset is a usable seek.
+#[tokio::test]
+async fn a_byte_offset_seeks_to_that_fraction_of_the_film() {
+    let (_temp, state, id) = scanned_film(12.0).await;
+    let (_, headers, whole) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let half = promised / 2;
+    let (status, headers, body) = video_ts(&state, id, "", Some(&format!("bytes={half}-"))).await;
+
+    // Whole packets, so a range whose first byte falls inside one ends a little
+    // short of the promise rather than delivering a fragment of a packet. HTTP
+    // lets a server answer an open-ended range with less of it than was asked
+    // for, and a decoder handed 40 bytes of a packet can do nothing with them.
+    let expected = ((promised - half) / TS_PACKET as u64) * TS_PACKET as u64;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        headers[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {half}-{}/{promised}", half + expected - 1)
+    );
+    assert_eq!(body.len() as u64, expected, "exactly what was promised");
+    assert_well_formed_ts(&body);
+    // The tables lead this response too — without them a decoder joining here
+    // would have nothing to interpret the packets against.
+    assert_eq!(pids(&body)[0], 0x0000);
+    assert!(
+        body.len() < whole.len(),
+        "seeking to the middle produced as much as the whole film"
+    );
+}
+
+#[tokio::test]
+async fn a_head_describes_the_transport_stream_without_producing_it() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(format!("/media/{id}/transcode/video.ts"))
+                .extension(ConnectInfo::<std::net::SocketAddr>(
+                    "127.0.0.1:50000".parse().unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "video/mpeg");
+    let promised = response.headers()[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(promised, "0");
+
+    let (_, get_headers, get_body) = video_ts(&state, id, "", None).await;
+    assert_eq!(get_headers[header::CONTENT_LENGTH], promised);
+    assert_eq!(get_body.len().to_string(), promised);
+}
+
+/// A client sizing the file up reads its last handful of bytes — fewer than one
+/// packet, so there is no whole packet left to produce. Refusing that as
+/// unsatisfiable is reported as a transfer error rather than shrugged off, and
+/// the film never starts.
+#[tokio::test]
+async fn a_range_inside_the_final_packet_is_answered_from_it() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, headers, whole) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Forty bytes into the last packet, which is where a reader counting back
+    // from the end lands.
+    let first = promised - 148;
+    let (status, headers, body) = video_ts(&state, id, "", Some(&format!("bytes={first}-"))).await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT, "not 416");
+    assert_eq!(body.len(), 148);
+    assert_eq!(
+        headers[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {first}-{}/{promised}", promised - 1)
+    );
+    // And it is the truth: these are the bytes a complete read really ends with.
+    assert_eq!(
+        &body[..],
+        &whole[whole.len() - 148..],
+        "the tail answer must match what the stream actually ends with"
+    );
+}
+
+/// The `video.mp4` next door stays, because the browser player fetches whole
+/// responses and never needs a byte offset — it is only a television that does.
+#[tokio::test]
+async fn the_mp4_resource_remains_beside_the_transport_stream() {
+    let (_temp, state, id) = scanned_film(4.0).await;
+    let (status, headers, _) = video_mp4(&state, id, Method::GET, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "video/mp4");
+
+    let (status, headers, _) = video_ts(&state, id, "", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "video/mpeg");
+}
+
+/// The failure that stopped a film playing at all, and the least obvious one.
+///
+/// A television opens three connections in under a second: one to play on, one
+/// to read the end of the file, and one to play on again. Answering the middle
+/// one by muxing means seeking into a thirty-gigabyte film and holding a
+/// transcode slot for as long as that takes — and with two slots, the request
+/// the set actually wanted to play on is refused outright.
+///
+/// A probe produces nothing, so it should cost nothing.
+#[tokio::test]
+async fn a_tail_probe_is_answered_even_with_every_transcode_slot_taken() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, headers, whole) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Every slot busy, as it is when a set has connections already open.
+    let mut held = Vec::new();
+    while let Some(permit) = state.transcode.try_acquire() {
+        held.push(permit);
+    }
+    assert!(!held.is_empty(), "there is at least one slot to exhaust");
+
+    // Producing the film is refused, which is the point of the limit.
+    let (status, _, _) = video_ts(&state, id, "", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+
+    // Reading its tail is not, because that produces nothing.
+    let first = promised - 4096;
+    let (status, headers, body) = video_ts(&state, id, "", Some(&format!("bytes={first}-"))).await;
+    assert_eq!(
+        status,
+        StatusCode::PARTIAL_CONTENT,
+        "a probe must not queue behind the films being played"
+    );
+    assert_eq!(body.len(), 4096);
+    assert_eq!(
+        headers[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {first}-{}/{promised}", promised - 1)
+    );
+    // And it is still the truth, aligned the way a full read would deliver it.
+    assert_eq!(
+        &body[..],
+        &whole[whole.len() - 4096..],
+        "the padding answer must match what the stream actually ends with"
+    );
+}
+
+/// The elementary-stream PIDs the programme map declares.
+///
+/// Parsed rather than inferred from what appears in the body, because the point
+/// of the assertions below is the difference between the two: a PID a renderer
+/// is told to expect audio on and never receives any is a renderer that waits
+/// forever.
+fn declared_pids(body: &[u8]) -> Vec<u16> {
+    let pmt = body
+        .chunks(TS_PACKET)
+        .find(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1000)
+        .expect("the stream carries a programme map");
+    // header(4) pointer_field(1), then the section.
+    let section = &pmt[5..];
+    assert_eq!(section[0], 0x02, "table_id 2 is the programme map");
+    let length = usize::from(u16::from_be_bytes([section[1] & 0x0F, section[2]]));
+    // table_id_extension(2) version(1) section(2) pcr_pid(2) program_info(2)
+    let info_length = usize::from(u16::from_be_bytes([section[10] & 0x0F, section[11]]));
+    let mut at = 12 + info_length;
+    // The section runs to `length` past the third byte, less its four-byte CRC.
+    let end = 3 + length - 4;
+    let mut pids = Vec::new();
+    while at + 5 <= end {
+        pids.push(u16::from_be_bytes([
+            section[at + 1] & 0x1F,
+            section[at + 2],
+        ]));
+        let descriptors = usize::from(u16::from_be_bytes([
+            section[at + 3] & 0x0F,
+            section[at + 4],
+        ]));
+        at += 5 + descriptors;
+    }
+    pids
+}
+
+/// Where one packet's payload begins, and the programme clock it carries.
+fn payload_and_pcr(packet: &[u8]) -> (usize, Option<u64>) {
+    let control = (packet[3] >> 4) & 0b11;
+    if control & 0b10 == 0 {
+        return (4, None);
+    }
+    let length = usize::from(packet[4]);
+    let payload = 5 + length;
+    if length == 0 {
+        return (payload, None);
+    }
+    if packet[5] & 0x10 == 0 {
+        return (payload, None);
+    }
+    let base = (u64::from(packet[6]) << 25)
+        | (u64::from(packet[7]) << 17)
+        | (u64::from(packet[8]) << 9)
+        | (u64::from(packet[9]) << 1)
+        | u64::from(packet[10] >> 7);
+    (payload, Some(base))
+}
+
+/// The presentation timestamp in a PES header starting at `payload`.
+fn pes_pts(payload: &[u8]) -> Option<u64> {
+    if payload.get(..3)? != [0x00, 0x00, 0x01] {
+        return None;
+    }
+    if payload[7] >> 6 == 0 {
+        return None;
+    }
+    let stamp = payload.get(9..14)?;
+    Some(
+        (u64::from(stamp[0] & 0x0E) << 29)
+            | (u64::from(stamp[1]) << 22)
+            | (u64::from(stamp[2] & 0xFE) << 14)
+            | (u64::from(stamp[3]) << 7)
+            | (u64::from(stamp[4]) >> 1),
+    )
+}
+
+/// A decoder starts its clock from the PCR and shows each picture when that
+/// clock reaches the picture's PTS. Write the two equal and every frame is due
+/// the instant it arrives, so there is no buffer at all and the first jitter
+/// starves the renderer — which after a seek, where the decoder starts from
+/// nothing, is exactly when it can least afford it.
+#[tokio::test]
+async fn the_presentation_clock_runs_ahead_of_the_programme_clock() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, _, body) = video_ts(&state, id, "", None).await;
+
+    let mut checked = 0;
+    for packet in body.chunks(TS_PACKET) {
+        let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        if pid != 0x0100 || packet[1] & 0x40 == 0 {
+            continue;
+        }
+        let (payload, Some(pcr)) = payload_and_pcr(packet) else {
+            continue;
+        };
+        let Some(pts) = pes_pts(&packet[payload..]) else {
+            continue;
+        };
+        assert!(
+            pts > pcr,
+            "a picture due at {pts} was clocked as arriving at {pcr}, so the renderer \
+             has no buffer to fill"
+        );
+        // Half a second of ninety-kilohertz ticks, and not so much more that the
+        // film takes noticeably longer to start.
+        assert_eq!(pts - pcr, 45_000, "the headroom is a fixed half second");
+        checked += 1;
+    }
+    assert!(checked > 20, "only {checked} pictures carried a clock");
+}
+
+/// A decoder that joins the stream anywhere can interpret nothing until it has
+/// seen a PAT and a PMT, so the wait for the next pair is the floor on how long
+/// a seek takes to produce a picture.
+#[tokio::test]
+async fn the_tables_repeat_often_enough_to_join_the_stream_quickly() {
+    let (_temp, state, id) = scanned_film(8.0).await;
+    let (_, _, body) = video_ts(&state, id, "", None).await;
+
+    let pmts = body
+        .chunks(TS_PACKET)
+        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1000)
+        .count();
+    // Ten a second is what the broadcast profiles ask for; eight seconds of film
+    // should therefore carry something near eighty, and certainly not eight.
+    assert!(
+        pmts >= 60,
+        "{pmts} programme maps in eight seconds of film is a decoder waiting a \
+         second to learn what it has joined"
+    );
+}
+
+/// A transport stream marks access unit boundaries with a delimiter and nothing
+/// else — a container's own frame boundaries do not survive the conversion — so
+/// every muxer in the field writes one, and a decoder that relies on it shows
+/// nothing at all without it.
+#[tokio::test]
+async fn every_picture_opens_with_an_access_unit_delimiter() {
+    let (_temp, state, id) = scanned_film(4.0).await;
+    let (_, _, body) = video_ts(&state, id, "", None).await;
+
+    let mut checked = 0;
+    for packet in body.chunks(TS_PACKET) {
+        let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        if pid != 0x0100 || packet[1] & 0x40 == 0 {
+            continue;
+        }
+        let (payload, _) = payload_and_pcr(packet);
+        let pes = &packet[payload..];
+        // start codes(3) stream_id(1) length(2) flags(2) header_len(1), then the
+        // timestamps the header declared.
+        let unit = &pes[9 + usize::from(pes[8])..];
+        assert_eq!(
+            &unit[..5],
+            &[0, 0, 0, 1, 0x09],
+            "an access unit that does not open with a delimiter"
+        );
+        checked += 1;
+    }
+    assert!(checked > 10, "only {checked} access units were examined");
+}
+
+// ── The codec this whole path exists for ──────────────────────────────────
+//
+// AC-3 is passed through: a television decodes it for itself, so a film with an
+// AC-3 soundtrack never reaches a decoder here and exercises none of the work
+// below. DTS is the one no television will play and the one every stage of this
+// has to get right — measured, decoded, re-encoded, and declared in the
+// programme map only once its decoder has been proved to open.
+
+/// The vendored DTS conformance fixture: 48 kHz, 1024-byte frames of 512
+/// samples each, which is 768 kbps in eleven-millisecond frames.
+const DTS: &[u8] = include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+const DTS_FRAME_LEN: usize = 1024;
+const DTS_FRAME_MS: f64 = 512.0 / 48.0;
+
+/// A film whose only soundtrack is DTS, which is the case a television shows
+/// the picture of and plays nothing.
+#[cfg(feature = "transcode-dts")]
+fn dts_film(seconds: f64) -> Vec<u8> {
+    let frames: Vec<&[u8]> = DTS.chunks_exact(DTS_FRAME_LEN).collect();
+    let audio_count = (seconds * 1000.0 / DTS_FRAME_MS).round() as usize;
+    let audio_samples: Vec<(u64, Vec<u8>)> = (0..audio_count)
+        .map(|i| {
+            (
+                (i as f64 * DTS_FRAME_MS).round() as u64,
+                frames[i % frames.len()].to_vec(),
+            )
+        })
+        .collect();
+
+    let video_count = (seconds * 25.0).round() as usize;
+    let video_samples: Vec<(u64, Vec<u8>)> = (0..video_count)
+        .map(|i| {
+            (
+                (i as f64 * 40.0).round() as u64,
+                video_sample(i % 25 == 0, 96, i as u8),
+            )
+        })
+        .collect();
+
+    build_mkv(
+        &[
+            Track {
+                number: 1,
+                codec_id: "V_MPEG4/ISO/AVC",
+                codec_private: AVCC.to_vec(),
+                kind: TrackKind::Video {
+                    width: 640,
+                    height: 360,
+                },
+                samples: video_samples,
+                all_keyframes: false,
+                is_default: true,
+                language: None,
+            },
+            Track {
+                number: 2,
+                codec_id: "A_DTS",
+                codec_private: Vec::new(),
+                kind: TrackKind::Audio {
+                    sample_rate: 48_000.0,
+                    channels: 6,
+                },
+                samples: audio_samples,
+                all_keyframes: true,
+                is_default: true,
+                language: Some("eng"),
+            },
+        ],
+        seconds * 1000.0,
+    )
+}
+
+#[cfg(feature = "transcode-dts")]
+async fn scanned_dts_film(seconds: f64) -> (tempfile::TempDir, vuio_core::state::AppState, i64) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("media");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Film.mkv"), dts_film(seconds)).unwrap();
+    let state = common::state_over(temp.path(), &root).await;
+    let id = common::scan_into(&state)
+        .await
+        .iter()
+        .find(|f| f.filename == "Film.mkv")
+        .unwrap()
+        .id
+        .unwrap();
+    (temp, state, id)
+}
+
+/// Whole ADTS frames on `pid`, reassembled across the packets they are split
+/// over — which is how a television's demuxer will see them.
+fn elementary_stream(body: &[u8], pid: u16) -> Vec<u8> {
+    let mut out = Vec::new();
+    for packet in body.chunks(TS_PACKET) {
+        let this = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        if this != pid {
+            continue;
+        }
+        let (payload, _) = payload_and_pcr(packet);
+        let start = packet[1] & 0x40 != 0;
+        if start {
+            // Past the PES header and the timestamps it declared.
+            let pes = &packet[payload..];
+            out.extend_from_slice(&pes[9 + usize::from(pes[8])..]);
+        } else {
+            out.extend_from_slice(&packet[payload..]);
+        }
+    }
+    out
+}
+
+/// The presentation timestamp of every access unit on `pid`, in stream order.
+fn pes_timestamps(body: &[u8], pid: u16) -> Vec<u64> {
+    body.chunks(TS_PACKET)
+        .filter(|packet| {
+            (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == pid
+                && packet[1] & 0x40 != 0
+        })
+        .filter_map(|packet| {
+            let (payload, _) = payload_and_pcr(packet);
+            pes_pts(&packet[payload..])
+        })
+        .collect()
+}
+
+/// The deliverable: a DTS soundtrack no television can decode arrives as AAC it
+/// can, in a transport stream it can seek.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_dts_film_reaches_the_television_as_aac() {
+    let (_temp, state, id) = scanned_dts_film(8.0).await;
+    let (status, headers, body) = video_ts(&state, id, "", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "video/mpeg");
+    assert_well_formed_ts(&body);
+
+    // The programme map declares the picture and one soundtrack, and the
+    // soundtrack is AAC — not the DTS the container held, which is the point.
+    let declared = declared_pids(&body);
+    assert_eq!(declared, vec![0x0100, 0x0101], "{declared:?}");
+    let pmt = body
+        .chunks(TS_PACKET)
+        .find(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1000)
+        .unwrap();
+    let section = &pmt[5..];
+    let info_length = usize::from(u16::from_be_bytes([section[10] & 0x0F, section[11]]));
+    assert_eq!(
+        section[12 + info_length],
+        0x1B,
+        "the picture is declared as H.264"
+    );
+    assert_eq!(
+        section[12 + info_length + 5],
+        0x0F,
+        "and the soundtrack as AAC, whatever it arrived as"
+    );
+
+    // And what arrives on that PID really is AAC: ADTS frames, each one a
+    // syncword and a length that walks to the next.
+    let audio = elementary_stream(&body, 0x0101);
+    assert!(!audio.is_empty(), "the soundtrack PID carried nothing");
+    let mut at = 0usize;
+    let mut frames = 0usize;
+    while at + 7 <= audio.len() {
+        assert_eq!(audio[at], 0xFF, "frame {frames} has no ADTS syncword");
+        assert_eq!(audio[at + 1] & 0xF0, 0xF0);
+        let len = ((usize::from(audio[at + 3]) & 0x03) << 11)
+            | (usize::from(audio[at + 4]) << 3)
+            | (usize::from(audio[at + 5]) >> 5);
+        assert!(len >= 7, "frame {frames} declares {len} bytes");
+        at += len;
+        frames += 1;
+    }
+    // Eight seconds of 1024-sample frames at 48 kHz is around 375 of them.
+    // Eight seconds of 1024-sample frames at 48 kHz is 375 of them, and every
+    // one is accounted for: a decode that drops frames shortens the soundtrack
+    // against the picture for the rest of the film.
+    assert_eq!(frames, 375, "eight seconds of AAC is 375 frames");
+
+    // And they are placed across the whole film rather than bunched at its
+    // start, which is the failure mode of a re-encoded run anchored wrongly:
+    // the sound plays, and plays in the wrong place.
+    let stamps = pes_timestamps(&body, 0x0101);
+    let (first, last) = (stamps[0], *stamps.last().unwrap());
+    assert!(
+        first < 45_000 + 90_000 / 2,
+        "the soundtrack starts {first} ticks in, half a second past the headroom"
+    );
+    let span = last - first;
+    // Eight seconds less the final frame, in ninety-kilohertz ticks.
+    assert!(
+        span.abs_diff(718_080) < 9_000,
+        "the soundtrack spans {span} ticks of an eight-second film"
+    );
+}
+
+/// The estimate on the codec it was written for. A DTS soundtrack leaves at a
+/// quarter of the rate it arrived at, so a promise built from the source's own
+/// size is mostly padding — and every byte offset then names a moment far later
+/// than the viewer dragged to.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn the_promise_follows_a_dts_soundtrack_down_to_what_it_becomes() {
+    let (_temp, state, id) = scanned_dts_film(12.0).await;
+    let (_, headers, body) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(body.len() as u64, promised);
+
+    let padding = body
+        .chunks(TS_PACKET)
+        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1FFF)
+        .count() as u64
+        * TS_PACKET as u64;
+    let film = promised - padding;
+    assert!(
+        padding * 4 < film,
+        "{padding} bytes of the {promised} promised are filler against {film} of film"
+    );
+
+    // The source's own size is what the promise used to be, and on this film it
+    // is far more than the stream weighs: 768 kbps of DTS leaves as 192 of AAC.
+    let source = std::fs::metadata(_temp.path().join("media").join("Film.mkv"))
+        .unwrap()
+        .len();
+    assert!(
+        promised < source,
+        "the soundtrack shrank fourfold and the promise did not: {promised} against \
+         a {source}-byte source"
+    );
+}
+
+/// Seeking is the thing being fixed, and it has to work on the codec that needs
+/// the decoder — where the muxer opens mid-film and every soundtrack frame has
+/// to be decoded and re-encoded from a standing start.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_dts_film_seeks_by_byte_and_still_carries_its_soundtrack() {
+    let (_temp, state, id) = scanned_dts_film(12.0).await;
+    let (_, headers, _) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let half = promised / 2;
+    let (status, _, body) = video_ts(&state, id, "", Some(&format!("bytes={half}-"))).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_well_formed_ts(&body);
+    assert_eq!(pids(&body)[0], 0x0000, "the tables lead the response");
+
+    let audio = elementary_stream(&body, 0x0101);
+    assert!(
+        audio.len() > 1024,
+        "a seek into the middle of a DTS film produced {} bytes of soundtrack",
+        audio.len()
+    );
+    assert_eq!(audio[0], 0xFF, "and it is still framed AAC");
+
+    // The picture is there too, and starts on a random-access point — otherwise
+    // the renderer has no reference frame to decode the first picture against.
+    let opens_on_a_keyframe = body
+        .chunks(TS_PACKET)
+        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x0100)
+        .find(|packet| packet[1] & 0x40 != 0)
+        .map(|packet| (packet[3] >> 4) & 0b10 != 0 && packet[5] & 0x40 != 0)
+        .unwrap_or(false);
+    assert!(
+        opens_on_a_keyframe,
+        "the first picture is not marked random-access"
+    );
+}
+
+/// A film with a soundtrack that cannot produce a single packet: one declared in
+/// the container and never written, and one whose frames no decoder will open.
+fn film_with_broken_soundtracks(seconds: f64) -> Vec<u8> {
+    let frames: Vec<&[u8]> = AC3.chunks_exact(AC3_FRAME_LEN).collect();
+    let audio_count = (seconds * 1000.0 / AC3_FRAME_MS).round() as usize;
+    let stamp = |i: usize| (i as f64 * AC3_FRAME_MS).round() as u64;
+
+    let video_count = (seconds * 25.0).round() as usize;
+    let video_samples: Vec<(u64, Vec<u8>)> = (0..video_count)
+        .map(|i| {
+            (
+                (i as f64 * 40.0).round() as u64,
+                video_sample(i % 25 == 0, 96, i as u8),
+            )
+        })
+        .collect();
+
+    build_mkv(
+        &[
+            Track {
+                number: 1,
+                codec_id: "V_MPEG4/ISO/AVC",
+                codec_private: AVCC.to_vec(),
+                kind: TrackKind::Video {
+                    width: 640,
+                    height: 360,
+                },
+                samples: video_samples,
+                all_keyframes: false,
+                is_default: true,
+                language: None,
+            },
+            // The one that works.
+            Track {
+                number: 2,
+                codec_id: "A_AC3",
+                codec_private: Vec::new(),
+                kind: TrackKind::Audio {
+                    sample_rate: 48_000.0,
+                    channels: 2,
+                },
+                samples: (0..audio_count)
+                    .map(|i| (stamp(i), frames[i % frames.len()].to_vec()))
+                    .collect(),
+                all_keyframes: true,
+                is_default: true,
+                language: Some("eng"),
+            },
+            // Declared, and never written a block.
+            Track {
+                number: 3,
+                codec_id: "A_AC3",
+                codec_private: Vec::new(),
+                kind: TrackKind::Audio {
+                    sample_rate: 48_000.0,
+                    channels: 2,
+                },
+                samples: Vec::new(),
+                all_keyframes: true,
+                is_default: false,
+                language: Some("fra"),
+            },
+            // Written, and nothing will decode it.
+            Track {
+                number: 4,
+                codec_id: "A_DTS",
+                codec_private: Vec::new(),
+                kind: TrackKind::Audio {
+                    sample_rate: 48_000.0,
+                    channels: 6,
+                },
+                samples: (0..audio_count)
+                    .map(|i| (stamp(i), vec![0xA5u8; 1024]))
+                    .collect(),
+                all_keyframes: true,
+                is_default: false,
+                language: Some("deu"),
+            },
+        ],
+        seconds * 1000.0,
+    )
+}
+
+/// A stream declared in the programme map and then silent forever is worse than
+/// one that was never declared: the renderer reads the map, sees a PID it is
+/// expecting audio on, and waits for it. So the map promises nothing that has
+/// not been proved first.
+#[tokio::test]
+async fn a_soundtrack_that_cannot_produce_packets_is_never_declared() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("media");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("Film.mkv"), film_with_broken_soundtracks(8.0)).unwrap();
+    let state = common::state_over(temp.path(), &root).await;
+    let id = common::scan_into(&state)
+        .await
+        .iter()
+        .find(|f| f.filename == "Film.mkv")
+        .unwrap()
+        .id
+        .unwrap();
+
+    let (status, _, body) = video_ts(&state, id, "", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_well_formed_ts(&body);
+
+    let declared = declared_pids(&body);
+    assert_eq!(
+        declared,
+        vec![0x0100, 0x0101],
+        "the picture and the one soundtrack that works, and nothing else: {declared:?}"
+    );
+
+    // And what it declared really does arrive.
+    let carried = pids(&body);
+    for pid in &declared {
+        assert!(
+            carried.contains(pid),
+            "PID {pid:#x} was promised and never sent"
+        );
+    }
+}
+
+/// The number the whole seek mechanism rests on.
+///
+/// A byte offset into this resource is read as a fraction of its promised
+/// length, so the promise being an honest account of what the stream weighs is
+/// what makes an offset mean the moment the viewer dragged to. Promising the
+/// source file's own size overstated it by a factor of three on the films this
+/// path exists for, and every byte offset then named a moment three times too
+/// far along.
+#[tokio::test]
+async fn the_promised_length_is_an_honest_account_of_the_stream() {
+    let (_temp, state, id) = scanned_film(12.0).await;
+    let (_, headers, body) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(body.len() as u64, promised);
+
+    let padding = body
+        .chunks(TS_PACKET)
+        .filter(|packet| (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]) == 0x1FFF)
+        .count() as u64
+        * TS_PACKET as u64;
+    let film = promised - padding;
+    assert!(
+        padding * 4 < film,
+        "{padding} bytes of the {promised} promised are filler, against {film} of \
+         film — the promise is not describing what is actually produced"
+    );
+}
+
+/// A seek near the end is a seek, not a probe: it still produces film.
+#[tokio::test]
+async fn a_genuine_seek_is_not_mistaken_for_a_probe() {
+    let (_temp, state, id) = scanned_film(12.0).await;
+    let (_, headers, _) = video_ts(&state, id, "", None).await;
+    let promised: u64 = headers[header::CONTENT_LENGTH]
+        .to_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let half = promised / 2;
+    let (_, _, body) = video_ts(&state, id, "", Some(&format!("bytes={half}-"))).await;
+    // Padding is null packets on PID 0x1FFF; film is not.
+    let carries_film = body.chunks(TS_PACKET).any(|packet| {
+        let pid = (u16::from(packet[1] & 0x1F) << 8) | u16::from(packet[2]);
+        pid != 0x1FFF
+    });
+    assert!(carries_film, "a seek to the middle produced only padding");
 }

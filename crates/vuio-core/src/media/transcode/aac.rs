@@ -23,6 +23,21 @@ pub struct AacEncoder {
 }
 
 impl AacEncoder {
+    /// What an encoder for `channels` will run at, in bits per second.
+    ///
+    /// Public because the transport-stream handler commits to a length before
+    /// any of this audio exists, and the re-encoded soundtracks are the part of
+    /// that length it knows exactly rather than estimates.
+    pub fn bitrate_for(channels: u16) -> u32 {
+        match channels {
+            1 => 96_000,
+            2 => 192_000,
+            6 => 384_000,
+            8 => 512_000,
+            _ => 96_000 * u32::from(channels),
+        }
+    }
+
     /// Build an encoder producing `channels` at `sample_rate`.
     ///
     /// The bitrate is 64 kbps per channel — the conventional AAC-LC "good quality"
@@ -32,13 +47,7 @@ impl AacEncoder {
             anyhow::bail!("unsupported channel count for AAC: {channels}");
         }
 
-        let bitrate = match channels {
-            1 => 96_000,
-            2 => 192_000,
-            6 => 384_000,
-            8 => 512_000,
-            _ => 96_000 * u32::from(channels),
-        };
+        let bitrate = Self::bitrate_for(channels);
 
         let config = xaac_rs::EncoderConfig {
             profile: xaac_rs::Profile::AacLc,

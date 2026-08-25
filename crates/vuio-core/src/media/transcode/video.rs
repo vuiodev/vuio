@@ -60,6 +60,9 @@ pub struct ProgressiveStream {
     /// `moov` — which is the order a renderer that takes the first audio track
     /// without asking will read them in, so the caller puts the default first.
     audio: Vec<AudioSink>,
+    /// Packets read before the `moov` could be written, replayed ahead of
+    /// anything further from the demuxer. See [`prime_dolby_tracks`].
+    primed: std::collections::VecDeque<PrimedPacket>,
     /// Total length of the film, for `mehd`.
     duration_secs: Option<f64>,
     sequence: u32,
@@ -146,25 +149,25 @@ impl ProgressiveStream {
             let _ = format.seek(
                 SeekMode::Coarse,
                 SeekTo::Time {
-                    time: Time::try_from_secs_f64(start_secs).unwrap_or(Time::ZERO),
+                    time: Time::try_from_secs_f64(super::seek_target(start_secs))
+                        .unwrap_or(Time::ZERO),
                     track_id: Some(video.id),
                 },
             );
         }
 
         let video_tb = track_time_base(format.as_ref(), video.id);
+        let (primed, first_frames) = prime_dolby_tracks(format.as_mut(), audio);
+
         let audio: Vec<AudioSink> = audio
             .iter()
             .filter_map(|track| {
-                let codec = track.codec_kind.transcode_codec();
-                if codec.is_none() && track.codec_kind != TrackCodec::Aac {
-                    return None;
-                }
                 let audio_tb = track_time_base(format.as_ref(), track.id);
+                let (out, codec) = output_track(track, first_frames.get(&track.id))?;
                 Some(AudioSink {
                     source_id: track.id,
                     codec,
-                    sink: TrackSink::new(aac_track(track), audio_tb),
+                    sink: TrackSink::new(out, audio_tb),
                     decode: None,
                 })
             })
@@ -174,6 +177,7 @@ impl ProgressiveStream {
             format,
             video: TrackSink::new(video.clone(), video_tb),
             audio,
+            primed,
             duration_secs,
             sequence: 0,
             started: false,
@@ -203,19 +207,25 @@ impl ProgressiveStream {
         let fragment_ticks = (FRAGMENT_SECS * f64::from(VIDEO_TIMESCALE)).round() as u64;
 
         loop {
-            let packet = match self.format.next_packet() {
-                Ok(Some(packet)) => packet,
-                _ => {
-                    // End of the film: flush the encoder's tail and emit whatever
-                    // is held, then stop.
-                    self.finished = true;
-                    self.flush_audio();
-                    return self.emit();
-                }
+            // Whatever priming read ahead of the `moov` comes first, in the
+            // order it was read, so the timeline the demuxer handed over is the
+            // timeline that gets written.
+            let next = match self.primed.pop_front() {
+                Some(packet) => Some(packet),
+                None => match self.format.next_packet() {
+                    Ok(Some(packet)) => {
+                        Some((packet.track_id, packet.pts.get(), packet.data.to_vec()))
+                    }
+                    _ => None,
+                },
             };
-            let track_id = packet.track_id;
-            let pts = packet.pts.get();
-            let data = packet.data.to_vec();
+            let Some((track_id, pts, data)) = next else {
+                // End of the film: flush the encoder's tail and emit whatever
+                // is held, then stop.
+                self.finished = true;
+                self.flush_audio();
+                return self.emit();
+            };
 
             if track_id == self.video.track.id {
                 let ticks = self.video.rescale(pts, VIDEO_TIMESCALE);
@@ -270,7 +280,9 @@ impl ProgressiveStream {
         let ticks = audio.sink.rescale(pts, sample_rate);
 
         let Some(codec) = audio.codec else {
-            // Already AAC. The container's frames are MP4 samples as they stand.
+            // Passed through: AAC, or Dolby a television decodes for itself.
+            // Every one of these codecs frames its own bitstream, so a
+            // container packet is already exactly one MP4 sample.
             audio.sink.push(ticks, data.to_vec(), true);
             return Ok(());
         };
@@ -474,30 +486,133 @@ impl TrackSink {
     }
 }
 
-/// The audio track as it will be written into the output.
+/// One packet held back from the demuxer during priming.
+type PrimedPacket = (u32, i64, Vec<u8>);
+
+/// Packets to read while looking for the first frame of each Dolby track.
 ///
-/// A decoded track is restated as the AAC it becomes: an `mp4a` sample entry
-/// whose `esds` carries the encoder's own `AudioSpecificConfig`, at the
-/// encoder's channel count rather than the source's 5.1. A track that is already
-/// AAC keeps everything it had, including the config the container carried.
-fn aac_track(track: &TrackInfo) -> TrackInfo {
-    let name = track.name.clone().or_else(|| Some(source_label(track)));
-    if track.codec_kind == TrackCodec::Aac {
-        return TrackInfo {
-            name,
-            ..track.clone()
+/// A film interleaves its tracks, so the first frame of the last soundtrack
+/// arrives within a fragment or so of the first. This only has to be larger
+/// than that, and small enough that a file with a track that never appears
+/// costs nothing much to give up on.
+const PRIME_PACKETS: usize = 512;
+
+/// Read far enough ahead to describe every Dolby track being passed through.
+///
+/// An `ac-3` sample entry needs a record that only the bitstream carries —
+/// Matroska stores no `CodecPrivate` for AC-3, because the syncframe already
+/// says everything — and the init segment naming that entry goes out before the
+/// first fragment. So the first frame of each such track is read here, ahead of
+/// the `moov`, and every packet read on the way is handed back to be replayed
+/// rather than dropped.
+///
+/// Reads nothing at all for a film with no Dolby track to pass through.
+fn prime_dolby_tracks(
+    format: &mut dyn symphonia::core::formats::FormatReader,
+    audio: &[TrackInfo],
+) -> (
+    std::collections::VecDeque<PrimedPacket>,
+    std::collections::HashMap<u32, Vec<u8>>,
+) {
+    let mut primed = std::collections::VecDeque::new();
+    let mut first_frames = std::collections::HashMap::new();
+
+    let wanted: Vec<u32> = audio
+        .iter()
+        .filter(|track| matches!(track.codec_kind, TrackCodec::Ac3 | TrackCodec::Eac3))
+        .map(|track| track.id)
+        .collect();
+    if wanted.is_empty() {
+        return (primed, first_frames);
+    }
+
+    for _ in 0..PRIME_PACKETS {
+        let Ok(Some(packet)) = format.next_packet() else {
+            break;
         };
+        let (id, pts, data) = (packet.track_id, packet.pts.get(), packet.data.to_vec());
+        if wanted.contains(&id) {
+            first_frames.entry(id).or_insert_with(|| data.clone());
+        }
+        primed.push_back((id, pts, data));
+        if wanted.iter().all(|id| first_frames.contains_key(id)) {
+            break;
+        }
+    }
+    (primed, first_frames)
+}
+
+/// The audio track as it will be written into the output, and what has to
+/// happen to its packets on the way.
+///
+/// Three outcomes, and the returned codec is which one. `None` is passthrough:
+/// AAC, and AC-3 or E-AC-3 whose first frame described itself, all of which a
+/// television plays as they stand — carrying them costs no CPU and keeps the
+/// 5.1 that a stereo re-encode would throw away. `Some(codec)` is a track that
+/// has to be decoded and re-encoded to be heard at all, which after this change
+/// means DTS and nothing else. And `None` for the whole track — dropping it —
+/// is for one this build can neither pass through nor produce: better a film
+/// with two working soundtracks than one with a third that plays noise.
+fn output_track(
+    track: &TrackInfo,
+    first_frame: Option<&Vec<u8>>,
+) -> Option<(TrackInfo, Option<TranscodeCodec>)> {
+    let name = track.name.clone().or_else(|| Some(source_label(track)));
+
+    if track.codec_kind == TrackCodec::Aac {
+        return Some((
+            TrackInfo {
+                name,
+                ..track.clone()
+            },
+            None,
+        ));
+    }
+
+    // Dolby, passed through if its own first frame will describe it. A frame
+    // that does not parse is not passed through on the strength of the
+    // container's word: an `ac-3` entry whose record was guessed at is a track
+    // a renderer will try to decode and fail on.
+    if matches!(track.codec_kind, TrackCodec::Ac3 | TrackCodec::Eac3) {
+        let parsed = first_frame.and_then(|frame| match track.codec_kind {
+            TrackCodec::Eac3 => crate::media::remux::parse_eac3(frame),
+            _ => crate::media::remux::parse_ac3(frame),
+        });
+        if let Some(config) = parsed {
+            return Some((
+                TrackInfo {
+                    // The syncframe outranks the container on both counts: it is
+                    // what the decoder will actually be handed.
+                    sample_rate: Some(config.sample_rate),
+                    channels: Some(config.channels),
+                    extra_data: config.record,
+                    name,
+                    ..track.clone()
+                },
+                None,
+            ));
+        }
+    }
+
+    // Anything left has to be decoded, and can only be carried if this build
+    // has both halves of that.
+    let codec = track.codec_kind.transcode_codec()?;
+    if !codec.is_decodable() || !cfg!(feature = "transcode-aac") {
+        return None;
     }
     let sample_rate = track.sample_rate.unwrap_or(48_000);
-    TrackInfo {
-        codec: format!("{} → AAC", track.codec),
-        codec_kind: TrackCodec::Aac,
-        channels: Some(DECODED_CHANNELS as u8),
-        extra_data: super::audio_specific_config(sample_rate, DECODED_CHANNELS),
-        track_kind: TrackKind::Audio,
-        name,
-        ..track.clone()
-    }
+    Some((
+        TrackInfo {
+            codec: format!("{} → AAC", track.codec),
+            codec_kind: TrackCodec::Aac,
+            channels: Some(DECODED_CHANNELS as u8),
+            extra_data: super::audio_specific_config(sample_rate, DECODED_CHANNELS),
+            track_kind: TrackKind::Audio,
+            name,
+            ..track.clone()
+        },
+        Some(codec),
+    ))
 }
 
 /// What to call this track in a renderer's audio menu.

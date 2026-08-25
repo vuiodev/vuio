@@ -398,3 +398,4 @@ mod tests {
         assert!(FrameIndex::build(TranscodeCodec::Ac3, &mut &junk[..]).is_err());
     }
 }
+

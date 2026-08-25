@@ -162,10 +162,38 @@ pub struct AdvertResource {
     /// Stated per resource, and it differs: constant-bitrate LPCM divides a byte
     /// offset straight back into a sample, so it is `11`; a re-encoded AAC
     /// stream has no length to seek within, so it is `00`; a remuxed film is
-    /// `01`, time seek only. A resource that claims an operation it cannot
-    /// perform is worse than one that claims none — a renderer which byte-seeks
-    /// and gets nothing usable stops playing rather than falling back.
+    /// `10`, time seek only, because a byte offset into a stream produced on
+    /// demand does not name a fixed place in it.
     pub op: &'static str,
+    /// Whether the `<res>` states a `size`.
+    ///
+    /// None of them do, and for three different reasons. Decoded LPCM has an
+    /// exact length that only its plan knows; re-encoded AAC has no length at
+    /// all until it exists; and the remuxed film has one the streaming handler
+    /// works out from the file's soundtracks and then makes true by padding the
+    /// body — which a browse response must not open the file to learn. A `size`
+    /// here would be a second, worse answer to a question the response itself
+    /// answers exactly.
+    ///
+    /// Kept as a field rather than deleted because it is the shape of the
+    /// question, and a resource with a length known up front would state it.
+    pub sized: bool,
+}
+
+/// The item a decoded alternative is being written for.
+///
+/// Grouped rather than passed loose because every one of these is a property of
+/// the same row, and a `<res>` writer taking seven positional arguments is one
+/// transposed pair away from advertising a film's duration as its size.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AdvertItem<'a> {
+    pub file_id: i64,
+    pub mime: &'a str,
+    pub duration: Option<u64>,
+    /// The stored file's size. Not written into any `<res>` today — see
+    /// [`AdvertResource::sized`] — and kept because it is what a resource with a
+    /// length known from the index would be sized from.
+    pub source_size: u64,
 }
 
 /// How a decoded alternative resource should be advertised.
@@ -198,26 +226,17 @@ impl TranscodeAdvert {
         }
     }
 
-    /// Write the decoded alternative for `file_id`.
+    /// Write the decoded alternative for `item`.
     fn write<W: std::fmt::Write>(
         &self,
         output: &mut W,
         context: &BrowseRenderContext,
-        file_id: i64,
-        mime: &str,
-        duration: Option<u64>,
+        item: &AdvertItem<'_>,
     ) -> std::fmt::Result {
-        self.write_didl(
-            output,
-            &context.server_ip,
-            context.server_port,
-            file_id,
-            mime,
-            duration,
-        )
+        self.write_didl(output, &context.server_ip, context.server_port, item)
     }
 
-    /// The same, for the fallback writer, which carries its parts loose rather
+    /// The same, for the fallback writer, which carries its address loose rather
     /// than in a context.
     ///
     /// `DLNA.ORG_CI=1` is the conversion indicator: a renderer matching on
@@ -228,10 +247,14 @@ impl TranscodeAdvert {
         output: &mut W,
         server_ip: &str,
         server_port: u16,
-        file_id: i64,
-        mime: &str,
-        duration: Option<u64>,
+        item: &AdvertItem<'_>,
     ) -> std::fmt::Result {
+        let &AdvertItem {
+            file_id,
+            mime,
+            duration,
+            source_size,
+        } = item;
         let Some(resource) = self.resource_for(mime) else {
             return Ok(());
         };
@@ -240,6 +263,13 @@ impl TranscodeAdvert {
             r#"<res protocolInfo="http-get:*:{}:DLNA.ORG_OP={};DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000""#,
             resource.mime, resource.op
         )?;
+        if resource.sized {
+            write!(
+                output,
+                r#" size="{}""#,
+                crate::web::promised_transcode_length(source_size)
+            )?;
+        }
         if let Some(seconds) = duration {
             write!(
                 output,
@@ -510,10 +540,21 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             .unwrap_or_else(|| {
                 mime.contains("dts") || file.filename().to_ascii_lowercase().ends_with(".dts")
             });
+    // See `browse.rs`: this decides whether to hide the original, not whether to
+    // offer the decoded resource. The decoded resource is offered either way.
     let is_forced = transcoded.as_ref().is_some_and(|a| a.first && is_dts);
     let item_duration = file.duration_secs().map(|value| value as u64);
-    if let Some(advert) = transcoded.filter(|a| a.first && is_dts) {
-        advert.write(output, context, file_id, mime, item_duration)?;
+    if let Some(advert) = transcoded.filter(|a| a.first) {
+        advert.write(
+            output,
+            context,
+            &AdvertItem {
+                file_id,
+                mime,
+                duration: item_duration,
+                source_size: file.size(),
+            },
+        )?;
     }
 
     if !is_forced {
@@ -568,7 +609,16 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             context.server_ip, context.server_port, file_id
         )?;
         if let Some(advert) = transcoded.filter(|a| !a.first) {
-            advert.write(output, context, file_id, mime, item_duration)?;
+            advert.write(
+            output,
+            context,
+            &AdvertItem {
+                file_id,
+                mime,
+                duration: item_duration,
+                source_size: file.size(),
+            },
+        )?;
         }
     }
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {

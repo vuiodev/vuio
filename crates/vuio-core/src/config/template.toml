@@ -95,12 +95,15 @@ enabled = true
 #   lpcm  uncompressed, seekable, about 1.5 Mbps
 #   aac   about a tenth of that, lossy, and cannot be scrubbed
 audio_format = "lpcm"
-# Which version is listed first, for a TV that takes what it is given rather
-# than choosing. Switch to "transcoded" only if a TV still plays silently.
-prefer = "original"
-# Decodes allowed at once. Past this a further request is refused rather than
-# queued, so the streams already playing keep up.
-max_concurrent = 2
+# What is offered, and in what order.
+#   enabled   the original is listed first, the decoded version beside it
+#   forced    the decoded version leads, and for DTS it is the only one offered
+#   disabled  nothing is decoded
+mode = "enabled"
+# Sessions allowed at once. Past this a further request is refused rather than
+# queued. Set high on purpose: a television opens several connections within a
+# second of pressing play, and a low ceiling refuses the one it meant to play on.
+max_concurrent = 100
 
 # Platform-specific notes:
 # PLACEHOLDER_PLATFORM_NOTES

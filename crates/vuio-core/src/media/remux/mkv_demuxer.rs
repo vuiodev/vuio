@@ -70,6 +70,31 @@ impl TrackCodec {
             Self::Unsupported => false,
         }
     }
+
+    /// Whether a progressive MP4 built for a television can carry this track —
+    /// either as the bitstream it already is, or decoded into one that can be.
+    ///
+    /// Wider than [`TrackCodec::is_playable`], which asks the same question on a
+    /// browser's behalf. A browser's media source cannot take AC-3 under any
+    /// circumstances, so for the HLS path a Dolby track is only ever reachable
+    /// by decoding it. A television is the one device that usually can: it is
+    /// what Dolby Digital was designed for, and handing it a stereo AAC downmix
+    /// of a 5.1 track would throw away the surround it was about to play. So
+    /// AC-3 and E-AC-3 are carried whatever this build can decode — passing a
+    /// track through needs no decoder at all — and only DTS, which televisions
+    /// commonly do lack, has to be re-encoded to be heard.
+    pub fn plays_on_a_television(self) -> bool {
+        match self {
+            Self::Avc | Self::Hevc | Self::Aac | Self::Ac3 | Self::Eac3 => true,
+            #[cfg(feature = "transcode")]
+            Self::Dts => self
+                .transcode_codec()
+                .is_some_and(|codec| codec.is_decodable() && cfg!(feature = "transcode-aac")),
+            #[cfg(not(feature = "transcode"))]
+            Self::Dts => false,
+            Self::Unsupported => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +159,16 @@ pub fn browser_audio_tracks(tracks: &[TrackInfo]) -> Vec<&TrackInfo> {
     tracks
         .iter()
         .filter(|t| t.track_kind == TrackKind::Audio && t.codec_kind.is_playable())
+        .collect()
+}
+
+/// Audio tracks a progressive MP4 for a television can carry, in container
+/// order. Wider than [`browser_audio_tracks`] by exactly the Dolby codecs a
+/// television plays for itself — see [`TrackCodec::plays_on_a_television`].
+pub fn television_audio_tracks(tracks: &[TrackInfo]) -> Vec<&TrackInfo> {
+    tracks
+        .iter()
+        .filter(|t| t.track_kind == TrackKind::Audio && t.codec_kind.plays_on_a_television())
         .collect()
 }
 

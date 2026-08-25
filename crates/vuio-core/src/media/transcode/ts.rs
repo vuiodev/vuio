@@ -1,0 +1,1178 @@
+//! A film remuxed into a transport stream, for a television that seeks by byte.
+//!
+//! The same work as [`super::ProgressiveStream`] — picture copied through, DTS
+//! decoded and re-encoded, Dolby passed through — poured into a different
+//! container, and the container is the whole point. A fragmented MP4 has one
+//! header at the front describing everything that follows, so a renderer that
+//! jumps to a byte offset lands in the middle of a structure it has no way to
+//! interpret. A transport stream has no front: the tables are repeated
+//! throughout, every packet begins with a sync byte, and the parameter sets a
+//! decoder needs travel beside each keyframe. Land anywhere and it recovers.
+//!
+//! That is what makes a scrub bar work on hardware that scrubs by byte, which is
+//! most televisions. See [`crate::media::remux::ts_writer`] for the packet layer.
+//!
+//! ## Why this batches
+//!
+//! Matroska stores presentation timestamps in decode order and no decode
+//! timestamps at all; a transport stream needs both, because a decoder has to be
+//! told when to decode a frame it will not display yet. Recovering the decode
+//! timeline needs a run of frames to sort, not a single one — so packets are
+//! gathered a second or so at a time, the timeline is worked out over the batch,
+//! and the batch is then written out interleaved by decode time. Which is also
+//! what a transport stream wants: audio and video arriving together, in the
+//! order a decoder will want them, rather than in track-sized runs.
+
+use anyhow::Result;
+use std::path::Path;
+
+use super::{AacEncoder, PcmDecoder, TranscodeCodec};
+use crate::media::remux::{
+    derive_decode_timestamps, packet_is_keyframe, rescale_ticks, to_annexb, ParameterSets,
+    PesTiming, TrackCodec, TrackInfo, TsMuxer, TsStreamSpec, FIRST_ES_PID, TS_CLOCK_HZ,
+    TS_PACKET_LEN,
+};
+
+/// Seconds of film gathered before a batch is written.
+///
+/// Long enough that the decode timeline can be recovered across any reordering a
+/// real encoder produces, short enough that a renderer starts promptly and a
+/// dropped connection wastes little.
+const BATCH_SECS: f64 = 1.0;
+
+/// Channels the re-encoded audio track carries.
+const DECODED_CHANNELS: u16 = 2;
+
+/// Packets to hear from before placing a re-encoded run on the timeline.
+/// See [`super::run_anchor`] for what the spread is and why the first
+/// timestamp alone will not do.
+const ANCHOR_PACKETS: usize = 96;
+
+/// How far the presentation clock runs ahead of the programme clock.
+///
+/// A decoder starts its own clock from the PCR it is given and shows each
+/// picture when that clock reaches the picture's PTS. Write the two equal and
+/// every frame is due the instant it arrives, so the decoder has no buffer at
+/// all and the first jitter starves it — which on a television is a film that
+/// stutters, or one that never starts. Every muxer in the field leaves a gap
+/// here; this is ffmpeg's, near enough, and it is what the renderer spends
+/// filling its buffer before the first frame is due.
+const CLOCK_HEADROOM: u64 = TS_CLOCK_HZ / 2;
+
+/// How often the programme tables are repeated, in output clock ticks.
+///
+/// A decoder that joins the stream anywhere can interpret nothing until it has
+/// seen a PAT and a PMT, so the wait for the next pair is the floor on how long
+/// a seek takes to produce a picture. A tenth of a second is what the broadcast
+/// profiles require and costs two packets to honour.
+const TABLE_INTERVAL: u64 = TS_CLOCK_HZ / 10;
+
+/// Packets to read while looking for the first frame of every soundtrack.
+///
+/// Bounded twice over, because the two things that go wrong are different: a
+/// film whose tracks are interleaved normally shows all of them within a
+/// fraction of a second, and one that never shows a track at all should cost
+/// something small and bounded to give up on. The byte bound is the one that
+/// matters on a film with a large picture, where a thousand packets could be a
+/// hundred megabytes.
+const PRIME_PACKETS: usize = 1024;
+const PRIME_BYTES: usize = 8 * 1024 * 1024;
+
+/// A packet read during priming, waiting to be replayed.
+type PrimedPacket = (u32, i64, Vec<u8>);
+
+/// What becomes of one soundtrack on its way into a transport stream.
+///
+/// Asked in two places that must agree — [`TsStream::open`], which carries the
+/// track, and the handler that commits to a length before the muxer has
+/// produced a byte — so it is answered once, here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioDisposition {
+    /// Carried exactly as it arrived. A television decodes Dolby and AAC for
+    /// itself, and copying costs nothing and keeps the 5.1 a stereo re-encode
+    /// would throw away.
+    Passthrough,
+    /// Decoded and re-encoded as stereo AAC, which is the whole point of this
+    /// path: a set with no DTS licence plays the picture and nothing else.
+    Reencoded,
+    /// Neither possible. Better a film with two working soundtracks than one
+    /// with a third that plays noise.
+    Dropped,
+}
+
+/// How `track` reaches the output, and what it is described as when it gets
+/// there.
+pub fn audio_disposition(track: &TrackInfo) -> AudioDisposition {
+    match track.codec_kind {
+        TrackCodec::Aac | TrackCodec::Ac3 | TrackCodec::Eac3 => AudioDisposition::Passthrough,
+        other => match other.transcode_codec() {
+            Some(codec) if codec.is_decodable() && cfg!(feature = "transcode-aac") => {
+                AudioDisposition::Reencoded
+            }
+            _ => AudioDisposition::Dropped,
+        },
+    }
+}
+
+/// What one track costs the film it is in, and how often it costs it.
+///
+/// Measured from the file rather than assumed from the codec, because the
+/// assumption is the thing that goes wrong. AC-3 runs anywhere from 192 to 640
+/// kilobits, DTS from 754 to 1509 for its core and several times that with the
+/// lossless extension on top — so a table keyed on codec and channel count is
+/// out by a factor of three on real films, in whichever direction happens to be
+/// wrong for the film in front of it.
+///
+/// The frame rate is here for a less obvious reason. A transport stream charges
+/// by the packet, and the last packet of every frame is padded out to 188 bytes
+/// whatever is left over — so what a track costs to carry depends on how large
+/// its frames are, not only on how many bits a second they add up to. On 768-byte
+/// AC-3 frames that padding is a fifth of the track.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TrackRate {
+    pub id: u32,
+    /// Bits a second this track occupies in the source.
+    pub bits_per_second: u64,
+    /// Access units a second.
+    pub frames_per_second: f64,
+}
+
+/// Every track of one film, measured.
+///
+/// What makes measuring cheap is that the soundtracks these films carry are all
+/// constant bitrate, and frame rates do not change. Half a second of a film says
+/// what two hours of it will cost.
+#[derive(Debug, Default, Clone)]
+pub struct TrackRates(Vec<TrackRate>);
+
+impl TrackRates {
+    /// What track `id` was measured at, if it was reached.
+    pub fn get(&self, id: u32) -> Option<TrackRate> {
+        self.0.iter().find(|rate| rate.id == id).copied()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// Seconds of each track to hear before its rate is settled.
+///
+/// A DTS frame is eleven milliseconds and an AC-3 frame thirty-two, so half a
+/// second is fifteen frames at worst — far more than a constant bitrate needs
+/// to reveal itself, and short enough that the read stays inside the film's
+/// first couple of megabytes.
+const MEASURE_SECS: f64 = 0.5;
+const MEASURE_FRAMES: usize = 8;
+const MEASURE_PACKETS: usize = 4096;
+const MEASURE_BYTES: usize = 12 * 1024 * 1024;
+
+/// Measure what each of `tracks` costs the source.
+///
+/// Reads from the head of the film, which for constant-bitrate audio and a
+/// fixed frame rate is representative of all of it, and gives up on whatever has
+/// not appeared within a bounded read — a track measured as nothing falls back
+/// to its codec's nominal shape at the call site.
+pub fn measure_track_rates(path: &Path, tracks: &[TrackInfo]) -> Result<TrackRates> {
+    /// One track's accumulating account of itself.
+    #[derive(Default)]
+    struct Meter {
+        first: Option<i64>,
+        last: i64,
+        /// Bytes of the frames wholly inside `[first, last)`.
+        bytes: u64,
+        /// The most recent frame's, which has no span behind it yet.
+        carry: u64,
+        frames: usize,
+    }
+
+    if tracks.is_empty() {
+        return Ok(TrackRates::default());
+    }
+    let mut format = super::source::open_format(path)?;
+    let mut meters: std::collections::HashMap<u32, Meter> = tracks
+        .iter()
+        .map(|track| (track.id, Meter::default()))
+        .collect();
+    let bases: std::collections::HashMap<u32, Option<symphonia::core::units::TimeBase>> = tracks
+        .iter()
+        .map(|track| (track.id, track_time_base(format.as_ref(), track.id)))
+        .collect();
+
+    let span = |id: &u32, meter: &Meter| -> Option<f64> {
+        let base = (*bases.get(id)?)?;
+        let at = |ticks: i64| {
+            base.calc_time(symphonia::core::units::Timestamp::new(ticks))
+                .map(|time| time.as_secs_f64())
+        };
+        Some(at(meter.last)? - at(meter.first?)?)
+    };
+
+    let mut read = 0usize;
+    for _ in 0..MEASURE_PACKETS {
+        if read >= MEASURE_BYTES {
+            break;
+        }
+        let Ok(Some(packet)) = format.next_packet() else {
+            break;
+        };
+        let (id, pts, len) = (packet.track_id, packet.pts.get(), packet.data.len());
+        read += len;
+        let Some(meter) = meters.get_mut(&id) else {
+            continue;
+        };
+        meter.bytes += meter.carry;
+        meter.carry = len as u64;
+        meter.first.get_or_insert(pts);
+        meter.last = pts;
+        meter.frames += 1;
+
+        // Every track heard from for long enough: nothing further to learn.
+        if meters.iter().all(|(id, meter)| {
+            meter.frames >= MEASURE_FRAMES
+                && span(id, meter).is_some_and(|span| span >= MEASURE_SECS)
+        }) {
+            break;
+        }
+    }
+
+    let mut rates: Vec<TrackRate> = meters
+        .iter()
+        .filter_map(|(id, meter)| {
+            let span = span(id, meter)?;
+            // Too little of it heard to say anything, which is not an error: the
+            // caller has a nominal shape to fall back on.
+            if meter.frames < MEASURE_FRAMES || span <= 0.0 {
+                return None;
+            }
+            Some(TrackRate {
+                id: *id,
+                bits_per_second: (meter.bytes as f64 * 8.0 / span) as u64,
+                frames_per_second: (meter.frames - 1) as f64 / span,
+            })
+        })
+        .collect();
+    rates.sort_unstable_by_key(|rate| rate.id);
+    Ok(TrackRates(rates))
+}
+
+/// What a track of this codec and shape usually looks like, for one
+/// [`measure_track_rates`] could not reach.
+///
+/// Every bitrate here is at the low end of what the codec is used at, and that
+/// is deliberate rather than sloppy. A soundtrack's rate is subtracted from the
+/// file's own to leave the picture's, so guessing one *small* leaves the picture
+/// looking large, which leaves the promised length long, which costs padding.
+/// Guessing it large does the opposite and cuts off the end of the film.
+fn nominal_rate(track: &TrackInfo) -> TrackRate {
+    use crate::media::remux::TrackKind;
+
+    let sample_rate = f64::from(track.sample_rate.unwrap_or(48_000));
+    let surround = track.channels.unwrap_or(2) >= 6;
+    let (bits, frames) = match track.codec_kind {
+        TrackCodec::Ac3 => (if surround { 384_000 } else { 192_000 }, sample_rate / 1536.0),
+        TrackCodec::Eac3 => (if surround { 384_000 } else { 128_000 }, sample_rate / 1536.0),
+        TrackCodec::Dts => (if surround { 768_000 } else { 384_000 }, sample_rate / 512.0),
+        TrackCodec::Aac => (
+            64_000 * u64::from(track.channels.unwrap_or(2)),
+            sample_rate / 1024.0,
+        ),
+        // Video, and anything the demuxer would not name — including TrueHD,
+        // which is not carried. Claiming no bitrate for an unnamed soundtrack
+        // leaves its bytes attributed to the picture, which is the safe
+        // direction.
+        _ => (
+            0,
+            if track.track_kind == TrackKind::Video {
+                24.0
+            } else {
+                sample_rate / 1536.0
+            },
+        ),
+    };
+    TrackRate {
+        id: track.id,
+        bits_per_second: bits,
+        frames_per_second: frames,
+    }
+}
+
+/// What carrying `bits` a second in frames of `fps` costs in a transport stream.
+///
+/// Not a percentage. A transport stream is a run of 188-byte packets and the
+/// last one of every frame is stuffed out to 188 whatever is left over, so the
+/// cost is a step function of the frame size: two per cent on a 130-kilobyte
+/// picture, twenty-two on a 768-byte AC-3 frame. A flat multiplier that is right
+/// for one is badly wrong for the other, and being wrong low here is the film's
+/// last minutes cut off.
+fn transport_cost(bits: u64, fps: f64) -> u64 {
+    /// A PES header carrying both timestamps, which is what this muxer writes.
+    const PES_HEADER: f64 = 19.0;
+    /// Payload in a packet: 188 less the four-byte header, less a two-byte
+    /// adaptation field for the flags the first packet of a frame carries.
+    const PAYLOAD: f64 = 182.0;
+
+    // `is_finite` first, so a track measured as NaN falls back rather than
+    // multiplying its way into the promise.
+    if bits == 0 || !fps.is_finite() || fps <= 0.0 {
+        return bits;
+    }
+    let per_frame = bits as f64 / (8.0 * fps) + PES_HEADER;
+    let packets = (per_frame / PAYLOAD).ceil();
+    (packets * TS_PACKET_LEN as f64 * 8.0 * fps) as u64
+}
+
+/// The bits a second the transport stream itself will run at.
+///
+/// Which is the number the whole seek mechanism rests on. A byte offset into
+/// this resource is read as a fraction of its promised length, so the promise
+/// being an honest account of what the stream weighs is what makes an offset
+/// mean the moment the viewer dragged to. Promise three times the truth — which
+/// assuming the output weighs what the source did does, on a film carrying five
+/// DTS soundtracks that leave as stereo AAC — and every byte offset names a
+/// moment three times too far along.
+///
+/// `tracks` is every track the file has, because what the picture costs is what
+/// is left of the file once its soundtracks are accounted for. `carried` is the
+/// subset this response will actually write.
+fn stream_bitrate(
+    source_size: u64,
+    duration_secs: f64,
+    tracks: &[TrackInfo],
+    carried: &[TrackInfo],
+    rates: &TrackRates,
+) -> u64 {
+    use crate::media::remux::TrackKind;
+
+    /// The programme tables, at [`TABLE_INTERVAL`]: two packets, ten times a
+    /// second.
+    const TABLE_BITS: u64 = 20 * TS_PACKET_LEN as u64 * 8;
+
+    let rate_of = |track: &TrackInfo| rates.get(track.id).unwrap_or_else(|| nominal_rate(track));
+
+    let source_bits = (source_size as f64 * 8.0 / duration_secs) as u64;
+    let source_audio: u64 = tracks
+        .iter()
+        .filter(|track| track.track_kind == TrackKind::Audio)
+        .map(|track| rate_of(track).bits_per_second)
+        .sum();
+    // A film whose soundtracks appear to outweigh it has been measured badly,
+    // or is mostly soundtrack. Either way the picture is not nothing.
+    let video_bits = source_bits
+        .saturating_sub(source_audio)
+        .max(source_bits / 20);
+    let video_fps = tracks
+        .iter()
+        .find(|track| track.track_kind == TrackKind::Video)
+        .map(|track| rate_of(track).frames_per_second)
+        .unwrap_or(24.0);
+
+    let carried_bits: u64 = carried
+        .iter()
+        .map(|track| {
+            let rate = rate_of(track);
+            match audio_disposition(track) {
+                AudioDisposition::Passthrough => {
+                    transport_cost(rate.bits_per_second, rate.frames_per_second)
+                }
+                AudioDisposition::Reencoded => {
+                    let sample_rate = f64::from(track.sample_rate.unwrap_or(48_000));
+                    transport_cost(
+                        u64::from(AacEncoder::bitrate_for(DECODED_CHANNELS)),
+                        sample_rate / f64::from(super::AAC_FRAME_SAMPLES as u32),
+                    )
+                }
+                AudioDisposition::Dropped => 0,
+            }
+        })
+        .sum();
+
+    transport_cost(video_bits, video_fps) + carried_bits + TABLE_BITS
+}
+
+/// The length a transport stream of this film commits to, in bytes.
+///
+/// Leaning long, and the lean is the only part that is not an estimate. The
+/// response is made exactly this length whatever the muxer produces: short of it
+/// is padding a renderer skips, over it is the film's last seconds cut off. So
+/// the margin buys the second outcome off with a little of the first.
+pub fn promised_ts_length(
+    source_size: u64,
+    duration_secs: f64,
+    tracks: &[TrackInfo],
+    carried: &[TrackInfo],
+    rates: &TrackRates,
+) -> u64 {
+    /// Slack over the estimate. Small, because with the tracks measured and the
+    /// packet cost counted rather than guessed the estimate lands within a few
+    /// per cent, and every point of it is bytes a renderer fetches and throws
+    /// away. It covers what is left: the parameter sets beside every keyframe,
+    /// and a picture whose average bitrate the file's own size understates.
+    const MARGIN: f64 = 1.10;
+    /// Nothing shorter, so a very short film is not trimmed by the tables.
+    const FLOOR: u64 = 1 << 18;
+
+    let bits = stream_bitrate(source_size, duration_secs, tracks, carried, rates);
+    let bytes = (bits as f64 * duration_secs * MARGIN / 8.0) as u64;
+    let aligned = (bytes.max(FLOOR) / TS_PACKET_LEN as u64) * TS_PACKET_LEN as u64;
+    aligned.max(TS_PACKET_LEN as u64)
+}
+
+/// One track being carried, and what has to happen to its packets.
+struct Stream {
+    spec: TsStreamSpec,
+    source_id: u32,
+    time_base: Option<symphonia::core::units::TimeBase>,
+    /// `None` for a track passed through as it stands.
+    codec: Option<TranscodeCodec>,
+    /// Set only for video: what to write before each keyframe.
+    parameter_sets: Option<ParameterSets>,
+    /// The rate a re-encoded track runs at, from the container's declaration.
+    sample_rate: u32,
+    decode: Option<Decode>,
+    /// Access units waiting for the batch to be written.
+    pending: Vec<Unit>,
+}
+
+/// The state of one track's decode-and-re-encode chain.
+struct Decode {
+    codec: TranscodeCodec,
+    decoder: PcmDecoder,
+    encoder: AacEncoder,
+    decoded_channels: u16,
+    sample_rate: u32,
+    /// Where the re-encoded run sits, in samples. `None` until enough packets
+    /// have been seen to say.
+    next_pts: Option<u64>,
+    anchors: Vec<i64>,
+    decoded: u64,
+    /// Frames encoded before the run could be placed.
+    held: Vec<Vec<u8>>,
+}
+
+/// One access unit, ready to become a PES packet once its decode time is known.
+struct Unit {
+    pts: u64,
+    dts: u64,
+    keyframe: bool,
+    data: Vec<u8>,
+}
+
+/// A film being rewritten as a transport stream.
+pub struct TsStream {
+    format: Box<dyn symphonia::core::formats::FormatReader>,
+    muxer: TsMuxer,
+    /// Video first, then every soundtrack in the order the caller gave them.
+    streams: Vec<Stream>,
+    specs: Vec<TsStreamSpec>,
+    video_pid: u16,
+    video_id: u32,
+    video_codec: TrackCodec,
+    /// Packets read while priming the decoders, replayed ahead of anything
+    /// further from the demuxer. See [`prime_decoders`].
+    primed: std::collections::VecDeque<PrimedPacket>,
+    /// Presentation time of the batch's first picture, in the output clock.
+    batch_start: Option<u64>,
+    started: bool,
+    finished: bool,
+}
+
+impl TsStream {
+    /// Open `path` positioned at `start_secs`, ready to emit packets.
+    ///
+    /// A track this build can neither pass through nor produce is dropped rather
+    /// than carried, exactly as in the MP4 path: better a film with two working
+    /// soundtracks than one with a third that plays noise.
+    pub fn open(
+        path: &Path,
+        video: &TrackInfo,
+        audio: &[TrackInfo],
+        start_secs: f64,
+    ) -> Result<Self> {
+        use symphonia::core::formats::{SeekMode, SeekTo};
+        use symphonia::core::units::Time;
+
+        let mut format = super::source::open_format(path)?;
+        if start_secs > 0.0 {
+            // Coarse, not Accurate: a stream has to open on a random-access
+            // point or the renderer has no reference frame to decode the first
+            // picture against.
+            let _ = format.seek(
+                SeekMode::Coarse,
+                SeekTo::Time {
+                    time: Time::try_from_secs_f64(super::seek_target(start_secs))
+                        .unwrap_or(Time::ZERO),
+                    track_id: Some(video.id),
+                },
+            );
+        }
+
+        let parameter_sets = ParameterSets::parse(video.codec_kind, &video.extra_data)
+            .ok_or_else(|| anyhow::anyhow!("no parameter sets for the video track"))?;
+        let mut next_pid = FIRST_ES_PID;
+        let mut streams = Vec::new();
+        streams.push(Stream {
+            spec: TsStreamSpec::for_codec(video.codec_kind, next_pid)
+                .ok_or_else(|| anyhow::anyhow!("{} has no transport mapping", video.codec))?,
+            source_id: video.id,
+            time_base: track_time_base(format.as_ref(), video.id),
+            codec: None,
+            parameter_sets: Some(parameter_sets),
+            sample_rate: 0,
+            decode: None,
+            pending: Vec::new(),
+        });
+
+        for track in audio {
+            next_pid += 1;
+            // Dolby and AAC ride as they are; anything else has to become AAC
+            // first, and is described as AAC from here on.
+            let (carried, codec) = match audio_disposition(track) {
+                AudioDisposition::Passthrough => (track.codec_kind, None),
+                AudioDisposition::Reencoded => {
+                    (TrackCodec::Aac, track.codec_kind.transcode_codec())
+                }
+                AudioDisposition::Dropped => continue,
+            };
+            let Some(spec) = TsStreamSpec::for_codec(carried, next_pid) else {
+                continue;
+            };
+            streams.push(Stream {
+                spec,
+                source_id: track.id,
+                time_base: track_time_base(format.as_ref(), track.id),
+                codec,
+                parameter_sets: None,
+                sample_rate: track.sample_rate.unwrap_or(48_000),
+                decode: None,
+                pending: Vec::new(),
+            });
+        }
+
+        // Everything the programme map is about to promise, proved before it
+        // promises it.
+        let primed = prime_decoders(format.as_mut(), &mut streams);
+
+        let specs = streams.iter().map(|s| s.spec.clone()).collect();
+        Ok(Self {
+            format,
+            muxer: TsMuxer::new(),
+            video_pid: streams[0].spec.pid,
+            video_id: video.id,
+            video_codec: if streams[0].spec.stream_type == 0x24 {
+                TrackCodec::Hevc
+            } else {
+                TrackCodec::Avc
+            },
+            streams,
+            specs,
+            primed,
+            batch_start: None,
+            started: false,
+            finished: false,
+        })
+    }
+
+    /// The next run of transport packets, or `None` at the end of the film.
+    pub fn next_chunk(&mut self) -> Option<Vec<u8>> {
+        if self.finished {
+            return None;
+        }
+        let batch_ticks = (BATCH_SECS * TS_CLOCK_HZ as f64) as u64;
+
+        loop {
+            let Some((id, pts, data)) = self.next_source_packet() else {
+                self.finished = true;
+                self.flush_encoders();
+                return self.emit();
+            };
+
+            if id == self.video_id {
+                let keyframe = packet_is_keyframe(&data, self.video_codec);
+                // Nothing before the first random-access point is decodable.
+                if !self.started && !keyframe {
+                    continue;
+                }
+                self.started = true;
+                let ticks = self.rescale(0, pts);
+                let elapsed = ticks.saturating_sub(*self.batch_start.get_or_insert(ticks));
+                // Batches break on keyframes, so every one opens with everything
+                // a decoder needs to start there.
+                if keyframe && elapsed >= batch_ticks && !self.streams[0].pending.is_empty() {
+                    let chunk = self.emit();
+                    self.batch_start = Some(ticks);
+                    self.push_video(ticks, data, keyframe);
+                    if chunk.is_some() {
+                        return chunk;
+                    }
+                    continue;
+                }
+                self.push_video(ticks, data, keyframe);
+                continue;
+            }
+
+            // Audio ahead of the first picture is dropped: a renderer given
+            // sound before it has a frame has nothing to synchronise against.
+            if !self.started {
+                continue;
+            }
+            if let Err(error) = self.take_audio(id, pts, &data) {
+                tracing::debug!(%error, "dropping an audio packet that would not re-encode");
+            }
+        }
+    }
+
+    /// The next packet from the film: what priming read, then the demuxer.
+    fn next_source_packet(&mut self) -> Option<PrimedPacket> {
+        if let Some(packet) = self.primed.pop_front() {
+            return Some(packet);
+        }
+        match self.format.next_packet() {
+            Ok(Some(packet)) => Some((
+                packet.track_id,
+                packet.pts.get(),
+                packet.data.to_vec(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn rescale(&self, index: usize, ticks: i64) -> u64 {
+        match self.streams[index].time_base {
+            Some(time_base) => rescale_ticks(ticks, time_base, TS_CLOCK_HZ as u32),
+            None => ticks.max(0) as u64,
+        }
+    }
+
+    fn push_video(&mut self, ticks: u64, data: Vec<u8>, keyframe: bool) {
+        let sets = self.streams[0]
+            .parameter_sets
+            .clone()
+            .unwrap_or_default();
+        let codec = self.video_codec;
+        self.streams[0].pending.push(Unit {
+            pts: ticks,
+            dts: ticks,
+            keyframe,
+            data: to_annexb(&data, &sets, keyframe, codec),
+        });
+    }
+
+    /// Feed one audio packet to whichever carried track it belongs to.
+    fn take_audio(&mut self, track_id: u32, pts: i64, data: &[u8]) -> Result<()> {
+        let Some(index) = self
+            .streams
+            .iter()
+            .position(|stream| stream.source_id == track_id && stream.spec.pid != self.video_pid)
+        else {
+            return Ok(());
+        };
+        let ticks = self.rescale(index, pts);
+        let stream = &mut self.streams[index];
+
+        let Some(codec) = stream.codec else {
+            // Passed through: the container's frame is the access unit.
+            stream.pending.push(Unit {
+                pts: ticks,
+                dts: ticks,
+                keyframe: true,
+                data: data.to_vec(),
+            });
+            return Ok(());
+        };
+
+        let sample_rate = stream.sample_rate;
+        let decode = match stream.decode.as_mut() {
+            Some(decode) => decode,
+            None => {
+                let (decoder, mut primed) =
+                    PcmDecoder::open(codec, sample_rate, Some(DECODED_CHANNELS), data)?;
+                let decoded_channels = decoder.channels();
+                let encoder = AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
+                if let Some(samples) = super::frames::frame_samples(codec, data) {
+                    primed.resize(samples as usize * decoded_channels as usize * 2, 0);
+                }
+                stream.decode = Some(Decode {
+                    codec,
+                    decoder,
+                    encoder,
+                    decoded_channels,
+                    sample_rate,
+                    next_pts: None,
+                    anchors: Vec::new(),
+                    decoded: 0,
+                    held: Vec::new(),
+                });
+                let decode = stream.decode.as_mut().unwrap();
+                take_decoded(&mut stream.pending, decode, ticks, primed)?;
+                return Ok(());
+            }
+        };
+        let expect = super::frames::frame_samples(decode.codec, data);
+        let pcm = decode.decoder.decode_or_silence(data, expect);
+        take_decoded(&mut stream.pending, decode, ticks, pcm)?;
+        Ok(())
+    }
+
+    fn flush_encoders(&mut self) {
+        for stream in &mut self.streams {
+            if let Some(decode) = stream.decode.as_mut() {
+                let tail = decode.encoder.finish();
+                place_frames(&mut stream.pending, decode, &tail, true);
+            }
+        }
+    }
+
+    /// Write everything held as transport packets, interleaved by decode time.
+    fn emit(&mut self) -> Option<Vec<u8>> {
+        // A batch about to be written cannot wait for more packets before
+        // deciding where a re-encoded run sits, so this is where it is forced.
+        for stream in &mut self.streams {
+            if let Some(decode) = stream.decode.as_mut() {
+                place_frames(&mut stream.pending, decode, &[], true);
+            }
+        }
+
+        // Matroska stores presentation timestamps in decode order and no decode
+        // timestamps; sorting the batch's presentation times recovers the decode
+        // timeline exactly, because each frame is decoded once and shown once.
+        let mut video = std::mem::take(&mut self.streams[0].pending);
+        let mut times: Vec<crate::media::remux::MediaPacket> = video
+            .iter()
+            .map(|unit| crate::media::remux::MediaPacket {
+                track_id: 0,
+                pts: unit.pts,
+                dts: unit.dts,
+                duration: 0,
+                is_keyframe: unit.keyframe,
+                data: Vec::new(),
+            })
+            .collect();
+        derive_decode_timestamps(&mut times);
+        for (unit, derived) in video.iter_mut().zip(&times) {
+            unit.dts = derived.dts;
+        }
+
+        // (decode time, stream index, unit)
+        let mut ordered: Vec<(u64, usize, Unit)> =
+            video.drain(..).map(|unit| (unit.dts, 0, unit)).collect();
+        for index in 1..self.streams.len() {
+            for unit in self.streams[index].pending.drain(..) {
+                ordered.push((unit.dts, index, unit));
+            }
+        }
+        if ordered.is_empty() {
+            return None;
+        }
+        ordered.sort_by_key(|(dts, index, _)| (*dts, *index));
+
+        // The tables lead every batch, and are then repeated inside it.
+        // Repeating them is what lets a decoder that joined part way through
+        // learn what the programme contains without having seen the beginning
+        // of it — so the gap between one pair and the next is the floor on how
+        // long a seek takes to show a picture, and a batch is far too long to
+        // make a viewer wait.
+        let mut out = self.muxer.pat();
+        out.extend_from_slice(&self.muxer.pmt(self.video_pid, &self.specs));
+        let mut tables_at = ordered[0].0;
+
+        for (_, index, unit) in ordered {
+            let spec = self.streams[index].spec.clone();
+            let is_video = index == 0;
+            if unit.dts.saturating_sub(tables_at) >= TABLE_INTERVAL {
+                tables_at = unit.dts;
+                out.extend_from_slice(&self.muxer.pat());
+                out.extend_from_slice(&self.muxer.pmt(self.video_pid, &self.specs));
+            }
+            // The programme clock rides on the video track, at every picture —
+            // a decoder needs it far more often than the hundred milliseconds
+            // the standard allows between one and the next. It is deliberately
+            // the *unshifted* decode time: the presentation stamps run
+            // `CLOCK_HEADROOM` ahead of it, and that gap is the renderer's
+            // buffer.
+            self.muxer.pes(
+                &mut out,
+                &spec,
+                &unit.data,
+                &PesTiming {
+                    pts: unit.pts + CLOCK_HEADROOM,
+                    dts: Some(unit.dts + CLOCK_HEADROOM),
+                    random_access: unit.keyframe,
+                    pcr: is_video.then_some(unit.dts),
+                },
+            );
+        }
+        Some(out)
+    }
+}
+
+/// Read far enough ahead to prove every soundtrack in `streams` can produce
+/// packets, and drop the ones that cannot.
+///
+/// A stream declared in the programme map and then silent forever is worse than
+/// one that was never declared. A renderer reads the map, sees a PID it is
+/// expecting audio on, and waits for it — so a DTS track whose decoder will not
+/// open, or a track the container lists but never writes a block for, does not
+/// cost that soundtrack. It costs the film.
+///
+/// Two ways a track fails that, and both are checked here. It may never appear
+/// in the stream at all, which the read below finds; or its decoder may refuse
+/// its first frame, which is found by opening one on that frame and throwing it
+/// away. The decode chain is then built again, lazily, on the same frame when it
+/// is replayed — one frame decoded twice at the start of a film, against a
+/// television that would otherwise sit on a black screen.
+///
+/// Every packet read on the way is handed back to be replayed rather than
+/// dropped: one of them is the keyframe the film has to start on.
+fn prime_decoders(
+    format: &mut dyn symphonia::core::formats::FormatReader,
+    streams: &mut Vec<Stream>,
+) -> std::collections::VecDeque<PrimedPacket> {
+    let mut primed = std::collections::VecDeque::new();
+    let wanted: Vec<u32> = streams[1..].iter().map(|stream| stream.source_id).collect();
+    if wanted.is_empty() {
+        return primed;
+    }
+
+    let mut first_frames: std::collections::HashMap<u32, Vec<u8>> =
+        std::collections::HashMap::new();
+    let mut read = 0usize;
+    for _ in 0..PRIME_PACKETS {
+        if read >= PRIME_BYTES {
+            break;
+        }
+        let Ok(Some(packet)) = format.next_packet() else {
+            break;
+        };
+        let (id, pts, data) = (packet.track_id, packet.pts.get(), packet.data.to_vec());
+        read += data.len();
+        if wanted.contains(&id) {
+            first_frames.entry(id).or_insert_with(|| data.clone());
+        }
+        primed.push_back((id, pts, data));
+        if wanted.iter().all(|id| first_frames.contains_key(id)) {
+            break;
+        }
+    }
+
+    streams.retain(|stream| {
+        if stream.spec.pid == FIRST_ES_PID {
+            return true;
+        }
+        let Some(frame) = first_frames.get(&stream.source_id) else {
+            tracing::warn!(
+                track = stream.source_id,
+                "dropping a soundtrack that carries no packets, rather than \
+                 declaring a stream a renderer would wait on forever"
+            );
+            return false;
+        };
+        let Some(codec) = stream.codec else {
+            return true;
+        };
+        match decode_chain_opens(codec, stream.sample_rate, frame) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(
+                    track = stream.source_id,
+                    "dropping a soundtrack whose decoder will not open: {error:#}"
+                );
+                false
+            }
+        }
+    });
+    primed
+}
+
+/// Whether both halves of a re-encode can be built for this track.
+fn decode_chain_opens(codec: TranscodeCodec, sample_rate: u32, frame: &[u8]) -> Result<()> {
+    let (decoder, _) = PcmDecoder::open(codec, sample_rate, Some(DECODED_CHANNELS), frame)?;
+    AacEncoder::new(sample_rate, DECODED_CHANNELS)?;
+    drop(decoder);
+    Ok(())
+}
+
+/// Take one frame's decoded PCM and encode it.
+fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Decode, ticks: u64, pcm: Vec<u8>) -> Result<()> {
+    // Where this run starts, if it is contiguous — asked of every packet, so
+    // that one rounded container timestamp cannot place the whole run.
+    let samples = (ticks as i128 * i64::from(decode.sample_rate) as i128
+        / TS_CLOCK_HZ as i128) as i64;
+    decode.anchors.push(samples - decode.decoded as i64);
+    decode.decoded += (pcm.len() / (decode.decoded_channels as usize * 2)) as u64;
+    let pcm = super::fit_channels(&pcm, decode.decoded_channels, DECODED_CHANNELS);
+    let adts = decode.encoder.push(&pcm)?;
+    place_frames(pending, decode, &adts, false);
+    Ok(())
+}
+
+/// Hold the encoder's ADTS frames until the run's place is settled, then queue
+/// them as access units.
+///
+/// The ADTS headers stay on, unlike the MP4 path which strips them: a transport
+/// stream carries AAC exactly as the encoder framed it, because there is no
+/// sample entry alongside to repeat what the header says.
+fn place_frames(pending: &mut Vec<Unit>, decode: &mut Decode, adts: &[u8], settle: bool) {
+    for frame in adts_frames(adts) {
+        decode.held.push(frame.to_vec());
+    }
+    if decode.next_pts.is_none() {
+        if !settle && decode.anchors.len() < ANCHOR_PACKETS {
+            return;
+        }
+        if decode.anchors.is_empty() {
+            return;
+        }
+        let mut anchors = std::mem::take(&mut decode.anchors);
+        // Placed early by the encoder's own delay, which is what a decoder's
+        // output trails its input by.
+        let anchor =
+            super::run_anchor(&mut anchors).saturating_sub(super::ENCODER_DELAY as i64);
+        decode.next_pts = Some(anchor.max(0) as u64);
+    }
+    let mut samples = decode.next_pts.unwrap_or(0);
+    for frame in decode.held.drain(..) {
+        let ticks = samples * TS_CLOCK_HZ / u64::from(decode.sample_rate);
+        pending.push(Unit {
+            pts: ticks,
+            dts: ticks,
+            keyframe: true,
+            data: frame,
+        });
+        samples += super::AAC_FRAME_SAMPLES;
+    }
+    decode.next_pts = Some(samples);
+}
+
+/// Whole ADTS frames, headers included.
+fn adts_frames(stream: &[u8]) -> Vec<&[u8]> {
+    let mut frames = Vec::new();
+    let mut pos = 0usize;
+    while pos + 7 <= stream.len() {
+        let header = &stream[pos..];
+        if header[0] != 0xFF || (header[1] & 0xF0) != 0xF0 {
+            break;
+        }
+        let len = (((u32::from(header[3]) & 0x03) << 11)
+            | (u32::from(header[4]) << 3)
+            | (u32::from(header[5]) >> 5)) as usize;
+        if len < 7 || pos + len > stream.len() {
+            break;
+        }
+        frames.push(&stream[pos..pos + len]);
+        pos += len;
+    }
+    frames
+}
+
+fn track_time_base(
+    format: &dyn symphonia::core::formats::FormatReader,
+    track_id: u32,
+) -> Option<symphonia::core::units::TimeBase> {
+    format
+        .tracks()
+        .iter()
+        .find(|t| t.id == track_id)
+        .and_then(|t| t.time_base)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::media::remux::TrackKind;
+
+    fn track(id: u32, kind: TrackKind, codec: TrackCodec, channels: u8) -> TrackInfo {
+        TrackInfo {
+            id,
+            track_kind: kind,
+            codec: format!("{codec:?}"),
+            codec_kind: codec,
+            language: None,
+            name: None,
+            sample_rate: Some(48_000),
+            channels: Some(channels),
+            width: None,
+            height: None,
+            is_default: id == 1,
+            extra_data: Vec::new(),
+        }
+    }
+
+    fn rate(id: u32, bits: u64, fps: f64) -> TrackRate {
+        TrackRate {
+            id,
+            bits_per_second: bits,
+            frames_per_second: fps,
+        }
+    }
+
+    /// The case the whole estimate exists for, and the one no fixture in this
+    /// repository is big enough to reproduce.
+    ///
+    /// A film carrying five DTS soundtracks, which between them are most of what
+    /// it weighs. Every one of them leaves as stereo AAC at an eighth of the
+    /// rate, so the stream is a third of the file — and promising the file's own
+    /// size names every byte offset three times too far along, which is a scrub
+    /// bar that lands nowhere near where it was dragged to.
+    #[test]
+    fn five_dts_soundtracks_do_not_reach_the_renderer_weighing_what_they_did() {
+        let duration = 120.0;
+        let source = 124_000_000u64;
+
+        let mut tracks = vec![track(1, TrackKind::Video, TrackCodec::Avc, 0)];
+        tracks.extend((2..7).map(|id| track(id, TrackKind::Audio, TrackCodec::Dts, 6)));
+        let carried: Vec<TrackInfo> = tracks[1..].to_vec();
+
+        // Measured: the picture at a megabit and a half, each soundtrack near
+        // the DTS core rate in eleven-millisecond frames.
+        let mut measured = vec![rate(1, 0, 24.0)];
+        measured.extend((2..7).map(|id| rate(id, 1_360_000, 93.75)));
+        let rates = TrackRates(measured);
+
+        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates);
+        assert!(
+            promised < source / 2,
+            "five soundtracks shrank eightfold and the promise did not: {promised} \
+             against a {source}-byte source"
+        );
+
+        // Five stereo AAC tracks, a megabit and a half of picture and the
+        // programme tables, over two minutes — reached without reference to the
+        // source's size, which is the whole point.
+        let expected = (1_470_000.0 * 1.03 + 5.0 * 211_500.0 + 30_080.0) * duration / 8.0;
+        assert!(
+            (promised as f64) > expected && (promised as f64) < expected * 1.2,
+            "{promised} is not the {expected} this stream actually weighs"
+        );
+    }
+
+    /// The estimate leans long on purpose: short of the promise is padding a
+    /// renderer skips, over it is the film's last minutes cut off.
+    #[test]
+    fn the_picture_always_fits_inside_the_promise() {
+        const GIB: u64 = 1 << 30;
+        let duration = 7200.0;
+
+        let mut tracks = vec![track(1, TrackKind::Video, TrackCodec::Avc, 0)];
+        tracks.extend((2..7).map(|id| track(id, TrackKind::Audio, TrackCodec::Dts, 6)));
+        let carried: Vec<TrackInfo> = tracks[1..].to_vec();
+        let mut measured = vec![rate(1, 0, 24.0)];
+        measured.extend((2..7).map(|id| rate(id, 1_509_000, 93.75)));
+        let rates = TrackRates(measured);
+
+        let source = 30 * GIB;
+        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates);
+        // The picture is the file less its five soundtracks, and it passes
+        // through untouched, so every byte of it has to fit.
+        let picture = source - (5 * 1_509_000 * 7200 / 8);
+        assert!(
+            promised > picture,
+            "{promised} does not leave room for {picture} bytes of picture"
+        );
+        assert!(
+            promised < source + source / 16,
+            "and should still be under what the source's own size would promise"
+        );
+    }
+
+    /// A soundtrack that is passed through costs what it always cost, so a film
+    /// of Dolby leaves at roughly the weight it arrived — which is the case the
+    /// old source-sized promise got right and this must not get wrong.
+    #[test]
+    fn a_film_that_only_passes_its_dolby_through_is_promised_what_it_weighs() {
+        let duration = 3600.0;
+        let tracks = vec![
+            track(1, TrackKind::Video, TrackCodec::Avc, 0),
+            track(2, TrackKind::Audio, TrackCodec::Ac3, 6),
+        ];
+        let carried = vec![tracks[1].clone()];
+        let rates = TrackRates(vec![rate(1, 0, 24.0), rate(2, 640_000, 31.25)]);
+
+        let source = 4 * (1u64 << 30);
+        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates);
+        assert!(
+            promised > source && promised < source * 6 / 5,
+            "a passthrough film should be promised its own size and a little over, \
+             not {promised} against {source}"
+        );
+    }
+
+    /// Frames small enough that the packet they are stuffed into costs more than
+    /// they do. A flat percentage overhead is badly wrong here, and wrong low —
+    /// which is the film's last minutes cut off rather than a little padding.
+    #[test]
+    fn the_packet_cost_is_counted_rather_than_guessed_at() {
+        // 192 kbps in 768-byte AC-3 frames: 782 bytes of PES, which is five
+        // packets of 188 rather than the four and a bit a percentage would give.
+        let cost = transport_cost(192_000, 31.25);
+        assert_eq!(cost, (5.0 * 188.0 * 8.0 * 31.25) as u64);
+        assert!(
+            cost > 192_000 * 6 / 5,
+            "a fifth of this track is stuffing, and {cost} does not show it"
+        );
+
+        // A 130-kilobyte picture pays for its header and almost nothing else.
+        let cost = transport_cost(25_000_000, 24.0);
+        assert!(
+            cost > 25_000_000 && cost < 25_000_000 * 21 / 20,
+            "a large frame should cost a couple of per cent, not {cost}"
+        );
+
+        // Nothing to say about a track with no rate or no frames.
+        assert_eq!(transport_cost(0, 24.0), 0);
+        assert_eq!(transport_cost(500, 0.0), 500);
+    }
+
+    /// The disposition decides both what the muxer does and what the handler
+    /// promises, so the two cannot be allowed to answer it differently.
+    #[test]
+    fn dolby_and_aac_ride_as_they_are_and_dts_is_re_encoded() {
+        assert_eq!(
+            audio_disposition(&track(1, TrackKind::Audio, TrackCodec::Ac3, 6)),
+            AudioDisposition::Passthrough
+        );
+        assert_eq!(
+            audio_disposition(&track(1, TrackKind::Audio, TrackCodec::Eac3, 6)),
+            AudioDisposition::Passthrough
+        );
+        assert_eq!(
+            audio_disposition(&track(1, TrackKind::Audio, TrackCodec::Aac, 2)),
+            AudioDisposition::Passthrough
+        );
+        assert_eq!(
+            audio_disposition(&track(1, TrackKind::Audio, TrackCodec::Unsupported, 2)),
+            AudioDisposition::Dropped,
+            "TrueHD and anything else unnamed has no way into a transport stream"
+        );
+        let dts = audio_disposition(&track(1, TrackKind::Audio, TrackCodec::Dts, 6));
+        assert_eq!(
+            dts,
+            if cfg!(all(feature = "transcode-dts", feature = "transcode-aac")) {
+                AudioDisposition::Reencoded
+            } else {
+                AudioDisposition::Dropped
+            }
+        );
+    }
+
+    #[test]
+    fn adts_frames_are_returned_whole_unlike_the_mp4_paths_payloads() {
+        // Two frames of seven-byte headers and one byte of payload each.
+        let mut stream = Vec::new();
+        for _ in 0..2 {
+            stream.extend_from_slice(&[0xFF, 0xF1, 0x4C, 0x80, 0x01, 0x1F, 0xFC, 0xAA]);
+        }
+        let frames = adts_frames(&stream);
+        assert_eq!(frames.len(), 2);
+        for frame in frames {
+            assert_eq!(frame.len(), 8, "the header stays on");
+            assert_eq!(frame[0], 0xFF, "and the frame opens with its syncword");
+        }
+    }
+
+    #[test]
+    fn a_truncated_frame_is_not_returned() {
+        let stream = [0xFF, 0xF1, 0x4C, 0x80, 0x7F, 0xFF, 0xFC];
+        assert!(adts_frames(&stream).is_empty(), "a frame running past the end");
+    }
+}

@@ -23,6 +23,8 @@ mod plan;
 #[cfg(all(feature = "transcode-aac", feature = "demux"))]
 mod rendition;
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+mod ts;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
 mod video;
 mod session;
 mod source;
@@ -47,11 +49,37 @@ pub use rendition::{
 };
 pub use session::{IndexKey, SegmentKey, TranscodeState};
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+#[allow(unused_imports)]
+pub use ts::{
+    audio_disposition, measure_track_rates, promised_ts_length, AudioDisposition, TrackRate,
+    TrackRates, TsStream,
+};
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
 pub use video::ProgressiveStream;
 #[allow(unused_imports)]
 pub use source::{PacketSource, PcmStream};
 #[allow(unused_imports)]
 pub use wav::{wav_header, WAV_HEADER_LEN};
+
+/// The instant to ask the demuxer for, given the instant that was requested.
+///
+/// A hair earlier. A coarse seek lands at or just *past* the point it is given,
+/// and the caller then has to wait for a random-access point — so asking for the
+/// exact time of a keyframe arrives immediately after it and costs a whole group
+/// of pictures, which on a film with five-second groups is five seconds later
+/// than the viewer dragged to. Backing off by less than a frame lands on that
+/// keyframe instead.
+///
+/// It does not make the seek exact. Between keyframes there is nothing to land
+/// on, so a request that falls mid-group still opens at the next one; what this
+/// removes is the whole group lost when the request was already on the mark.
+#[cfg(feature = "casting")]
+pub(crate) fn seek_target(requested_secs: f64) -> f64 {
+    /// Shorter than a frame at any rate a film is shot at, and longer than the
+    /// rounding a container's own timestamps carry.
+    const BACK_OFF: f64 = 0.005;
+    (requested_secs - BACK_OFF).max(0.0)
+}
 
 /// An audio codec VuIO can decode but many renderers cannot play.
 ///

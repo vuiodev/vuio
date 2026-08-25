@@ -143,7 +143,13 @@ audio_format = "lpcm"
 #   forced    transcode is forced; only transcoded stream is offered so every TV plays it
 #   disabled  transcode is disabled
 mode = "enabled"
-# Decodes allowed at once, shared between TVs and the browser player. Past this
-# a further request is refused rather than queued, so the streams already
-# playing keep up.
-max_concurrent = 2
+# Sessions allowed at once, shared between TVs and the browser player. Past this
+# a further request is refused rather than queued.
+#
+# Set high on purpose. A television opens three connections within a second of
+# pressing play — one to play on, one to read the end of the file, and one to
+# play on again — so a low ceiling refuses the one it meant to play on and the
+# film never starts. The work is cheap besides: the picture is passed through
+# and so is Dolby, and only a DTS soundtrack is really decoded. Lower it only if
+# you have a genuine reason to cap the CPU.
+max_concurrent = 100

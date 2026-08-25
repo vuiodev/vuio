@@ -63,11 +63,26 @@ pub(super) fn default_true() -> bool {
     true
 }
 
-/// Two at once: enough that a second TV starting a film does not get a refusal,
-/// low enough that a small box is not asked to run four decoders and serve the
-/// library at the same time.
+/// High enough not to refuse anything a household actually does.
+///
+/// This began as a tuning figure — two, on the reasoning that a small box should
+/// not run four decoders while serving the library. What that missed is that a
+/// renderer does not open one connection per film. A television opens three
+/// within a second of pressing play: one to play on, one to read the end of the
+/// file, and one to play on again. Against a ceiling of two, the third is
+/// refused, and what the viewer sees is a film that will not start.
+///
+/// It also over-charged for the work. The picture is passed through and so is
+/// Dolby, so most sessions are a remux costing almost nothing; only a DTS
+/// soundtrack is really decoded, at about a hundredth of a core per track. A low
+/// ceiling was mostly refusing work that was nearly free.
+///
+/// So this is no longer a tuning knob but a guard against something having gone
+/// wrong — a renderer looping on a failure, or a crawler. Anyone with a genuine
+/// reason to cap the CPU can still set it, and zero is rejected outright by
+/// [`crate::config::validation`] because it would refuse every transcode.
 pub(super) fn default_transcode_max_concurrent() -> usize {
-    2
+    100
 }
 
 pub(super) fn default_web_ui_port() -> u16 {
@@ -255,6 +270,10 @@ pub struct TranscodeConfig {
     #[serde(default)]
     pub audio_format: TranscodeAudioFormat,
     /// Ceiling on simultaneous transcode sessions.
+    ///
+    /// A guard against a renderer looping on a failure rather than a tuning
+    /// figure — see [`default_transcode_max_concurrent`] for why it is set where
+    /// it is, and what a television does that a low ceiling breaks.
     #[serde(default = "default_transcode_max_concurrent")]
     pub max_concurrent: usize,
 }

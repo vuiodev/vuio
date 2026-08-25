@@ -264,15 +264,26 @@ pub async fn generate_browse_response(
                         file.mime_type.contains("dts")
                             || file.filename.to_ascii_lowercase().ends_with(".dts")
                     });
+            // Whether to hide the original, not whether to offer the decoded
+            // resource. The decoded resource is offered either way — a renderer
+            // that cannot play the original and is shown nothing else plays
+            // nothing at all, which is the failure this whole path exists to
+            // prevent. What `is_dts` decides is only whether the original is
+            // worth leaving beside it: a television that cannot license DTS is
+            // certain not to have it, where AC-3 is common enough that hiding
+            // the original would take away a working choice.
             let is_forced = transcoded.as_ref().is_some_and(|a| a.first && is_dts);
-            if let Some(advert) = transcoded.filter(|a| a.first && is_dts) {
+            if let Some(advert) = transcoded.filter(|a| a.first) {
                 let _ = advert.write_didl(
                     &mut didl,
                     server_ip,
                     state.http_binding.port(),
-                    file_id,
-                    &file.mime_type,
-                    duration_secs,
+                    &AdvertItem {
+                        file_id,
+                        mime: &file.mime_type,
+                        duration: duration_secs,
+                        source_size: file.size,
+                    },
                 );
             }
 
@@ -315,9 +326,12 @@ pub async fn generate_browse_response(
                         &mut didl,
                         server_ip,
                         state.http_binding.port(),
-                        file_id,
-                        &file.mime_type,
-                        duration_secs,
+                        &AdvertItem {
+                            file_id,
+                            mime: &file.mime_type,
+                            duration: duration_secs,
+                            source_size: file.size,
+                        },
                     );
                 }
             }

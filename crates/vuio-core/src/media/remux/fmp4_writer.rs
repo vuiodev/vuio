@@ -283,6 +283,21 @@ impl Fmp4Writer {
         Self::wrap_box(&minf)
     }
 
+    /// The `AudioSampleEntry` preamble every audio codec shares, up to the point
+    /// where its own configuration box begins.
+    fn audio_sample_entry(fourcc: &[u8; 4], track: &TrackInfo) -> Vec<u8> {
+        let mut sample_entry = Vec::new();
+        sample_entry.extend_from_slice(fourcc);
+        sample_entry.extend_from_slice(&[0; 6]); // reserved
+        sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
+        sample_entry.extend_from_slice(&[0; 8]); // reserved
+        sample_entry.extend_from_slice(&(track.channels.unwrap_or(2) as u16).to_be_bytes());
+        sample_entry.extend_from_slice(&(16u16).to_be_bytes()); // sample_size = 16
+        sample_entry.extend_from_slice(&[0; 4]); // pre_defined + reserved
+        sample_entry.extend_from_slice(&(track.sample_rate.unwrap_or(44100) << 16).to_be_bytes());
+        sample_entry
+    }
+
     fn build_stbl(track: &TrackInfo) -> Vec<u8> {
         let mut stbl_body = Vec::new();
 
@@ -332,28 +347,32 @@ impl Fmp4Writer {
                 }
                 Self::wrap_box(&sample_entry)
             }
-            // Everything else gets an `mp4a` entry. The three decoded codecs are
-            // here only for exhaustiveness: a track of theirs reaches this writer
-            // already restated as AAC (see `aac_track`), because what the fragment
-            // will carry is the re-encoded stream, not the source.
-            TrackCodec::Aac
-            | TrackCodec::Ac3
-            | TrackCodec::Eac3
-            | TrackCodec::Dts
-            | TrackCodec::Unsupported => {
-                let mut sample_entry = Vec::new();
-                sample_entry.extend_from_slice(b"mp4a");
-                sample_entry.extend_from_slice(&[0; 6]); // reserved
-                sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
-                sample_entry.extend_from_slice(&[0; 8]); // reserved
-                sample_entry
-                    .extend_from_slice(&(track.channels.unwrap_or(2) as u16).to_be_bytes());
-                sample_entry.extend_from_slice(&(16u16).to_be_bytes()); // sample_size = 16
-                sample_entry.extend_from_slice(&[0; 4]); // pre_defined + reserved
-                sample_entry.extend_from_slice(
-                    &(track.sample_rate.unwrap_or(44100) << 16).to_be_bytes(),
-                );
-
+            // Dolby, passed through. An `mp4a` entry cannot describe AC-3, so
+            // ISO-BMFF gives these their own sample entries, each carrying the
+            // record built from the bitstream's first syncframe (see
+            // `super::ac3_config`). A track reaching here as `Ac3` or `Eac3` is
+            // one being carried untouched; one that had to be decoded arrives
+            // restated as `Aac` and takes the branch below.
+            TrackCodec::Ac3 | TrackCodec::Eac3 => {
+                let (fourcc, config_box): (&[u8; 4], &[u8; 4]) =
+                    if track.codec_kind == TrackCodec::Eac3 {
+                        (b"ec-3", b"dec3")
+                    } else {
+                        (b"ac-3", b"dac3")
+                    };
+                let mut sample_entry = Self::audio_sample_entry(fourcc, track);
+                let mut config = Vec::with_capacity(4 + track.extra_data.len());
+                config.extend_from_slice(config_box);
+                config.extend_from_slice(&track.extra_data);
+                sample_entry.extend_from_slice(&Self::wrap_box(&config));
+                Self::wrap_box(&sample_entry)
+            }
+            // Everything else gets an `mp4a` entry. `Dts` is here only for
+            // exhaustiveness: a DTS track reaches this writer already restated
+            // as AAC, because what the fragment will carry is the re-encoded
+            // stream and not the source.
+            TrackCodec::Aac | TrackCodec::Dts | TrackCodec::Unsupported => {
+                let mut sample_entry = Self::audio_sample_entry(b"mp4a", track);
                 if !track.extra_data.is_empty() {
                     sample_entry
                         .extend_from_slice(&Self::wrap_box(&Self::build_esds(&track.extra_data)));

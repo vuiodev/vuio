@@ -20,12 +20,90 @@ pub mod subtitles;
 #[cfg(feature = "transcode")]
 pub mod transcode_streaming;
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+pub mod ts_streaming;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
 pub mod video_streaming;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
 
 use crate::{database::DatabaseManager, state::AppState};
+
+/// The length a transcoded film commits to when nothing better is known.
+///
+/// Built from the source's own size, because the picture is the bulk of both and
+/// passes through untouched. What that ignores is what the soundtracks do, and
+/// on a film carrying several of them in DTS it is the whole answer: a quarter
+/// of the file leaves re-encoded at an eighth of the rate, so the stream weighs
+/// nothing like the source and this number is out by a factor of three.
+///
+/// Which is why the transport stream does not use it. That resource is the one a
+/// television seeks by byte, so its promise has to be an honest account of what
+/// it produces, and [`crate::media::transcode::promised_ts_length`] builds one
+/// from the film's own measured tracks. This remains for the two cases with
+/// nothing to measure against: the fragmented MP4, which the browser player
+/// fetches whole and never seeks into by byte, and a film whose container
+/// declares no duration, where there is no way to turn bytes into instants at
+/// all.
+///
+/// Rounded up, and that is the part that matters wherever it is used. The
+/// response is made to be exactly this long whatever the muxer produces, so the
+/// estimate being wrong is not the risk — the risk is which way. Short of the
+/// promise is padding the renderer skips; over the promise is the film's last
+/// seconds cut off. So the number leans high.
+pub(crate) fn promised_transcode_length(source_size: u64) -> u64 {
+    /// What to promise for a file the index has no size for. Zero would
+    /// advertise an empty resource, which renderers decline to open at all.
+    const FALLBACK: u64 = 1 << 30;
+    /// Slack over the source, against a source whose own overhead is unusually
+    /// light — a sixteenth, and never less than this many bytes, which is what
+    /// keeps a very short film from being trimmed by its fragment headers.
+    const FLOOR: u64 = 256 * 1024;
+
+    if source_size == 0 {
+        return align_to_packets(FALLBACK);
+    }
+    align_to_packets(source_size + (source_size / 16).max(FLOOR))
+}
+
+/// Round a length down to a whole number of transport packets.
+///
+/// One of the containers this number can describe is a transport stream, which
+/// is a run of 188-byte packets and nothing else. A promise that is not a whole
+/// number of them ends in a fragment of a packet — filler no decoder can read as
+/// anything, sitting where a decoder reading to the end would look. The MP4 path
+/// is indifferent to the alignment, so one aligned number is true of either.
+fn align_to_packets(length: u64) -> u64 {
+    const TS_PACKET: u64 = crate::media::remux::TS_PACKET_LEN as u64;
+    (length / TS_PACKET) * TS_PACKET
+}
+
+/// Whether a byte range is a renderer sizing the resource up rather than seeking
+/// into it.
+///
+/// Renderers read the end of a file before they play it — sixteen bytes for an
+/// MP4 reader looking for a `moov`, a few hundred kilobytes for a transport
+/// stream reader looking for a last timestamp. Both land in the padding that
+/// makes the promised length true, so both can be answered from it directly:
+/// no transcode slot, no muxing, and the bytes are the truth because padding is
+/// the one part of these resources whose contents are known without producing
+/// them.
+///
+/// Getting that wrong in the expensive direction is what stops a film playing.
+/// A probe answered by muxing holds a slot for as long as it takes to seek into
+/// a thirty-gigabyte file, and a television that opens three connections at once
+/// against two slots then has its actual playback request refused outright.
+///
+/// The threshold scales, because "near the end" means something different for a
+/// two-minute clip than for a three-hour film, and it is deliberately small: a
+/// genuine seek this close to the end lands in the last second or two of the
+/// film, where answering with padding costs nothing anyone would notice.
+pub(crate) fn is_probe_tail(first_byte: u64, promised: u64) -> bool {
+    const SMALLEST: u64 = 64 * 1024;
+    const LARGEST: u64 = 8 * 1024 * 1024;
+    let tail = (promised / 128).clamp(SMALLEST, LARGEST);
+    promised.saturating_sub(first_byte) <= tail
+}
 
 /// Whether this item is one a renderer may be unable to play unaided.
 ///
@@ -104,6 +182,10 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
                     // Constant-bitrate PCM: a byte offset divides straight back
                     // into a sample, so this is a real seek.
                     op: "11",
+                    // The exact length is the decoded sample count, which only
+                    // the plan knows; the streaming handler states it per
+                    // response rather than the DIDL stating it up front.
+                    sized: false,
                 },
                 TranscodeAudioFormat::Aac => xml::AdvertResource {
                     mime: "audio/aac",
@@ -111,17 +193,34 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
                     // A lossy re-encode has no length until it exists, so there
                     // is nothing to seek within.
                     op: "00",
+                    sized: false,
                 },
             },
             // A film is offered the film, not its soundtrack: the same picture,
-            // with an audio track the renderer can actually decode. Time seek
-            // only — see `web::video_streaming` for why byte seek is not on
-            // offer and why time seek is enough.
+            // with audio the renderer can actually decode.
+            //
+            // As a transport stream, not the MP4 next door, because this is what
+            // a television is being handed and a television scrubs by byte. A
+            // byte offset into a fragmented MP4 produced on demand names nothing
+            // stable; a transport stream resynchronises wherever it is joined,
+            // which is what makes `DLNA.ORG_OP=11` here an honest claim rather
+            // than a corrupt one. The MP4 remains for the browser player, which
+            // fetches whole responses and never needs it. See
+            // `web::ts_streaming`.
             #[cfg(all(feature = "transcode-aac", feature = "casting"))]
             video: Some(xml::AdvertResource {
-                mime: "video/mp4",
-                path: "transcode/video.mp4",
-                op: "10",
+                mime: "video/mpeg",
+                path: "transcode/video.ts",
+                op: "11",
+                // No size, and this is the one place the DIDL cannot honestly
+                // state one. The length of the produced stream turns on what
+                // each of the film's soundtracks costs it and which of them
+                // leave re-encoded — facts that live in the file, not in the
+                // index, and reading them here would mean opening every film in
+                // a folder to render one browse response. The streaming handler
+                // does know, states it as a `Content-Length`, and makes it true;
+                // a `size` guessed from the source would only contradict it.
+                sized: false,
             }),
             // With no remuxer or no encoder there is nothing to offer a film.
             // Offering it `audio.wav` instead would replace a silent film with
@@ -362,11 +461,19 @@ pub fn create_router<D: DatabaseManager + 'static>(
     // The film itself, remuxed with its audio decoded. Needs the demuxer as
     // well as the encoder, which is why it rides on `casting` too.
     #[cfg(all(feature = "transcode-aac", feature = "casting"))]
-    let router = router.route(
-        "/media/{id}/transcode/video.mp4",
-        get(video_streaming::serve_transcoded_video::<D>)
-            .head(video_streaming::serve_transcoded_video::<D>),
-    );
+    let router = router
+        .route(
+            "/media/{id}/transcode/video.mp4",
+            get(video_streaming::serve_transcoded_video::<D>)
+                .head(video_streaming::serve_transcoded_video::<D>),
+        )
+        // The same film as a transport stream, which is the one a television can
+        // seek. See `web::ts_streaming`.
+        .route(
+            "/media/{id}/transcode/video.ts",
+            get(ts_streaming::serve_transcoded_ts::<D>)
+                .head(ts_streaming::serve_transcoded_ts::<D>),
+        );
 
     #[cfg(feature = "casting")]
     let router = router

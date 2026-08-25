@@ -15,6 +15,8 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, Semaphore};
 
 use super::AudioPlan;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
+use super::TrackRates;
 
 /// How many indexes to keep. A two-hour AC-3 track indexes to roughly 3 MB, so
 /// this is single-digit megabytes for a household's worth of open streams.
@@ -57,12 +59,32 @@ pub struct SegmentKey {
 const MAX_CACHED_SEGMENTS: usize = 24;
 const MAX_CACHED_SEGMENT_BYTES: usize = 48 * 1024 * 1024;
 
+/// How many films' soundtrack measurements to keep.
+///
+/// Two numbers per soundtrack, so this is bytes rather than megabytes and the
+/// only reason there is a ceiling at all is that a library is not a session.
+const MAX_CACHED_RATES: usize = 64;
+
 /// Shared transcoding state, held by `AppState`.
 #[derive(Debug)]
 pub struct TranscodeState {
     cache: Mutex<Cache>,
     segments: Mutex<SegmentCache>,
+    rates: Mutex<RateCache>,
     permits: Arc<Semaphore>,
+}
+
+/// What each film's tracks were measured to cost.
+///
+/// Worth caching for the same reason the index is: a renderer opens a film with
+/// a `HEAD`, then a `GET`, then a range request per scrub, and every one of them
+/// has to state the same promised length or the byte offsets stop meaning the
+/// same instants. Measuring once is both cheaper and the only way the answer is
+/// guaranteed to be identical each time.
+#[derive(Debug, Default)]
+struct RateCache {
+    entries: HashMap<IndexKey, Arc<TrackRates>>,
+    order: Vec<IndexKey>,
 }
 
 #[derive(Debug, Default)]
@@ -97,6 +119,7 @@ impl TranscodeState {
         Self {
             cache: Mutex::new(Cache::default()),
             segments: Mutex::new(SegmentCache::default()),
+            rates: Mutex::new(RateCache::default()),
             permits: Arc::new(Semaphore::new(max_concurrent.max(1))),
         }
     }
@@ -121,6 +144,25 @@ impl TranscodeState {
         if cache.entries.insert(key, index).is_none() {
             cache.order.push(key);
             while cache.order.len() > MAX_CACHED_INDEXES {
+                let oldest = cache.order.remove(0);
+                cache.entries.remove(&oldest);
+            }
+        }
+    }
+
+    /// What `key`'s soundtracks were measured to cost, if they have been.
+    #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+    pub async fn cached_rates(&self, key: &IndexKey) -> Option<Arc<TrackRates>> {
+        self.rates.lock().await.entries.get(key).cloned()
+    }
+
+    /// Remember one film's measurement, evicting the oldest if full.
+    #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+    pub async fn remember_rates(&self, key: IndexKey, rates: Arc<TrackRates>) {
+        let mut cache = self.rates.lock().await;
+        if cache.entries.insert(key, rates).is_none() {
+            cache.order.push(key);
+            while cache.order.len() > MAX_CACHED_RATES {
                 let oldest = cache.order.remove(0);
                 cache.entries.remove(&oldest);
             }
