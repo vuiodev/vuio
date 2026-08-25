@@ -1,33 +1,31 @@
 [package]
 name = "vuio-codec-ac3"
-publish = false
-version = "0.0.45"
+version = "0.0.1"
 edition = "2021"
-rust-version = "1.80"
-license = "MIT"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
-# Forked from github.com/OxideAV/oxideav-ac3 at commit
-# 8acf106d50d58f359946c086d1b393a060eaf5f6 (v0.0.10-23-g8acf106), MIT, by
-# Mark Karpeles. VuIO carries the encoder forward independently — see the
-# "Our AC-3 codec" section of CLAUDE.md — so this is no longer a verbatim
-# vendored copy and `scripts/vendor-oxideav.sh` no longer touches it.
-authors = ["Mark Karpeles", "vyrti"]
-description = "AC-3 / E-AC-3 decoder and encoder. Forked from oxideav-ac3."
+homepage = "https://github.com/vuiodev/vuio"
+documentation = "https://docs.rs/vuio-codec-ac3"
+authors = ["vyrti"]
+description = "High-performance, SIMD-accelerated AC-3 and E-AC-3 audio decoder and encoder in pure Rust. Forked from oxideav-ac3."
 
 readme = "README.md"
-keywords = ["multimedia", "audio", "ac3", "dolby", "codec"]
-categories = ["multimedia::encoding", "multimedia::audio"]
+keywords = ["ac3", "dolby", "audio", "codec", "encoder"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+
+include = [
+    "src/**/*",
+    "tests/**/*",
+    "Cargo.toml",
+    "README.md",
+    "NOTICE",
+]
 
 [dependencies]
-oxideav-core = { path = "../vendor/oxideav-core" }
-# Frame-level parallelism in the AC-3 encoder. Syncframes are independent
-# once transient detection has run, and 5.1 at 640 kbps has to keep ahead of
-# a television playing a film — see `Ac3Encoder::emit_pending`.
+oxideav-core = { version = "0.1", path = "../vendor/oxideav-core" }
 rayon = "1.10"
 
-# Inherited from the fork point: 13.7k lines that do not build under this
-# repository's `-D warnings`. Tightening this is its own chore, deliberately
-# kept off the performance work so that diff stays readable.
 [lints.rust]
 warnings = "allow"
 
