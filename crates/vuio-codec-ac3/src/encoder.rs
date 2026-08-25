@@ -2125,45 +2125,64 @@ impl TransientDetector {
             return false;
         }
         // 1) High-pass filter — cascaded biquad direct-form-I.
+        //
+        // Both stages' history is unrolled into locals and written back once at
+        // the end. The state array is only four values per stage, but reaching
+        // it through `self.biquad_state[stage]` inside the sample loop meant a
+        // bounds check and four stores per sample per stage, for a filter whose
+        // arithmetic is nine operations. This runs in registers instead. The
+        // expression order is unchanged, so the output is bit-identical.
         let mut hp = [0.0f32; 256];
-        for i in 0..256 {
-            let mut x = block[i];
-            for stage in 0..2 {
-                let s = &mut self.biquad_state[stage];
-                let c = &HPF_8K_BIQUADS[stage];
-                let y = c[0] * x + c[1] * s[0] + c[2] * s[1] - c[3] * s[2] - c[4] * s[3];
-                // Shift state.
-                s[1] = s[0]; // x[n-2] = x[n-1]
-                s[0] = x; // x[n-1] = x[n]
-                s[3] = s[2]; // y[n-2] = y[n-1]
-                s[2] = y; // y[n-1] = y[n]
-                x = y;
+        {
+            let [s0, s1] = &mut self.biquad_state;
+            let (ca, cb) = (&HPF_8K_BIQUADS[0], &HPF_8K_BIQUADS[1]);
+            // x[n-1], x[n-2], y[n-1], y[n-2] for each stage.
+            let (mut ax1, mut ax2, mut ay1, mut ay2) = (s0[0], s0[1], s0[2], s0[3]);
+            let (mut bx1, mut bx2, mut by1, mut by2) = (s1[0], s1[1], s1[2], s1[3]);
+
+            for (out, &x) in hp.iter_mut().zip(block[..256].iter()) {
+                let ya = ca[0] * x + ca[1] * ax1 + ca[2] * ax2 - ca[3] * ay1 - ca[4] * ay2;
+                ax2 = ax1;
+                ax1 = x;
+                ay2 = ay1;
+                ay1 = ya;
+
+                let yb = cb[0] * ya + cb[1] * bx1 + cb[2] * bx2 - cb[3] * by1 - cb[4] * by2;
+                bx2 = bx1;
+                bx1 = ya;
+                by2 = by1;
+                by1 = yb;
+
+                *out = yb;
             }
-            hp[i] = x;
+
+            *s0 = [ax1, ax2, ay1, ay2];
+            *s1 = [bx1, bx2, by1, by2];
         }
+        // 2/3) Hierarchical peak detection, bottom-up.
+        //
+        // The four level-3 segment peaks are all the scanning this needs: max
+        // is associative, so the level-2 and level-1 peaks are maxima of those
+        // rather than three more passes over the same samples.
+        let p31 = peak(&hp[0..64]);
+        let p32 = peak(&hp[64..128]);
+        let p33 = peak(&hp[128..192]);
+        let p34 = peak(&hp[192..256]);
+        let p21 = p31.max(p32);
+        let p22 = p33.max(p34);
         // 4a) Silence threshold — if the overall block peak is below
         // 100/32768 ≈ 0.003, force long block regardless of relative
         // peaks.
-        let p11 = hp.iter().fold(0.0f32, |a, &v| a.max(v.abs()));
+        let p11 = p21.max(p22);
         const SILENCE_THRESHOLD: f32 = 100.0 / 32768.0;
         if p11 < SILENCE_THRESHOLD {
             // Persist last-segment peaks for the next block (use 0;
             // silence has no carry-over significance).
             self.prev_peak_l1 = p11;
-            self.prev_peak_l2 = peak(&hp[128..256]);
-            self.prev_peak_l3 = peak(&hp[192..256]);
+            self.prev_peak_l2 = p22;
+            self.prev_peak_l3 = p34;
             return false;
         }
-        // 2/3) Hierarchical peak detection.
-        // Level 1: P[1][1] = peak over [0,256) — already = p11.
-        // Level 2: P[2][1] = peak over [0,128); P[2][2] = peak over [128,256).
-        // Level 3: P[3][1..4] = peak over each 64-sample segment.
-        let p21 = peak(&hp[0..128]);
-        let p22 = peak(&hp[128..256]);
-        let p31 = peak(&hp[0..64]);
-        let p32 = peak(&hp[64..128]);
-        let p33 = peak(&hp[128..192]);
-        let p34 = peak(&hp[192..256]);
         // Threshold ratios per §8.2.2 step 4: |P[j][k]| × T[j] > |P[j][k-1]|
         // means the new peak is more than 1/T[j] times the previous —
         // i.e. a sharp rise. For k=1 the previous-segment reference is
@@ -4614,9 +4633,36 @@ struct MantGroupCtx {
 /// Quantise a floating-point transform coefficient into its AC-3
 /// mantissa code for bap ∈ 1..=15. Returns `u32` (upper-bit-unused for
 /// narrow bap).
+/// `2^e` for the exponent range AC-3 codes, as an exact table.
+///
+/// `2f32.powi(e)` with a runtime `e` lowers to `llvm.powi.f32` — a loop of
+/// squarings — and this sits on the per-coefficient path, several thousand
+/// calls a frame. Exponents are 0..=24 by construction (§7.1.3), and a power
+/// of two is exact in binary floating point, so a table is not an
+/// approximation of the old code: it is the same values, looked up.
+const POW2: [f32; 25] = {
+    let mut t = [1.0f32; 25];
+    let mut i = 1;
+    while i < 25 {
+        t[i] = t[i - 1] * 2.0;
+        i += 1;
+    }
+    t
+};
+
+/// `2^exp`, falling back to `powi` outside the coded range.
+#[inline(always)]
+fn pow2(exp: i32) -> f32 {
+    if (0..POW2.len() as i32).contains(&exp) {
+        POW2[exp as usize]
+    } else {
+        2f32.powi(exp)
+    }
+}
+
 pub(crate) fn quantise_mantissa(coeff: f32, exp: i32, bap: u8) -> u32 {
     // Normalised mantissa in (-1, 1): coeff * 2^exp.
-    let m = (coeff * 2f32.powi(exp)).clamp(-1.0, 1.0);
+    let m = (coeff * pow2(exp)).clamp(-1.0, 1.0);
     match bap {
         1 => {
             // 3-level: nearest of {-2/3, 0, 2/3} → codes 0..2.
@@ -4652,7 +4698,7 @@ pub(crate) fn quantise_mantissa(coeff: f32, exp: i32, bap: u8) -> u32 {
 /// against the carrier the decoder will actually reconstruct (bap = 0
 /// bins are true zeros — the coupling channel is never dithered).
 pub(crate) fn quantise_reconstruct(coeff: f32, exp: i32, bap: u8) -> f32 {
-    let m = (coeff * 2f32.powi(exp)).clamp(-1.0, 1.0);
+    let m = (coeff * pow2(exp)).clamp(-1.0, 1.0);
     let level = match bap {
         0 => 0.0,
         1 => MANT_LEVEL_3[nearest_symmetric(m, &MANT_LEVEL_3)],
@@ -4669,7 +4715,7 @@ pub(crate) fn quantise_reconstruct(coeff: f32, exp: i32, bap: u8) -> f32 {
             v.clamp(min, max) as f32 / (1u32 << shift) as f32
         }
     };
-    level * 2f32.powi(-exp)
+    level * pow2(-exp)
 }
 
 fn nearest_symmetric(m: f32, table: &[f32]) -> usize {
