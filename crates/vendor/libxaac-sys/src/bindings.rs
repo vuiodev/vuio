@@ -212,6 +212,14 @@ pub struct ia_mem_info_struct {
     pub ui_priority: UWORD32,
     pub ui_placed: [UWORD32; 2usize],
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ia_mem_info_struct"][::std::mem::size_of::<ia_mem_info_struct>() - 32usize];
@@ -235,6 +243,14 @@ pub struct ia_lib_info_struct {
     pub p_lib_name: *mut WORD8,
     pub p_version_num: *mut WORD8,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ia_lib_info_struct"][::std::mem::size_of::<ia_lib_info_struct>() - 16usize];
@@ -268,6 +284,14 @@ pub struct ixheaace_mem_info_struct {
     pub ui_priority: UWORD32,
     pub ui_placed: [UWORD32; 2usize],
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_mem_info_struct"]
@@ -295,6 +319,14 @@ pub struct ixheaace_mem_info_table {
     pub ui_type: UWORD32,
     pub mem_ptr: pVOID,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_mem_info_table"][::std::mem::size_of::<ixheaace_mem_info_table>() - 24usize];
@@ -330,6 +362,14 @@ pub struct ixheaace_aac_enc_config {
     pub bitreservoir_size: WORD32,
     pub length: WORD32,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_aac_enc_config"][::std::mem::size_of::<ixheaace_aac_enc_config>() - 68usize];
@@ -412,6 +452,14 @@ pub struct ixheaace_input_config {
     pub stream_id: UWORD16,
     pub use_delay_adjustment: FLAG,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_input_config"][::std::mem::size_of::<ixheaace_input_config>() - 232usize];
@@ -500,6 +548,14 @@ pub struct ixheaace_version {
     pub p_lib_name: *mut WORD8,
     pub p_version_num: *mut WORD8,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_version"][::std::mem::size_of::<ixheaace_version>() - 16usize];
@@ -533,6 +589,14 @@ pub struct ixheaace_output_config {
     pub expected_frame_count: WORD32,
     pub is_loudness_configured: FLAG,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_output_config"][::std::mem::size_of::<ixheaace_output_config>() - 248usize];
@@ -583,6 +647,14 @@ pub struct ixheaace_user_config_struct {
     pub input_config: ixheaace_input_config,
     pub output_config: ixheaace_output_config,
 }
+// bindgen recorded these sizes, alignments and offsets from a 64-bit
+// target, and they are only true there: every struct they describe holds
+// pointers, so on a 32-bit target each is smaller and the subtraction
+// underflows at compile time. The structs themselves need no help — they
+// are #[repr(C)] over real pointer types with no explicit padding, so
+// rustc lays them out for whatever the target's pointer width is. Only the
+// assertions are 64-bit facts, so only they are gated.
+#[cfg(target_pointer_width = "64")]
 #[allow(clippy::unnecessary_operation, clippy::identity_op)]
 const _: () = {
     ["Size of ixheaace_user_config_struct"]
