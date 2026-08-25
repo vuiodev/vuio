@@ -45,6 +45,26 @@ impl Ac3Encoder {
         }
     }
 
+    /// Bytes in every syncframe this encoder emits, or `None` for a sample rate
+    /// AC-3 has no mapping for.
+    ///
+    /// Exact, not an average: AC-3 is constant-bitrate and the encoder holds one
+    /// frame-size code for the whole stream. That is what lets a caller state a
+    /// `Content-Length` for audio it has not encoded yet, and turn a byte offset
+    /// back into a frame — the seeking the AAC resource cannot offer.
+    pub fn frame_bytes(sample_rate: u32, channels: u16) -> Option<u32> {
+        vuio_codec_ac3::encoder::frame_bytes_for(sample_rate, Self::bitrate_for(channels) / 1000)
+    }
+
+    /// Total size of an AC-3 stream covering `samples` sample frames.
+    ///
+    /// The tail is padded out to a whole syncframe, because that is what
+    /// [`Ac3Encoder::finish`] emits.
+    pub fn stream_size(sample_rate: u32, channels: u16, samples: u64) -> Option<u64> {
+        let frame_bytes = u64::from(Self::frame_bytes(sample_rate, channels)?);
+        Some(samples.div_ceil(AC3_FRAME_SAMPLES) * frame_bytes)
+    }
+
     pub fn new(sample_rate: u32, channels: u16) -> Result<Self> {
         let mut params = CodecParameters::audio(CodecId::new("ac3"));
         params.sample_rate = Some(sample_rate);

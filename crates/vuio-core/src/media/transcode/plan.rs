@@ -123,6 +123,17 @@ impl AudioPlan {
             .map(|samples| wav_size(samples, self.channels))
     }
 
+    /// Total size of the AC-3 resource.
+    ///
+    /// `None` when the source will not say how long it is, exactly as
+    /// [`AudioPlan::wav_size`] — the resource then has no `Content-Length` and
+    /// no seeking.
+    #[cfg(feature = "transcode-ac3")]
+    pub fn ac3_size(&self) -> Option<u64> {
+        use super::Ac3Encoder;
+        Ac3Encoder::stream_size(self.sample_rate(), self.channels, self.total_samples()?)
+    }
+
     /// Sample rate of the decoded output, in Hz.
     pub fn sample_rate(&self) -> u32 {
         self.source.sample_rate()

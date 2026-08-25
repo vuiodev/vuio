@@ -176,6 +176,18 @@ pub(crate) fn transcode_advert<D: DatabaseManager>(
             // renderer that matches against its own sink protocolInfo pick the
             // one it can actually decode.
             audio: match config.transcode.audio_format {
+                TranscodeAudioFormat::Ac3 => xml::AdvertResource {
+                    mime: "audio/ac3",
+                    path: "transcode/audio.ac3",
+                    // AC-3 is constant-bitrate, so unlike the AAC resource this
+                    // one has a length before it exists and a byte offset lands
+                    // on a frame boundary. The claim is honest; the streaming
+                    // handler states the length and honours the ranges.
+                    op: "11",
+                    // Same reason as LPCM: the exact length is a function of the
+                    // decoded sample count, which only the plan knows.
+                    sized: false,
+                },
                 TranscodeAudioFormat::Lpcm => xml::AdvertResource {
                     mime: "audio/vnd.wave",
                     path: "transcode/audio.wav",
@@ -451,6 +463,12 @@ pub fn create_router<D: DatabaseManager + 'static>(
         "/media/{id}/transcode/audio.wav",
         get(transcode_streaming::serve_transcoded_wav::<D>)
             .head(transcode_streaming::serve_transcoded_wav::<D>),
+    );
+    #[cfg(feature = "transcode-ac3")]
+    let router = router.route(
+        "/media/{id}/transcode/audio.ac3",
+        get(transcode_streaming::serve_transcoded_ac3::<D>)
+            .head(transcode_streaming::serve_transcoded_ac3::<D>),
     );
     #[cfg(feature = "transcode-aac")]
     let router = router.route(

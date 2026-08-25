@@ -192,6 +192,27 @@ pub fn make_encoder_with_metadata(
 /// (even-indexed) frmsizecod for each bitrate — both members of a pair
 /// encode the same rate, and the lower row matches the usual encoder
 /// default at 48 kHz.
+/// Bytes in every syncframe an encoder for `sample_rate` at `kbps` emits.
+///
+/// AC-3 is constant-bitrate, and an encoder picks one `frmsizecod` at
+/// construction and keeps it, so this is exact rather than an average — which
+/// is what lets a caller state a `Content-Length` for a stream it has not
+/// produced yet, and turn a byte offset back into a frame. Note the two
+/// `frmsizecod` values per bitrate differ by a word at 44.1 kHz; because the
+/// encoder holds one of them for the whole stream, its frames are a constant
+/// size there too.
+///
+/// `None` for a sample rate or bitrate AC-3 has no mapping for.
+pub fn frame_bytes_for(sample_rate: u32, kbps: u32) -> Option<u32> {
+    let fscod = match sample_rate {
+        48_000 => 0,
+        44_100 => 1,
+        32_000 => 2,
+        _ => return None,
+    };
+    frame_length_bytes(fscod, pick_frmsizecod(kbps)?)
+}
+
 fn pick_frmsizecod(kbps: u32) -> Option<u8> {
     const TABLE: &[(u32, u8)] = &[
         (32, 0),

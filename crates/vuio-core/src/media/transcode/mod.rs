@@ -57,7 +57,8 @@ pub use session::{ChunkKey, IndexKey, SegmentKey, TranscodeState};
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
 #[allow(unused_imports)]
 pub use ts::{
-    audio_disposition, measure_track_rates, promised_ts_length, AudioDisposition, TrackRate,
+    audio_disposition, measure_track_rates, promised_ts_length, AudioDisposition, SoundtrackFormat,
+    TrackRate,
     TrackRates, TsStream,
 };
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]

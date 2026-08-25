@@ -117,6 +117,188 @@ fn aac_body(plan: Arc<AudioPlan>, permit: tokio::sync::OwnedSemaphorePermit) -> 
     Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
+/// `GET`/`HEAD /media/{id}/transcode/audio.ac3`.
+///
+/// The default transcode resource, and the one most televisions were built to
+/// decode. Unlike the AAC sibling this one is seekable: AC-3 is constant
+/// bitrate and the encoder holds one frame-size code for the whole stream, so
+/// the length is known before a byte is produced and a byte offset divides
+/// straight back into a syncframe.
+///
+/// A source that will not say how long it is falls back to a chunked body with
+/// no length and no ranges, exactly as the WAV resource does — the same trade,
+/// for the same reason.
+#[cfg(feature = "transcode-ac3")]
+pub async fn serve_transcoded_ac3<D: DatabaseManager>(
+    State(state): State<AppState<D>>,
+    Path(id): Path<String>,
+    method: Method,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let file = resolve(&state, &id).await?;
+    let Some(permit) = state.transcode.try_acquire() else {
+        return Ok(busy(&state, &file.filename));
+    };
+    let plan = plan_for(&state, &file).await?;
+
+    let Some(total) = plan.ac3_size() else {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "audio/ac3")
+            .header("transferMode.dlna.org", "Streaming")
+            .header(
+                "contentFeatures.dlna.org",
+                "DLNA.ORG_OP=00;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+            );
+        if method == Method::HEAD {
+            drop(permit);
+            return Ok(response.body(Body::empty())?);
+        }
+        return Ok(response.body(ac3_body(plan, 0, u64::MAX, permit))?);
+    };
+
+    let (start, end) = match headers.get(header::RANGE) {
+        Some(value) => {
+            let text = value.to_str().map_err(|_| AppError::InvalidRange)?;
+            parse_range_header(text, total)?
+        }
+        None => (0, total.saturating_sub(1)),
+    };
+    let len = end.saturating_sub(start) + 1;
+    let partial = headers.contains_key(header::RANGE);
+
+    let mut response = Response::builder()
+        .status(if partial {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header(header::CONTENT_TYPE, "audio/ac3")
+        .header(header::CONTENT_LENGTH, len)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header("transferMode.dlna.org", "Streaming")
+        // CI=1 because these bytes were produced rather than stored; OP=11
+        // because constant-bitrate AC-3 genuinely supports the byte seeking
+        // that claim promises.
+        .header(
+            "contentFeatures.dlna.org",
+            "DLNA.ORG_OP=11;DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000",
+        );
+    if partial {
+        response = response.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{total}"),
+        );
+    }
+
+    if method == Method::HEAD {
+        drop(permit);
+        return Ok(response.body(Body::empty())?);
+    }
+    Ok(response.body(ac3_body(plan, start, len, permit))?)
+}
+
+/// Decode the track and re-encode it as AC-3, from `start` bytes in.
+#[cfg(feature = "transcode-ac3")]
+fn ac3_body(
+    plan: Arc<AudioPlan>,
+    start: u64,
+    len: u64,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Body {
+    use crate::media::transcode::{Ac3Encoder, AC3_FRAME_SAMPLES};
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(PIPELINE_DEPTH);
+
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let (rate, channels) = (plan.sample_rate(), plan.channels);
+
+        // A byte offset lands inside some syncframe. Encoding restarts at that
+        // frame's first sample and the odd bytes come off the front, so the
+        // renderer receives exactly the bytes it asked for.
+        let frame_bytes = u64::from(Ac3Encoder::frame_bytes(rate, channels).unwrap_or(0));
+        let (start_sample, mut skip) = if frame_bytes == 0 {
+            (0u64, 0usize)
+        } else {
+            (
+                (start / frame_bytes) * AC3_FRAME_SAMPLES,
+                (start % frame_bytes) as usize,
+            )
+        };
+
+        let mut stream = match PcmStream::open(&plan, start_sample) {
+            Ok(stream) => stream,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+                return;
+            }
+        };
+        let mut encoder = match Ac3Encoder::new(rate, channels) {
+            Ok(e) => e,
+            Err(e) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other(e.to_string())));
+                return;
+            }
+        };
+
+        let mut remaining = len;
+        let send = |frames: Vec<Vec<u8>>, remaining: &mut u64, skip: &mut usize| -> bool {
+            for frame in frames {
+                if *remaining == 0 {
+                    return false;
+                }
+                let frame = if *skip >= frame.len() {
+                    *skip -= frame.len();
+                    continue;
+                } else {
+                    &frame[*skip..]
+                };
+                *skip = 0;
+                let take = frame.len().min(*remaining as usize);
+                if tx
+                    .blocking_send(Ok(bytes::Bytes::copy_from_slice(&frame[..take])))
+                    .is_err()
+                {
+                    return false;
+                }
+                *remaining -= take as u64;
+            }
+            true
+        };
+
+        while remaining > 0 {
+            let Some(pcm) = stream.next_block() else { break };
+            match encoder.push(&pcm) {
+                Ok(frames) => {
+                    if !send(frames, &mut remaining, &mut skip) {
+                        return;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        if remaining > 0 {
+            let _ = send(encoder.finish(), &mut remaining, &mut skip);
+        }
+
+        // A renderer promised `len` bytes must receive `len` bytes; the same
+        // rule the PCM path follows, for the same reason.
+        while remaining > 0 && remaining != u64::MAX {
+            let chunk = remaining.min(64 * 1024) as usize;
+            if tx
+                .blocking_send(Ok(bytes::Bytes::from(vec![0u8; chunk])))
+                .is_err()
+            {
+                return;
+            }
+            remaining -= chunk as u64;
+        }
+    });
+
+    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
+}
+
 /// `GET`/`HEAD /media/{id}/transcode/audio.wav`.
 pub async fn serve_transcoded_wav<D: DatabaseManager>(
     State(state): State<AppState<D>>,

@@ -89,31 +89,74 @@ const PRIME_BYTES: usize = 8 * 1024 * 1024;
 /// A packet read during priming, waiting to be replayed.
 type PrimedPacket = (u32, i64, Vec<u8>);
 
-// ── An experiment, off unless asked for ─────────────────────────────────────
-//
-// `VUIO_TS_AUDIO=ac3` re-encodes a DTS soundtrack as 5.1 AC-3 at 640 kbps
-// instead of stereo AAC at 192. Two things are being asked at once: whether a
-// television handles a format it decodes natively better than one it does not,
-// and what keeping the surround channels costs. Delete this and its call sites
-// to remove the experiment.
-
-fn ac3_experiment() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        cfg!(feature = "transcode-ac3")
-            && std::env::var("VUIO_TS_AUDIO")
-                .map(|v| v.trim().eq_ignore_ascii_case("ac3"))
-                .unwrap_or(false)
-    })
+/// What a soundtrack that cannot be passed through becomes.
+///
+/// Only DTS reaches here — Dolby and AAC ride as they are, see
+/// [`audio_disposition`] — so in practice this is the answer to "a DTS film,
+/// and a television that cannot decode DTS: then what".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoundtrackFormat {
+    /// AC-3, keeping the film's channel layout.
+    ///
+    /// The default. It is what a television was built to decode, and it is the
+    /// only one of the two that keeps the surround: DTS 5.1 becomes AC-3 5.1 at
+    /// 640 kbps rather than being folded down to a stereo pair.
+    #[default]
+    Ac3,
+    /// AAC-LC, folded down to stereo.
+    ///
+    /// What this path used to do unconditionally. Kept for a renderer that
+    /// turns out to prefer it, and it is what a build without the AC-3 encoder
+    /// falls back to.
+    Aac,
 }
 
-/// Channels the re-encoded soundtrack carries: the surround the AC-3 path keeps,
-/// or the stereo the AAC path downmixes to.
-fn target_channels() -> u16 {
-    if ac3_experiment() {
-        6
-    } else {
-        DECODED_CHANNELS
+impl From<crate::config::TranscodeAudioFormat> for SoundtrackFormat {
+    /// LPCM is not among a soundtrack's options — it shares a transport stream
+    /// with the picture — so `audio_format = "lpcm"`, which is an answer about
+    /// standalone audio files, leaves a film on the default.
+    fn from(value: crate::config::TranscodeAudioFormat) -> Self {
+        use crate::config::TranscodeAudioFormat as F;
+        match value.soundtrack() {
+            F::Aac => Self::Aac,
+            _ => Self::Ac3,
+        }
+    }
+}
+
+impl SoundtrackFormat {
+    /// The format this build can actually produce.
+    ///
+    /// A server compiled without the AC-3 encoder falls back to AAC rather than
+    /// dropping the soundtrack: stereo is better than silence.
+    pub fn available(self) -> Self {
+        #[cfg(not(feature = "transcode-ac3"))]
+        {
+            let _ = self;
+            Self::Aac
+        }
+        #[cfg(feature = "transcode-ac3")]
+        self
+    }
+
+    /// The codec a track re-encoded to this format is described as from here on.
+    fn carried_as(self) -> TrackCodec {
+        match self {
+            Self::Ac3 => TrackCodec::Ac3,
+            Self::Aac => TrackCodec::Aac,
+        }
+    }
+
+    /// Channels a track re-encoded to this format carries.
+    ///
+    /// AC-3 keeps what the film declared, clamped to the six channels Table 5.8
+    /// can lay out; a track that declares nothing is treated as stereo. AAC
+    /// folds everything down, which is what it has always done.
+    fn channels(self, source: Option<u8>) -> u16 {
+        match self {
+            Self::Ac3 => u16::from(source.unwrap_or(DECODED_CHANNELS as u8)).clamp(1, 6),
+            Self::Aac => DECODED_CHANNELS,
+        }
     }
 }
 
@@ -428,6 +471,7 @@ fn stream_bitrate(
     tracks: &[TrackInfo],
     carried: &[TrackInfo],
     rates: &TrackRates,
+    soundtrack: SoundtrackFormat,
 ) -> u64 {
     use crate::media::remux::TrackKind;
 
@@ -464,21 +508,23 @@ fn stream_bitrate(
                 }
                 AudioDisposition::Reencoded => {
                     let sample_rate = f64::from(track.sample_rate.unwrap_or(48_000));
-                    let channels = target_channels();
-                    #[cfg(feature = "transcode-ac3")]
-                    if ac3_experiment() {
-                        return_ac3_cost(sample_rate, channels)
-                    } else {
-                        transport_cost(
+                    let channels = soundtrack.channels(track.channels);
+                    match soundtrack {
+                        #[cfg(feature = "transcode-ac3")]
+                        SoundtrackFormat::Ac3 => return_ac3_cost(sample_rate, channels),
+                        // Unreachable in practice — `available()` has already
+                        // turned Ac3 into Aac for a build without the encoder —
+                        // but the arm has to exist for the match to compile.
+                        #[cfg(not(feature = "transcode-ac3"))]
+                        SoundtrackFormat::Ac3 => transport_cost(
                             u64::from(AacEncoder::bitrate_for(channels)),
                             sample_rate / super::AAC_FRAME_SAMPLES as f64,
-                        )
+                        ),
+                        SoundtrackFormat::Aac => transport_cost(
+                            u64::from(AacEncoder::bitrate_for(channels)),
+                            sample_rate / super::AAC_FRAME_SAMPLES as f64,
+                        ),
                     }
-                    #[cfg(not(feature = "transcode-ac3"))]
-                    transport_cost(
-                        u64::from(AacEncoder::bitrate_for(channels)),
-                        sample_rate / super::AAC_FRAME_SAMPLES as f64,
-                    )
                 }
                 AudioDisposition::Dropped => 0,
             }
@@ -509,6 +555,7 @@ pub fn promised_ts_length(
     tracks: &[TrackInfo],
     carried: &[TrackInfo],
     rates: &TrackRates,
+    soundtrack: SoundtrackFormat,
 ) -> u64 {
     /// Slack over the estimate. Small, because with the tracks measured and the
     /// packet cost counted rather than guessed the estimate lands within a few
@@ -519,7 +566,7 @@ pub fn promised_ts_length(
     /// Nothing shorter, so a very short film is not trimmed by the tables.
     const FLOOR: u64 = 1 << 18;
 
-    let bits = stream_bitrate(source_size, duration_secs, tracks, carried, rates);
+    let bits = stream_bitrate(source_size, duration_secs, tracks, carried, rates, soundtrack);
     let bytes = (bits as f64 * duration_secs * MARGIN / 8.0) as u64;
     let aligned = (bytes.max(FLOOR) / TS_PACKET_LEN as u64) * TS_PACKET_LEN as u64;
     aligned.max(TS_PACKET_LEN as u64)
@@ -542,6 +589,9 @@ struct Stream {
     decoder: Option<PcmDecoder>,
     /// Everything downstream of the decoder.
     encode: Option<Encode>,
+    /// What this track is being re-encoded to, and how wide. `None` for a track
+    /// passed through as it stands.
+    reencode: Option<Reencode>,
     /// Packets read but not yet decoded, with the instant each arrived at.
     ///
     /// Held rather than decoded where they are read, so that every soundtrack
@@ -556,6 +606,14 @@ struct Stream {
     pending: Vec<Unit>,
 }
 
+/// What a re-encoded track is becoming: the format, and the channel count that
+/// format keeps for this particular soundtrack.
+#[derive(Debug, Clone, Copy)]
+struct Reencode {
+    format: SoundtrackFormat,
+    channels: u16,
+}
+
 /// The state of one track's re-encoding, downstream of its decoder.
 ///
 /// The decoder is not here. It lives on the [`Stream`] so that the decoding of
@@ -564,6 +622,9 @@ struct Stream {
 /// thread boundary at all.
 struct Encode {
     encoder: Reencoder,
+    /// Channels the encoder was built for — the film's own layout on the AC-3
+    /// path, stereo on the AAC one. What the decoder emits is fitted to this.
+    target_channels: u16,
     decoded_channels: u16,
     sample_rate: u32,
     /// Where the re-encoded run sits, in samples. `None` until enough packets
@@ -623,6 +684,7 @@ impl TsStream {
         video: &TrackInfo,
         audio: &[TrackInfo],
         start_secs: f64,
+        soundtrack: SoundtrackFormat,
     ) -> Result<Self> {
         use symphonia::core::formats::{SeekMode, SeekTo};
         use symphonia::core::units::Time;
@@ -660,6 +722,7 @@ impl TsStream {
             sample_rate: 0,
             decoder: None,
             encode: None,
+            reencode: None,
             held: Vec::new(),
             pcm: Vec::new(),
             pending: Vec::new(),
@@ -667,18 +730,19 @@ impl TsStream {
 
         for track in audio {
             next_pid += 1;
-            // Dolby and AAC ride as they are; anything else has to become AAC
-            // first, and is described as AAC from here on.
-            let (carried, codec) = match audio_disposition(track) {
-                AudioDisposition::Passthrough => (track.codec_kind, None),
-                AudioDisposition::Reencoded => {
-                    let becomes = if ac3_experiment() {
-                        TrackCodec::Ac3
-                    } else {
-                        TrackCodec::Aac
-                    };
-                    (becomes, track.codec_kind.transcode_codec())
-                }
+            // Dolby and AAC ride as they are; anything else — which in
+            // practice means DTS — is re-encoded, and is described as whatever
+            // it became from here on.
+            let (carried, codec, reencode) = match audio_disposition(track) {
+                AudioDisposition::Passthrough => (track.codec_kind, None, None),
+                AudioDisposition::Reencoded => (
+                    soundtrack.carried_as(),
+                    track.codec_kind.transcode_codec(),
+                    Some(Reencode {
+                        format: soundtrack,
+                        channels: soundtrack.channels(track.channels),
+                    }),
+                ),
                 AudioDisposition::Dropped => continue,
             };
             let Some(spec) = TsStreamSpec::for_codec(carried, next_pid) else {
@@ -693,6 +757,7 @@ impl TsStream {
                 sample_rate: track.sample_rate.unwrap_or(48_000),
                 decoder: None,
                 encode: None,
+                reencode,
                 held: Vec::new(),
                 pcm: Vec::new(),
                 pending: Vec::new(),
@@ -1080,25 +1145,30 @@ fn prime_decoders(
 /// with no special case in it.
 fn open_chain(stream: &mut Stream, codec: TranscodeCodec, frame: &[u8]) -> Result<()> {
     let sample_rate = stream.sample_rate;
-    let want = target_channels();
+    // A track only reaches here because it is being re-encoded, so it has a
+    // target; treat a missing one as the stereo AAC this path used to assume.
+    let target = stream.reencode.unwrap_or(Reencode {
+        format: SoundtrackFormat::Aac,
+        channels: DECODED_CHANNELS,
+    });
+    let want = target.channels;
+    // Ask the decoder for the width the encoder wants: for AC-3 that is the
+    // film's own layout, so the surround survives instead of being folded down
+    // and back up again.
     let (decoder, _) = PcmDecoder::open(codec, sample_rate, Some(want), frame)?;
     let decoded_channels = decoder.channels();
-    let encoder = if ac3_experiment() {
+    let encoder = match target.format {
         #[cfg(feature = "transcode-ac3")]
-        {
-            Reencoder::Ac3(super::Ac3Encoder::new(sample_rate, want)?)
-        }
+        SoundtrackFormat::Ac3 => Reencoder::Ac3(super::Ac3Encoder::new(sample_rate, want)?),
         #[cfg(not(feature = "transcode-ac3"))]
-        {
-            Reencoder::Aac(Box::new(AacEncoder::new(sample_rate, want)?))
-        }
-    } else {
-        Reencoder::Aac(Box::new(AacEncoder::new(sample_rate, want)?))
+        SoundtrackFormat::Ac3 => Reencoder::Aac(Box::new(AacEncoder::new(sample_rate, want)?)),
+        SoundtrackFormat::Aac => Reencoder::Aac(Box::new(AacEncoder::new(sample_rate, want)?)),
     };
     stream.decoder = Some(decoder);
     stream.encode = Some(Encode {
         encoder,
         decoded_channels,
+        target_channels: want,
         sample_rate,
         next_pts: None,
         anchors: Vec::new(),
@@ -1116,7 +1186,7 @@ fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Encode, ticks: u64, pcm: V
         / TS_CLOCK_HZ as i128) as i64;
     decode.anchors.push(samples - decode.decoded as i64);
     decode.decoded += (pcm.len() / (decode.decoded_channels as usize * 2)) as u64;
-    let pcm = super::fit_channels(&pcm, decode.decoded_channels, target_channels());
+    let pcm = super::fit_channels(&pcm, decode.decoded_channels, decode.target_channels);
     let frames = decode.encoder.push(&pcm)?;
     place_frames(pending, decode, frames, false);
     Ok(())
@@ -1243,7 +1313,7 @@ mod tests {
         measured.extend((2..7).map(|id| rate(id, 1_360_000, 93.75)));
         let rates = TrackRates(measured);
 
-        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates);
+        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates, SoundtrackFormat::default());
         assert!(
             promised < source / 2,
             "five soundtracks shrank eightfold and the promise did not: {promised} \
@@ -1275,7 +1345,7 @@ mod tests {
         let rates = TrackRates(measured);
 
         let source = 30 * GIB;
-        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates);
+        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates, SoundtrackFormat::default());
         // The picture is the file less its five soundtracks, and it passes
         // through untouched, so every byte of it has to fit.
         let picture = source - (5 * 1_509_000 * 7200 / 8);
@@ -1303,7 +1373,7 @@ mod tests {
         let rates = TrackRates(vec![rate(1, 0, 24.0), rate(2, 640_000, 31.25)]);
 
         let source = 4 * (1u64 << 30);
-        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates);
+        let promised = promised_ts_length(source, duration, &tracks, &carried, &rates, SoundtrackFormat::default());
         assert!(
             promised > source && promised < source * 6 / 5,
             "a passthrough film should be promised its own size and a little over, \

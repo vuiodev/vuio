@@ -289,26 +289,43 @@ impl Default for TranscodeConfig {
     }
 }
 
-/// What a transcoded audio resource is delivered as.
+/// What VuIO re-encodes to, wherever it has to re-encode.
+///
+/// One setting for two resources, because it is one decision: a film whose
+/// soundtrack the renderer cannot decode, and a standalone audio file in the
+/// same position, both want the same answer to "then what should it get
+/// instead".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TranscodeAudioFormat {
-    /// Linear PCM in a WAV container.
+    /// AC-3 (Dolby Digital).
     ///
-    /// The default, and the better resource where bandwidth allows: PCM is
-    /// constant-bitrate, so the response carries an exact `Content-Length` and
-    /// supports byte-range seeking, and every renderer that accepts LPCM at all
-    /// accepts 16-bit stereo. It costs about 1.5 Mbps, which is nothing on the
-    /// wired or 5 GHz LAN these devices sit on and noticeable over 2.4 GHz.
+    /// The default, and the only one of the three a television is likely to
+    /// have been built to decode — which is the whole situation this feature
+    /// exists for. It is also the only one that keeps a film's surround
+    /// channels: a DTS 5.1 soundtrack becomes AC-3 5.1 at 640 kbps rather than
+    /// being folded down to stereo, and a 2.0 soundtrack becomes AC-3 2.0 at
+    /// 192. Standalone audio files are still delivered as stereo — see
+    /// [`crate::media::transcode::plan`] for why a renderer that needed the
+    /// decode is not one with a surround set behind it.
     #[default]
-    Lpcm,
+    Ac3,
     /// AAC-LC in ADTS framing.
     ///
-    /// A tenth of the bitrate, at the price of a lossy re-encode and a
-    /// non-seekable response — the encoder's output size is not known ahead of
-    /// time, so the resource is streamed without a `Content-Length` and a
-    /// renderer cannot scrub within it.
+    /// What this used to do, kept for a renderer that turns out to prefer it.
+    /// Roughly a third of AC-3's bitrate, folded down to stereo in every case,
+    /// and non-seekable — the encoder's output size is not known ahead of time,
+    /// so the resource is streamed without a `Content-Length`.
     Aac,
+    /// Linear PCM in a WAV container.
+    ///
+    /// Lossless, and the only one that is not a re-encode at all: a byte offset
+    /// divides straight back into a sample, so the response carries an exact
+    /// `Content-Length` and real byte-range seeking. It costs about 1.5 Mbps,
+    /// which is nothing on a wired or 5 GHz LAN and noticeable over 2.4 GHz,
+    /// and it applies only to standalone audio — a film's soundtrack has to
+    /// share a transport stream with its picture, and PCM will not fit.
+    Lpcm,
 }
 
 impl TranscodeAudioFormat {
@@ -318,8 +335,9 @@ impl TranscodeAudioFormat {
     /// back and refusing — Docker falls back, a config file refuses.
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "lpcm" | "pcm" | "wav" => Some(Self::Lpcm),
+            "ac3" | "ac-3" | "dolby" | "dd" => Some(Self::Ac3),
             "aac" => Some(Self::Aac),
+            "lpcm" | "pcm" | "wav" => Some(Self::Lpcm),
             _ => None,
         }
     }
@@ -327,8 +345,22 @@ impl TranscodeAudioFormat {
     /// The value as it is written in a config file.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Lpcm => "lpcm",
+            Self::Ac3 => "ac3",
             Self::Aac => "aac",
+            Self::Lpcm => "lpcm",
+        }
+    }
+
+    /// What a film's soundtrack becomes when it has to be re-encoded.
+    ///
+    /// PCM is not among the answers: a transport stream carries the soundtrack
+    /// beside the picture, and LPCM at 1.5 Mbps a channel does not belong
+    /// there. An operator who asked for `lpcm` is answering a question about
+    /// standalone audio files, so a film falls back to the default.
+    pub fn soundtrack(self) -> Self {
+        match self {
+            Self::Lpcm => Self::Ac3,
+            other => other,
         }
     }
 }

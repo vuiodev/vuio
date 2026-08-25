@@ -49,6 +49,7 @@ use tracing::{debug, warn};
 use crate::media::remux::{browser_video_track, MkvDemuxer, TrackInfo, TS_PACKET_LEN};
 use crate::media::transcode::{
     audio_disposition, measure_track_rates, promised_ts_length, AudioDisposition, ChunkKey,
+    SoundtrackFormat,
     IndexKey, TrackRates, TranscodeState, TsStream,
 };
 use crate::{database::DatabaseManager, error::AppError, state::AppState};
@@ -92,11 +93,16 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
         .ok_or(AppError::NotFound)?
         .clone();
     let audio = audio_tracks(&info.tracks, query.audio_track);
+    // What a soundtrack this response has to re-encode becomes. Read once here:
+    // the promised length and the stream that has to fill it must agree, and a
+    // config reloaded mid-response would otherwise make them disagree.
+    let soundtrack = SoundtrackFormat::from(state.current_config().transcode.audio_format)
+        .available();
     let duration = info.duration_secs.filter(|d| *d > 0.0);
     let promised = match duration {
         Some(duration) => {
             let rates = track_rates(&state, file_id, &path, &info.tracks).await;
-            promised_ts_length(size, duration, &info.tracks, &audio, &rates)
+            promised_ts_length(size, duration, &info.tracks, &audio, &rates, soundtrack)
         }
         // No duration is no way to turn bytes into instants, so there is nothing
         // better than the source's own size to promise.
@@ -263,7 +269,7 @@ pub async fn serve_transcoded_ts<D: DatabaseManager>(
         .map(|file| (state.transcode.clone(), file, track_signature(&audio)));
 
     Ok(response.body(ts_body(
-        path, video, audio, start, deliver, permit, cache,
+        path, video, audio, start, deliver, permit, cache, soundtrack,
     ))?)
 }
 
@@ -282,6 +288,7 @@ fn ts_body(
     deliver: u64,
     permit: tokio::sync::OwnedSemaphorePermit,
     cache: Option<(Arc<TranscodeState>, IndexKey, u64)>,
+    soundtrack: SoundtrackFormat,
 ) -> Body {
     let (tx, rx) = tokio::sync::mpsc::channel::<std::io::Result<bytes::Bytes>>(PIPELINE_DEPTH);
 
@@ -289,7 +296,7 @@ fn ts_body(
         let _permit = permit;
         let mut sent: u64 = 0;
         let opened = std::time::Instant::now();
-        let stream = TsStream::open(&path, &video, &audio, start);
+        let stream = TsStream::open(&path, &video, &audio, start, soundtrack);
         debug!(
             "opened {} at {start:.3}s in {:.0}ms",
             path.display(),

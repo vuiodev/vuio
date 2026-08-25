@@ -9,6 +9,7 @@
 
 mod common;
 
+use vuio_core::media::transcode::SoundtrackFormat;
 use common::{build_mkv, video_sample, Track, TrackKind, AVCC};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -1582,7 +1583,7 @@ fn describe_a_real_film() {
         .into_iter()
         .cloned()
         .collect();
-    let promised = promised_ts_length(size, duration, &info.tracks, &carried, &rates);
+    let promised = promised_ts_length(size, duration, &info.tracks, &carried, &rates, SoundtrackFormat::default());
     let old = size + (size / 16);
     eprintln!(
         "  promised {promised} bytes ({:.1}% of source, {:.2} Mbps)\n  \
