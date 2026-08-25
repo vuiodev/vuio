@@ -29,6 +29,7 @@ use oxideav_core::{
     AudioFrame, ChannelLayout, CodecId, CodecParameters, Error, Frame, Packet, Result,
     SampleFormat, TimeBase,
 };
+use rayon::prelude::*;
 
 use crate::audblk::{remat_band_count, BLOCKS_PER_FRAME, MAX_FBW, N_COEFFS, SAMPLES_PER_BLOCK};
 
@@ -172,9 +173,9 @@ pub fn make_encoder_with_metadata(
         fscod,
         frmsizecod,
         frame_bytes: frame_bytes as usize,
-        crc1_multiplier: crate::crc::ac3_crc_prefix_multiplier(
-            crc1_region_len(frame_bytes as usize),
-        ),
+        crc1_multiplier: crate::crc::ac3_crc_prefix_multiplier(crc1_region_len(
+            frame_bytes as usize,
+        )),
         // 256 samples of left-context per channel feed the first MDCT.
         // Includes the LFE channel (last interleaved slot when lfeon=1).
         delay_line: vec![vec![0.0f32; SAMPLES_PER_BLOCK]; total_chans],
@@ -503,6 +504,29 @@ struct Ac3Encoder {
     pts: i64,
 }
 
+/// One frame's input, after the stateful analysis stage.
+///
+/// `samples[ch]` holds `256 + 1536` values: the previous frame's last block as
+/// left context, then this frame's own. Block `blk`'s 512-sample MDCT window is
+/// therefore `samples[ch][blk * 256 .. blk * 256 + 512]`, neighbours
+/// overlapping by half as TDAC requires.
+struct FrameInput {
+    samples: Vec<Vec<f32>>,
+    /// Per-block short-transform flags, full-bandwidth channels only.
+    blksw: Vec<[bool; BLOCKS_PER_FRAME]>,
+    pts: i64,
+}
+
+/// How many syncframes to analyse before encoding them in parallel.
+///
+/// Frames are independent once [`Ac3Encoder::analyse_frame`] has run, so a
+/// batch fans out across rayon's pool. Eight is comfortably more than the core
+/// count that matters and costs 256 ms of buffering at 48 kHz — well inside
+/// what the caller already buffers (VuIO's TS muxer batches 0.4 s of film
+/// before it emits anything), so it adds no latency to a seek that was not
+/// already being paid.
+const FRAME_BATCH: usize = 8;
+
 impl Encoder for Ac3Encoder {
     fn codec_id(&self) -> &CodecId {
         &self.codec_id
@@ -531,9 +555,9 @@ impl Encoder for Ac3Encoder {
         for ch in 0..total_chans {
             self.pending_samples[ch].extend_from_slice(&per_chan[ch]);
         }
-        // Flush whole syncframes while we have enough.
-        while self.pending_samples[0].len() as u32 >= SAMPLES_PER_FRAME {
-            self.emit_syncframe()?;
+        // Encode whole syncframes once a batch has accumulated.
+        while self.pending_samples[0].len() >= FRAME_BATCH * SAMPLES_PER_FRAME as usize {
+            self.emit_pending(FRAME_BATCH)?;
         }
         Ok(())
     }
@@ -551,14 +575,19 @@ impl Encoder for Ac3Encoder {
         if self.pending_samples[0].is_empty() {
             return Ok(());
         }
-        let missing = SAMPLES_PER_FRAME as usize - self.pending_samples[0].len();
+        // Batching means up to `FRAME_BATCH - 1` whole frames may still be
+        // waiting alongside a partial one, so pad out to a frame boundary
+        // rather than assuming a single short frame is all that is left.
+        let n_per = SAMPLES_PER_FRAME as usize;
+        let missing = (n_per - self.pending_samples[0].len() % n_per) % n_per;
         if missing > 0 {
             let total_chans = self.channels + usize::from(self.lfeon);
             for ch in 0..total_chans {
                 self.pending_samples[ch].extend(std::iter::repeat(0.0).take(missing));
             }
         }
-        self.emit_syncframe()?;
+        let frames = self.pending_samples[0].len() / n_per;
+        self.emit_pending(frames)?;
         Ok(())
     }
 }
@@ -621,86 +650,143 @@ pub(crate) fn decode_input_samples(
 }
 
 impl Ac3Encoder {
-    fn emit_syncframe(&mut self) -> Result<()> {
+    /// Analyse up to `frames` pending syncframes, then encode them in parallel.
+    ///
+    /// Analysis has to run in frame order — see [`Ac3Encoder::analyse_frame`] —
+    /// but it is only a pair of biquads per block, and everything expensive
+    /// downstream of it is independent per frame. So the batch fans out across
+    /// rayon's pool and the packets are queued back in order.
+    fn emit_pending(&mut self, frames: usize) -> Result<()> {
+        let n_per = SAMPLES_PER_FRAME as usize;
+        let mut inputs = Vec::with_capacity(frames);
+        for _ in 0..frames {
+            if self.pending_samples[0].len() < n_per {
+                break;
+            }
+            inputs.push(self.analyse_frame());
+        }
+
+        match inputs.len() {
+            0 => {}
+            // A lone frame is not worth a fan-out, and this is the case the
+            // tail of a stream and the tests hit.
+            1 => {
+                let pkt = self.encode_analysed(&inputs[0])?;
+                self.packet_queue.push(pkt);
+            }
+            _ => {
+                let packets = inputs
+                    .par_iter()
+                    .map(|input| self.encode_analysed(input))
+                    .collect::<Result<Vec<_>>>()?;
+                self.packet_queue.extend(packets);
+            }
+        }
+        Ok(())
+    }
+
+    /// Consume one syncframe's worth of PCM, run the transient detector and
+    /// hand back everything the stateless part of encoding needs.
+    ///
+    /// This is the half that must run in frame order: the §8.2.2 detector
+    /// carries biquad state across blocks *and* frames, and the delay line
+    /// carries 256 samples of left context. Everything after it — transform,
+    /// coupling, exponents, rate control, packing — depends only on this
+    /// output, which is what lets [`Ac3Encoder::emit_pending`] encode a batch
+    /// of frames in parallel.
+    fn analyse_frame(&mut self) -> FrameInput {
         let n_per = SAMPLES_PER_FRAME as usize;
         let total_chans = self.channels + usize::from(self.lfeon);
-        let lfe_idx = self.channels; // index into pending_samples / delay_line for LFE
-                                     // Run the 6-block MDCT pipeline per channel and stash coefficient
-                                     // blocks per channel: blocks × N_COEFFS.
-                                     // We allocate `channels + 1` slots so LFE coefficients can live
-                                     // at index `self.channels` when present, mirroring the source-
-                                     // interleaved layout (LFE last). Index isn't a coupling
-                                     // pseudo-channel here — that lives at index `self.channels` in a
-                                     // *separate* `+1`-sized exps array allocated below.
-        let mut coeffs: Vec<Vec<[f32; N_COEFFS]>> =
-            vec![vec![[0.0; N_COEFFS]; BLOCKS_PER_FRAME]; total_chans];
-        // §5.4.3.1 blksw[ch][blk] — per-block per-channel block-switch
-        // flag. Decided per block from the time-domain transient
-        // detector (see `detect_transient`). When `true`, the encoder
-        // runs the 256-sample MDCT pair (§7.6 / §8.2.3.2 short
-        // transform) instead of the long 512-sample MDCT, and the
-        // decoder swaps to the matching IMDCT path on the same flag.
-        // LFE has no blksw bit per spec — the LFE channel always uses
-        // the long-block MDCT (§5.4.3.1 lists blksw[ch] only for fbw).
+        let lfe_idx = self.channels;
+
+        let mut samples = Vec::with_capacity(total_chans);
+        // §5.4.3.1 blksw[ch][blk]. LFE has no blksw bit — the LFE channel
+        // always uses the long-block MDCT — so this array covers fbw only.
         let mut blksw: Vec<[bool; BLOCKS_PER_FRAME]> =
             vec![[false; BLOCKS_PER_FRAME]; self.channels];
+
         for ch in 0..total_chans {
-            let drain: Vec<f32> = self.pending_samples[ch].drain(0..n_per).collect();
-            for blk in 0..BLOCKS_PER_FRAME {
-                // Build 512-sample input: left context + next 256.
-                let mut in_buf = [0.0f32; 512];
-                in_buf[..256].copy_from_slice(&self.delay_line[ch]);
-                in_buf[256..].copy_from_slice(
-                    &drain[blk * SAMPLES_PER_BLOCK..(blk + 1) * SAMPLES_PER_BLOCK],
-                );
-                // Per-block transient decision. Implements §8.2.2 of
-                // ATSC A/52: a 4th-order Butterworth HPF at 8 kHz
-                // followed by a hierarchical peak-ratio test on three
-                // levels (256 / 128×2 / 64×4). The "second half" of
-                // the 512-sample MDCT window — i.e. the freshly drained
-                // 256 samples in `in_buf[256..]` — is what we test;
-                // a transient there is what the short-block pair
-                // localises so it doesn't smear across the prior 256
-                // samples of left-context.
-                //
-                // Spec uses very strict ratios (T[1]=0.1, T[2]=0.075,
-                // T[3]=0.05) → ~10×–20× peak rises required; pure tones
-                // (even at low frequency) sit nowhere near these
-                // thresholds because the 8 kHz HPF removes the carrier
-                // entirely.
-                //
-                // The `AC3_DISABLE_BLKSW=1` environment variable
-                // forces long blocks regardless of detector output —
-                // useful when bisecting whether a quality regression
-                // is short-block-related.
-                // LFE never short-blocks (no blksw bit per §5.4.3.1).
-                let is_lfe_chan = self.lfeon && ch == lfe_idx;
-                let is_short = if is_lfe_chan || debug_cfg().disable_blksw {
-                    false
-                } else {
-                    self.transient_state[ch].process(&in_buf[256..])
-                };
-                if !is_lfe_chan {
-                    blksw[ch][blk] = is_short;
+            let mut buf = Vec::with_capacity(SAMPLES_PER_BLOCK + n_per);
+            buf.extend_from_slice(&self.delay_line[ch]);
+            buf.extend(self.pending_samples[ch].drain(0..n_per));
+
+            // Per-block transient decision, §8.2.2: a 4th-order Butterworth
+            // HPF at 8 kHz followed by a hierarchical peak-ratio test on three
+            // levels (256 / 128x2 / 64x4). What we test is the *fresh* 256
+            // samples of each block's window — a transient there is what the
+            // short-block pair localises, so it doesn't smear across the prior
+            // 256 samples of left context.
+            //
+            // The spec's ratios are strict (T[1]=0.1, T[2]=0.075, T[3]=0.05),
+            // so pure tones sit nowhere near them: the 8 kHz HPF removes the
+            // carrier entirely.
+            //
+            // `AC3_DISABLE_BLKSW=1` forces long blocks regardless, which is
+            // useful when bisecting whether a regression is short-block
+            // related.
+            let is_lfe_chan = self.lfeon && ch == lfe_idx;
+            if !is_lfe_chan && !debug_cfg().disable_blksw {
+                for (blk, flag) in blksw[ch].iter_mut().enumerate() {
+                    let fresh = &buf[SAMPLES_PER_BLOCK * (blk + 1)..SAMPLES_PER_BLOCK * (blk + 2)];
+                    *flag = self.transient_state[ch].process(fresh);
                 }
-                // Windowing (symmetric 512-sample AC-3 window). The
-                // window is the same regardless of long/short — the
-                // decoder applies the same 256-coeff KBD window after
-                // its IMDCT in both cases (`audblk.rs` around the
-                // `time[n] *= WINDOW[n]` line). The spec's §7.9.5
-                // distinguishes long-only / long-to-short / etc.
-                // window shapes, but the decoder's choice makes the
-                // 4-way distinction collapse to the long window for
-                // every block, which we honour here.
+            }
+
+            // Left context for the next frame is this frame's last block.
+            self.delay_line[ch].copy_from_slice(&buf[buf.len() - SAMPLES_PER_BLOCK..]);
+            samples.push(buf);
+        }
+
+        let pts = self.pts;
+        self.pts += SAMPLES_PER_FRAME as i64;
+        FrameInput {
+            samples,
+            blksw,
+            pts,
+        }
+    }
+
+    /// Encode one analysed frame into a syncframe packet.
+    ///
+    /// Takes `&self`: every field it touches is fixed for the life of the
+    /// encoder, which is what makes a batch of these safe to run in parallel.
+    fn encode_analysed(&self, input: &FrameInput) -> Result<Packet> {
+        let total_chans = self.channels + usize::from(self.lfeon);
+        let lfe_idx = self.channels; // index into the coefficient array for LFE
+                                     // Coefficient blocks per channel: blocks x N_COEFFS. `total_chans`
+                                     // slots, so LFE coefficients live at index `self.channels` when
+                                     // present, mirroring the source-interleaved layout (LFE last). That
+                                     // index is *not* the coupling pseudo-channel — that lives at index
+                                     // `self.channels` in a separate `+1`-sized exps array allocated below.
+        let mut coeffs: Vec<Vec<[f32; N_COEFFS]>> =
+            vec![vec![[0.0; N_COEFFS]; BLOCKS_PER_FRAME]; total_chans];
+        let blksw = &input.blksw;
+
+        for ch in 0..total_chans {
+            let src = &input.samples[ch];
+            for blk in 0..BLOCKS_PER_FRAME {
+                // Block `blk`'s 512-sample window, overlapping its neighbour
+                // by half — which is why `samples` carries the previous
+                // frame's last block as a prefix.
+                let off = blk * SAMPLES_PER_BLOCK;
+                let mut in_buf = [0.0f32; 512];
+                in_buf.copy_from_slice(&src[off..off + 512]);
+
+                // Windowing (symmetric 512-sample AC-3 window). The window is
+                // the same regardless of long/short — the decoder applies the
+                // same 256-coeff KBD window after its IMDCT in both cases
+                // (`audblk.rs`, the `time[n] *= WINDOW[n]` line). §7.9.5
+                // distinguishes long-only / long-to-short / etc. window
+                // shapes, but the decoder's choice collapses the 4-way
+                // distinction to the long window for every block, which we
+                // honour here.
                 let mut win_buf = [0.0f32; 512];
                 crate::simd::window_512(&in_buf, &WINDOW, &mut win_buf);
-                // Update delay line to right-half of the next block.
-                self.delay_line[ch].copy_from_slice(
-                    &drain[blk * SAMPLES_PER_BLOCK..(blk + 1) * SAMPLES_PER_BLOCK],
-                );
-                // Forward MDCT — long (one 512-pt) or short pair
-                // (two interleaved 256-pt halves per §7.9.4.2).
-                if is_short {
+
+                // Forward MDCT — long (one 512-pt) or short pair (two
+                // interleaved 256-pt halves per §7.9.4.2). `blksw` covers fbw
+                // channels only, so LFE falls through to the long transform.
+                if blksw.get(ch).is_some_and(|b| b[blk]) {
                     mdct_256_pair(&win_buf, &mut coeffs[ch][blk]);
                 } else {
                     mdct_512(&win_buf, &mut coeffs[ch][blk]);
@@ -1071,7 +1157,10 @@ impl Ac3Encoder {
                     if e_s.min(e_d) < e_l.min(e_r) {
                         rematflg[blk][bnd_idx] = true;
                         let (c0, c1_rest) = coeffs.split_at_mut(1);
-                        crate::simd::rematrix_stereo(&mut c0[0][blk][lo..hi], &mut c1_rest[0][blk][lo..hi]);
+                        crate::simd::rematrix_stereo(
+                            &mut c0[0][blk][lo..hi],
+                            &mut c1_rest[0][blk][lo..hi],
+                        );
                     }
                     if debug_cfg().trace_remat_enc {
                         eprintln!(
@@ -1172,16 +1261,15 @@ impl Ac3Encoder {
         // anchor pattern (new on 0/3, REUSE on 1/2/4/5) is preserved.
         // `AC3_DISABLE_EXPSTR_SEL=1` pins every "new" anchor to D15
         // for A/B testing.
-        let chexpstr_plan: Vec<[u8; BLOCKS_PER_FRAME]> =
-            if debug_cfg().disable_expstr_sel {
-                let mut out = vec![[0u8; BLOCKS_PER_FRAME]; self.channels];
-                for ch in 0..self.channels {
-                    out[ch] = exp_strategies;
-                }
-                out
-            } else {
-                select_exp_strategies(&exps, self.channels, ch_end_mant)
-            };
+        let chexpstr_plan: Vec<[u8; BLOCKS_PER_FRAME]> = if debug_cfg().disable_expstr_sel {
+            let mut out = vec![[0u8; BLOCKS_PER_FRAME]; self.channels];
+            for ch in 0..self.channels {
+                out[ch] = exp_strategies;
+            }
+            out
+        } else {
+            select_exp_strategies(&exps, self.channels, ch_end_mant)
+        };
         // Apply grpsize quantisation for any channel that picked D25/D45
         // on an anchor block. The decoder will reconstruct the same
         // exponents (one per grpsize span replicated across the span)
@@ -1935,11 +2023,7 @@ impl Ac3Encoder {
             "crc2 emit produced a non-zero post-syncword residue"
         );
 
-        self.packet_queue.push(
-            Packet::new(0, TimeBase::new(1, self.sample_rate as i64), frame).with_pts(self.pts),
-        );
-        self.pts += SAMPLES_PER_FRAME as i64;
-        Ok(())
+        Ok(Packet::new(0, TimeBase::new(1, self.sample_rate as i64), frame).with_pts(input.pts))
     }
 }
 
@@ -4790,7 +4874,7 @@ fn write_mantissa(bw: &mut BitWriter, bap: u8, code: u32, ctx: &mut MantGroupCtx
 // CRC-16 primitives live in `crate::crc` so the decoder can use the
 // same residue check (§7.10.1). Re-exported below for the existing
 // in-crate `use crate::encoder::ac3_crc_update;` sites (eac3/encoder.rs).
-pub(crate) use crate::crc::{ac3_crc_solve_prefix, ac3_crc_solve_prefix_with, ac3_crc_update};
+pub(crate) use crate::crc::{ac3_crc_solve_prefix_with, ac3_crc_update};
 
 /// Length in bytes of the region `crc1` protects: the first 5/8 of the
 /// syncframe, less the two-byte syncword that sits outside it (§7.10.1).

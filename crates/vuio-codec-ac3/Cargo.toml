@@ -20,6 +20,10 @@ categories = ["multimedia::encoding", "multimedia::audio"]
 
 [dependencies]
 oxideav-core = { path = "../vendor/oxideav-core" }
+# Frame-level parallelism in the AC-3 encoder. Syncframes are independent
+# once transient detection has run, and 5.1 at 640 kbps has to keep ahead of
+# a television playing a film — see `Ac3Encoder::emit_pending`.
+rayon = "1.10"
 
 # Inherited from the fork point: 13.7k lines that do not build under this
 # repository's `-D warnings`. Tightening this is its own chore, deliberately

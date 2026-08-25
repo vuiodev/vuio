@@ -7,8 +7,7 @@
 use std::time::{Duration, Instant};
 use vuio_core::media::transcode::{PcmDecoder, TranscodeCodec};
 
-const AC3_FIXTURE: &[u8] =
-    include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
+const AC3_FIXTURE: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 const DTS_FIXTURE: &[u8] =
     include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
 

@@ -11,26 +11,27 @@ use std::f32::consts::PI;
 #[inline(always)]
 pub fn window_512(in_buf: &[f32; 512], window: &[f32; 256], win_buf: &mut [f32; 512]) {
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        neon_window_512(in_buf, window, win_buf);
-        return;
-    }
-
-    #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                avx2_window_512(in_buf, window, win_buf);
-                return;
-            }
-        }
+        // SAFETY: NEON is baseline on aarch64, so no runtime check is needed.
+        unsafe { neon_window_512(in_buf, window, win_buf) };
     }
 
-    // Scalar fallback
-    for n in 0..256 {
-        let w = window[n];
-        win_buf[n] = in_buf[n] * w;
-        win_buf[511 - n] = in_buf[511 - n] * w;
+    // Cfg'd out wholesale on aarch64 rather than left after an early return,
+    // so the scalar path is not dead code there.
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the feature detection above.
+            unsafe { avx2_window_512(in_buf, window, win_buf) };
+            return;
+        }
+
+        for n in 0..256 {
+            let w = window[n];
+            win_buf[n] = in_buf[n] * w;
+            win_buf[511 - n] = in_buf[511 - n] * w;
+        }
     }
 }
 
@@ -96,21 +97,21 @@ unsafe fn avx2_window_512(in_buf: &[f32; 512], window: &[f32; 256], win_buf: &mu
 #[inline(always)]
 pub fn energy_sum(slice: &[f32]) -> f64 {
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        return neon_energy_sum(slice);
-    }
-
-    #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
-            unsafe {
-                return avx2_energy_sum(slice);
-            }
-        }
+        // SAFETY: NEON is baseline on aarch64.
+        return unsafe { neon_energy_sum(slice) };
     }
 
-    // Scalar fallback
-    slice.iter().map(|&v| (v as f64) * (v as f64)).sum()
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            // SAFETY: guarded by the feature detection above.
+            return unsafe { avx2_energy_sum(slice) };
+        }
+
+        slice.iter().map(|&v| (v as f64) * (v as f64)).sum()
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -165,30 +166,28 @@ unsafe fn avx2_energy_sum(slice: &[f32]) -> f64 {
 #[inline(always)]
 pub fn rematrix_stereo(l: &mut [f32], r: &mut [f32]) {
     assert_eq!(l.len(), r.len());
-    let len = l.len();
 
     #[cfg(target_arch = "aarch64")]
-    unsafe {
-        neon_rematrix_stereo(l, r);
-        return;
-    }
-
-    #[cfg(target_arch = "x86_64")]
     {
-        if is_x86_feature_detected!("avx2") {
-            unsafe {
-                avx2_rematrix_stereo(l, r);
-                return;
-            }
-        }
+        // SAFETY: NEON is baseline on aarch64.
+        unsafe { neon_rematrix_stereo(l, r) };
     }
 
-    // Scalar fallback
-    for i in 0..len {
-        let lv = l[i];
-        let rv = r[i];
-        l[i] = 0.5 * (lv + rv);
-        r[i] = 0.5 * (lv - rv);
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        if is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by the feature detection above.
+            unsafe { avx2_rematrix_stereo(l, r) };
+            return;
+        }
+
+        for i in 0..l.len() {
+            let lv = l[i];
+            let rv = r[i];
+            l[i] = 0.5 * (lv + rv);
+            r[i] = 0.5 * (lv - rv);
+        }
     }
 }
 

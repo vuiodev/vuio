@@ -26,7 +26,7 @@
 //!
 //! Our own AC-3 and E-AC-3 encoders emit both CRC words in the
 //! spec's reference form: `crc1` is solved via
-//! `ac3_crc_solve_prefix` (gauss-elimination over GF(2)) so the
+//! `ac3_crc_solve_prefix_with` (a closed form over GF(2)) so the
 //! LFSR reaches zero at the 5/8 boundary, and `crc2` is computed
 //! in **augmented** form (`ac3_crc_update(0, body || [0, 0])`) so
 //! the LFSR reaches zero at frame end. The augmented form follows
@@ -196,6 +196,10 @@ const X_INVERSE: u16 = (AC3_CRC_POLY >> 1) | 0x8000;
 /// the residue.
 ///
 /// The region must be at least 2 bytes (the 16-bit CRC field).
+/// Convenience wrapper that derives the multiplier from `region`. Only tests
+/// use it — the encoder holds a multiplier computed once at construction, and
+/// deriving one per frame would give back part of what this replaced.
+#[cfg(test)]
 pub(crate) fn ac3_crc_solve_prefix(region: &[u8]) -> u16 {
     ac3_crc_solve_prefix_with(region, ac3_crc_prefix_multiplier(region.len()))
 }

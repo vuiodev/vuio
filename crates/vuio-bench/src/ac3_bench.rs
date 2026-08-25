@@ -15,7 +15,9 @@ fn generate_multichannel_audio(sample_rate: u32, channels: u16, duration_secs: f
     let mut pcm = Vec::with_capacity(total_frames * channels as usize);
 
     // Distinct frequencies for each channel
-    let freqs: [f64; 8] = [440.0, 554.37, 659.25, 329.63, 880.0, 1108.73, 220.0, 1318.51];
+    let freqs: [f64; 8] = [
+        440.0, 554.37, 659.25, 329.63, 880.0, 1108.73, 220.0, 1318.51,
+    ];
 
     for i in 0..total_frames {
         let t = i as f64 / sample_rate as f64;
@@ -78,12 +80,22 @@ impl BenchResult {
     }
 
     pub fn print_summary(&self) {
-        println!("  Time Taken:           {:.3} ms", self.duration.as_secs_f64() * 1000.0);
+        println!(
+            "  Time Taken:           {:.3} ms",
+            self.duration.as_secs_f64() * 1000.0
+        );
         println!("  Speedup:              {:.1}x real-time", self.speedup());
         println!("  PCM Throughput:       {:.2} MB/s", self.throughput_mb_s());
         println!("  Encoded Frames:       {}", self.frames_encoded);
-        println!("  Average Frame Time:   {:.2} µs (32.0 ms audio/frame)", self.avg_frame_latency_us());
-        println!("  Output Size:          {} bytes ({:.1} kbps)", self.output_bytes, self.output_bitrate_kbps());
+        println!(
+            "  Average Frame Time:   {:.2} µs (32.0 ms audio/frame)",
+            self.avg_frame_latency_us()
+        );
+        println!(
+            "  Output Size:          {} bytes ({:.1} kbps)",
+            self.output_bytes,
+            self.output_bitrate_kbps()
+        );
     }
 }
 
@@ -106,7 +118,8 @@ pub fn bench_vuio_ac3(
     let mut frames_encoded = 0;
 
     for chunk in pcm_bytes.chunks(chunk_bytes) {
-        let packets = encoder.push(chunk)
+        let packets = encoder
+            .push(chunk)
             .map_err(|e| format!("push error: {e}"))?;
         for pkt in packets {
             out_data.extend_from_slice(&pkt);
@@ -149,14 +162,22 @@ pub fn bench_ffmpeg_ac3(
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "error",
-            "-f", "s16le",
-            "-ar", &sample_rate.to_string(),
-            "-ac", &channels.to_string(),
-            "-i", "-",
-            "-c:a", "ac3",
-            "-b:a", &bitrate_str,
-            "-f", "ac3",
+            "-loglevel",
+            "error",
+            "-f",
+            "s16le",
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            &channels.to_string(),
+            "-i",
+            "-",
+            "-c:a",
+            "ac3",
+            "-b:a",
+            &bitrate_str,
+            "-f",
+            "ac3",
             "-",
         ])
         .stdin(Stdio::piped())
@@ -171,7 +192,8 @@ pub fn bench_ffmpeg_ac3(
         let _ = stdin.write_all(&pcm_vec);
     });
 
-    let output = child.wait_with_output()
+    let output = child
+        .wait_with_output()
         .map_err(|e| format!("Failed to wait on ffmpeg: {e}"))?;
     let _ = writer_handle.join();
 
@@ -201,13 +223,20 @@ pub fn decode_ac3_with_ffmpeg(
         .args([
             "-y",
             "-hide_banner",
-            "-loglevel", "error",
-            "-f", "ac3",
-            "-i", "-",
-            "-f", "s16le",
-            "-acodec", "pcm_s16le",
-            "-ar", &sample_rate.to_string(),
-            "-ac", &channels.to_string(),
+            "-loglevel",
+            "error",
+            "-f",
+            "ac3",
+            "-i",
+            "-",
+            "-f",
+            "s16le",
+            "-acodec",
+            "pcm_s16le",
+            "-ar",
+            &sample_rate.to_string(),
+            "-ac",
+            &channels.to_string(),
             "-",
         ])
         .stdin(Stdio::piped())
@@ -222,7 +251,8 @@ pub fn decode_ac3_with_ffmpeg(
         let _ = stdin.write_all(&data_vec);
     });
 
-    let output = child.wait_with_output()
+    let output = child
+        .wait_with_output()
         .map_err(|e| format!("Failed to read decoded pcm from ffmpeg: {e}"))?;
     let _ = writer_handle.join();
 
@@ -240,11 +270,7 @@ pub struct QualityReport {
     pub overall_rms: f64,
 }
 
-pub fn evaluate_quality(
-    orig_pcm: &[i16],
-    decoded_pcm: &[i16],
-    channels: u16,
-) -> QualityReport {
+pub fn evaluate_quality(orig_pcm: &[i16], decoded_pcm: &[i16], channels: u16) -> QualityReport {
     let ch = channels as usize;
     let total_orig_frames = orig_pcm.len() / ch;
     let total_dec_frames = decoded_pcm.len() / ch;
@@ -328,9 +354,9 @@ pub fn evaluate_quality(
 #[cfg(target_os = "macos")]
 #[allow(non_snake_case, non_upper_case_globals)]
 pub mod apple_native {
+    use super::BenchResult;
     use std::ffi::c_void;
     use std::time::Instant;
-    use super::BenchResult;
 
     #[repr(C)]
     #[derive(Debug, Clone, Copy, Default)]
@@ -350,7 +376,7 @@ pub mod apple_native {
     type AudioConverterRef = *mut c_void;
 
     pub const kAudioFormatLinearPCM: u32 = 0x6C70636D; // 'lpcm'
-    pub const kAudioFormatAC3: u32 = 0x61632D33;       // 'ac-3'
+    pub const kAudioFormatAC3: u32 = 0x61632D33; // 'ac-3'
     pub const kAudioFormatFlagIsSignedInteger: u32 = 1 << 2;
     pub const kAudioFormatFlagsNativeEndian: u32 = 0;
 
@@ -420,7 +446,10 @@ pub mod apple_native {
                         descs.as_mut_ptr() as *mut c_void,
                     )
                 };
-                return descs.into_iter().map(|d| u32_to_fourcc(d.mFormatID)).collect();
+                return descs
+                    .into_iter()
+                    .map(|d| u32_to_fourcc(d.mFormatID))
+                    .collect();
             }
             return vec![];
         }
@@ -450,7 +479,10 @@ pub mod apple_native {
                     descs.as_mut_ptr() as *mut c_void,
                 )
             };
-            return descs.into_iter().map(|d| u32_to_fourcc(d.mFormatID)).collect();
+            return descs
+                .into_iter()
+                .map(|d| u32_to_fourcc(d.mFormatID))
+                .collect();
         }
         vec![]
     }
@@ -486,9 +518,7 @@ pub mod apple_native {
         };
 
         let mut converter: AudioConverterRef = std::ptr::null_mut();
-        let status = unsafe {
-            AudioConverterNew(&in_format, &out_format, &mut converter)
-        };
+        let status = unsafe { AudioConverterNew(&in_format, &out_format, &mut converter) };
 
         if status != 0 || converter.is_null() {
             return Err(format!(
@@ -498,7 +528,9 @@ pub mod apple_native {
             ));
         }
 
-        unsafe { AudioConverterDispose(converter); }
+        unsafe {
+            AudioConverterDispose(converter);
+        }
 
         Ok(BenchResult {
             name: "Apple AudioToolbox Native".to_string(),
@@ -516,16 +548,23 @@ fn print_quality_table(report: &QualityReport, label: &str) {
     println!("  [{label}] Reconstruction Fidelity (vs Original Reference):");
     println!("    Overall SNR:    {:>6.2} dB", report.overall_snr_db);
     println!("    Overall PSNR:   {:>6.2} dB", report.overall_psnr_db);
-    println!("    Overall RMS:    {:>6.2} (amplitude error on 16-bit PCM)", report.overall_rms);
+    println!(
+        "    Overall RMS:    {:>6.2} (amplitude error on 16-bit PCM)",
+        report.overall_rms
+    );
     print!("    Per-Channel SNR (dB):  [");
     for (i, snr) in report.per_channel_snr_db.iter().enumerate() {
-        if i > 0 { print!(", "); }
+        if i > 0 {
+            print!(", ");
+        }
         print!("Ch{i}: {snr:.1}");
     }
     println!("]");
     print!("    Per-Channel PSNR (dB): [");
     for (i, psnr) in report.per_channel_psnr_db.iter().enumerate() {
-        if i > 0 { print!(", "); }
+        if i > 0 {
+            print!(", ");
+        }
         print!("Ch{i}: {psnr:.1}");
     }
     println!("]");
@@ -543,7 +582,9 @@ fn main() {
         println!("  Registered Encoders in AudioToolbox: {:?}", encoders);
         let decoders = apple_native::query_available_decoders();
         println!("  Registered Decoders in AudioToolbox: {:?}", decoders);
-        println!("--------------------------------------------------------------------------------");
+        println!(
+            "--------------------------------------------------------------------------------"
+        );
     }
 
     let sample_rate = 48000;
@@ -555,12 +596,19 @@ fn main() {
     let channels_5 = 5;
     let bitrate_640k = 640_000;
 
-    println!("\n>>> TEST CASE 1: 5 Channels, 640 kbps @ 48 kHz ({} s test signal)", duration_secs);
+    println!(
+        "\n>>> TEST CASE 1: 5 Channels, 640 kbps @ 48 kHz ({} s test signal)",
+        duration_secs
+    );
     println!("--------------------------------------------------------------------------------");
 
     let pcm_5ch = generate_multichannel_audio(sample_rate, channels_5, duration_secs);
     let pcm_bytes_5ch = pcm_i16_to_u8_le(&pcm_5ch);
-    println!("  Generated PCM: {} samples ({:.2} MB)", pcm_5ch.len(), pcm_bytes_5ch.len() as f64 / (1024.0 * 1024.0));
+    println!(
+        "  Generated PCM: {} samples ({:.2} MB)",
+        pcm_5ch.len(),
+        pcm_bytes_5ch.len() as f64 / (1024.0 * 1024.0)
+    );
 
     // 1. vuio-codec-ac3
     println!("\n[1] vuio-codec-ac3 Encoder (pure Rust):");
@@ -607,12 +655,19 @@ fn main() {
     // Target Test Case 2: 5.1 Channels (6 ch), 640 kbps
     // -------------------------------------------------------------------------
     let channels_6 = 6;
-    println!("\n>>> TEST CASE 2: 5.1 Channels (6 ch), 640 kbps @ 48 kHz ({} s test signal)", duration_secs);
+    println!(
+        "\n>>> TEST CASE 2: 5.1 Channels (6 ch), 640 kbps @ 48 kHz ({} s test signal)",
+        duration_secs
+    );
     println!("--------------------------------------------------------------------------------");
 
     let pcm_6ch = generate_multichannel_audio(sample_rate, channels_6, duration_secs);
     let pcm_bytes_6ch = pcm_i16_to_u8_le(&pcm_6ch);
-    println!("  Generated PCM: {} samples ({:.2} MB)", pcm_6ch.len(), pcm_bytes_6ch.len() as f64 / (1024.0 * 1024.0));
+    println!(
+        "  Generated PCM: {} samples ({:.2} MB)",
+        pcm_6ch.len(),
+        pcm_bytes_6ch.len() as f64 / (1024.0 * 1024.0)
+    );
 
     println!("\n[1] vuio-codec-ac3 Encoder (pure Rust):");
     let ox_res_6 = bench_vuio_ac3(&pcm_bytes_6ch, sample_rate, channels_6, bitrate_640k);
@@ -647,12 +702,19 @@ fn main() {
     // -------------------------------------------------------------------------
     let channels_2 = 2;
     let bitrate_192k = 192_000;
-    println!("\n>>> TEST CASE 3: Stereo (2 ch), 192 kbps @ 48 kHz ({} s test signal)", duration_secs);
+    println!(
+        "\n>>> TEST CASE 3: Stereo (2 ch), 192 kbps @ 48 kHz ({} s test signal)",
+        duration_secs
+    );
     println!("--------------------------------------------------------------------------------");
 
     let pcm_2ch = generate_multichannel_audio(sample_rate, channels_2, duration_secs);
     let pcm_bytes_2ch = pcm_i16_to_u8_le(&pcm_2ch);
-    println!("  Generated PCM: {} samples ({:.2} MB)", pcm_2ch.len(), pcm_bytes_2ch.len() as f64 / (1024.0 * 1024.0));
+    println!(
+        "  Generated PCM: {} samples ({:.2} MB)",
+        pcm_2ch.len(),
+        pcm_bytes_2ch.len() as f64 / (1024.0 * 1024.0)
+    );
 
     println!("\n[1] vuio-codec-ac3 Encoder (pure Rust):");
     let ox_res_2 = bench_vuio_ac3(&pcm_bytes_2ch, sample_rate, channels_2, bitrate_192k);
