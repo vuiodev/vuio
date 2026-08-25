@@ -66,5 +66,5 @@ path = "examples/sample.rs"
 
 [dependencies]
 
-[build-dependencies.bindgen]
-version = "0.72"
+[build-dependencies]
+cc = "1.0"

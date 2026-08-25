@@ -52,10 +52,7 @@ python = ["dep:pyo3"]
 
 [lib]
 name = "xaac_rs"
-crate-type = [
-    "lib",
-    "cdylib",
-]
+crate-type = ["lib"]
 path = "src/lib.rs"
 
 [[example]]

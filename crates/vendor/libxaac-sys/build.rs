@@ -29,13 +29,38 @@ fn main() {
                 .unwrap_or_else(|err| panic!("failed to clean {}: {err}", build_dir.display()));
         }
 
-        run(Command::new("cmake")
+        let compiler = cc::Build::new().get_compiler();
+        let c_compiler = compiler.path();
+
+        let target = env::var("TARGET").unwrap_or_default();
+        let host = env::var("HOST").unwrap_or_default();
+        let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+
+        let mut cmake_cmd = Command::new("cmake");
+        cmake_cmd
             .arg("-S")
             .arg(&source_dir)
             .arg("-B")
             .arg(&build_dir)
             .arg(format!("-DCMAKE_SYSTEM_PROCESSOR={processor}"))
-            .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON"));
+            .arg("-DCMAKE_POSITION_INDEPENDENT_CODE=ON");
+
+        if target != host {
+            let system_name = match target_os.as_str() {
+                "linux" => "Linux",
+                "windows" => "Windows",
+                "macos" | "ios" => "Darwin",
+                "freebsd" => "FreeBSD",
+                "android" => "Android",
+                _ => "Generic",
+            };
+            cmake_cmd.arg(format!("-DCMAKE_SYSTEM_NAME={system_name}"));
+            cmake_cmd.arg(format!("-DCMAKE_C_COMPILER={}", c_compiler.display()));
+            cmake_cmd.arg(format!("-DCMAKE_CXX_COMPILER={}", c_compiler.display()));
+            cmake_cmd.arg(format!("-DCMAKE_ASM_COMPILER={}", c_compiler.display()));
+        }
+
+        run(&mut cmake_cmd);
         let config_type = if env::var("PROFILE").unwrap_or_default() == "release" {
             "Release"
         } else {
@@ -128,34 +153,6 @@ fn main() {
     if target_os != "windows" {
         println!("cargo:rustc-link-lib=m");
     }
-
-    let bindings = bindgen::Builder::default()
-        .header(manifest_dir.join("wrapper.h").display().to_string())
-        .clang_arg(format!("-I{}", manifest_dir.display()))
-        .clang_arg(format!("-I{}", source_dir.join("common").display()))
-        .clang_arg(format!("-I{}", source_dir.join("decoder").display()))
-        .clang_arg(format!(
-            "-I{}",
-            source_dir.join("decoder/drc_src").display()
-        ))
-        .clang_arg(format!("-I{}", source_dir.join("encoder").display()))
-        .clang_arg(format!(
-            "-I{}",
-            source_dir.join("encoder/drc_src").display()
-        ))
-        .allowlist_function("ixheaace_(get_lib_id_strings|create|process|delete)")
-        .allowlist_function("ixheaacd_(get_lib_id_strings|dec_api|dec_main)")
-        .allowlist_function("ia_drc_dec_api")
-        .allowlist_type("ixheaace_.*")
-        .allowlist_type("ia_(mem_info_struct|lib_info_struct)")
-        .allowlist_var("(IA|IXHEAACE|AOT|DEFAULT_MEM_ALIGN_8).*")
-        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
-        .generate()
-        .expect("failed to generate bindings");
-
-    bindings
-        .write_to_file(out_dir.join("bindings.rs"))
-        .expect("failed to write bindings");
 }
 
 fn cmake_processor() -> &'static str {
