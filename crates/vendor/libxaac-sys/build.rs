@@ -72,11 +72,32 @@ fn main() {
             cmake_cmd.arg(format!("-DCMAKE_ASM_COMPILER={}", c_compiler.display()));
         }
 
+        // libxaac builds 32-bit arm as `-mfloat-abi=softfp` unless told
+        // otherwise, and softfp leaves __ARM_PCS_VFP undefined — so glibc's
+        // gnu/stubs.h reaches for gnu/stubs-soft.h, which an
+        // `arm-linux-gnueabihf` sysroot does not ship. The Rust triple is the
+        // only thing here that knows which ABI was meant.
+        if processor == "aarch32" {
+            let abi = if target.ends_with("hf") {
+                "hard"
+            } else {
+                "softfp"
+            };
+            cmake_cmd.arg(format!("-DLIBXAAC_ARM_FLOAT_ABI={abi}"));
+        }
+
         run(&mut cmake_cmd);
+        // Never `Debug`. MSVC's Debug configuration adds /RTC1, which it will
+        // not accept beside the /O2 this library's cmake asks for, and it links
+        // the debug CRT while rustc links the release one whatever the cargo
+        // profile says — so a dev build mixed the two. RelWithDebInfo keeps the
+        // symbols with neither problem, and the workspace already asks for
+        // opt-level 3 on this package in dev. Single-config generators ignore
+        // `--config` entirely, so this is a Windows-only distinction.
         let config_type = if env::var("PROFILE").unwrap_or_default() == "release" {
             "Release"
         } else {
-            "Debug"
+            "RelWithDebInfo"
         };
 
         run(Command::new("cmake")

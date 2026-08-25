@@ -4,20 +4,31 @@ set(CMAKE_C_STANDARD 99)
 function(libxaac_add_compile_options)
   if(APPLE OR MSVC OR NOT CMAKE_SYSTEM_NAME MATCHES "Linux|Android")
     if(MSVC)
-      add_compile_options(/O2 /W3)
+      # A Visual Studio generator is multi-config: options added here reach
+      # every configuration, and MSVC's Debug adds /RTC1, which it refuses to
+      # accept alongside /O2 (D8016). Optimise everywhere but Debug.
+      add_compile_options(/W3 "$<$<NOT:$<CONFIG:Debug>>:/O2>")
     else()
       add_compile_options(-O3 -Wall -Wsequence-point -Wunused-function -fwrapv)
     endif()
   elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64")
     add_compile_options(-std=gnu99 -march=armv8-a)
   elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch32")
+    # The float ABI has to be the one the toolchain was built for. `softfp`
+    # leaves __ARM_PCS_VFP undefined, so glibc's gnu/stubs.h reaches for
+    # gnu/stubs-soft.h — and an arm-linux-gnueabihf sysroot ships only the hard
+    # one, so a hard-float cross build fails at the first #include. The caller
+    # passes -DLIBXAAC_ARM_FLOAT_ABI=hard for such a target.
+    if(NOT LIBXAAC_ARM_FLOAT_ABI)
+      set(LIBXAAC_ARM_FLOAT_ABI "softfp")
+    endif()
     add_compile_options(
       -O3
       -Wall
       -std=c99
       -mcpu=cortex-a8
       -march=armv7-a
-      -mfloat-abi=softfp
+      -mfloat-abi=${LIBXAAC_ARM_FLOAT_ABI}
       -mfpu=neon)
   elseif(${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
     add_compile_options(-D_X86_ -O3 -Wall -Wsequence-point -Wunused-function -fwrapv)
