@@ -1352,24 +1352,23 @@ impl Ac3Encoder {
         // covering bins 1..7). Encoder mirrors that: extract on each
         // block, with the same D15-on-blocks-0/3 strategy.
         //
-        // §7.1.3 / A/52 §5.5.5 — LFE is spectrally constrained to
-        // 0–120 Hz. At 48 kHz with a 512-point MDCT, bin k has centre
-        // frequency (2k+1)×48000/1024 Hz: bin 0 ≈ 47 Hz, bin 1 ≈ 141 Hz.
-        // We zero coefficients from bin 2 onward so only sub-120 Hz
-        // content is coded in the LFE channel. LFE_END_MANT stays at 7
-        // (decoder expects it), but bins 2..7 carry exp=24 → bap=0 →
-        // no mantissa bits allocated.
+        // A/52 §5.5.5 band-limits the LFE *channel* to 120 Hz, and a 5.1
+        // master arrives already low-passed there. But that is a statement
+        // about the content a mixer puts in the channel, not a licence to
+        // discard what is actually in it: the format carries seven LFE
+        // coefficients — out to about 328 Hz at 48 kHz — and the decoder
+        // reconstructs all seven.
+        //
+        // This used to zero everything from bin 2 up, which costs nothing on
+        // already-filtered content and destroys anything else. Even a tone
+        // safely under the limit is hurt, because an 87 Hz tone sits between
+        // bin 0 (≈47 Hz) and bin 1 (≈141 Hz) and its transform skirt runs into
+        // the bins above: truncating them cost ~29 dB against FFmpeg, which
+        // codes the whole LFE band. Nothing is discarded now; the allocator
+        // gives the upper bins no bits when they hold nothing, which is the
+        // same saving arrived at honestly.
         if self.lfeon {
-            let lfe_cutoff = match self.sample_rate {
-                48_000 => 2usize,
-                44_100 => 2usize,
-                32_000 => 2usize, // 32k: bin 1 ≈ 125 Hz — still close enough
-                _ => 2usize,
-            };
             for blk in 0..BLOCKS_PER_FRAME {
-                for k in lfe_cutoff..LFE_END_MANT {
-                    coeffs[lfe_idx][blk][k] = 0.0;
-                }
                 for k in 0..LFE_END_MANT {
                     exps[lfe_idx_in_exps][blk][k] = extract_exponent(coeffs[lfe_idx][blk][k]);
                 }
@@ -1392,6 +1391,11 @@ impl Ac3Encoder {
         // clamp each forward delta to ±2. The output is a legal D15
         // sequence the decoder will replay verbatim.
         for ch in 0..self.channels {
+            // Fold each reuse run into its anchor before anything downstream
+            // looks at the exponents, so the strategy choice, the D15
+            // legalisation and the bit allocator all see the set the blocks
+            // will actually be quantised against.
+            min_exponents_over_reuse_runs(&mut exps[ch], &exp_strategies, 0..ch_end_mant);
             for blk in 0..BLOCKS_PER_FRAME {
                 if exp_strategies[blk] == 1 {
                     preprocess_d15(&mut exps[ch][blk][..ch_end_mant]);
@@ -1451,6 +1455,11 @@ impl Ac3Encoder {
             let cpl_idx = cpl_idx_in_exps;
             let begf_mant = cpl.begf_mant();
             let endf_mant = cpl.endf_mant();
+            min_exponents_over_reuse_runs(
+                &mut exps[cpl_idx],
+                &exp_strategies,
+                begf_mant..endf_mant,
+            );
             for blk in 0..BLOCKS_PER_FRAME {
                 if exp_strategies[blk] == 1 {
                     preprocess_d15(&mut exps[cpl_idx][blk][begf_mant..endf_mant]);
@@ -1473,6 +1482,11 @@ impl Ac3Encoder {
         // REUSE, 1 means new D15. We map exp_strategies==1 → lfeexpstr=1
         // and exp_strategies==0 → lfeexpstr=0, matching the fbw cadence.
         if self.lfeon {
+            min_exponents_over_reuse_runs(
+                &mut exps[lfe_idx_in_exps],
+                &exp_strategies,
+                0..LFE_END_MANT,
+            );
             for blk in 0..BLOCKS_PER_FRAME {
                 if exp_strategies[blk] == 1 {
                     preprocess_d15(&mut exps[lfe_idx_in_exps][blk][..LFE_END_MANT]);
@@ -2442,6 +2456,47 @@ pub(crate) fn extract_exponent(x: f32) -> u8 {
 ///    kept to guarantee legality for pathological inputs.
 ///
 /// `exp` is mutated in place.
+/// Collapse each run of blocks that share one exponent set down to exponents
+/// the whole run can carry.
+///
+/// §5.4.3.22 lets a block reuse the preceding block's exponents, and the frame
+/// pattern this encoder emits does exactly that: blocks 1 and 2 reuse block 0's,
+/// blocks 4 and 5 reuse block 3's. But an exponent is the scale its mantissa is
+/// measured against — [`quantise_mantissa`] normalises a coefficient by
+/// `2^exp` and clamps the result to unit magnitude — so a block whose
+/// coefficients outgrow the exponents it inherited has them *clipped*, and
+/// silently: up to 6 dB of level for every exponent step it is short.
+///
+/// The per-bin minimum over the run is the set that is safe for every block in
+/// it, a smaller exponent being more headroom. The quieter blocks of a run give
+/// up some mantissa precision in exchange, which is the trade this point of the
+/// format asks for — and the same one [`quantise_exponents_to_grpsize`] already
+/// makes across the bins of a group, for the same reason.
+///
+/// Without it a steady tone loses some 50 dB on the four reuse blocks of every
+/// frame: its MDCT magnitude moves from block to block, and half the time the
+/// anchor's exponents cannot hold the louder ones.
+pub(crate) fn min_exponents_over_reuse_runs(
+    blocks: &mut [[u8; N_COEFFS]],
+    exp_strategies: &[u8; BLOCKS_PER_FRAME],
+    bins: std::ops::Range<usize>,
+) {
+    let n = blocks.len().min(BLOCKS_PER_FRAME);
+    let mut anchor = 0usize;
+    for blk in 1..n {
+        // A block that transmits its own exponents starts a new run.
+        if exp_strategies[blk] != 0 {
+            anchor = blk;
+            continue;
+        }
+        let (head, tail) = blocks.split_at_mut(blk);
+        let (dst, src) = (&mut head[anchor], &tail[0]);
+        for bin in bins.clone() {
+            dst[bin] = dst[bin].min(src[bin]);
+        }
+    }
+}
+
 pub(crate) fn preprocess_d15(exp: &mut [u8]) {
     if exp.is_empty() {
         return;
@@ -5899,6 +5954,53 @@ mod tests {
                     table.len()
                 );
             }
+        }
+    }
+
+    /// A block that reuses another's exponents must not have its own
+    /// coefficients clipped by them.
+    ///
+    /// `quantise_mantissa` normalises by `2^exp` and clamps to unit magnitude,
+    /// so an exponent too large for the coefficient it is applied to silently
+    /// costs level — 6 dB per step. Blocks 1, 2, 4 and 5 reuse an anchor's
+    /// exponents, and before `min_exponents_over_reuse_runs` the anchor's were
+    /// derived from its own coefficients alone. On a steady tone, whose MDCT
+    /// magnitude moves from block to block, that clipped the four reuse blocks
+    /// of every frame down to about 11 dB SNR while the anchors sat at 65.
+    #[test]
+    fn reuse_run_exponents_cannot_clip_a_later_block() {
+        // Anchor at 0 and 3, the cadence the encoder emits.
+        let strategies = [1u8, 0, 0, 1, 0, 0];
+        let mut blocks = vec![[24u8; N_COEFFS]; BLOCKS_PER_FRAME];
+        // First run: the loudest coefficient of the run is in block 2, so the
+        // set the run transmits has to be block 2's exponent.
+        blocks[0][5] = 7;
+        blocks[1][5] = 4;
+        blocks[2][5] = 2;
+        // Second run: loudest in its anchor, which must survive untouched.
+        blocks[3][5] = 1;
+        blocks[4][5] = 9;
+        blocks[5][5] = 6;
+        min_exponents_over_reuse_runs(&mut blocks, &strategies, 0..N_COEFFS);
+        assert_eq!(
+            blocks[0][5], 2,
+            "run 0 must adopt its loudest block's exponent"
+        );
+        assert_eq!(blocks[3][5], 1, "run 1's anchor was already the loudest");
+        // The property that matters, stated directly: no block in a run is
+        // asked to quantise against an exponent larger than its own.
+        let originals = [7u8, 4, 2, 1, 9, 6];
+        let mut anchor = 0usize;
+        for blk in 0..BLOCKS_PER_FRAME {
+            if strategies[blk] != 0 {
+                anchor = blk;
+            }
+            assert!(
+                blocks[anchor][5] <= originals[blk],
+                "block {blk} would be clipped: run exponent {} > its own {}",
+                blocks[anchor][5],
+                originals[blk]
+            );
         }
     }
 

@@ -635,7 +635,7 @@ const SECTIONS: &[SectionSpec] = &[
     },
     SectionSpec {
         id: "transcode",
-        title: "Audio for older TVs",
+        title: "Transcode",
         blurb: "Films often carry AC-3, Dolby Digital Plus or DTS audio, and a TV sold without \
                 those licences plays the picture and nothing else. VuIO can decode them and \
                 offer a second, playable version beside the original.",
