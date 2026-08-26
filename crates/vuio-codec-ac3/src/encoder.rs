@@ -39,7 +39,7 @@ use crate::audblk::{remat_band_count, BLOCKS_PER_FRAME, MAX_FBW, N_COEFFS, SAMPL
 /// = 7` and we mirror that bound on every LFE exp/mantissa loop.
 pub(crate) const LFE_END_MANT: usize = 7;
 use crate::decoder::SAMPLES_PER_FRAME;
-use crate::mdct::{mdct_256_pair, mdct_512};
+use crate::mdct::{mdct_256_pair_windowed, mdct_512_windowed};
 use crate::tables::{
     frame_length_bytes, nominal_bitrate_kbps, BAPTAB, BNDSZ, BNDTAB, DBPBTAB, FASTDEC, FASTGAIN,
     FLOORTAB, HTH, LATAB, MANT_LEVEL_11, MANT_LEVEL_15, MANT_LEVEL_3, MANT_LEVEL_5, MANT_LEVEL_7,
@@ -176,13 +176,9 @@ pub fn make_encoder_with_metadata(
         crc1_multiplier: crate::crc::ac3_crc_prefix_multiplier(crc1_region_len(
             frame_bytes as usize,
         )),
-        // 256 samples of left-context per channel feed the first MDCT.
-        // Includes the LFE channel (last interleaved slot when lfeon=1).
-        delay_line: vec![vec![0.0f32; SAMPLES_PER_BLOCK]; total_chans],
-        pending_samples: vec![Vec::<f32>::new(); total_chans],
-        // Per-fbw-channel transient-detector state. LFE doesn't use
-        // blksw (§5.4.3.1) so we skip it; index 0..nfchans.
-        transient_state: (0..nfchans).map(|_| TransientDetector::default()).collect(),
+        // One slot per input channel, LFE last when lfeon=1. Each carries the
+        // 256 samples of left context that feed the first MDCT window.
+        chans: (0..total_chans).map(|_| ChannelState::new()).collect(),
         packet_queue: Vec::new(),
         pts: 0,
     }))
@@ -506,23 +502,43 @@ struct Ac3Encoder {
     /// computed once here rather than per frame — see
     /// [`crate::crc::ac3_crc_prefix_multiplier`].
     crc1_multiplier: u16,
-    /// Last block's right-half (256 samples) per channel, forming the
-    /// left context for the next MDCT window. Includes the LFE channel
-    /// at index `channels` when `lfeon`.
-    delay_line: Vec<Vec<f32>>,
-    /// Samples that have been sent via `send_frame` but not yet
-    /// consumed into a syncframe. Each inner `Vec` is per-channel
-    /// (fbw 0..channels, then LFE when present).
-    pending_samples: Vec<Vec<f32>>,
-    /// Per-fbw-channel state for the §8.2.2 spec-compliant transient
-    /// detector. Holds the cascaded biquad HPF state and the previous
-    /// 256-sample block's last-segment peak per hierarchy level so the
-    /// "P[j][0] = previous-tree last-segment peak" test of §8.2.2
-    /// step 4 has the right history.
-    transient_state: Vec<TransientDetector>,
+    /// Frame-ordered state, one entry per input channel: fbw `0..channels`,
+    /// then the LFE when present.
+    chans: Vec<ChannelState>,
     packet_queue: Vec<Packet>,
     /// Running sample PTS. Each produced syncframe carries SAMPLES_PER_FRAME.
     pts: i64,
+}
+
+/// Everything the frame-ordered half of encoding carries for one input channel.
+///
+/// One struct per channel rather than three parallel arrays, because the
+/// analysis pass runs the channels concurrently: the biquads, the delay line
+/// and the input queue all belong to a single channel, so a channel is a
+/// self-contained unit of work — and grouping them is what lets the borrow
+/// checker see that and hand one out per thread.
+struct ChannelState {
+    /// §8.2.2 transient-detector state: the cascaded biquad HPF history and
+    /// the previous block's last-segment peak per hierarchy level, so the
+    /// "P[j][0] = previous-tree last-segment peak" test of step 4 has its
+    /// history. Left idle for the LFE channel, which carries no `blksw` bit
+    /// (§5.4.3.1) and always takes the long transform.
+    transient: TransientDetector,
+    /// The previous frame's last block, forming the left context for the next
+    /// MDCT window.
+    delay: [f32; SAMPLES_PER_BLOCK],
+    /// Samples handed over by `send_frame` that no syncframe has consumed yet.
+    pending: Vec<f32>,
+}
+
+impl ChannelState {
+    fn new() -> Self {
+        Self {
+            transient: TransientDetector::default(),
+            delay: [0.0; SAMPLES_PER_BLOCK],
+            pending: Vec::new(),
+        }
+    }
 }
 
 /// One frame's input, after the stateful analysis stage.
@@ -546,7 +562,26 @@ struct FrameInput {
 /// what the caller already buffers (VuIO's TS muxer batches 0.4 s of film
 /// before it emits anything), so it adds no latency to a seek that was not
 /// already being paid.
-const FRAME_BATCH: usize = 8;
+/// Frames the encoder analyses before fanning a batch out across rayon.
+///
+/// Frames are independent once analysed, so this is purely a scheduling knob —
+/// the batch is the unit the pool has to balance. One frame per worker is the
+/// worst case for that: every worker gets exactly one, so a worker on a slow
+/// core holds up the whole batch and a worker on a fast one has nothing left to
+/// steal. Several frames each gives the pool something to redistribute, which
+/// on a machine that mixes performance and efficiency cores — every Apple
+/// Silicon Mac, and most recent laptops — is worth about a third of the
+/// encoder's wall time.
+///
+/// The cost is buffering: the encoder holds this many frames of audio, 32 ms
+/// each, before it emits any of them. That is latency the AC-3 path can afford
+/// (it streams a file the client pulls through a bounded channel, and the
+/// encoder runs far ahead of playback), but it is capped so that a large pool
+/// cannot turn it into seconds.
+fn frame_batch() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| (rayon::current_num_threads() * 3).clamp(8, 32))
+}
 
 impl Encoder for Ac3Encoder {
     fn codec_id(&self) -> &CodecId {
@@ -571,14 +606,11 @@ impl Encoder for Ac3Encoder {
         // time via CodecParameters and trusts the caller to feed matching
         // PCM here. Channel count and stride are taken from `self.channels`
         // (fbw) plus an optional LFE slot at the end.
-        let total_chans = self.channels + usize::from(self.lfeon);
-        let per_chan = decode_input_samples(audio, total_chans, self.input_sample_format)?;
-        for ch in 0..total_chans {
-            self.pending_samples[ch].extend_from_slice(&per_chan[ch]);
-        }
+        push_input_samples(audio, &mut self.chans, self.input_sample_format)?;
         // Encode whole syncframes once a batch has accumulated.
-        while self.pending_samples[0].len() >= FRAME_BATCH * SAMPLES_PER_FRAME as usize {
-            self.emit_pending(FRAME_BATCH)?;
+        let batch = frame_batch();
+        while self.chans[0].pending.len() >= batch * SAMPLES_PER_FRAME as usize {
+            self.emit_pending(batch)?;
         }
         Ok(())
     }
@@ -593,24 +625,72 @@ impl Encoder for Ac3Encoder {
     fn flush(&mut self) -> Result<()> {
         // Pad any partial frame with zeros so the last PCM samples reach
         // the decoder.
-        if self.pending_samples[0].is_empty() {
+        if self.chans[0].pending.is_empty() {
             return Ok(());
         }
-        // Batching means up to `FRAME_BATCH - 1` whole frames may still be
-        // waiting alongside a partial one, so pad out to a frame boundary
-        // rather than assuming a single short frame is all that is left.
+        // Batching means whole frames may still be waiting alongside a
+        // partial one, so pad out to a frame boundary rather than assuming a
+        // single short frame is all that is left.
         let n_per = SAMPLES_PER_FRAME as usize;
-        let missing = (n_per - self.pending_samples[0].len() % n_per) % n_per;
+        let missing = (n_per - self.chans[0].pending.len() % n_per) % n_per;
         if missing > 0 {
-            let total_chans = self.channels + usize::from(self.lfeon);
-            for ch in 0..total_chans {
-                self.pending_samples[ch].extend(std::iter::repeat(0.0).take(missing));
+            for st in &mut self.chans {
+                st.pending.extend(std::iter::repeat(0.0).take(missing));
             }
         }
-        let frames = self.pending_samples[0].len() / n_per;
+        let frames = self.chans[0].pending.len() / n_per;
         self.emit_pending(frames)?;
         Ok(())
     }
+}
+
+/// Append one [`AudioFrame`]'s interleaved PCM to each channel's queue.
+///
+/// Same conversion as [`decode_input_samples`], but deinterleaving straight
+/// into the queues instead of building a `Vec<Vec<f32>>` to copy out of. This
+/// runs in frame order, ahead of the parallel fan-out, so the second pass over
+/// every sample and the allocations that carried it were being paid at full
+/// price on the encoder's critical path.
+fn push_input_samples(a: &AudioFrame, chans: &mut [ChannelState], fmt: SampleFormat) -> Result<()> {
+    let nsamp = a.samples as usize;
+    let nch = chans.len();
+    if nsamp == 0 || nch == 0 {
+        return Ok(());
+    }
+    let width = match fmt {
+        SampleFormat::S16 => 2,
+        SampleFormat::F32 => 4,
+        other => {
+            return Err(Error::Unsupported(format!(
+                "ac3 encoder: sample format {other:?} not yet supported"
+            )))
+        }
+    };
+    let plane = a
+        .data
+        .first()
+        .ok_or_else(|| Error::invalid("ac3 encoder: frame missing data plane"))?;
+    let need = nsamp * nch * width;
+    if plane.len() < need {
+        return Err(Error::invalid("ac3 encoder: input plane too short"));
+    }
+    // Exactly `nsamp` whole sample-frames, so `chunks_exact` yields one per
+    // output sample and `extend` can size each queue in a single reserve.
+    let rows = &plane[..need];
+    for (ch, st) in chans.iter_mut().enumerate() {
+        let off = ch * width;
+        match fmt {
+            SampleFormat::S16 => st.pending.extend(
+                rows.chunks_exact(nch * 2)
+                    .map(|f| i16::from_le_bytes([f[off], f[off + 1]]) as f32 / 32768.0),
+            ),
+            _ => st.pending.extend(
+                rows.chunks_exact(nch * 4)
+                    .map(|f| f32::from_le_bytes([f[off], f[off + 1], f[off + 2], f[off + 3]])),
+            ),
+        }
+    }
+    Ok(())
 }
 
 /// Convert a decoded [`AudioFrame`] into normalized f32 samples per
@@ -678,14 +758,7 @@ impl Ac3Encoder {
     /// downstream of it is independent per frame. So the batch fans out across
     /// rayon's pool and the packets are queued back in order.
     fn emit_pending(&mut self, frames: usize) -> Result<()> {
-        let n_per = SAMPLES_PER_FRAME as usize;
-        let mut inputs = Vec::with_capacity(frames);
-        for _ in 0..frames {
-            if self.pending_samples[0].len() < n_per {
-                break;
-            }
-            inputs.push(self.analyse_frame());
-        }
+        let inputs = self.analyse_batch(frames);
 
         match inputs.len() {
             0 => {}
@@ -706,8 +779,8 @@ impl Ac3Encoder {
         Ok(())
     }
 
-    /// Consume one syncframe's worth of PCM, run the transient detector and
-    /// hand back everything the stateless part of encoding needs.
+    /// Consume `frames` syncframes' worth of PCM, run the transient detector
+    /// and hand back everything the stateless part of encoding needs.
     ///
     /// This is the half that must run in frame order: the §8.2.2 detector
     /// carries biquad state across blocks *and* frames, and the delay line
@@ -715,56 +788,96 @@ impl Ac3Encoder {
     /// coupling, exponents, rate control, packing — depends only on this
     /// output, which is what lets [`Ac3Encoder::emit_pending`] encode a batch
     /// of frames in parallel.
-    fn analyse_frame(&mut self) -> FrameInput {
+    ///
+    /// It does not have to run in *channel* order, though, and that matters:
+    /// it sits on the encoder's critical path, ahead of the fan-out, so what
+    /// it costs is not divided by anything. Hence a whole batch at a time,
+    /// with the channels — which share no state — running concurrently.
+    fn analyse_batch(&mut self, frames: usize) -> Vec<FrameInput> {
         let n_per = SAMPLES_PER_FRAME as usize;
-        let total_chans = self.channels + usize::from(self.lfeon);
-        let lfe_idx = self.channels;
+        let frames = frames.min(self.chans[0].pending.len() / n_per);
+        if frames == 0 {
+            return Vec::new();
+        }
+        let nfchans = self.channels;
+        let skip_blksw = debug_cfg().disable_blksw;
 
-        let mut samples = Vec::with_capacity(total_chans);
-        // §5.4.3.1 blksw[ch][blk]. LFE has no blksw bit — the LFE channel
-        // always uses the long-block MDCT — so this array covers fbw only.
-        let mut blksw: Vec<[bool; BLOCKS_PER_FRAME]> =
-            vec![[false; BLOCKS_PER_FRAME]; self.channels];
+        // Channels run concurrently. Everything this touches — the biquads,
+        // the delay line, the input queue — belongs to one channel, so there
+        // is no ordering between them; only the frames *within* a channel have
+        // to stay in order, and they do.
+        let per_chan: Vec<(Vec<Vec<f32>>, Vec<[bool; BLOCKS_PER_FRAME]>)> = self
+            .chans
+            .par_iter_mut()
+            .enumerate()
+            .map(|(ch, st)| {
+                // The LFE has no blksw bit (§5.4.3.1) and always takes the
+                // long transform, so it never runs the detector.
+                let detect = ch < nfchans && !skip_blksw;
+                let mut runs = Vec::with_capacity(frames);
+                let mut flags = vec![[false; BLOCKS_PER_FRAME]; frames];
+                for (f, flag_set) in flags.iter_mut().enumerate() {
+                    let mut buf = Vec::with_capacity(SAMPLES_PER_BLOCK + n_per);
+                    buf.extend_from_slice(&st.delay);
+                    buf.extend_from_slice(&st.pending[f * n_per..(f + 1) * n_per]);
 
-        for ch in 0..total_chans {
-            let mut buf = Vec::with_capacity(SAMPLES_PER_BLOCK + n_per);
-            buf.extend_from_slice(&self.delay_line[ch]);
-            buf.extend(self.pending_samples[ch].drain(0..n_per));
+                    // Per-block transient decision, §8.2.2: a 4th-order
+                    // Butterworth HPF at 8 kHz followed by a hierarchical
+                    // peak-ratio test on three levels (256 / 128x2 / 64x4).
+                    // What we test is the *fresh* 256 samples of each block's
+                    // window — a transient there is what the short-block pair
+                    // localises, so it doesn't smear across the prior 256
+                    // samples of left context.
+                    //
+                    // The spec's ratios are strict (T[1]=0.1, T[2]=0.075,
+                    // T[3]=0.05), so pure tones sit nowhere near them: the
+                    // 8 kHz HPF removes the carrier entirely.
+                    //
+                    // `AC3_DISABLE_BLKSW=1` forces long blocks regardless,
+                    // which is useful when bisecting whether a regression is
+                    // short-block related.
+                    if detect {
+                        for (blk, flag) in flag_set.iter_mut().enumerate() {
+                            let fresh =
+                                &buf[SAMPLES_PER_BLOCK * (blk + 1)..SAMPLES_PER_BLOCK * (blk + 2)];
+                            *flag = st.transient.process(fresh);
+                        }
+                    }
 
-            // Per-block transient decision, §8.2.2: a 4th-order Butterworth
-            // HPF at 8 kHz followed by a hierarchical peak-ratio test on three
-            // levels (256 / 128x2 / 64x4). What we test is the *fresh* 256
-            // samples of each block's window — a transient there is what the
-            // short-block pair localises, so it doesn't smear across the prior
-            // 256 samples of left context.
-            //
-            // The spec's ratios are strict (T[1]=0.1, T[2]=0.075, T[3]=0.05),
-            // so pure tones sit nowhere near them: the 8 kHz HPF removes the
-            // carrier entirely.
-            //
-            // `AC3_DISABLE_BLKSW=1` forces long blocks regardless, which is
-            // useful when bisecting whether a regression is short-block
-            // related.
-            let is_lfe_chan = self.lfeon && ch == lfe_idx;
-            if !is_lfe_chan && !debug_cfg().disable_blksw {
-                for (blk, flag) in blksw[ch].iter_mut().enumerate() {
-                    let fresh = &buf[SAMPLES_PER_BLOCK * (blk + 1)..SAMPLES_PER_BLOCK * (blk + 2)];
-                    *flag = self.transient_state[ch].process(fresh);
+                    // Left context for the next frame is this frame's last block.
+                    st.delay
+                        .copy_from_slice(&buf[buf.len() - SAMPLES_PER_BLOCK..]);
+                    runs.push(buf);
                 }
-            }
+                // One compaction for the whole batch. Draining per frame moved
+                // the rest of the queue down eight times over.
+                st.pending.drain(0..frames * n_per);
+                (runs, flags)
+            })
+            .collect();
 
-            // Left context for the next frame is this frame's last block.
-            self.delay_line[ch].copy_from_slice(&buf[buf.len() - SAMPLES_PER_BLOCK..]);
-            samples.push(buf);
+        // Transpose: the stateless half wants one frame's channels together.
+        let mut per_chan = per_chan;
+        let mut out = Vec::with_capacity(frames);
+        for f in 0..frames {
+            let samples: Vec<Vec<f32>> = per_chan
+                .iter_mut()
+                .map(|(runs, _)| std::mem::take(&mut runs[f]))
+                .collect();
+            // §5.4.3.1 blksw[ch][blk] covers fbw channels only.
+            let blksw: Vec<[bool; BLOCKS_PER_FRAME]> = per_chan[..nfchans]
+                .iter()
+                .map(|(_, flags)| flags[f])
+                .collect();
+            let pts = self.pts;
+            self.pts += SAMPLES_PER_FRAME as i64;
+            out.push(FrameInput {
+                samples,
+                blksw,
+                pts,
+            });
         }
-
-        let pts = self.pts;
-        self.pts += SAMPLES_PER_FRAME as i64;
-        FrameInput {
-            samples,
-            blksw,
-            pts,
-        }
+        out
     }
 
     /// Encode one analysed frame into a syncframe packet.
@@ -790,27 +903,27 @@ impl Ac3Encoder {
                 // by half — which is why `samples` carries the previous
                 // frame's last block as a prefix.
                 let off = blk * SAMPLES_PER_BLOCK;
-                let mut in_buf = [0.0f32; 512];
-                in_buf.copy_from_slice(&src[off..off + 512]);
-
-                // Windowing (symmetric 512-sample AC-3 window). The window is
-                // the same regardless of long/short — the decoder applies the
-                // same 256-coeff KBD window after its IMDCT in both cases
-                // (`audblk.rs`, the `time[n] *= WINDOW[n]` line). §7.9.5
-                // distinguishes long-only / long-to-short / etc. window
-                // shapes, but the decoder's choice collapses the 4-way
-                // distinction to the long window for every block, which we
-                // honour here.
-                let mut win_buf = [0.0f32; 512];
-                crate::simd::window_512(&in_buf, &WINDOW, &mut win_buf);
+                let win: &[f32; 512] = src[off..off + 512]
+                    .try_into()
+                    .expect("a block's window is 512 samples of the channel's run");
 
                 // Forward MDCT — long (one 512-pt) or short pair (two
-                // interleaved 256-pt halves per §7.9.4.2). `blksw` covers fbw
-                // channels only, so LFE falls through to the long transform.
+                // interleaved 256-pt halves per §7.9.4.2) — windowing on the
+                // way in with the symmetric 512-sample AC-3 window.
+                //
+                // The window is the same regardless of long/short: the decoder
+                // applies the same 256-coeff KBD window after its IMDCT in both
+                // cases (`audblk.rs`, the `time[n] *= WINDOW[n]` line). §7.9.5
+                // distinguishes long-only / long-to-short / etc. window shapes,
+                // but the decoder's choice collapses the 4-way distinction to
+                // the long window for every block, which we honour here.
+                //
+                // `blksw` covers fbw channels only, so LFE falls through to the
+                // long transform.
                 if blksw.get(ch).is_some_and(|b| b[blk]) {
-                    mdct_256_pair(&win_buf, &mut coeffs[ch][blk]);
+                    mdct_256_pair_windowed(win, &WINDOW, &mut coeffs[ch][blk]);
                 } else {
-                    mdct_512(&win_buf, &mut coeffs[ch][blk]);
+                    mdct_512_windowed(win, &WINDOW, &mut coeffs[ch][blk]);
                 }
             }
         }
@@ -939,15 +1052,25 @@ impl Ac3Encoder {
             } else {
                 0.0
             };
+            // Channel outermost, so each channel's contribution to the whole
+            // coupling region is one straight run over contiguous bins rather
+            // than a branch taken per bin per channel. Every bin still sums its
+            // channels in ascending order, which is what the float result
+            // depends on.
             for blk in 0..BLOCKS_PER_FRAME {
-                for bin in begf_mant..endf_mant {
-                    let mut sum = 0.0f32;
-                    for ch in 0..self.channels {
-                        if cpl.chincpl[ch] {
-                            sum += coeffs[ch][blk][bin];
-                        }
+                let acc = &mut cpl_coeffs[blk][begf_mant..endf_mant];
+                acc.fill(0.0);
+                for ch in 0..self.channels {
+                    if !cpl.chincpl[ch] {
+                        continue;
                     }
-                    cpl_coeffs[blk][bin] = sum * inv_n;
+                    let src = &coeffs[ch][blk][begf_mant..endf_mant];
+                    for (a, &v) in acc.iter_mut().zip(src) {
+                        *a += v;
+                    }
+                }
+                for a in acc.iter_mut() {
+                    *a *= inv_n;
                 }
             }
 
@@ -1195,9 +1318,10 @@ impl Ac3Encoder {
         // Step 1: raw exponent extraction per block, per channel.
         for ch in 0..self.channels {
             for blk in 0..BLOCKS_PER_FRAME {
-                for k in 0..ch_end_mant {
-                    exps[ch][blk][k] = extract_exponent(coeffs[ch][blk][k]);
-                }
+                crate::simd::extract_exponents(
+                    &coeffs[ch][blk][..ch_end_mant],
+                    &mut exps[ch][blk][..ch_end_mant],
+                );
                 // For each exponent that was just extracted, take the *minimum*
                 // across the coefficient's bin neighbourhood of radius 0
                 // (i.e. no change) — this is a stub for the spec's §7.1.5
@@ -1216,9 +1340,10 @@ impl Ac3Encoder {
             let begf_mant = cpl.begf_mant();
             let endf_mant = cpl.endf_mant();
             for blk in 0..BLOCKS_PER_FRAME {
-                for k in begf_mant..endf_mant {
-                    exps[cpl_idx][blk][k] = extract_exponent(cpl_coeffs[blk][k]);
-                }
+                crate::simd::extract_exponents(
+                    &cpl_coeffs[blk][begf_mant..endf_mant],
+                    &mut exps[cpl_idx][blk][begf_mant..endf_mant],
+                );
             }
         }
         // LFE exponents (§5.4.3.23 / §7.1.3 — bins 0..7 only). The
@@ -1409,12 +1534,28 @@ impl Ac3Encoder {
         // byte budget the tuners see instead so the mantissa payload
         // still fits after those words are written.
         let tuner_frame_bytes = self.meta.tuner_frame_bytes(self.frame_bytes);
-        let tuned_ba = tune_snroffst_with_plan(
+        // Every §7.2.2.1-6 masking curve this frame needs, built once. Nothing
+        // downstream varies an input to them — the two tuners only move SNR
+        // offsets, which enter at the very last step — so the global tuner,
+        // the per-block tuner and the final bap pass all read this one bank.
+        let bank = MaskBank::build(
             &ba,
             &exps,
             ch_end_mant,
+            None,
             self.channels,
             self.fscod,
+            &cpl,
+            &dba_plan,
+            self.lfeon,
+        );
+        let tuned_ba = tune_snroffst_with_bank(
+            &bank,
+            &ba,
+            &exps,
+            ch_end_mant,
+            None,
+            self.channels,
             tuner_frame_bytes,
             &exp_strategies,
             Some(&chexpstr_plan),
@@ -1437,12 +1578,12 @@ impl Ac3Encoder {
         let snr_plan = if debug_cfg().disable_perblock_snr {
             PerBlockSnr::from_global(&tuned_ba)
         } else {
-            tune_per_block_snroffst_with_plan(
+            tune_per_block_snroffst_with_bank(
+                &bank,
                 &tuned_ba,
                 &exps,
                 ch_end_mant,
                 self.channels,
-                self.fscod,
                 tuner_frame_bytes,
                 &exp_strategies,
                 Some(&chexpstr_plan),
@@ -1462,13 +1603,12 @@ impl Ac3Encoder {
         for ch in 0..self.channels {
             for blk in 0..BLOCKS_PER_FRAME {
                 let ch_ba = snr_plan.ba_for_fbw(&tuned_ba, blk, ch);
-                compute_bap(
+                bap_from_mask(
                     &exps[ch][blk],
-                    ch_end_mant,
-                    self.fscod,
-                    &ch_ba,
+                    bank.get(ch, blk),
+                    snroffset_of(&ch_ba),
+                    &BAPTAB,
                     &mut baps[ch][blk],
-                    Some((&dba_plan, ch)),
                 );
             }
         }
@@ -1488,14 +1628,12 @@ impl Ac3Encoder {
             // Per-block (csnr, cplfsnr) substitution via snr_plan.
             for blk in 0..BLOCKS_PER_FRAME {
                 let cpl_ba = snr_plan.ba_for_cpl(&tuned_ba, blk);
-                compute_bap_cpl(
+                bap_from_mask(
                     &exps[cpl_idx][blk],
-                    begf_mant,
-                    endf_mant,
-                    self.fscod,
-                    &cpl_ba,
+                    bank.get(cpl_idx, blk),
+                    snroffset_of(&cpl_ba),
+                    &BAPTAB,
                     &mut baps[cpl_idx][blk],
-                    Some((&dba_plan, MAX_FBW)),
                 );
             }
         }
@@ -1506,13 +1644,14 @@ impl Ac3Encoder {
         if self.lfeon {
             for blk in 0..BLOCKS_PER_FRAME {
                 let lfe_ba = snr_plan.ba_for_lfe(&tuned_ba, blk);
-                compute_bap(
+                // §5.4.3.47 forbids LFE dba, and `MaskBank` built this curve
+                // with `None` to match.
+                bap_from_mask(
                     &exps[lfe_idx_in_exps][blk],
-                    LFE_END_MANT,
-                    self.fscod,
-                    &lfe_ba,
+                    bank.get(lfe_idx_in_exps, blk),
+                    snroffset_of(&lfe_ba),
+                    &BAPTAB,
                     &mut baps[lfe_idx_in_exps][blk],
-                    None, // §5.4.3.47 forbids LFE dba — pass None.
                 );
             }
         }
@@ -1585,6 +1724,9 @@ impl Ac3Encoder {
         bw.write_u32(0, 1); // addbsie
 
         // ---- Audio blocks ----
+        // One buffer for every block's mantissa codes, reused rather than
+        // reallocated six times a frame.
+        let mut codes: Vec<(u8, u32)> = Vec::with_capacity((self.channels + 2) * ch_end_mant);
         for blk in 0..BLOCKS_PER_FRAME {
             // §5.4.3.1 blksw[ch] — per-channel block-switch flag.
             // Value 1 ⇒ this channel uses the 256-sample short-block
@@ -1914,7 +2056,7 @@ impl Ac3Encoder {
             // [cpl_begf_mant, cpl_endf_mant) bap sequence appended to
             // that channel's mantissa stream. The encoder must emit
             // codes in exactly the same order.
-            let mut codes: Vec<(u8, u32)> = Vec::with_capacity((self.channels + 2) * ch_end_mant);
+            codes.clear();
             let mut got_cplchan = false;
             for ch in 0..self.channels {
                 for bin in 0..ch_end_mant {
@@ -2272,13 +2414,11 @@ fn detect_transient(block: &[f32]) -> bool {
 /// left shifts that would bring `|x|` to the interval `[0.5, 1)`, clamped
 /// to `0..=24` (§8.2.7 extract_exponents).
 pub(crate) fn extract_exponent(x: f32) -> u8 {
-    let bits = (x.to_bits() & 0x7FFF_FFFF) as u32;
-    if bits == 0 {
-        return 24;
-    }
-    let exp_field = (bits >> 23) as i32;
-    let exp = 126 - exp_field;
-    exp.clamp(0, 24) as u8
+    // No zero test: a zero coefficient's exponent field is 0, which the clamp
+    // below already carries to 24 — as it does for every denormal. See
+    // [`crate::simd::extract_exponents`], which runs this over a whole block.
+    let exp_field = ((x.to_bits() & 0x7FFF_FFFF) >> 23) as i32;
+    (126 - exp_field).clamp(0, 24) as u8
 }
 
 /// Pre-process the D15 exponent run so that successive differences
@@ -2931,20 +3071,139 @@ pub(crate) fn snroffset_of(ba: &BitAllocParams) -> i32 {
 /// [`MantissaTally::bits`] closes the groups at the end.
 #[derive(Default, Clone, Copy)]
 pub(crate) struct MantissaTally {
-    /// Counts for the grouped classes, in bap order 1, 2, 4.
-    grouped: [u32; 3],
-    /// Bits owed by the ungrouped baps, which cost a fixed width each.
-    ungrouped: u32,
+    /// Four counters in one word — see [`TALLY_STEP`] for the lane layout.
+    ///
+    /// Packed rather than four `u32`s because the tuner does nothing with a
+    /// tally but accumulate coefficients into it and add whole channels
+    /// together, and both become a single 64-bit add this way.
+    packed: u64,
 }
+
+/// What one coefficient adds to a block's tally, indexed by its bap.
+///
+/// Lane layout, low to high: the bap-1, bap-2 and bap-4 *counts* in 12 bits
+/// each, then the bits owed by every other bap in the remaining 28. A block
+/// holds at most a few thousand coefficients across all its channel-slots, so
+/// no count can reach 4096 and no lane can carry into its neighbour.
+const TALLY_STEP: [u64; 16] = {
+    let mut t = [0u64; 16];
+    let mut bap = 0usize;
+    while bap < 16 {
+        t[bap] = match bap {
+            0 => 0,
+            1 => 1,
+            2 => 1 << 12,
+            4 => 1 << 24,
+            b => (QUANTIZATION_BITS[b] as u64) << 36,
+        };
+        bap += 1;
+    }
+    t
+};
 
 impl MantissaTally {
     /// Total mantissa bits for the block, closing any partial groups.
     #[inline]
     pub(crate) fn bits(&self) -> u32 {
-        self.ungrouped
-            + self.grouped[0].div_ceil(3) * 5
-            + self.grouped[1].div_ceil(3) * 7
-            + self.grouped[2].div_ceil(2) * 7
+        let g1 = (self.packed & 0xfff) as u32;
+        let g2 = ((self.packed >> 12) & 0xfff) as u32;
+        let g4 = ((self.packed >> 24) & 0xfff) as u32;
+        let ungrouped = (self.packed >> 36) as u32;
+        ungrouped + g1.div_ceil(3) * 5 + g2.div_ceil(3) * 7 + g4.div_ceil(2) * 7
+    }
+
+    /// Count one coefficient quantised at `bap`.
+    #[inline]
+    pub(crate) fn push(&mut self, bap: u8) {
+        self.packed += TALLY_STEP[bap as usize];
+    }
+
+    /// Fold another channel's contribution to the same block into this one.
+    ///
+    /// The lanes are counts, so this is exact — the grouping is closed once,
+    /// by [`MantissaTally::bits`], over whatever the block ends up holding.
+    #[inline]
+    fn add(&mut self, other: &MantissaTally) {
+        self.packed += other.packed;
+    }
+
+    /// Take a contribution back out again, for a block total the tuner is
+    /// re-deriving one channel at a time. The inverse of [`MantissaTally::add`]
+    /// and only ever called with a term that went in through it, so no lane
+    /// can borrow from the one above.
+    #[inline]
+    fn sub(&mut self, other: &MantissaTally) {
+        self.packed -= other.packed;
+    }
+}
+
+/// The §7.2.2.5 SNR offset that a packed `(csnroffst << 4) | fsnroffst` word
+/// derives to. Same value as [`snroffset_of`] on a `BitAllocParams` carrying
+/// those two fields, written against the word the tuners search over.
+#[inline(always)]
+fn snroffset_of_word(word: u16) -> i32 {
+    // ((csnr - 15) * 16 + fsnr) * 4, and csnr * 16 + fsnr is the word.
+    (word as i32 - 240) << 2
+}
+
+/// Every distinct (channel-slot, block, SNR offset) mantissa tally a
+/// rate-control search has already paid for.
+///
+/// The search is a long walk of candidates that differ from their predecessor
+/// in one channel's `fsnroffst`, and a slot's tally depends on nothing else —
+/// the masking curve is fixed for the frame ([`MaskBank`]), so the offset is
+/// the only input that moves. Recomputing every slot for every candidate meant
+/// walking 253 bins some three thousand times a frame, which the profiler put
+/// at over 40% of the encoder.
+///
+/// The key is the packed `(csnroffst << 4) | fsnroffst` word, direct-mapped on
+/// its low four bits. That is exactly `fsnroffst`, and both refinement passes
+/// hold `csnroffst` fixed while walking `fsnroffst` over 0..=15 — so sixteen
+/// ways hold the entire working set with no collisions. The binary search that
+/// runs above them varies `csnroffst` too, but it never asks for the same word
+/// twice, so a collision there costs nothing that was going to be a hit.
+struct TallyCache<'a> {
+    bank: &'a MaskBank,
+    exps: &'a [Vec<[u8; N_COEFFS]>],
+    /// `[slot][blk][word & 15]`, flattened. A tag of 0 is an empty way; a live
+    /// one holds `word + 1`, so the zeroed table reads as entirely cold.
+    ways: Vec<(u16, MantissaTally)>,
+    blocks: usize,
+}
+
+impl<'a> TallyCache<'a> {
+    fn new(
+        bank: &'a MaskBank,
+        exps: &'a [Vec<[u8; N_COEFFS]>],
+        slots: usize,
+        blocks: usize,
+    ) -> Self {
+        Self {
+            bank,
+            exps,
+            ways: vec![(0u16, MantissaTally::default()); slots * blocks * 16],
+            blocks,
+        }
+    }
+
+    /// Slot `slot`'s block `blk`, billed at the offset `word` encodes.
+    #[inline]
+    fn get(&mut self, slot: usize, blk: usize, word: u16) -> MantissaTally {
+        let idx = ((slot * self.blocks) + blk) * 16 + (word & 15) as usize;
+        let tag = word + 1;
+        let way = &self.ways[idx];
+        if way.0 == tag {
+            return way.1;
+        }
+        let mut tally = MantissaTally::default();
+        bap_bits_from_mask(
+            &self.exps[slot][blk],
+            self.bank.get(slot, blk),
+            snroffset_of_word(word),
+            &mut tally,
+        );
+        self.ways[idx] = (tag, tally);
+        tally
     }
 }
 
@@ -2956,7 +3215,6 @@ pub(crate) fn bap_bits_from_mask(
     exp: &[u8; N_COEFFS],
     curve: &MaskCurve,
     snroffset: i32,
-    ptr_tab: &[u8; 64],
     tally: &mut MantissaTally,
 ) {
     let (start, end) = (curve.start, curve.end);
@@ -2964,35 +3222,40 @@ pub(crate) fn bap_bits_from_mask(
         return;
     }
     let floor = curve.floor;
-    let mut i = start;
-    let mut j = MASKTAB[start] as usize;
-    loop {
-        let lastbin = (BNDTAB[j] as usize + BNDSZ[j] as usize).min(end);
-        let mut m = curve.mask[j];
-        m -= snroffset;
-        m -= floor;
-        if m < 0 {
-            m = 0;
-        }
-        m &= 0x1fe0;
-        m += floor;
-        while i < lastbin {
-            let psd = 3072 - ((exp[i] as i32) << 7);
-            let addr = ((psd - m) >> 5).clamp(0, 63) as usize;
-            match ptr_tab[addr] {
-                0 => {}
-                1 => tally.grouped[0] += 1,
-                2 => tally.grouped[1] += 1,
-                4 => tally.grouped[2] += 1,
-                b => tally.ungrouped += QUANTIZATION_BITS[b as usize] as u32,
-            }
-            i += 1;
-        }
-        if i >= end {
-            break;
-        }
-        j += 1;
+    // What each *band* allocates against, which the kernel then reads per bin
+    // through `MASKTAB`. Keeping it per band rather than expanding it to one
+    // entry per bin is the point: 50 bands fit a 64-entry table, and looking a
+    // bin's base up in one costs the vector unit a single instruction, where
+    // materialising 253 of them costs a pass over the run.
+    // A bin's §7.2.2.7 address is `((3072 - (exp << 7)) - m) >> 5`, capped to
+    // the table. `exp << 7` is a multiple of 32, so it survives the shift
+    // intact as `exp * 4`, leaving the band-constant part below.
+    //
+    // §7.2.2.5 rounds the masking level down to a multiple of 32 before the
+    // shift (`m &= 0x1fe0`), and subtracting a multiple of 32 commutes with a
+    // shift by 5 — so the whole per-band expression collapses to one constant
+    // minus a shifted, masked difference, with no branch left in it. That
+    // matters because this now runs alongside a vector kernel that costs less
+    // than it does.
+    //
+    // The result spans roughly -183..=160 across the floor and mask ranges the
+    // tables allow, so clamping it into a byte changes nothing: a base at or
+    // below zero already put every bin in the band at address zero however
+    // loud it was, and one above 160 already put every bin at 63.
+    let mut band_base = [0u8; 64];
+    let c = (3072 - floor) >> 5;
+    for (slot, &mask) in band_base[..=MASKTAB[end - 1] as usize]
+        .iter_mut()
+        .zip(curve.mask.iter())
+        .skip(MASKTAB[start] as usize)
+    {
+        let d = (mask - snroffset - floor).max(0);
+        *slot = (c - ((d >> 5) & 0xff)).clamp(0, 255) as u8;
     }
+
+    let [n1, n2, n4, bits] =
+        crate::simd::tally_bap_bits(&exp[start..end], &MASKTAB[start..end], &band_base);
+    tally.packed += n1 as u64 | (n2 as u64) << 12 | (n4 as u64) << 24 | (bits as u64) << 36;
 }
 
 /// The final §7.2.2.7 bap lookup: the only part of bit allocation that
@@ -3829,6 +4092,47 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     acmod: u8,
     lfeon: bool,
 ) -> BitAllocParams {
+    let bank = MaskBank::build(ba, exps, end, end_ch, nchan, fscod, cpl, dba, lfeon);
+    tune_snroffst_with_bank(
+        &bank,
+        ba,
+        exps,
+        end,
+        end_ch,
+        nchan,
+        frame_bytes,
+        exp_strategies,
+        chexpstr_per_ch,
+        cpl,
+        dba,
+        acmod,
+        lfeon,
+    )
+}
+
+/// [`tune_snroffst_with_plan_ends`] against masking curves the caller already
+/// has.
+///
+/// The curves depend on nothing the tuners vary, so a frame that runs the
+/// global tuner, the per-block tuner and the final bap pass over the same
+/// exponents was building the identical [`MaskBank`] three times. The encoder
+/// builds one and hands it to all three.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tune_snroffst_with_bank(
+    bank: &MaskBank,
+    ba: &BitAllocParams,
+    exps: &[Vec<[u8; N_COEFFS]>],
+    end: usize,
+    end_ch: Option<&[usize]>,
+    nchan: usize,
+    frame_bytes: usize,
+    exp_strategies: &[u8; BLOCKS_PER_FRAME],
+    chexpstr_per_ch: Option<&[[u8; BLOCKS_PER_FRAME]]>,
+    cpl: &CouplingPlan,
+    dba: &DbaPlan,
+    acmod: u8,
+    lfeon: bool,
+) -> BitAllocParams {
     let overhead = overhead_bits_for_ends(
         exp_strategies,
         chexpstr_per_ch,
@@ -3857,16 +4161,20 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // tie cplfsnr ≡ fsnr (the cpl pseudo-channel and the fbw channels
     // share the same sub-band SNR offset). This is sub-optimal but
     // adequate for an initial coupling-encode implementation.
-    // Everything about bit allocation that does not depend on the candidate
-    // being tested, computed once for the whole search. See `MaskBank`.
-    let bank = MaskBank::build(ba, exps, end, end_ch, nchan, fscod, cpl, dba, lfeon);
-
     // Whether the coupling channel's bins are billed at all: the mantissa
     // accounting walks them only via the first fbw channel that is actually
     // coupled, so an in-use plan with no coupled channel costs nothing.
     let cpl_billed = cpl.in_use && (0..nchan).any(|c| cpl.chincpl[c]);
 
-    let calc_used = |combined: i32| -> (u32, BitAllocParams) {
+    // Blocks each channel-slot actually carries. `blocks` is the frame's, and
+    // the bit total is only ever taken over that many, so a slot that somehow
+    // held more would have had the surplus dropped by the old `tally[..blocks]`
+    // sum — clamping here keeps that behaviour without the wasted work.
+    let blocks = exps[0].len();
+    let n_blk = |slot: usize| exps[slot].len().min(blocks);
+    let mut cache = TallyCache::new(bank, exps, nchan + 2, blocks);
+
+    let mut calc_used = |cache: &mut TallyCache, combined: i32| -> (u32, BitAllocParams) {
         let csnr = (combined / 16).min(63) as u8;
         let fsnr = (combined % 16).min(15) as u8;
         let mut cand = *ba;
@@ -3874,49 +4182,27 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         cand.fsnroffst = fsnr;
         cand.cplfsnroffst = fsnr;
         cand.lfefsnroffst = fsnr;
-        let blocks = exps[0].len();
         let mut tally = [MantissaTally::default(); BLOCKS_PER_FRAME];
-        let fbw_snr = snroffset_of(&cand);
+        // Every slot is billed at the same offset here, but read each one's
+        // own field: the two are only equal because this candidate ties them.
+        macro_rules! bill {
+            ($slot:expr, $word:expr) => {{
+                let slot = $slot;
+                for blk in 0..n_blk(slot) {
+                    let t = cache.get(slot, blk, $word);
+                    tally[blk].add(&t);
+                }
+            }};
+        }
+        let fbw_word = (csnr as u16) << 4 | cand.fsnroffst as u16;
         for ch in 0..nchan {
-            for blk in 0..exps[ch].len() {
-                bap_bits_from_mask(
-                    &exps[ch][blk],
-                    bank.get(ch, blk),
-                    fbw_snr,
-                    &BAPTAB,
-                    &mut tally[blk],
-                );
-            }
+            bill!(ch, fbw_word);
         }
         if cpl_billed {
-            let cpl_idx = nchan;
-            let mut cpl_ba = cand;
-            cpl_ba.fsnroffst = cand.cplfsnroffst;
-            let cpl_snr = snroffset_of(&cpl_ba);
-            for blk in 0..exps[cpl_idx].len() {
-                bap_bits_from_mask(
-                    &exps[cpl_idx][blk],
-                    bank.get(cpl_idx, blk),
-                    cpl_snr,
-                    &BAPTAB,
-                    &mut tally[blk],
-                );
-            }
+            bill!(nchan, (csnr as u16) << 4 | cand.cplfsnroffst as u16);
         }
         if lfeon {
-            let lfe_idx = nchan + 1;
-            let mut lfe_ba = cand;
-            lfe_ba.fsnroffst = cand.lfefsnroffst;
-            let lfe_snr = snroffset_of(&lfe_ba);
-            for blk in 0..exps[lfe_idx].len() {
-                bap_bits_from_mask(
-                    &exps[lfe_idx][blk],
-                    bank.get(lfe_idx, blk),
-                    lfe_snr,
-                    &BAPTAB,
-                    &mut tally[blk],
-                );
-            }
+            bill!(nchan + 1, (csnr as u16) << 4 | cand.lfefsnroffst as u16);
         }
         let used = tally[..blocks].iter().map(MantissaTally::bits).sum();
         (used, cand)
@@ -3929,7 +4215,7 @@ pub(crate) fn tune_snroffst_with_plan_ends(
 
     while low <= high {
         let mid = (low + high) / 2;
-        let (used, cand) = calc_used(mid);
+        let (used, cand) = calc_used(&mut cache, mid);
         if used <= budget {
             best_cand_opt = Some(cand);
             low = mid + 1;
@@ -3984,55 +4270,76 @@ pub(crate) fn tune_snroffst_with_plan_ends(
     // We don't tune cplfsnroffst / lfefsnroffst per-channel here —
     // they're singletons in the bitstream syntax and the cpl/lfe
     // pseudo-channels don't need it for the current test inputs.
-    let recompute_used = |ba_in: &BitAllocParams| -> u32 {
-        let blocks = exps[0].len();
-        let mut tally = [MantissaTally::default(); BLOCKS_PER_FRAME];
-        for ch in 0..nchan {
-            let mut ch_ba = *ba_in;
-            ch_ba.fsnroffst = ba_in.fsnroffst_ch[ch];
-            let ch_snr = snroffset_of(&ch_ba);
-            for blk in 0..exps[ch].len() {
-                bap_bits_from_mask(
-                    &exps[ch][blk],
-                    bank.get(ch, blk),
-                    ch_snr,
-                    &BAPTAB,
-                    &mut tally[blk],
-                );
-            }
+    // Both refinement passes below move exactly one channel's `fsnroffst` at a
+    // time, and a block's bit total is a sum over the channel-slots billed to
+    // it. So rather than re-walk every slot for every trial — which is what
+    // made this the most expensive thing in the encoder — hold each slot's
+    // contribution to each block, and let a trial swap out just the one
+    // channel it touches.
+    //
+    // `csnroffst` is fixed from here on (the binary search chose it), and the
+    // coupling and LFE offsets are singletons that this pass never tunes, so
+    // those two slots fold into the running block totals once and stay there.
+    let csnr_word = (best.csnroffst as u16) << 4;
+    let mut slot_tally = vec![MantissaTally::default(); nchan * blocks];
+    let mut block_sum = [MantissaTally::default(); BLOCKS_PER_FRAME];
+    for ch in 0..nchan {
+        let word = csnr_word | best.fsnroffst_ch[ch] as u16;
+        for blk in 0..n_blk(ch) {
+            let t = cache.get(ch, blk, word);
+            slot_tally[ch * blocks + blk] = t;
+            block_sum[blk].add(&t);
         }
-        if cpl_billed {
-            let cpl_idx = nchan;
-            let mut cpl_ba = *ba_in;
-            cpl_ba.fsnroffst = ba_in.cplfsnroffst;
-            let cpl_snr = snroffset_of(&cpl_ba);
-            for blk in 0..exps[cpl_idx].len() {
-                bap_bits_from_mask(
-                    &exps[cpl_idx][blk],
-                    bank.get(cpl_idx, blk),
-                    cpl_snr,
-                    &BAPTAB,
-                    &mut tally[blk],
-                );
-            }
+    }
+    if cpl_billed {
+        let cpl_idx = nchan;
+        let word = csnr_word | best.cplfsnroffst as u16;
+        for blk in 0..n_blk(cpl_idx) {
+            let t = cache.get(cpl_idx, blk, word);
+            block_sum[blk].add(&t);
         }
-        if lfeon {
-            let lfe_idx = nchan + 1;
-            let mut lfe_ba = *ba_in;
-            lfe_ba.fsnroffst = ba_in.lfefsnroffst;
-            let lfe_snr = snroffset_of(&lfe_ba);
-            for blk in 0..exps[lfe_idx].len() {
-                bap_bits_from_mask(
-                    &exps[lfe_idx][blk],
-                    bank.get(lfe_idx, blk),
-                    lfe_snr,
-                    &BAPTAB,
-                    &mut tally[blk],
-                );
-            }
+    }
+    if lfeon {
+        let lfe_idx = nchan + 1;
+        let word = csnr_word | best.lfefsnroffst as u16;
+        for blk in 0..n_blk(lfe_idx) {
+            let t = cache.get(lfe_idx, blk, word);
+            block_sum[blk].add(&t);
         }
-        tally[..blocks].iter().map(MantissaTally::bits).sum()
-    };
+    }
+
+    /// What the frame would cost if fbw channel `ch` moved to `fsnr`, with
+    /// every other slot left where it is.
+    macro_rules! trial_used {
+        ($cache:expr, $ch:expr, $fsnr:expr) => {{
+            let ch = $ch;
+            let word = csnr_word | $fsnr as u16;
+            let mut total = 0u32;
+            for blk in 0..blocks {
+                let mut s = block_sum[blk];
+                if blk < n_blk(ch) {
+                    s.sub(&slot_tally[ch * blocks + blk]);
+                    s.add(&$cache.get(ch, blk, word));
+                }
+                total += s.bits();
+            }
+            total
+        }};
+    }
+
+    /// Accept a trial: fold channel `ch`'s new tallies into the block totals.
+    macro_rules! commit {
+        ($cache:expr, $ch:expr, $fsnr:expr) => {{
+            let ch = $ch;
+            let word = csnr_word | $fsnr as u16;
+            for blk in 0..n_blk(ch) {
+                let t = $cache.get(ch, blk, word);
+                block_sum[blk].sub(&slot_tally[ch * blocks + blk]);
+                block_sum[blk].add(&t);
+                slot_tally[ch * blocks + blk] = t;
+            }
+        }};
+    }
 
     // Per-channel greedy bumps, **least-served first with fairness
     // cap** (r95).
@@ -4087,11 +4394,10 @@ pub(crate) fn tune_snroffst_with_plan_ends(
         }
         let mut bumped = false;
         for &ch in &order[..n_eligible] {
-            let mut trial = best;
-            trial.fsnroffst_ch[ch] += 1;
-            let trial_used = recompute_used(&trial);
-            if trial_used <= budget {
-                best = trial;
+            let want = best.fsnroffst_ch[ch] + 1;
+            if trial_used!(cache, ch, want) <= budget {
+                best.fsnroffst_ch[ch] = want;
+                commit!(cache, ch, want);
                 bumped = true;
             }
         }
@@ -4134,11 +4440,10 @@ pub(crate) fn tune_snroffst_with_plan_ends(
 
         let mut bumped = false;
         for &ch in &order[..n_eligible] {
-            let mut trial = best;
-            trial.fsnroffst_ch[ch] += 1;
-            let trial_used = recompute_used(&trial);
-            if trial_used <= budget {
-                best = trial;
+            let want = best.fsnroffst_ch[ch] + 1;
+            if trial_used!(cache, ch, want) <= budget {
+                best.fsnroffst_ch[ch] = want;
+                commit!(cache, ch, want);
                 bumped = true;
             }
         }
@@ -4354,6 +4659,40 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     acmod: u8,
     lfeon: bool,
 ) -> PerBlockSnr {
+    let bank = MaskBank::build(ba, exps, end, None, nchan, fscod, cpl, dba, lfeon);
+    tune_per_block_snroffst_with_bank(
+        &bank,
+        ba,
+        exps,
+        end,
+        nchan,
+        frame_bytes,
+        exp_strategies,
+        chexpstr_per_ch,
+        cpl,
+        dba,
+        acmod,
+        lfeon,
+    )
+}
+
+/// [`tune_per_block_snroffst_with_plan`] against masking curves the caller
+/// already has. See [`tune_snroffst_with_bank`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tune_per_block_snroffst_with_bank(
+    bank: &MaskBank,
+    ba: &BitAllocParams,
+    exps: &[Vec<[u8; N_COEFFS]>],
+    end: usize,
+    nchan: usize,
+    frame_bytes: usize,
+    exp_strategies: &[u8; BLOCKS_PER_FRAME],
+    chexpstr_per_ch: Option<&[[u8; BLOCKS_PER_FRAME]]>,
+    cpl: &CouplingPlan,
+    dba: &DbaPlan,
+    acmod: u8,
+    lfeon: bool,
+) -> PerBlockSnr {
     let mut plan = PerBlockSnr::from_global(ba);
     if nchan == 0 {
         return plan;
@@ -4385,7 +4724,6 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
     // As in the global tuner: only `snroffst` varies across the trials below,
     // so the masking curves are computed once for the whole search, and the
     // trials tally mantissa bits directly instead of materialising bap arrays.
-    let bank = MaskBank::build(ba, exps, end, None, nchan, fscod, cpl, dba, lfeon);
     let cpl_billed = cpl.in_use && (0..nchan).any(|c| cpl.chincpl[c]);
     let recompute = |plan: &PerBlockSnr| -> u32 {
         let mut total = 0u32;
@@ -4397,7 +4735,6 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                     &exps[ch][blk],
                     bank.get(ch, blk),
                     snroffset_of(&ch_ba),
-                    &BAPTAB,
                     &mut tally,
                 );
             }
@@ -4408,7 +4745,6 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                     &exps[cpl_idx][blk],
                     bank.get(cpl_idx, blk),
                     snroffset_of(&cpl_ba),
-                    &BAPTAB,
                     &mut tally,
                 );
             }
@@ -4419,7 +4755,6 @@ pub(crate) fn tune_per_block_snroffst_with_plan(
                     &exps[lfe_idx][blk],
                     bank.get(lfe_idx, blk),
                     snroffset_of(&lfe_ba),
-                    &BAPTAB,
                     &mut tally,
                 );
             }
@@ -4774,33 +5109,48 @@ fn nearest_symmetric(m: f32, table: &[f32]) -> usize {
 /// Bap values 3, 5, and 6..=15 are emitted inline (no grouping).
 pub(crate) fn write_mantissa_stream(bw: &mut BitWriter, codes: &[(u8, u32)]) {
     let n = codes.len();
-    let mut consumed = vec![false; n];
+    // How far each grouped class has been packed, as an exclusive bound.
+    //
+    // A class's members are taken strictly in order, so everything an earlier
+    // group of that class consumed lies *before* the next group's first
+    // member: one high-water mark per class says whether a code has already
+    // been packed, and a group's forward scan for its remaining members never
+    // revisits ground an earlier group covered. Total work is one pass over
+    // the block per class.
+    //
+    // What this replaces walked the whole block looking for each group's
+    // members — with a `Vec<bool>` per block to tell the consumed ones apart —
+    // which on a block whose bap-1 coefficients are sparse is quadratic.
+    let mut packed_through = [0usize; 3];
     for i in 0..n {
-        if consumed[i] {
+        let (bap, mant) = codes[i];
+        let class = match bap {
+            1 => 0usize,
+            2 => 1,
+            4 => 2,
+            _ => usize::MAX,
+        };
+        if class != usize::MAX && i < packed_through[class] {
             continue;
         }
-        let (bap, mant) = codes[i];
         match bap {
             1 => {
                 // 5-bit group of 3 codes (3-level quantiser).
-                let m1 = mant;
-                let (m2, m3) = grab_next_two(codes, &mut consumed, i, 1);
-                let packed = m1 * 9 + m2 * 3 + m3;
-                bw.write_u32(packed, 5);
+                let (m2, m3, end) = grab_next_two(codes, i, 1);
+                packed_through[0] = end;
+                bw.write_u32(mant * 9 + m2 * 3 + m3, 5);
             }
             2 => {
                 // 7-bit group of 3 codes (5-level).
-                let m1 = mant;
-                let (m2, m3) = grab_next_two(codes, &mut consumed, i, 2);
-                let packed = m1 * 25 + m2 * 5 + m3;
-                bw.write_u32(packed, 7);
+                let (m2, m3, end) = grab_next_two(codes, i, 2);
+                packed_through[1] = end;
+                bw.write_u32(mant * 25 + m2 * 5 + m3, 7);
             }
             4 => {
                 // 7-bit group of 2 codes (11-level).
-                let m1 = mant;
-                let m2 = grab_next_one(codes, &mut consumed, i, 4);
-                let packed = m1 * 11 + m2;
-                bw.write_u32(packed, 7);
+                let (m2, end) = grab_next_one(codes, i, 4);
+                packed_through[2] = end;
+                bw.write_u32(mant * 11 + m2, 7);
             }
             3 => bw.write_u32(mant, 3),
             5 => bw.write_u32(mant, 4),
@@ -4817,44 +5167,33 @@ pub(crate) fn write_mantissa_stream(bw: &mut BitWriter, codes: &[(u8, u32)]) {
 /// that have not yet been consumed. Marks those entries consumed and
 /// returns their mantissa codes. Pads with zero if fewer than two are
 /// available (typical for end-of-block partial groups).
-fn grab_next_two(
-    codes: &[(u8, u32)],
-    consumed: &mut [bool],
-    start: usize,
-    target_bap: u8,
-) -> (u32, u32) {
+fn grab_next_two(codes: &[(u8, u32)], start: usize, target_bap: u8) -> (u32, u32, usize) {
     let mut out = [0u32; 2];
     let mut n = 0usize;
     for j in (start + 1)..codes.len() {
-        if consumed[j] {
-            continue;
-        }
         if codes[j].0 == target_bap {
             out[n] = codes[j].1;
-            consumed[j] = true;
             n += 1;
             if n == 2 {
-                return (out[0], out[1]);
+                return (out[0], out[1], j + 1);
             }
         }
     }
-    (out[0], out[1])
+    // Short group at the end of a block: the missing members pad with zero,
+    // and nothing of this class is left to skip.
+    (out[0], out[1], codes.len())
 }
 
 /// Scan forward in `codes` for the next entry matching `target_bap`
 /// that has not yet been consumed. Marks it consumed and returns its
 /// mantissa code. Pads with zero if none remains.
-fn grab_next_one(codes: &[(u8, u32)], consumed: &mut [bool], start: usize, target_bap: u8) -> u32 {
+fn grab_next_one(codes: &[(u8, u32)], start: usize, target_bap: u8) -> (u32, usize) {
     for j in (start + 1)..codes.len() {
-        if consumed[j] {
-            continue;
-        }
         if codes[j].0 == target_bap {
-            consumed[j] = true;
-            return codes[j].1;
+            return (codes[j].1, j + 1);
         }
     }
-    0
+    (0, codes.len())
 }
 
 /// Flush any pending mantissa-group accumulators: grouped-bap codes
@@ -5261,13 +5600,20 @@ pub(crate) fn build_dba_plan(
                 }
             }
             // Per-band tonal vote: check the exponents in each target band.
+            //
+            // A band is a contiguous run of bins — `BNDTAB[b]` is its first and
+            // `BNDSZ[b]` its width, which is the same partition `MASKTAB` reads
+            // out per bin (asserted by `band_tables_agree`). So the band's
+            // exponents are a subslice, where this used to filter all 253 bins
+            // and collect the survivors into a fresh `Vec` for every band of
+            // every block.
             for b in lo_band..hi_band {
-                // Collect exponents of bins in this band.
-                let band_bins: Vec<u8> = (0..end)
-                    .filter(|&k| MASKTAB[k] as usize == b)
-                    .map(|k| exps[ch][blk][k])
-                    .collect();
-                if band_is_tonal(&band_bins) {
+                let lo = BNDTAB[b] as usize;
+                let hi = (lo + BNDSZ[b] as usize).min(end);
+                if lo >= hi {
+                    continue;
+                }
+                if band_is_tonal(&exps[ch][blk][lo..hi]) {
                     band_tonal_votes[b] += 1;
                 }
             }
@@ -5475,6 +5821,109 @@ mod tests {
     /// This checks that against the sequential accounting in
     /// [`mantissa_bits_total_ends`], which walks the bap arrays for real.
     #[test]
+    /// `build_dba_plan` reads a band's exponents as the subslice
+    /// `BNDTAB[b] .. BNDTAB[b] + BNDSZ[b]`, where it used to filter every bin
+    /// on `MASKTAB[bin] == b`. The two agree only because §7.2.2 partitions
+    /// the spectrum into contiguous bands — which this pins down, since
+    /// nothing else in the encoder would notice if a table edit broke it.
+    ///
+    /// Over the coded range only. `chbwcod` is five bits capped at 60
+    /// (§5.4.3.6), so `end_mant = 37 + 3 * (chbwcod + 12)` never exceeds 253
+    /// and bins 253..256 are padding on the end of `MASKTAB` that belong to no
+    /// band — they read as band 0, which is why the filter this replaced was
+    /// written over `0..end` rather than the whole table.
+    /// `build_dba_plan` reads a band's exponents as the subslice
+    /// `BNDTAB[b] .. BNDTAB[b] + BNDSZ[b]`, where it used to filter every bin
+    /// on `MASKTAB[bin] == b`. The two agree only because §7.2.2 partitions
+    /// the spectrum into contiguous bands — which this pins down, since
+    /// nothing else in the encoder would notice if a table edit broke it.
+    ///
+    /// Over the coded range only. `chbwcod` is five bits capped at 60
+    /// (§5.4.3.6), so `end_mant = 37 + 3 * (chbwcod + 12)` never exceeds 253
+    /// and bins 253..256 are padding on the end of `MASKTAB` that belong to no
+    /// band — they read as band 0, which is why the filter this replaced was
+    /// written over `0..end` rather than the whole table.
+    /// [`nearest_symmetric`] seeds itself arithmetically and then weighs three
+    /// candidates, where it used to walk the whole level table. The two agree
+    /// for **every** `f32` in `[-1, 1]` — all 2,130,706,434 of them, against
+    /// all five tables — which was checked exhaustively out of tree; a full
+    /// sweep takes about a minute and does not belong in a test run. This
+    /// covers the midpoints, where a disagreement would have to show up: an
+    /// exact tie between two levels, and the ulp either side of it.
+    #[test]
+    fn nearest_symmetric_matches_full_scan() {
+        fn full_scan(m: f32, table: &[f32]) -> usize {
+            let mut best_i = 0usize;
+            let mut best_d = f32::INFINITY;
+            for (i, &v) in table.iter().enumerate() {
+                let d = (m - v).abs();
+                if d < best_d {
+                    best_d = d;
+                    best_i = i;
+                }
+            }
+            best_i
+        }
+        let tables: [&[f32]; 5] = [
+            &MANT_LEVEL_3,
+            &MANT_LEVEL_5,
+            &MANT_LEVEL_7,
+            &MANT_LEVEL_11,
+            &MANT_LEVEL_15,
+        ];
+        for table in tables {
+            let mut probes: Vec<f32> = vec![-1.0, 1.0, 0.0, -0.0];
+            probes.extend_from_slice(table);
+            for w in table.windows(2) {
+                probes.push(((w[0] as f64 + w[1] as f64) / 2.0) as f32);
+            }
+            // The ulp neighbourhood of every probe, plus a dense uniform sweep.
+            let mut all = Vec::new();
+            for &p in &probes {
+                let b = p.to_bits() as i64;
+                for d in -32i64..=32 {
+                    all.push(f32::from_bits((b + d) as u32));
+                }
+            }
+            for k in 0..20_000 {
+                all.push(-1.0 + 2.0 * k as f32 / 20_000.0);
+            }
+            for m in all {
+                if !(-1.0..=1.0).contains(&m) {
+                    continue;
+                }
+                assert_eq!(
+                    nearest_symmetric(m, table),
+                    full_scan(m, table),
+                    "n={} m={m:?}",
+                    table.len()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn band_tables_agree() {
+        const MAX_END: usize = 37 + 3 * (60 + 12);
+        assert!(MAX_END <= N_COEFFS);
+        let mut covered = vec![false; MAX_END];
+        for b in 0..50usize {
+            let lo = BNDTAB[b] as usize;
+            let hi = (lo + BNDSZ[b] as usize).min(MAX_END);
+            let filtered: Vec<usize> = (0..MAX_END).filter(|&k| MASKTAB[k] as usize == b).collect();
+            assert_eq!(
+                filtered,
+                (lo..hi).collect::<Vec<_>>(),
+                "band {b} is not the contiguous run BNDTAB/BNDSZ describe"
+            );
+            for bin in lo..hi {
+                covered[bin] = true;
+            }
+        }
+        assert!(covered.iter().all(|&c| c), "a coded bin belongs to no band");
+    }
+
+    #[test]
     fn mantissa_tally_matches_sequential_group_accounting() {
         let mut state = 0xDEAD_BEEFu32;
         let mut rand = move |m: u32| {
@@ -5503,10 +5952,7 @@ mod tests {
                         baps[ch][blk][bin] = b;
                         match b {
                             0 => {}
-                            1 => tally[blk].grouped[0] += 1,
-                            2 => tally[blk].grouped[1] += 1,
-                            4 => tally[blk].grouped[2] += 1,
-                            o => tally[blk].ungrouped += QUANTIZATION_BITS[o as usize] as u32,
+                            b => tally[blk].push(b),
                         }
                     }
                 }
@@ -5516,10 +5962,7 @@ mod tests {
                         baps[nchan + 1][blk][bin] = b;
                         match b {
                             0 => {}
-                            1 => tally[blk].grouped[0] += 1,
-                            2 => tally[blk].grouped[1] += 1,
-                            4 => tally[blk].grouped[2] += 1,
-                            o => tally[blk].ungrouped += QUANTIZATION_BITS[o as usize] as u32,
+                            b => tally[blk].push(b),
                         }
                     }
                 }

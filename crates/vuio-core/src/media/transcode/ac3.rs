@@ -125,7 +125,7 @@ fn to_bitstream_order(pcm: &[u8], channels: u16) -> Vec<u8> {
     let map: &[usize] = match channels {
         5 => &FIVE_ZERO,
         6 => &FIVE_ONE,
-        // Mono and stereo agree in both orders
+        // Mono and stereo agree in both orders.
         _ => return pcm.to_vec(),
     };
     let stride = usize::from(channels) * 2;
@@ -133,8 +133,11 @@ fn to_bitstream_order(pcm: &[u8], channels: u16) -> Vec<u8> {
     for (frame, source) in pcm.chunks_exact(stride).enumerate() {
         let base = frame * stride;
         for (slot, &from) in map.iter().enumerate() {
-            out[base + slot * 2..base + slot * 2 + 2]
-                .copy_from_slice(&source[from * 2..from * 2 + 2]);
+            // A sample's two bytes, moved as two bytes. `copy_from_slice` over
+            // a two-element slice is the same work put through a call, on a
+            // loop that runs once per channel per sample of the soundtrack.
+            out[base + slot * 2] = source[from * 2];
+            out[base + slot * 2 + 1] = source[from * 2 + 1];
         }
     }
     out

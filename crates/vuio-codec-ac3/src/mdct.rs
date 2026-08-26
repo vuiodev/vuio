@@ -232,6 +232,30 @@ pub fn mdct_512(input: &[f32; 512], output: &mut [f32; 256]) {
     dct4_256().run(&x_sym, output);
 }
 
+/// [`mdct_512`] with the §7.9.5 window applied on the way in.
+///
+/// The fold reads each windowed sample exactly once, so windowing into a
+/// buffer for it to read back is a pass over 512 samples and 2 KiB of traffic
+/// that the fold can absorb for free. The encoder runs this 36 times a frame
+/// at 5.1, and it is the same arithmetic in the same order — each term is
+/// still one multiply, and the pair still combine the way they did.
+///
+/// The window is symmetric about its centre in the sense §7.9.5 gives it:
+/// `w[n]` for the first half, and `w[511 - n]` for the second, which is what
+/// puts `WINDOW[255 - q]` and `WINDOW[q]` on the upper terms below.
+#[inline]
+pub fn mdct_512_windowed(input: &[f32; 512], window: &[f32; 256], output: &mut [f32; 256]) {
+    let mut x_sym = [0.0f32; 256];
+    for q in 0..128 {
+        x_sym[127 - q] = -(input[256 + q] * window[255 - q]) - input[511 - q] * window[q];
+    }
+    for p in 0..128 {
+        x_sym[128 + p] = input[p] * window[p] - input[255 - p] * window[255 - p];
+    }
+
+    dct4_256().run(&x_sym, output);
+}
+
 /// 256-point forward MDCT for one half of a short-block pair (§8.2.3.2).
 ///
 /// The two halves differ only in their phase term `(π/4)(2k+1)(1+α)`, which is
@@ -274,6 +298,37 @@ pub fn mdct_256_pair(input: &[f32; 512], output: &mut [f32; 256]) {
 
     mdct_256_half(&h1, -1.0, &mut x1);
     mdct_256_half(&h2, 1.0, &mut x2);
+
+    for k in 0..128 {
+        output[2 * k] = x1[k];
+        output[2 * k + 1] = x2[k];
+    }
+}
+
+/// [`mdct_256_pair`] with the §7.9.5 window applied on the way in. See
+/// [`mdct_512_windowed`].
+///
+/// Each half's fold is written against the unwindowed input directly, which
+/// also drops the two 256-sample copies the pair used to make to split the
+/// window buffer in two.
+#[inline]
+pub fn mdct_256_pair_windowed(input: &[f32; 512], window: &[f32; 256], output: &mut [f32; 256]) {
+    // α = -1 half: y[m] = w[m]·in[m] - w[255-m]·in[255-m].
+    let mut y1 = [0.0f32; 128];
+    for m in 0..128 {
+        y1[m] = input[m] * window[m] - input[255 - m] * window[255 - m];
+    }
+    // α = +1 half, over the second 256 samples: y[m] = -(w'[127-m]·in[383-m]
+    // + w'[m+128]·in[384+m]), with the second half's window index mirrored.
+    let mut y2 = [0.0f32; 128];
+    for m in 0..128 {
+        y2[m] = -(input[383 - m] * window[128 + m] + input[384 + m] * window[127 - m]);
+    }
+
+    let mut x1 = [0.0f32; 128];
+    let mut x2 = [0.0f32; 128];
+    dct4_128().run(&y1, &mut x1);
+    dct4_128().run(&y2, &mut x2);
 
     for k in 0..128 {
         output[2 * k] = x1[k];

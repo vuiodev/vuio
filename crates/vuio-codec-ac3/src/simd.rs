@@ -268,3 +268,197 @@ pub fn extract_exponent_fast(c: f32) -> u8 {
         diff as u8
     }
 }
+
+/// §8.2.7 exponent extraction over a whole run of coefficients.
+///
+/// Matches `encoder::extract_exponent` element for element, minus its
+/// `bits == 0` early return: a zero coefficient has an exponent field of 0,
+/// which the clamp already carries to 24, and so does every denormal. Dropping
+/// the test leaves a branchless body that both NEON and AVX2 vectorise, on a
+/// loop the encoder runs over every coded bin of every block.
+#[inline]
+pub fn extract_exponents(coeffs: &[f32], out: &mut [u8]) {
+    debug_assert_eq!(coeffs.len(), out.len());
+    for (o, &x) in out.iter_mut().zip(coeffs) {
+        let exp_field = ((x.to_bits() & 0x7FFF_FFFF) >> 23) as i32;
+        *o = (126 - exp_field).clamp(0, 24) as u8;
+    }
+}
+
+/// Per-coefficient contribution tables for [`tally_bap_bits`], indexed by bap.
+///
+/// The three grouped quantisers (§7.3.5 packs bap 1, 2 and 4 in triples and
+/// pairs) are counted; everything else owes its fixed §7.3 width. Split into
+/// four 16-byte tables so a vector unit can look all four up by bap.
+const TALLY_G1: [u8; 16] = tally_flag(1);
+const TALLY_G2: [u8; 16] = tally_flag(2);
+const TALLY_G4: [u8; 16] = tally_flag(4);
+const TALLY_BITS: [u8; 16] = {
+    let mut t = [0u8; 16];
+    let mut b = 0usize;
+    while b < 16 {
+        t[b] = match b {
+            0 | 1 | 2 | 4 => 0,
+            _ => crate::tables::QUANTIZATION_BITS[b],
+        };
+        b += 1;
+    }
+    t
+};
+
+const fn tally_flag(want: usize) -> [u8; 16] {
+    let mut t = [0u8; 16];
+    t[want] = 1;
+    t
+}
+
+/// Mantissa-bit tally for a run of coefficients, from their exponents and the
+/// masking curve's per-*band* allocation base.
+///
+/// Each bin's §7.2.2.7 address is `clamp(base[band] - 4 * exp, 0, 63)`, and
+/// the bap it selects either counts towards one of the three grouped classes
+/// (§7.3.5 packs bap 1, 2 and 4 in triples and pairs) or owes a fixed number
+/// of bits. Returns `[bap-1 count, bap-2 count, bap-4 count, bits owed by the
+/// rest]`.
+///
+/// `bands` is `masktab[bin]` for each coefficient — its band number — and
+/// `band_base` is indexed by that. §7.2.2 has 50 bands, so both the band
+/// lookup and the address lookup are 64-entry tables, which is exactly what a
+/// vector unit does in one instruction: no per-bin base array has to be
+/// materialised for them.
+///
+/// This is the encoder's hottest loop by a wide margin — the rate-control
+/// search walks every coded bin of every block a dozen times a frame — which
+/// is what earns it a vector kernel.
+pub fn tally_bap_bits(exp: &[u8], bands: &[u8], band_base: &[u8; 64]) -> [u32; 4] {
+    debug_assert_eq!(exp.len(), bands.len());
+    debug_assert!(
+        exp.iter().all(|&e| e <= 63),
+        "exponents are 0..=24 (§7.1.3)"
+    );
+    debug_assert!(bands.iter().all(|&b| b < 64), "§7.2.2 has 50 bands");
+
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is baseline on aarch64, so no runtime check is needed.
+        return unsafe { neon_tally_bap_bits(exp, bands, band_base) };
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    scalar_tally_bap_bits(exp, bands, band_base)
+}
+
+/// Portable [`tally_bap_bits`]. Also the oracle the NEON kernel is checked
+/// against by `neon_tally_matches_scalar`.
+#[inline]
+pub(crate) fn scalar_tally_bap_bits(exp: &[u8], bands: &[u8], band_base: &[u8; 64]) -> [u32; 4] {
+    let mut out = [0u32; 4];
+    for (&e, &bnd) in exp.iter().zip(bands) {
+        let addr = band_base[bnd as usize].saturating_sub(e << 2).min(63) as usize;
+        let bap = crate::tables::BAPTAB[addr] as usize;
+        out[0] += TALLY_G1[bap] as u32;
+        out[1] += TALLY_G2[bap] as u32;
+        out[2] += TALLY_G4[bap] as u32;
+        out[3] += TALLY_BITS[bap] as u32;
+    }
+    out
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn neon_tally_bap_bits(exp: &[u8], bands: &[u8], band_base: &[u8; 64]) -> [u32; 4] {
+    use std::arch::aarch64::*;
+
+    let n = exp.len();
+    let ep = exp.as_ptr();
+    let np = bands.as_ptr();
+
+    let load4 = |p: *const u8| {
+        uint8x16x4_t(
+            vld1q_u8(p),
+            vld1q_u8(p.add(16)),
+            vld1q_u8(p.add(32)),
+            vld1q_u8(p.add(48)),
+        )
+    };
+    // The band-number-to-base table, and §7.2.2.4's address-to-bap table.
+    let base_tab = load4(band_base.as_ptr());
+    let baptab = load4(crate::tables::BAPTAB.as_ptr());
+    let g1 = vld1q_u8(TALLY_G1.as_ptr());
+    let g2 = vld1q_u8(TALLY_G2.as_ptr());
+    let g4 = vld1q_u8(TALLY_G4.as_ptr());
+    let bits = vld1q_u8(TALLY_BITS.as_ptr());
+    let cap = vdupq_n_u8(63);
+
+    // Widening accumulators: `vpadalq_u8` folds each chunk's byte lanes in
+    // pairs, so even a full 253-bin run cannot come near overflowing them.
+    let mut a1 = vdupq_n_u16(0);
+    let mut a2 = vdupq_n_u16(0);
+    let mut a4 = vdupq_n_u16(0);
+    let mut ab = vdupq_n_u16(0);
+
+    let mut i = 0usize;
+    while i + 16 <= n {
+        let e = vld1q_u8(ep.add(i));
+        let base = vqtbl4q_u8(base_tab, vld1q_u8(np.add(i)));
+        // addr = clamp(base - 4*exp, 0, 63): the saturating subtract supplies
+        // the lower clamp, and exponents cap `4 * exp` at 96 so nothing wraps.
+        let addr = vminq_u8(vqsubq_u8(base, vshlq_n_u8(e, 2)), cap);
+        let bap = vqtbl4q_u8(baptab, addr);
+        a1 = vpadalq_u8(a1, vqtbl1q_u8(g1, bap));
+        a2 = vpadalq_u8(a2, vqtbl1q_u8(g2, bap));
+        a4 = vpadalq_u8(a4, vqtbl1q_u8(g4, bap));
+        ab = vpadalq_u8(ab, vqtbl1q_u8(bits, bap));
+        i += 16;
+    }
+
+    let mut out = [
+        vaddvq_u16(a1) as u32,
+        vaddvq_u16(a2) as u32,
+        vaddvq_u16(a4) as u32,
+        vaddvq_u16(ab) as u32,
+    ];
+    if i < n {
+        let tail = scalar_tally_bap_bits(&exp[i..], &bands[i..], band_base);
+        for k in 0..4 {
+            out[k] += tail[k];
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tally_tests {
+    use super::*;
+
+    /// The vector kernel and the portable one must agree exactly — the encoder
+    /// picks whichever the target has, and its bitstream must not depend on
+    /// that choice.
+    #[test]
+    fn neon_tally_matches_scalar() {
+        let mut rng = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            rng
+        };
+        for len in [0usize, 1, 7, 15, 16, 17, 31, 120, 253] {
+            for _ in 0..64 {
+                let exp: Vec<u8> = (0..len).map(|_| (next() % 25) as u8).collect();
+                let bands: Vec<u8> = (0..len).map(|_| (next() % 50) as u8).collect();
+                let mut band_base = [0u8; 64];
+                for b in band_base.iter_mut() {
+                    // Spans the whole reachable range, including the ends where
+                    // every bin in a band saturates to bap 0 or bap 15.
+                    *b = (next() % 170) as u8;
+                }
+                assert_eq!(
+                    tally_bap_bits(&exp, &bands, &band_base),
+                    scalar_tally_bap_bits(&exp, &bands, &band_base),
+                    "len={len}"
+                );
+            }
+        }
+    }
+}
