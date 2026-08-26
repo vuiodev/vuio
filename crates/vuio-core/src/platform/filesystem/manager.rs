@@ -258,6 +258,14 @@ pub const SUPPORTED_MEDIA_TYPES: &[(&str, &str)] = &[
     ("m4a", "audio/mp4"),
     ("opus", "audio/opus"),
     ("aiff", "audio/aiff"),
+    // Elementary Dolby and DTS streams. Indexed because VuIO can decode them
+    // (see `media::transcode`) — before that it could neither play nor
+    // usefully list them, so they were left out. The MIME types are the
+    // registered ones: RFC 4184 for AC-3, RFC 4598 for E-AC-3.
+    ("ac3", "audio/ac3"),
+    ("eac3", "audio/eac3"),
+    ("ec3", "audio/eac3"),
+    ("dts", "audio/vnd.dts"),
     // Image formats
     ("jpg", "image/jpeg"),
     ("jpeg", "image/jpeg"),

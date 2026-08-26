@@ -32,6 +32,15 @@ pub(crate) async fn extract_audio_metadata(
     Ok(())
 }
 
+/// Likewise for video: with no probe there is no codec to record, and the
+/// browse path simply never offers a decoded alternative for a film.
+#[cfg(not(feature = "metadata"))]
+pub(crate) async fn extract_stream_info(
+    _media_file: &mut MediaFile,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    Ok(())
+}
+
 /// Records written without a tag reader carry version 0, so enabling the
 /// feature later re-reads them on the next scan.
 #[cfg(not(feature = "metadata"))]

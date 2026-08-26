@@ -152,23 +152,34 @@ async function attachHlsSource(video, url, file) {
 }
 
 // Populates the audio-track <select> once hls.js knows the master playlist's
-// #EXT-X-MEDIA:TYPE=AUDIO renditions (only tracks the server found browser
-// decodable — e.g. AAC — ever appear here), and shows a note instead when the
-// file has no such track at all (this is expected, not an error, for sources
-// whose audio is e.g. Dolby Digital/E-AC-3 — no browser can decode that).
 function setupAudioTrackUi(hls, Hls) {
     const select = document.getElementById('video-audio-track-select');
     const note = document.getElementById('video-audio-unavailable-note');
 
-    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+    const refreshTracks = (tracks, currentTrack) => {
         if (videoHls !== hls) return;
-        note.style.display = (data.audioTracks || []).length === 0 ? 'block' : 'none';
+        const list = tracks || hls.audioTracks || [];
+        note.style.display = list.length === 0 ? 'block' : 'none';
+        updateAudioTrackOptions(list, currentTrack !== undefined ? currentTrack : hls.audioTrack);
+    };
+
+    hls.on(Hls.Events.MANIFEST_PARSED, (event, data) => {
+        refreshTracks(data.audioTracks, hls.audioTrack);
     });
 
     hls.on(Hls.Events.AUDIO_TRACKS_UPDATED, (event, data) => {
+        refreshTracks(data.audioTracks, hls.audioTrack);
+    });
+
+    hls.on(Hls.Events.AUDIO_TRACK_SWITCHED, (event, data) => {
         if (videoHls !== hls) return;
-        const tracks = data.audioTracks || [];
-        if (tracks.length < 2) {
+        if (typeof data.id === 'number') {
+            select.value = String(data.id);
+        }
+    });
+
+    function updateAudioTrackOptions(tracks, activeIndex) {
+        if (!tracks || tracks.length < 2) {
             select.style.display = 'none';
             select.replaceChildren();
             return;
@@ -176,15 +187,23 @@ function setupAudioTrackUi(hls, Hls) {
         select.replaceChildren(...tracks.map((track, idx) => {
             const option = document.createElement('option');
             option.value = String(idx);
-            option.textContent = track.name || track.lang || ('Audio Track ' + (idx + 1));
-            option.selected = idx === hls.audioTrack;
+            let label = track.name || track.lang || ('Audio Track ' + (idx + 1));
+            option.textContent = label;
+            option.selected = idx === (activeIndex >= 0 ? activeIndex : 0);
             return option;
         }));
         select.style.display = 'inline-block';
-    });
+    }
 
     select.onchange = () => {
-        if (videoHls === hls) hls.audioTrack = Number(select.value);
+        if (videoHls === hls) {
+            const targetIdx = Number(select.value);
+            hls.audioTrack = targetIdx;
+            const selectedText = select.options[select.selectedIndex]?.textContent || '';
+            if (typeof showToast === 'function' && selectedText) {
+                showToast(`Audio: ${selectedText}`);
+            }
+        }
     };
 }
 

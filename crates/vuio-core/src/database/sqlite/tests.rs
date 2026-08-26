@@ -201,6 +201,8 @@ async fn a_v1_database_migrates_forward_without_losing_anything() {
     assert_eq!(file.artist.as_deref(), Some("Artist"));
     // New columns exist and are empty until a scan re-reads the file.
     assert_eq!(file.tags.disc_number, None);
+    assert_eq!(file.stream.codec, None);
+    assert_eq!(file.stream.video_codec, None, "v7's column");
     assert_eq!(file.tags_version, 0);
 
     // Everything a rebuild would have thrown away.

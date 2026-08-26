@@ -1,0 +1,71 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "external_libxaac_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["external_libxaac_license"],
+}
+
+cc_test {
+    name: "xaacdec",
+
+    vendor_available: true,
+    host_supported: true,
+    gtest: false,
+
+    cflags: [
+        "-O3",
+        "-UARM_PROFILE_HW",
+        "-UARM_PROFILE_BOARD",
+        "-DECLIPSE",
+        "-DDRC_ENABLE",
+        "-DMULTICHANNEL_ENABLE",
+        "-DENABLE_DRC",
+        "-DLOUDNESS_LEVELING_SUPPORT",
+    ],
+
+    include_dirs: [
+        "external/libxaac/decoder/",
+    ],
+
+    srcs: [
+        "decoder/ixheaacd_error.c",
+        "decoder/ixheaacd_fileifc.c",
+        "decoder/ixheaacd_main.c",
+        "decoder/ixheaacd_metadata_read.c"
+    ],
+
+    static_libs: ["libxaacdec"],
+
+    shared_libs: ["liblog"],
+}
+
+cc_test {
+    name: "xaacenc",
+
+    vendor_available: true,
+    host_supported: true,
+    gtest: false,
+
+    cflags: [
+        "-O3",
+        "-D_X86_",
+        "-DLOUDNESS_LEVELING_SUPPORT",
+    ],
+
+    include_dirs: [
+        "external/libxaac/encoder/",
+        "external/libxaac/encoder/drc_src/",
+    ],
+
+    srcs: [
+        "encoder/impd_drc_user_config.c",
+        "encoder/ixheaace_error.c",
+        "encoder/ixheaace_testbench.c",
+    ],
+
+    static_libs: ["libxaacenc"],
+
+    shared_libs: ["liblog"],
+}

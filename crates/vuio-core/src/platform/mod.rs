@@ -124,6 +124,7 @@ pub struct NetworkInterface {
 
 /// Types of network interfaces
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum InterfaceType {
     Ethernet,
     WiFi,

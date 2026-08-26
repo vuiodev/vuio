@@ -186,6 +186,10 @@ where
         discovered_tvs: Arc::new(renderer_cache),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(crate::radio::RadioManager::new()),
+        #[cfg(feature = "transcode")]
+        transcode: Arc::new(crate::media::transcode::TranscodeState::new(
+            config.transcode.max_concurrent,
+        )),
         cancellation: cancellation.clone(),
         background_tasks: background_tasks.clone(),
     };

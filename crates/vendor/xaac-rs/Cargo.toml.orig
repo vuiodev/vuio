@@ -1,0 +1,40 @@
+[package]
+name = "xaac-rs"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Yehor Smoliakov <egorsmkv@gmail.com>"]
+description = "High-level Rust AAC/xHE-AAC encoder and decoder bindings built on libxaac"
+readme = "README.md"
+license = "Apache-2.0"
+documentation = "https://docs.rs/xaac-rs"
+keywords = ["aac", "xhe-aac", "usac", "audio", "encoder"]
+categories = ["multimedia::audio", "encoding", "api-bindings"]
+include = [
+    "Cargo.toml",
+    "README.md",
+    "src/**",
+    "examples/**",
+    "tests/**",
+]
+exclude = [
+    "examples/python/",
+]
+
+[lib]
+name = "xaac_rs"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[features]
+default = []
+python = ["dep:pyo3"]
+
+[dependencies]
+libxaac-sys = "0.1.0"
+pyo3 = { version = "0.27", optional = true, features = ["extension-module"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = "symbols"

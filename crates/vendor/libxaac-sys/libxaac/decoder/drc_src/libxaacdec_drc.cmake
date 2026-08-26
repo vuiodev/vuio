@@ -1,0 +1,27 @@
+# src files
+list(
+  APPEND
+  LIBXAACDEC_SRCS
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_api.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_bitbuffer.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_dec.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_dynamic_payload.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_eq.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_extr_delta_coded_info.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_filter_bank.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_gain_dec.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_gain_decoder.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_init.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_interface_decoder.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_loudness_control.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_main_td_process.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_multiband.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_parametric_dec.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_peak_limiter.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_process.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_rom.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_selection_process.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_selection_process_drcset_selection.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_selection_process_init.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_shape_filter.c"
+  "${XAAC_ROOT}/decoder/drc_src/impd_drc_static_payload.c")

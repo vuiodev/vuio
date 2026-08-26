@@ -20,6 +20,8 @@ mod policy;
 pub mod remux;
 mod result;
 mod scanner;
+#[cfg(feature = "transcode")]
+pub mod transcode;
 
 pub use policy::ScanPolicy;
 #[cfg(test)]

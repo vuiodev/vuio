@@ -235,38 +235,113 @@ pub async fn generate_browse_response(
                 file.size.to_string()
             };
 
-            let _ = write!(
-                &mut didl,
-                r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
-                mime = mime_override,
-                dlna_flags = dlna_flags,
-                size = size_val
+            // The same second resource the indexed path offers. Kept in step
+            // with `rendering.rs` deliberately: an item reached through this
+            // fallback must not lose the alternative it would have been given
+            // through the other.
+            let audio_is_dolby = crate::web::item_audio_is_dolby(
+                file.stream.codec.as_deref(),
+                &file.mime_type,
+                &file.filename,
             );
-
-            if let Some(secs) = duration_secs {
-                let _ = write!(&mut didl, r#" duration="{}""#, format_duration(secs));
+            let transcoded = crate::web::transcode_advert(state)
+                .filter(|_| !is_radio)
+                .filter(|_| {
+                    crate::web::item_needs_transcode(
+                        file.stream.codec.as_deref(),
+                        &file.mime_type,
+                        &file.filename,
+                    )
+                })
+                .filter(|advert| advert.resource_for(&file.mime_type, audio_is_dolby).is_some())
+                .filter(|_| {
+                    !file.mime_type.starts_with("video/")
+                        || crate::web::item_can_remux_video(file.stream.video_codec.as_deref())
+                });
+            let is_dts = !file.mime_type.starts_with("video/")
+                || file
+                    .stream
+                    .codec
+                    .as_deref()
+                    .map(|c| c.trim().to_ascii_lowercase())
+                    .map(|c| c == "dca" || c == "dts" || c == "a_dts")
+                    .unwrap_or_else(|| {
+                        file.mime_type.contains("dts")
+                            || file.filename.to_ascii_lowercase().ends_with(".dts")
+                    });
+            // Whether to hide the original, not whether to offer the decoded
+            // resource. The decoded resource is offered either way — a renderer
+            // that cannot play the original and is shown nothing else plays
+            // nothing at all, which is the failure this whole path exists to
+            // prevent. What `is_dts` decides is only whether the original is
+            // worth leaving beside it: a television that cannot license DTS is
+            // certain not to have it, where AC-3 is common enough that hiding
+            // the original would take away a working choice.
+            let is_forced = transcoded.as_ref().is_some_and(|a| a.first && is_dts);
+            if let Some(advert) = transcoded.filter(|a| a.first) {
+                let _ = advert.write_didl(
+                    &mut didl,
+                    server_ip,
+                    state.http_binding.port(),
+                    &AdvertItem {
+                        file_id,
+                        mime: &file.mime_type,
+                        duration: duration_secs,
+                        source_size: file.size,
+                        audio_is_dolby,
+                    },
+                );
             }
 
-            if (client == crate::web::client::DlnaClientProfile::LgTv
-                || client == crate::web::client::DlnaClientProfile::PanasonicTv)
-                && has_srt
-            {
+            if !is_forced {
                 let _ = write!(
                     &mut didl,
-                    r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                    r#"<res protocolInfo="http-get:*:{mime}:{dlna_flags}" size="{size}""#,
+                    mime = mime_override,
+                    dlna_flags = dlna_flags,
+                    size = size_val
+                );
+
+                if let Some(secs) = duration_secs {
+                    let _ = write!(&mut didl, r#" duration="{}""#, format_duration(secs));
+                }
+
+                if (client == crate::web::client::DlnaClientProfile::LgTv
+                    || client == crate::web::client::DlnaClientProfile::PanasonicTv)
+                    && has_srt
+                {
+                    let _ = write!(
+                        &mut didl,
+                        r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                        server_ip,
+                        state.http_binding.port(),
+                        file_id
+                    );
+                }
+
+                let _ = write!(
+                    &mut didl,
+                    r#">http://{}:{}/media/{}</res>"#,
                     server_ip,
                     state.http_binding.port(),
                     file_id
                 );
-            }
 
-            let _ = write!(
-                &mut didl,
-                r#">http://{}:{}/media/{}</res>"#,
-                server_ip,
-                state.http_binding.port(),
-                file_id
-            );
+                if let Some(advert) = transcoded.filter(|a| !a.first) {
+                    let _ = advert.write_didl(
+                        &mut didl,
+                        server_ip,
+                        state.http_binding.port(),
+                        &AdvertItem {
+                            file_id,
+                            mime: &file.mime_type,
+                            duration: duration_secs,
+                            source_size: file.size,
+                            audio_is_dolby,
+                        },
+                    );
+                }
+            }
 
             if client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
                 let _ = write!(

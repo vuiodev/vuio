@@ -63,6 +63,28 @@ pub(super) fn default_true() -> bool {
     true
 }
 
+/// High enough not to refuse anything a household actually does.
+///
+/// This began as a tuning figure — two, on the reasoning that a small box should
+/// not run four decoders while serving the library. What that missed is that a
+/// renderer does not open one connection per film. A television opens three
+/// within a second of pressing play: one to play on, one to read the end of the
+/// file, and one to play on again. Against a ceiling of two, the third is
+/// refused, and what the viewer sees is a film that will not start.
+///
+/// It also over-charged for the work. The picture is passed through and so is
+/// Dolby, so most sessions are a remux costing almost nothing; only a DTS
+/// soundtrack is really decoded, at about a hundredth of a core per track. A low
+/// ceiling was mostly refusing work that was nearly free.
+///
+/// So this is no longer a tuning knob but a guard against something having gone
+/// wrong — a renderer looping on a failure, or a crawler. Anyone with a genuine
+/// reason to cap the CPU can still set it, and zero is rejected outright by
+/// [`crate::config::validation`] because it would refuse every transcode.
+pub(super) fn default_transcode_max_concurrent() -> usize {
+    100
+}
+
 pub(super) fn default_web_ui_port() -> u16 {
     8090
 }
@@ -130,6 +152,22 @@ impl ConfigOverrides {
                 })
                 .collect();
         }
+        if let Ok(v) = std::env::var("VUIO_TRANSCODE")
+            .or_else(|_| std::env::var("VUIO_TRANSCODE_MODE"))
+            .or_else(|_| std::env::var("VUIO_TRANSCODE_PREFER"))
+        {
+            if let Some(mode) = TranscodeMode::parse(&v) {
+                config.transcode.mode = mode;
+                if mode == TranscodeMode::Disabled {
+                    config.transcode.enabled = false;
+                }
+            }
+        }
+        if let Ok(v) = std::env::var("VUIO_TRANSCODE_AUDIO_FORMAT") {
+            if let Some(fmt) = TranscodeAudioFormat::parse(&v) {
+                config.transcode.audio_format = fmt;
+            }
+        }
     }
 
     /// The settings this forces, as dotted config keys and the value in force, so a
@@ -170,6 +208,8 @@ pub struct AppConfig {
     pub web_ui: WebUiConfig,
     #[serde(default)]
     pub mcp: McpConfig,
+    #[serde(default)]
+    pub transcode: TranscodeConfig,
 }
 
 /// The Model Context Protocol server, which lets an AI agent browse, search and
@@ -204,6 +244,160 @@ impl Default for McpConfig {
             enabled: true,
             read_only: false,
             require_auth: false,
+        }
+    }
+}
+
+/// Decoding AC-3, E-AC-3 and DTS for renderers that cannot play them.
+///
+/// Defaulted as a whole, like `[mcp]` and `[web_ui]`: a config file written
+/// before this existed has no `[transcode]` table and must keep loading.
+///
+/// Parsed in every build, including one compiled without any decoder — the same
+/// rule `[mediainfo]` follows. A server that cannot decode still reads the
+/// section, still reports it to the dashboard, and simply never advertises a
+/// transcoded resource; an operator moving a config file between builds should
+/// not have it rejected by the leaner one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TranscodeConfig {
+    /// Offer a decoded resource beside the original for AC-3/E-AC-3/DTS items.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// Operating mode: enabled (default/auto), forced (transcode always listed first / primary), or disabled.
+    #[serde(default, alias = "prefer")]
+    pub mode: TranscodeMode,
+    /// What the decoded resource is delivered as.
+    #[serde(default)]
+    pub audio_format: TranscodeAudioFormat,
+    /// Ceiling on simultaneous transcode sessions.
+    ///
+    /// A guard against a renderer looping on a failure rather than a tuning
+    /// figure — see [`default_transcode_max_concurrent`] for why it is set where
+    /// it is, and what a television does that a low ceiling breaks.
+    #[serde(default = "default_transcode_max_concurrent")]
+    pub max_concurrent: usize,
+}
+
+impl Default for TranscodeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            mode: TranscodeMode::default(),
+            audio_format: TranscodeAudioFormat::default(),
+            max_concurrent: default_transcode_max_concurrent(),
+        }
+    }
+}
+
+/// What VuIO re-encodes to, wherever it has to re-encode.
+///
+/// One setting for two resources, because it is one decision: a film whose
+/// soundtrack the renderer cannot decode, and a standalone audio file in the
+/// same position, both want the same answer to "then what should it get
+/// instead".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscodeAudioFormat {
+    /// AC-3 (Dolby Digital).
+    ///
+    /// The default, and the only one of the three a television is likely to
+    /// have been built to decode — which is the whole situation this feature
+    /// exists for. It is also the only one that keeps a film's surround
+    /// channels: a DTS 5.1 soundtrack becomes AC-3 5.1 at 640 kbps rather than
+    /// being folded down to stereo, and a 2.0 soundtrack becomes AC-3 2.0 at
+    /// 192. Standalone audio files are still delivered as stereo — see
+    /// [`crate::media::transcode::plan`] for why a renderer that needed the
+    /// decode is not one with a surround set behind it.
+    #[default]
+    Ac3,
+    /// AAC-LC in ADTS framing.
+    ///
+    /// What this used to do, kept for a renderer that turns out to prefer it.
+    /// Roughly a third of AC-3's bitrate, folded down to stereo in every case,
+    /// and non-seekable — the encoder's output size is not known ahead of time,
+    /// so the resource is streamed without a `Content-Length`.
+    Aac,
+    /// Linear PCM in a WAV container.
+    ///
+    /// Lossless, and the only one that is not a re-encode at all: a byte offset
+    /// divides straight back into a sample, so the response carries an exact
+    /// `Content-Length` and real byte-range seeking. It costs about 1.5 Mbps,
+    /// which is nothing on a wired or 5 GHz LAN and noticeable over 2.4 GHz,
+    /// and it applies only to standalone audio — a film's soundtrack has to
+    /// share a transport stream with its picture, and PCM will not fit.
+    Lpcm,
+}
+
+impl TranscodeAudioFormat {
+    /// Parse an environment-variable or TOML value, case- and space-insensitively.
+    ///
+    /// `None` for anything unrecognised, so the caller decides between falling
+    /// back and refusing — Docker falls back, a config file refuses.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "ac3" | "ac-3" | "dolby" | "dd" => Some(Self::Ac3),
+            "aac" => Some(Self::Aac),
+            "lpcm" | "pcm" | "wav" => Some(Self::Lpcm),
+            _ => None,
+        }
+    }
+
+    /// The value as it is written in a config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ac3 => "ac3",
+            Self::Aac => "aac",
+            Self::Lpcm => "lpcm",
+        }
+    }
+
+    /// What a film's soundtrack becomes when it has to be re-encoded.
+    ///
+    /// PCM is not among the answers: a transport stream carries the soundtrack
+    /// beside the picture, and LPCM at 1.5 Mbps a channel does not belong
+    /// there. An operator who asked for `lpcm` is answering a question about
+    /// standalone audio files, so a film falls back to the default.
+    pub fn soundtrack(self) -> Self {
+        match self {
+            Self::Lpcm => Self::Ac3,
+            other => other,
+        }
+    }
+}
+
+/// Operating mode for transcode advertisement and delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TranscodeMode {
+    /// Transcoding is enabled and offered alongside the original format.
+    #[default]
+    #[serde(alias = "original", alias = "auto", alias = "true")]
+    Enabled,
+    /// Transcoding is forced: transcoded streams are listed first so any TV is forced to play the transcoded version.
+    #[serde(alias = "transcoded", alias = "force", alias = "always")]
+    Forced,
+    /// Transcoding is disabled.
+    #[serde(alias = "disable", alias = "off", alias = "false")]
+    Disabled,
+}
+
+impl TranscodeMode {
+    /// Parse an environment-variable or TOML value, case- and space-insensitively.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "enabled" | "enable" | "auto" | "true" | "original" => Some(Self::Enabled),
+            "forced" | "force" | "always" | "transcoded" => Some(Self::Forced),
+            "disabled" | "disable" | "off" | "false" => Some(Self::Disabled),
+            _ => None,
+        }
+    }
+
+    /// The value as it is written in a config file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enabled => "enabled",
+            Self::Forced => "forced",
+            Self::Disabled => "disabled",
         }
     }
 }

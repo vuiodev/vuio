@@ -1,0 +1,144 @@
+#In order to support DRC AMD-2(ISO/IEC 23003-4:2020/Amd. 2:2023(E)), `leveling_present` and `ducking_only_set` fields are introduced in DRC config file.
+#For a given DRC effect, when both `leveling_present` and `ducking_only_set` are set to 1, automatically the next drc instruction is treated as ducking only set.
+#For example, if the second DRC effect is marked as 2048/4096 with  `leveling_present` is set to 1 and `ducking_only_set` is set to 1, then the third DRC effect will be treated as ducking-only.
+#For the last drc instruction, `leveling_present` and `ducking_only_set` fields are ignored and reset to 0. Maximum supported instructions are 8.
+
+#####str_drc_instructions_uni_drc#####
+drc_instructions_uni_drc_count:0
+#####str_drc_coefficients_uni_drc#####
+drc_coefficients_uni_drc_count:0
+
+########### uniDRCv1 configuration ###########
+uni_drc_config_ext_present:1
+
+#####str_downmix_instructions_v1#####
+downmix_instructions_v1_present:1
+
+downmix_instructions_v1_count:1
+#n=0
+target_layout:1
+#s=0
+downmix_coeff:0.70794578438
+#end downmix coeeficients
+
+######## str_drc_coefficients_uni_drc_v1 & str_drc_instructions_uni_drc_v1 ########
+drc_coeffs_and_instructions_uni_drc_v1_present:1
+
+#####str_drc_coefficients_uni_drc_v1#####
+drc_coefficients_uni_drc_count_v1:1
+#n=0
+gain_set_count:3
+#s=0
+band_count:1
+#gain parameters m=0
+nb_points:3
+x:-60.0
+y:-40.0
+x:-30.0
+y:-30.0
+x:0.0
+y:-20.0
+width:0.01
+attack:0.01
+decay:5.0
+#end gain parameters
+#s=1
+band_count:1
+#gain parameters m=0
+nb_points:2
+x:-50.0
+y:-50.0
+x:0.0
+y:-10.0
+width:0.01
+attack:0.01
+decay:5.0
+#s=2
+band_count:1
+#gain parameters m=0
+nb_points:3
+x:-60.0
+y:-60.0
+x:-20.0
+y:-15.0
+x:0.0
+y:-5.0
+width:0.01
+attack:0.01
+decay:5.0
+#end gain parameters
+#####str_drc_instructions_uni_drc_v1#####
+drc_instructions_uni_drc_count_v1:3
+#n=0
+downmix_id:0
+drc_set_effect:0x0001
+gain_set_channels:8
+gain_set_index:0
+gain_set_index:0
+gain_set_index:0
+gain_set_index:0
+gain_set_index:0
+gain_set_index:0
+gain_set_index:0
+gain_set_index:0
+num_drc_channel_groups:1
+#n=1
+downmix_id:0
+drc_set_effect:0x800
+gain_set_channels:8
+gain_set_index:1
+gain_set_index:1
+gain_set_index:1
+gain_set_index:1
+gain_set_index:1
+gain_set_index:1
+gain_set_index:1
+gain_set_index:1
+num_drc_channel_groups:1
+#leveling present flag
+leveling_present:1
+#if ducking_only_set is one next drc instruction's set effect is set to 0x800 (ducking/leveling self)
+ducking_only_set_present:1
+#n=2
+downmix_id:0
+drc_set_effect:0x0800
+gain_set_channels:8
+gain_set_index:2
+gain_set_index:2
+gain_set_index:2
+gain_set_index:2
+gain_set_index:2
+gain_set_index:2
+gain_set_index:2
+gain_set_index:2
+num_drc_channel_groups:1
+leveling_present:0
+ducking_only_set_present:0
+########### end of uniDRCv1 configuration ###########
+
+#loudness info parameters
+loudness_info_count:1
+#n=0
+drc_set_id:1
+downmix_id:0
+sample_peak_level_present:1
+sample_peak_level:0.0
+true_peak_level_present:1
+true_peak_level:0.0
+true_peak_level_measurement_system:2
+true_peak_level_reliability:3
+measurement_count:1
+#m=0
+method_definition:1
+method_value:-16.0
+measurement_system:2
+reliability:3
+#end loudness info parameters
+
+#loudness info album parameters
+loudness_info_album_count:0
+#end of loudness info album parameters
+
+#####loudness info set extension#####
+loudness_info_set_ext_present:0
+# end of loudness info set extension

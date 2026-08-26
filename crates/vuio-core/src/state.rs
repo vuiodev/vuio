@@ -239,6 +239,13 @@ pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
     pub upnp_subscriptions:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, UpnpSubscription>>>,
     pub radio: Arc<crate::radio::RadioManager>,
+    /// Index cache and concurrency ceiling for decoding AC-3/E-AC-3/DTS.
+    ///
+    /// Lives here rather than in the handler because it is shared across
+    /// requests by design: a renderer's `HEAD`, `GET` and range requests for one
+    /// file should build its frame index once, not once each.
+    #[cfg(feature = "transcode")]
+    pub transcode: Arc<crate::media::transcode::TranscodeState>,
     pub cancellation: tokio_util::sync::CancellationToken,
     pub background_tasks: tokio_util::task::TaskTracker,
 }
@@ -271,6 +278,8 @@ impl<D: DatabaseManager> Clone for AppState<D> {
             discovered_tvs: self.discovered_tvs.clone(),
             upnp_subscriptions: self.upnp_subscriptions.clone(),
             radio: self.radio.clone(),
+            #[cfg(feature = "transcode")]
+            transcode: self.transcode.clone(),
             cancellation: self.cancellation.clone(),
             background_tasks: self.background_tasks.clone(),
         }

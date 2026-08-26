@@ -125,6 +125,13 @@ impl AppConfig {
                 "aac".to_string(),
                 "ogg".to_string(),
                 "wma".to_string(),
+                // Elementary Dolby and DTS streams. Listed because VuIO can now
+                // decode them for renderers that cannot — before that there was
+                // nothing useful to do with one, which is why they were absent.
+                "ac3".to_string(),
+                "eac3".to_string(),
+                "ec3".to_string(),
+                "dts".to_string(),
                 "jpg".to_string(),
                 "jpeg".to_string(),
                 "png".to_string(),
@@ -224,6 +231,32 @@ impl AppConfig {
                 enabled: env_flag("VUIO_MCP_ENABLED").unwrap_or(true),
                 read_only: env_flag("VUIO_MCP_READ_ONLY").unwrap_or(false),
                 require_auth: env_flag("VUIO_MCP_REQUIRE_AUTH").unwrap_or(false),
+            },
+            transcode: TranscodeConfig {
+                enabled: env_flag("VUIO_TRANSCODE_ENABLED").unwrap_or_else(|| {
+                    if let Ok(v) = std::env::var("VUIO_TRANSCODE") {
+                        !matches!(
+                            v.trim().to_ascii_lowercase().as_str(),
+                            "disabled" | "disable" | "off" | "false"
+                        )
+                    } else {
+                        true
+                    }
+                }),
+                mode: std::env::var("VUIO_TRANSCODE")
+                    .or_else(|_| std::env::var("VUIO_TRANSCODE_MODE"))
+                    .or_else(|_| std::env::var("VUIO_TRANSCODE_PREFER"))
+                    .ok()
+                    .and_then(|v| TranscodeMode::parse(&v))
+                    .unwrap_or_default(),
+                audio_format: std::env::var("VUIO_TRANSCODE_AUDIO_FORMAT")
+                    .ok()
+                    .and_then(|v| TranscodeAudioFormat::parse(&v))
+                    .unwrap_or_default(),
+                max_concurrent: std::env::var("VUIO_TRANSCODE_MAX_CONCURRENT")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or_else(default_transcode_max_concurrent),
             },
         })
     }
@@ -346,6 +379,7 @@ impl AppConfig {
         };
 
         Self {
+            transcode: TranscodeConfig::default(),
             server: ServerConfig {
                 port: platform_config
                     .preferred_ports

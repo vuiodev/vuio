@@ -415,6 +415,64 @@ const WEB_UI_FIELDS: &[FieldSpec] = &[
     ),
 ];
 
+const TRANSCODE_FIELDS: &[FieldSpec] = &[
+    noted(
+        optional(
+            "transcode.enabled",
+            "Offer decoded audio",
+            FieldKind::Bool,
+            Impact::Live,
+            "For films whose audio is AC-3, Dolby Digital Plus or DTS, list a second, \
+             already-decoded version beside the original so a TV without those licences \
+             can play it with sound.",
+        ),
+        "Both versions are offered and the TV picks. One that can already play the original \
+         is unaffected.",
+    ),
+    noted(
+        optional(
+            "transcode.audio_format",
+            "Decoded audio format",
+            FieldKind::Enum {
+                options: &["ac3", "aac", "lpcm"],
+                free_form: false,
+            },
+            Impact::Live,
+            "AC-3 is what a television was built to decode, and the only one that keeps a \
+             film's surround channels instead of folding them down to stereo. AAC is about a \
+             third of the bitrate, stereo, and cannot be scrubbed. LPCM is uncompressed and \
+             seekable but costs about 1.5 Mbps and applies to audio files only.",
+        ),
+        "AC-3 is the one to leave alone: it is the format the TVs this feature exists for \
+         already decode, and it is the only setting under which a 5.1 film reaches them in 5.1.",
+    ),
+    noted(
+        optional(
+            "transcode.mode",
+            "Transcode Mode",
+            FieldKind::Enum {
+                options: &["enabled", "forced", "disabled"],
+                free_form: false,
+            },
+            Impact::Live,
+            "Operating mode: enabled (auto/standard), forced (transcoded stream listed first for all TVs), or disabled.",
+        ),
+        "Use \u{201c}forced\u{201d} to force all TVs (even those with native DTS support) to play the transcoded AAC stream.",
+    ),
+    noted(
+        optional(
+            "transcode.max_concurrent",
+            "Simultaneous decodes",
+            FieldKind::Int { min: 1, max: 32 },
+            Impact::Live,
+            "How many decodes may run at once. Beyond this, a further request is refused \
+             rather than queued.",
+        ),
+        "Decoding is the only CPU-heavy work this server does. Raising it on a small box \
+         trades stutter on the streams already playing for the chance to start another.",
+    ),
+];
+
 const MCP_FIELDS: &[FieldSpec] = &[
     noted(
         optional(
@@ -572,6 +630,16 @@ const SECTIONS: &[SectionSpec] = &[
         title: "Access",
         blurb: "Who may reach the dashboard and the management API.",
         fields: MANAGEMENT_FIELDS,
+        directories: false,
+        panel: false,
+    },
+    SectionSpec {
+        id: "transcode",
+        title: "Transcode",
+        blurb: "Films often carry AC-3, Dolby Digital Plus or DTS audio, and a TV sold without \
+                those licences plays the picture and nothing else. VuIO can decode them and \
+                offer a second, playable version beside the original.",
+        fields: TRANSCODE_FIELDS,
         directories: false,
         panel: false,
     },

@@ -8,6 +8,7 @@ use crate::database::{DatabaseManager, MediaFile, Playlist};
 
 /// Supported playlist file formats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(clippy::upper_case_acronyms)]
 pub enum PlaylistFormat {
     M3U,
     PLS,

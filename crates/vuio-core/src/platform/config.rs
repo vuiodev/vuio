@@ -465,6 +465,11 @@ impl PlatformConfig {
             "aac".to_string(),
             "ogg".to_string(),
             "wma".to_string(),
+            // Elementary Dolby and DTS streams, decodable since `media::transcode`.
+            "ac3".to_string(),
+            "eac3".to_string(),
+            "ec3".to_string(),
+            "dts".to_string(),
             "m4a".to_string(),
             "opus".to_string(),
             "ape".to_string(),

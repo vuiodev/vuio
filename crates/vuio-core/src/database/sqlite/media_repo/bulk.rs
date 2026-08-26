@@ -22,10 +22,11 @@ INSERT INTO media_files (
     disc_number, disc_total, track_total, composer, comment, bpm, compilation,
     sort_title, sort_artist, sort_album, release_date,
     musicbrainz_track_id, musicbrainz_album_id, musicbrainz_artist_id,
-    codec, sample_rate, channels, bits_per_sample, bit_rate, tags_version
-) VALUES (?39, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+    codec, sample_rate, channels, bits_per_sample, bit_rate, tags_version,
+    video_codec
+) VALUES (?40, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
           ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35,
-          ?36, ?37, ?38)";
+          ?36, ?37, ?38, ?39)";
 
 pub(in crate::database::sqlite) const UPDATE_MEDIA: &str = "\
 UPDATE media_files SET
@@ -38,10 +39,10 @@ UPDATE media_files SET
     sort_artist = ?27, sort_album = ?28, release_date = ?29,
     musicbrainz_track_id = ?30, musicbrainz_album_id = ?31, musicbrainz_artist_id = ?32,
     codec = ?33, sample_rate = ?34, channels = ?35, bits_per_sample = ?36,
-    bit_rate = ?37, tags_version = ?38
-WHERE id = ?39";
+    bit_rate = ?37, tags_version = ?38, video_codec = ?39
+WHERE id = ?40";
 
-/// The thirty-eight stored fields, in the order both statements bind them.
+/// The thirty-nine stored fields, in the order both statements bind them.
 pub(in crate::database::sqlite) fn bind_media_file(file: &MediaFile) -> Vec<Value> {
     let path = file.path.to_string_lossy().into_owned();
     let parent = SqliteDatabase::parent_directory(&path).unwrap_or_default();
@@ -92,6 +93,7 @@ pub(in crate::database::sqlite) fn bind_media_file(file: &MediaFile) -> Vec<Valu
         optional_integer(file.stream.bits_per_sample.map(u32::from)),
         optional_integer(file.stream.bit_rate),
         Value::Integer(i64::from(file.tags_version)),
+        optional_text(&file.stream.video_codec),
     ]
 }
 

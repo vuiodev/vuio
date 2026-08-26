@@ -34,6 +34,8 @@ watch_for_changes = true
 supported_extensions = [
     "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg", "3gp", "ogv",
     "mp3", "flac", "wav", "aac", "ogg", "wma", "m4a", "opus", "ape",
+    # Elementary Dolby and DTS streams, decoded for renderers that cannot play them.
+    "ac3", "eac3", "ec3", "dts",
     "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "svg", "heif", "heic", "avif"
 ]
 # cleanup_deleted_files = true          # Drop files the startup scan finds gone
@@ -121,3 +123,42 @@ port = 8090                             # Must differ from server.port
 # Whether a fetched title outranks the one read from the file's own tags.
 # prefer_online_titles = true
 # request_timeout_seconds = 15
+
+# Audio for TVs that cannot decode AC-3, Dolby Digital Plus or DTS.
+# Those codecs are licensed, and a set sold without the licence plays the
+# picture and nothing else. When this is on, such a film is offered twice — the
+# original and an already-decoded version — and the TV plays whichever it can.
+# A TV that was already fine is unaffected.
+[transcode]
+enabled = true
+# What the decoded version is delivered as.
+#   ac3   Dolby Digital, which is what a television was built to decode. The
+#         only one that keeps a film's surround: a DTS 5.1 soundtrack arrives
+#         as AC-3 5.1 at 640 kbps rather than folded down to a stereo pair.
+#         Constant-bitrate, so an audio item gets an exact Content-Length and
+#         real byte-range seeking
+#   aac   about a third of that, lossy, and folded down to stereo in every
+#         case. The encoder's output size is not known ahead of time, so an
+#         audio item carries no Content-Length and cannot be scrubbed
+#   lpcm  uncompressed, seekable, about 1.5 Mbps. Audio items only — a film's
+#         soundtrack shares a transport stream with the picture, where PCM at
+#         1.5 Mbps a channel does not fit, so a film falls back to ac3
+# A film's picture is copied through untouched whatever this says. To a
+# television it goes as a transport stream, seekable by byte; to the browser
+# player as fragmented MP4 with AAC, because no browser decodes AC-3.
+audio_format = "ac3"
+# Operating mode for transcode advertisement:
+#   enabled   transcode is available; original stream listed first, transcode as alternative
+#   forced    transcode is forced; only transcoded stream is offered so every TV plays it
+#   disabled  transcode is disabled
+mode = "enabled"
+# Sessions allowed at once, shared between TVs and the browser player. Past this
+# a further request is refused rather than queued.
+#
+# Set high on purpose. A television opens three connections within a second of
+# pressing play — one to play on, one to read the end of the file, and one to
+# play on again — so a low ceiling refuses the one it meant to play on and the
+# film never starts. The work is cheap besides: the picture is passed through
+# and so is Dolby, and only a DTS soundtrack is really decoded. Lower it only if
+# you have a genuine reason to cap the CPU.
+max_concurrent = 100

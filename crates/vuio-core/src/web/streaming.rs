@@ -71,6 +71,14 @@ pub async fn serve_media<D: DatabaseManager>(
 ) -> Result<Response, AppError> {
     let start_time = Instant::now();
 
+    // Only the opening request of a playback, not every range request that
+    // follows it — what this is for is seeing which resource a renderer chose
+    // and how it seeks, and one line per scrub says that without one line per
+    // buffer refill.
+    if !headers.contains_key(header::RANGE) {
+        crate::web::client::log_renderer_request(&format!("/media/{id}"), &method, &headers);
+    }
+
     let file_id = media_id_from_path_segment(&id).ok_or_else(|| {
         state.web_metrics.record_error();
         AppError::NotFound
@@ -316,7 +324,7 @@ pub(crate) fn media_id_from_path_segment(segment: &str) -> Option<i64> {
 }
 
 // Helper function to parse range header manually
-fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
+pub(crate) fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64, u64), AppError> {
     if file_size == 0 {
         return Err(AppError::InvalidRange);
     }

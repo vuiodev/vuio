@@ -1,0 +1,189 @@
+/******************************************************************************
+ *                                                                            *
+ * Copyright (C) 2023 The Android Open Source Project
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ *
+ *****************************************************************************
+ * Originally developed and contributed by Ittiam Systems Pvt. Ltd, Bangalore
+ */
+
+#pragma once
+#define NUM_QMF_BANDS (64)
+#define MAX_HYBRID_BANDS (71)
+
+#define MAX_INPUT_CHANNELS (6)
+#define MAX_OUTPUT_CHANNELS (2)
+#define PARAMETER_BANDS (20)
+
+#define MAX_QMF_BANDS_TO_HYBRID (7)
+#define MAX_HYBRID_ONLY_BANDS_PER_QMF (16)
+#define PROTO_LEN (13)
+#define BUFFER_LEN_LF (PROTO_LEN - 1 + MAX_TIME_SLOTS)
+
+#define BUFFER_LEN_HF ((PROTO_LEN - 1) / 2)
+
+#define MAX_BUFFER_SIZE (2048)
+#define HYBRID_FILTER_DELAY (6)
+#define QMF_FILTER_STATE_SYN_SIZE (640)
+#define NUM_QMF_BANDS_TO_LF (3)
+
+#define MPS_MAX_FRAME_LENGTH (4096)
+#define MAX_SAMPLING_RATE (48000)
+#define NUM_QMF_BANDS (64)
+#define MAX_QMF_BANDS (128)
+
+#define MAX_ANA_TIME_SLOT (192)
+#define MAX_HYBRID_BAND (MAX_QMF_BANDS)
+#define MAX_FRAME_TIME_SLOT (128)
+#define MAX_HYBRID_STATIC_SLOT (96)
+#define IXHEAACE_MPS_MAX_NUM_BOXES (1)
+#define IXHEAACE_MPS_MAX_INPUT_CHANNELS (2)
+#define IXHEAACE_MPS_MAX_OUTPUT_CHANNELS (1)
+
+#define EPSILON (1e-9f)
+#define PI_FLT (3.1415926535897931f)
+#define ALPHA (0.0001f)
+
+#define MAX_DELAY_INPUT (1024)
+#define MAX_DELAY_OUTPUT (4096)
+#define MAX_DELAY_SURROUND_ANALYSIS (20)
+#define MAX_BITSTREAM_DELAY (4)
+#define MAX_MPEGS_BYTES (1 << 14)
+#define MAX_SSC_BYTES (1 << 6)
+#define MAX_MPS_BS_PAYLOAD_SIZE 10000
+#define MAX_SPACE_TREE_CHANNELS (2)
+#define NUM_KEEP_WINDOWS (3)
+
+#define WIN_ACTIV (1)
+#define MAX_KEEP_FRAMECOUNT (100)
+
+#define LEFT_CH (0)
+#define RIGHT_CH (1)
+
+#define SPACE_ONSET_THRESHOLD (3.0)
+#define SPACE_ONSET_THRESHOLD_SQUARE_FLT ((1.0 / (SPACE_ONSET_THRESHOLD * SPACE_ONSET_THRESHOLD)))
+#define MAX_NUM_TRANS (MAX_NUM_PARAMS / 2)
+
+#define MAX_FREQ_RES_INDEX (8)
+#define MAX_SAMPLING_FREQUENCY_INDEX (13)
+#define SAMPLING_FREQUENCY_INDEX_ESCAPE (15)
+
+#define IXHEAACE_MPS_SAC_VAR_HOLD (0)
+#define IXHEAACE_MPS_SAC_VAR_ISOLATE (1)
+#define IXHEAACE_MPS_FRAME_WINDOWING_INTP (0)
+#define IXHEAACE_MPS_FRAME_WINDOWING_HOLD (1)
+
+#define IXHEAACE_MPS_SAC_MAX_FREQ_BANDS (MAX_NUM_BINS)
+
+#define IXHEAACE_MPS_MAX_CLD_QUANT_FINE (31)
+#define IXHEAACE_MPS_MAX_CLD_QUANT_COARSE (15)
+#define IXHEAACE_MPS_OFFSET_CLD_QUANT_COARSE (7)
+#define IXHEAACE_MPS_OFFSET_CLD_QUANT_FINE (15)
+
+#define IXHEAACE_MPS_MAX_ICC_QUANT_COARSE (4)
+#define IXHEAACE_MPS_MAX_ICC_QUANT_FINE (8)
+#define IXHEAACE_MPS_OFFSET_ICC_QUANT_COARSE (0)
+#define IXHEAACE_MPS_OFFSET_ICC_QUANT_FINE (0)
+
+#define MAX_NUM_PARAM_BANDS (56)
+
+#define IXHEAACE_MPS_TREE_5151 (0)
+#define IXHEAACE_MPS_TREE_5152 (1)
+#define IXHEAACE_MPS_TREE_525 (2)
+#define IXHEAACE_MPS_TREE_212 (7)
+#define IXHEAACE_MPS_FIXED_GAIN_DMX_INVALID (-1)
+#define IXHEAACE_MPS_MAX_FIXED_GAIN_DMX (7)
+
+#define IXHEAACE_MPS_DECORR_INVALID (-1)
+#define IXHEAACE_MPS_DECORR_QMFSPLIT0 (0)
+#define IXHEAACE_MPS_DECORR_QMFSPLIT1 (1)
+#define IXHEAACE_MPS_DECORR_QMFSPLIT2 (2)
+
+#define IXHEAACE_MPS_DATA_MODE_DEFAULT (0)
+#define IXHEAACE_MPS_DATA_MODE_KEEP (1)
+#define IXHEAACE_MPS_DATA_MODE_INTERPOLATE (2)
+#define IXHEAACE_MPS_DATA_MODE_FINECOARSE (3)
+
+#define MAX_NUM_BOXES (5)
+#define MAX_AAC_SHORTWINDOWGROUPS (4)
+#define MAX_AAC_MDCT (1024)
+#define MAX_AAC_FRAMES (2)
+
+#define NUM_DATATYPES (3)
+
+#define DELAY_COMPENSATION (352)
+
+#define LOG10_2_10 (3.01029995664f)
+#define INV_LN_10_10 (4.3429448190325182765112891891661f)
+
+#define IXHEAACE_MPS_SAC_MODE_INVALID (0)
+#define IXHEAACE_MPS_DMX_GAIN_DEFAULT (2)
+#define IXHEAACE_MPS_SAC_BANDS_INVALID (0)
+#define IXHEAACE_MPS_SAC_BANDS_ld (15)
+#define IXHEAACE_MPS_SAC_BANDS_usac (28)
+
+#define IXHEAACE_MPS_QUANTMODE_INVALID (-1)
+#define IXHEAACE_MPS_QUANTMODE_FINE (0)
+#define IXHEAACE_MPS_QUANTMODE_EBQ1 (1)
+#define IXHEAACE_MPS_QUANTMODE_EBQ2 (2)
+#define IXHEAACE_MPS_QUANTMODE_RSVD3 (3)
+
+#define IXHEAACE_MPS_INPUT_BUFFER_IDX (0)
+#define IXHEAACE_MPS_OUTUT_BUFFER_IDX (0)
+#define IXHEAACE_MPS_BITSTREAM_BUFFER_IDX (1)
+
+#define QMF_FILTER_PROTOTYPE_SIZE 640
+#define QMF_NO_POLY 5
+#define QMF640_PFT_TABLE_SIZE (640 / 2 + QMF_NO_POLY)
+#define QMF320_MPSLDFB_PFT_TABLE_SIZE (320)
+#define QMF640_MPSLDFB_PFT_TABLE_SIZE (640)
+#define QMF_MPSLDFB_PFT_SCALE 1
+
+#define MAX_MPEGS_BYTES (1 << 14)
+#define MAX_SSC_BYTES (1 << 6)
+#define MAX_HYBRID_BAND_OFFSET (64)
+
+#define SQUARE_ROOT_TWO (1.41421356237f)
+#define MPS_PAYLOAD_SIZE (1024)
+#define ONE_BY_LN_TWO (1.44269504089f)
+
+#define PBC_MIN_BANDS 5
+#define MAXBANDS 56
+
+#define MAX_FACTORS 23
+#define MAX_PERM 209
+#define NFACTOR 11
+#ifndef M_PI
+#define M_PI 3.14159265358979323846264338327950288
+#endif
+#define SIN_60 0.86602540378443865
+#define COS_72 0.30901699437494742
+#define SIN_72 0.95105651629515357
+#define COS_22_5 (0.92387953251129f)
+#define COS_67_5 (0.38268343236509f)
+#define SIN_67_5 (0.92387953251129f)
+#define SIN_22_5 (0.38268343236509f)
+#define INV_SQRT_2 (0.70710678118655f)
+
+#define MPS_COS_PI_BY_16 (0.980785280403230f)
+#define MPS_SIN_PI_BY_16 (0.195090322016128f)
+#define MPS_COS_3_PI_BY_16 (0.831469612302545f)
+#define MPS_SIN_3_PI_BY_16 (0.555570233019602f)
+#define MPS_COS_6_PI_BY_16 (0.923879532511287f)
+#define MPS_SIN_6_PI_BY_16 (0.382683432365090f)
+#define MPS_INV_SQRT2 (7.071067811865475e-1f)
+#define MPS_COS_PI_DIV8 (9.238795325112867e-1f)
+#define MPS_COS_3PI_DIV8 (3.826834323650898e-1f)
+#define MPS_SQRT2PLUS1 (2.414213562373095f)
+#define MPS_SQRT2MINUS1 (4.142135623730952e-1f)

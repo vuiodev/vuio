@@ -17,11 +17,283 @@ pub mod radio;
 pub mod soap;
 pub mod streaming;
 pub mod subtitles;
+#[cfg(feature = "transcode")]
+pub mod transcode_streaming;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
+pub mod ts_streaming;
+#[cfg(all(feature = "transcode-aac", feature = "casting"))]
+pub mod video_streaming;
 #[cfg(feature = "dashboard")]
 pub mod ui;
 pub mod xml;
 
 use crate::{database::DatabaseManager, state::AppState};
+
+/// The length a transcoded film commits to when nothing better is known.
+///
+/// Built from the source's own size, because the picture is the bulk of both and
+/// passes through untouched. What that ignores is what the soundtracks do, and
+/// on a film carrying several of them in DTS it is the whole answer: a quarter
+/// of the file leaves re-encoded at an eighth of the rate, so the stream weighs
+/// nothing like the source and this number is out by a factor of three.
+///
+/// Which is why the transport stream does not use it. That resource is the one a
+/// television seeks by byte, so its promise has to be an honest account of what
+/// it produces, and [`crate::media::transcode::promised_ts_length`] builds one
+/// from the film's own measured tracks. This remains for the two cases with
+/// nothing to measure against: the fragmented MP4, which the browser player
+/// fetches whole and never seeks into by byte, and a film whose container
+/// declares no duration, where there is no way to turn bytes into instants at
+/// all.
+///
+/// Rounded up, and that is the part that matters wherever it is used. The
+/// response is made to be exactly this long whatever the muxer produces, so the
+/// estimate being wrong is not the risk — the risk is which way. Short of the
+/// promise is padding the renderer skips; over the promise is the film's last
+/// seconds cut off. So the number leans high.
+pub(crate) fn promised_transcode_length(source_size: u64) -> u64 {
+    /// What to promise for a file the index has no size for. Zero would
+    /// advertise an empty resource, which renderers decline to open at all.
+    const FALLBACK: u64 = 1 << 30;
+    /// Slack over the source, against a source whose own overhead is unusually
+    /// light — a sixteenth, and never less than this many bytes, which is what
+    /// keeps a very short film from being trimmed by its fragment headers.
+    const FLOOR: u64 = 256 * 1024;
+
+    if source_size == 0 {
+        return align_to_packets(FALLBACK);
+    }
+    align_to_packets(source_size + (source_size / 16).max(FLOOR))
+}
+
+/// Round a length down to a whole number of transport packets.
+///
+/// One of the containers this number can describe is a transport stream, which
+/// is a run of 188-byte packets and nothing else. A promise that is not a whole
+/// number of them ends in a fragment of a packet — filler no decoder can read as
+/// anything, sitting where a decoder reading to the end would look. The MP4 path
+/// is indifferent to the alignment, so one aligned number is true of either.
+fn align_to_packets(length: u64) -> u64 {
+    const TS_PACKET: u64 = crate::media::remux::TS_PACKET_LEN as u64;
+    (length / TS_PACKET) * TS_PACKET
+}
+
+/// Whether a byte range is a renderer sizing the resource up rather than seeking
+/// into it.
+///
+/// Renderers read the end of a file before they play it — sixteen bytes for an
+/// MP4 reader looking for a `moov`, a few hundred kilobytes for a transport
+/// stream reader looking for a last timestamp. Both land in the padding that
+/// makes the promised length true, so both can be answered from it directly:
+/// no transcode slot, no muxing, and the bytes are the truth because padding is
+/// the one part of these resources whose contents are known without producing
+/// them.
+///
+/// Getting that wrong in the expensive direction is what stops a film playing.
+/// A probe answered by muxing holds a slot for as long as it takes to seek into
+/// a thirty-gigabyte file, and a television that opens three connections at once
+/// against two slots then has its actual playback request refused outright.
+///
+/// The threshold scales, because "near the end" means something different for a
+/// two-minute clip than for a three-hour film, and it is deliberately small: a
+/// genuine seek this close to the end lands in the last second or two of the
+/// film, where answering with padding costs nothing anyone would notice.
+pub(crate) fn is_probe_tail(first_byte: u64, promised: u64) -> bool {
+    const SMALLEST: u64 = 64 * 1024;
+    const LARGEST: u64 = 8 * 1024 * 1024;
+    let tail = (promised / 128).clamp(SMALLEST, LARGEST);
+    promised.saturating_sub(first_byte) <= tail
+}
+
+/// Whether this item is one a renderer may be unable to play unaided.
+///
+/// True only when the codec is AC-3, E-AC-3 or DTS *and* this build can decode
+/// it — advertising a resource we cannot produce would turn a silent film into
+/// a broken one. The recorded codec is consulted first because it is what a
+/// container's audio track will be identified by; the MIME type and filename
+/// cover an elementary stream, including one indexed before those MIME types
+/// existed.
+#[cfg_attr(not(feature = "transcode"), allow(unused_variables))]
+pub(crate) fn item_needs_transcode(codec: Option<&str>, mime: &str, filename: &str) -> bool {
+    #[cfg(not(feature = "transcode"))]
+    {
+        false
+    }
+    #[cfg(feature = "transcode")]
+    {
+        use crate::media::transcode::TranscodeCodec;
+        codec
+            .and_then(TranscodeCodec::from_stored_codec)
+            .or_else(|| transcode_streaming::codec_for(mime, filename))
+            .is_some_and(TranscodeCodec::is_decodable)
+    }
+}
+
+/// Whether an item's audio is AC-3 or E-AC-3.
+///
+/// Asked of the same three columns as [`item_needs_transcode`] and resolved the
+/// same way, because it is the same question narrowed: of the codecs that need
+/// decoding here, which are the ones a decoded alternative must not itself be.
+/// Only DTS answers `false`, and only DTS can therefore be offered AC-3.
+#[cfg_attr(not(feature = "transcode"), allow(unused_variables))]
+pub(crate) fn item_audio_is_dolby(codec: Option<&str>, mime: &str, filename: &str) -> bool {
+    #[cfg(not(feature = "transcode"))]
+    {
+        false
+    }
+    #[cfg(feature = "transcode")]
+    {
+        use crate::media::transcode::TranscodeCodec;
+        codec
+            .and_then(TranscodeCodec::from_stored_codec)
+            .or_else(|| transcode_streaming::codec_for(mime, filename))
+            .is_some_and(|codec| matches!(codec, TranscodeCodec::Ac3 | TranscodeCodec::Eac3))
+    }
+}
+
+/// Whether a film's picture can be copied into the remuxed alternative.
+///
+/// Needing an alternative and being able to produce one are different
+/// questions, asked of different tracks. The audio decides the first; the video
+/// decides the second, because the alternative copies the picture through
+/// rather than re-encoding it and can only do that for the codecs the fMP4
+/// writer knows how to describe. A film with a VP9 or MPEG-2 picture and an AC-3
+/// soundtrack therefore gets no second resource — advertising one and answering
+/// 404 would be worse than the silence it was meant to fix.
+///
+/// A record written before the scanner recorded video codecs carries `None`.
+/// Those are treated as remuxable: the next scan fills the column in, and until
+/// it does, the far more common case is the one that works.
+pub(crate) fn item_can_remux_video(video_codec: Option<&str>) -> bool {
+    match video_codec {
+        None => true,
+        Some(codec) => matches!(
+            codec.trim().to_ascii_lowercase().as_str(),
+            "h264" | "avc" | "avc1" | "hevc" | "h265" | "hvc1"
+        ),
+    }
+}
+
+/// How this server should advertise a decoded alternative, if at all.
+///
+/// One place decides, so the two DIDL writers cannot drift apart on it, and the
+/// feature gate lives here rather than in the XML.
+pub(crate) fn transcode_advert<D: DatabaseManager>(
+    state: &AppState<D>,
+) -> Option<xml::TranscodeAdvert> {
+    #[cfg(not(feature = "transcode"))]
+    {
+        let _ = state;
+        None
+    }
+    #[cfg(feature = "transcode")]
+    {
+        use crate::config::{TranscodeAudioFormat, TranscodeMode};
+        let config = state.current_config();
+        if !config.transcode.enabled || config.transcode.mode == TranscodeMode::Disabled {
+            return None;
+        }
+        Some(xml::TranscodeAdvert {
+            // The MIME differs from the original's, which is what lets a
+            // renderer that matches against its own sink protocolInfo pick the
+            // one it can actually decode.
+            audio: match config.transcode.audio_format {
+                TranscodeAudioFormat::Ac3 => xml::AdvertResource {
+                    mime: "audio/ac3",
+                    path: "transcode/audio.ac3",
+                    // AC-3 is constant-bitrate, so unlike the AAC resource this
+                    // one has a length before it exists and a byte offset lands
+                    // on a frame boundary. The claim is honest; the streaming
+                    // handler states the length and honours the ranges.
+                    op: "11",
+                    // Same reason as LPCM: the exact length is a function of the
+                    // decoded sample count, which only the plan knows.
+                    sized: false,
+                },
+                TranscodeAudioFormat::Lpcm => xml::AdvertResource {
+                    mime: "audio/vnd.wave",
+                    path: "transcode/audio.wav",
+                    // Constant-bitrate PCM: a byte offset divides straight back
+                    // into a sample, so this is a real seek.
+                    op: "11",
+                    // The exact length is the decoded sample count, which only
+                    // the plan knows; the streaming handler states it per
+                    // response rather than the DIDL stating it up front.
+                    sized: false,
+                },
+                TranscodeAudioFormat::Aac => xml::AdvertResource {
+                    mime: "audio/aac",
+                    path: "transcode/audio.aac",
+                    // A lossy re-encode has no length until it exists, so there
+                    // is nothing to seek within.
+                    op: "00",
+                    sized: false,
+                },
+            },
+            // And what an item whose audio is *already* Dolby is offered.
+            //
+            // Under `ac3` that cannot be the configured resource: this second
+            // `<res>` exists for a renderer that may have no Dolby licence, and
+            // handing such a renderer an AC-3 file re-encoded to AC-3 offers it
+            // nothing it did not already refuse. LPCM instead — lossless,
+            // seekable, decoded by everything, and what this path produced
+            // before AC-3 became the default. Under `aac` and `lpcm` no such
+            // collision exists and this is simply the configured resource.
+            audio_if_dolby: match config.transcode.audio_format {
+                TranscodeAudioFormat::Ac3 => xml::AdvertResource {
+                    mime: "audio/vnd.wave",
+                    path: "transcode/audio.wav",
+                    op: "11",
+                    sized: false,
+                },
+                TranscodeAudioFormat::Aac => xml::AdvertResource {
+                    mime: "audio/aac",
+                    path: "transcode/audio.aac",
+                    op: "00",
+                    sized: false,
+                },
+                TranscodeAudioFormat::Lpcm => xml::AdvertResource {
+                    mime: "audio/vnd.wave",
+                    path: "transcode/audio.wav",
+                    op: "11",
+                    sized: false,
+                },
+            },
+            // A film is offered the film, not its soundtrack: the same picture,
+            // with audio the renderer can actually decode.
+            //
+            // As a transport stream, not the MP4 next door, because this is what
+            // a television is being handed and a television scrubs by byte. A
+            // byte offset into a fragmented MP4 produced on demand names nothing
+            // stable; a transport stream resynchronises wherever it is joined,
+            // which is what makes `DLNA.ORG_OP=11` here an honest claim rather
+            // than a corrupt one. The MP4 remains for the browser player, which
+            // fetches whole responses and never needs it. See
+            // `web::ts_streaming`.
+            #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+            video: Some(xml::AdvertResource {
+                mime: "video/mpeg",
+                path: "transcode/video.ts",
+                op: "11",
+                // No size, and this is the one place the DIDL cannot honestly
+                // state one. The length of the produced stream turns on what
+                // each of the film's soundtracks costs it and which of them
+                // leave re-encoded — facts that live in the file, not in the
+                // index, and reading them here would mean opening every film in
+                // a folder to render one browse response. The streaming handler
+                // does know, states it as a `Content-Length`, and makes it true;
+                // a `size` guessed from the source would only contradict it.
+                sized: false,
+            }),
+            // With no remuxer or no encoder there is nothing to offer a film.
+            // Offering it `audio.wav` instead would replace a silent film with
+            // no film at all.
+            #[cfg(not(all(feature = "transcode-aac", feature = "casting")))]
+            video: None,
+            first: config.transcode.mode == TranscodeMode::Forced,
+        })
+    }
+}
 use axum::{
     extract::DefaultBodyLimit,
     middleware,
@@ -233,6 +505,43 @@ pub fn create_router<D: DatabaseManager + 'static>(
         .route(
             "/api/radio/stations/{id}/stream.{extension}",
             get(radio::serve_stream_with_extension::<D>),
+        );
+
+    // Public for the same reason `/media/{id}` is: a TV playing the decoded
+    // version of a film has nowhere to put a login either.
+    #[cfg(feature = "transcode")]
+    let router = router.route(
+        "/media/{id}/transcode/audio.wav",
+        get(transcode_streaming::serve_transcoded_wav::<D>)
+            .head(transcode_streaming::serve_transcoded_wav::<D>),
+    );
+    #[cfg(feature = "transcode-ac3")]
+    let router = router.route(
+        "/media/{id}/transcode/audio.ac3",
+        get(transcode_streaming::serve_transcoded_ac3::<D>)
+            .head(transcode_streaming::serve_transcoded_ac3::<D>),
+    );
+    #[cfg(feature = "transcode-aac")]
+    let router = router.route(
+        "/media/{id}/transcode/audio.aac",
+        get(transcode_streaming::serve_transcoded_aac::<D>)
+            .head(transcode_streaming::serve_transcoded_aac::<D>),
+    );
+    // The film itself, remuxed with its audio decoded. Needs the demuxer as
+    // well as the encoder, which is why it rides on `casting` too.
+    #[cfg(all(feature = "transcode-aac", feature = "casting"))]
+    let router = router
+        .route(
+            "/media/{id}/transcode/video.mp4",
+            get(video_streaming::serve_transcoded_video::<D>)
+                .head(video_streaming::serve_transcoded_video::<D>),
+        )
+        // The same film as a transport stream, which is the one a television can
+        // seek. See `web::ts_streaming`.
+        .route(
+            "/media/{id}/transcode/video.ts",
+            get(ts_streaming::serve_transcoded_ts::<D>)
+                .head(ts_streaming::serve_transcoded_ts::<D>),
         );
 
     #[cfg(feature = "casting")]

@@ -1,0 +1,33 @@
+[package]
+name = "vuio-codec-ac3"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vuiodev/vuio"
+homepage = "https://github.com/vuiodev/vuio"
+documentation = "https://docs.rs/vuio-codec-ac3"
+authors = ["vyrti"]
+description = "High-performance, SIMD-accelerated AC-3 and E-AC-3 audio decoder and encoder in pure Rust. Forked from oxideav-ac3."
+
+readme = "README.md"
+keywords = ["ac3", "dolby", "audio", "codec", "encoder"]
+categories = ["multimedia::audio", "multimedia::encoding"]
+
+include = [
+    "src/**/*",
+    "tests/**/*",
+    "Cargo.toml",
+    "README.md",
+    "NOTICE",
+]
+
+[dependencies]
+oxideav-core = { version = "0.1", path = "../vendor/oxideav-core" }
+rayon = "1.10"
+
+[lints.rust]
+warnings = "allow"
+
+[lints.clippy]
+all = "allow"

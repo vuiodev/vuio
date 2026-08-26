@@ -32,7 +32,7 @@ use symphonia::core::meta::{MetadataOptions, MetadataRevision, RawValue, Standar
 /// written by an older extractor even though the file itself has not changed.
 /// The file is opened and parsed on every scan regardless, so a bump costs one
 /// database write per record and no extra I/O.
-pub(crate) const TAGS_VERSION: u32 = 1;
+pub(crate) const TAGS_VERSION: u32 = 2;
 
 /// Longest tag value kept in `media_tags`.
 ///
@@ -43,6 +43,46 @@ const MAX_TAG_VALUE_LEN: usize = 4096;
 
 /// Tags whose values are large enough to be worth storing nowhere.
 const OVERSIZED_TAGS: &[&str] = &["Lyrics", "AcoustIdFingerprint", "CdToc"];
+
+/// Read only the stream properties of a file, leaving its titling alone.
+///
+/// For video. A film's title comes from its filename (and, where the operator
+/// enabled it, from the metadata fetcher); running the tag reader's
+/// artist/album/track-number logic over it would fill a library's video rows
+/// with whatever a muxer happened to write. What is wanted here is one field:
+/// which codec the audio track is in, so the browse path can decide whether to
+/// offer a decoded alternative without opening the file.
+///
+/// This is a header probe. It reads the container's front matter and its track
+/// declarations; it demuxes nothing and decodes nothing.
+pub(crate) async fn extract_stream_info(
+    media_file: &mut MediaFile,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = media_file.path.clone();
+    match tokio::task::spawn_blocking(move || probe_metadata(&path)).await {
+        Ok(Ok(probed)) => {
+            media_file.stream = probed.stream;
+            if media_file.duration.is_none() {
+                media_file.duration = probed.duration;
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(
+                path = %media_file.path.display(),
+                %error,
+                "Failed to probe video stream properties"
+            );
+        }
+        Err(error) => {
+            tracing::debug!(
+                path = %media_file.path.display(),
+                %error,
+                "Failed to execute blocking stream probe"
+            );
+        }
+    }
+    Ok(())
+}
 
 pub(crate) async fn extract_audio_metadata(
     media_file: &mut MediaFile,
@@ -196,14 +236,32 @@ fn probe_metadata(path: &Path) -> anyhow::Result<ProbedMetadata> {
     let mut format = open_format(path)?;
     let mut probed = ProbedMetadata::default();
 
+    // The video track's codec, where there is one. Recorded so the browse path
+    // can tell a film whose picture can be copied through from one whose cannot
+    // without opening either.
+    if let Some(track) = format.default_track(TrackType::Video) {
+        if let Some(video) = track.codec_params.as_ref().and_then(|params| params.video()) {
+            probed.stream.video_codec = video_codec_short_name(video.codec);
+        }
+    }
+
+    // The container's own duration (e.g. Matroska's Segment > Info > Duration or MP4 mvhd)
+    let media_info = format.media_info();
+    if let (Some(time_base), Some(duration)) = (media_info.time_base, media_info.duration) {
+        if let Some(t) = time_base.calc_time(symphonia::core::units::Timestamp::new(duration.get() as i64)) {
+            let secs = t.as_secs_f64();
+            if secs > 0.0 {
+                probed.duration = Some(Duration::from_secs_f64(secs));
+            }
+        }
+    }
+
     // Stream properties come off the default audio track. A container with no
     // audio track still has usable tags, so this is not an error.
     if let Some(track) = format.default_track(TrackType::Audio) {
         let num_frames = track.num_frames;
         if let Some(audio) = track.codec_params.as_ref().and_then(|params| params.audio()) {
-            probed.stream.codec = symphonia::default::get_codecs()
-                .get_audio_decoder(audio.codec)
-                .map(|registered| registered.codec.info.short_name.to_owned());
+            probed.stream.codec = audio_codec_short_name(audio.codec).map(|c| c.to_string());
             probed.stream.sample_rate = audio.sample_rate;
             probed.stream.channels = audio
                 .channels
@@ -214,10 +272,27 @@ fn probe_metadata(path: &Path) -> anyhow::Result<ProbedMetadata> {
                 .or(audio.bits_per_coded_sample)
                 .map(|bits| bits as u16);
 
-            if let (Some(frames), Some(rate)) = (num_frames, audio.sample_rate.filter(|r| *r > 0)) {
-                probed.duration = Some(Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+            if probed.duration.is_none() {
+                if let (Some(frames), Some(rate)) = (num_frames, audio.sample_rate.filter(|r| *r > 0)) {
+                    probed.duration = Some(Duration::from_secs_f64(frames as f64 / f64::from(rate)));
+                }
             }
         }
+    }
+
+    // If any audio track in the container is DTS, record it as DTS so that DTS transcoding
+    // can be properly applied for the film.
+    let has_dts = format.tracks().iter().any(|t| {
+        t.track_type() == Some(TrackType::Audio)
+            && t.codec_params
+                .as_ref()
+                .and_then(|p| p.audio())
+                .and_then(|a| audio_codec_short_name(a.codec))
+                .map(|c| c == "dca" || c == "dts")
+                .unwrap_or(false)
+    });
+    if has_dts {
+        probed.stream.codec = Some("dts".to_string());
     }
 
     // A file can carry more than one revision — ID3v2 at the head and APEv2 at
@@ -232,6 +307,65 @@ fn probe_metadata(path: &Path) -> anyhow::Result<ProbedMetadata> {
     }
 
     Ok(probed)
+}
+
+/// The short name to record for an identified audio codec.
+///
+/// Symphonia's registry is asked first, so anything it can decode keeps the
+/// exact spelling it has always been stored under. The fallback below covers
+/// the codecs it *identifies but cannot decode* — which, before this existed,
+/// stored a NULL codec and so were indistinguishable from a file whose track
+/// nothing recognised. Those are precisely the codecs a television is most
+/// likely to be missing a licence for, so they are the ones the browse path
+/// most needs to know about.
+///
+/// TrueHD is named here and is deliberately *not* decodable: nothing vendored
+/// decodes it, [`crate::media::transcode::TranscodeCodec::from_stored_codec`]
+/// returns `None` for it, and recording it is worth doing anyway so a
+/// diagnostic can say what the track is instead of shrugging.
+fn audio_codec_short_name(
+    codec: symphonia::core::codecs::audio::AudioCodecId,
+) -> Option<String> {
+    use symphonia::core::codecs::audio::well_known::*;
+
+    if let Some(registered) = symphonia::default::get_codecs().get_audio_decoder(codec) {
+        return Some(registered.codec.info.short_name.to_owned());
+    }
+    let name = match codec {
+        CODEC_ID_AC3 => "ac3",
+        CODEC_ID_EAC3 => "eac3",
+        CODEC_ID_DCA => "dca",
+        CODEC_ID_TRUEHD => "truehd",
+        CODEC_ID_AC4 => "ac4",
+        CODEC_ID_WMA => "wma",
+        CODEC_ID_OPUS => "opus",
+        _ => return None,
+    };
+    Some(name.to_owned())
+}
+
+/// The short name to record for an identified video codec.
+///
+/// Nothing here decodes video, so symphonia's decoder registry has no opinion
+/// and this is a plain table. Only the names the remuxer acts on need to be
+/// distinguishable; the rest are recorded so a diagnostic can say what a file
+/// holds instead of shrugging.
+fn video_codec_short_name(
+    codec: symphonia::core::codecs::video::VideoCodecId,
+) -> Option<String> {
+    use symphonia::core::codecs::video::well_known::*;
+
+    let name = match codec {
+        CODEC_ID_H264 => "h264",
+        CODEC_ID_HEVC => "hevc",
+        CODEC_ID_VP8 => "vp8",
+        CODEC_ID_VP9 => "vp9",
+        CODEC_ID_AV1 => "av1",
+        CODEC_ID_MPEG2 => "mpeg2video",
+        CODEC_ID_MPEG4 => "mpeg4",
+        _ => return None,
+    };
+    Some(name.to_owned())
 }
 
 fn absorb_revision(revision: &MetadataRevision, probed: &mut ProbedMetadata) {

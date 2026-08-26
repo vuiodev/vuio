@@ -1,0 +1,28 @@
+@Input_path ./
+@Output_path ./
+@Start
+
+//LC
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_2.es -br:64000 aot:2 
+
+//HEAAC V1
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_5.es  -br:64000 aot:5
+
+//ld
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_23.es  -br:64000  -aot:23
+
+//HEAAC V2
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_29.es -br:64000 -aot:29
+
+//ELD
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_39.es  -br:64000 -aot:39
+
+//ELDv2
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_39_mps.es  -br:64000 -aot:39  -mps:1
+
+//USAC
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_42.es  -br:64000 -aot:42
+
+//DRC
+-ifile:sine_2ch.wav -ofile:sine_2ch_aot_42_drc.es  -br:64000 -usac:1  -drc:1
+@Stop

@@ -37,10 +37,19 @@ RUN RUST_TARGET=$(cat /tmp/rust_target) && \
 
 # Copy the workspace and build the server. Only this layer rebuilds when source
 # changes. `--bin vuio` skips the generate_test_media helper binary.
+#
+# VUIO_CARGO_FLAGS is for trimming the image. The default build is the whole
+# server, including the AC-3/E-AC-3/DTS decoders — the person whose television
+# plays a film silently is not going to rebuild an image to fix it. An operator
+# who knows their renderers and wants the ~6 MB of decoder out can pass, e.g.:
+#
+#   --build-arg VUIO_CARGO_FLAGS="--no-default-features \
+#       --features casting,dashboard,diagnostics,mcp,mediainfo,metadata,web-ui"
+ARG VUIO_CARGO_FLAGS=""
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN RUST_TARGET=$(cat /tmp/rust_target) && \
-    cargo build --release --locked --target $RUST_TARGET --package vuio-cli --bin vuio && \
+    cargo build --release --locked --target $RUST_TARGET --package vuio-cli --bin vuio $VUIO_CARGO_FLAGS && \
     cp target/$RUST_TARGET/release/vuio /tmp/vuio
 
 # ---- Final Stage ----

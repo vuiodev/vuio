@@ -47,7 +47,7 @@ jobs:
         with:
           components: rustfmt
       - name: Check formatting
-        run: cargo fmt --all -- --check
+        run: cargo fmt -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web -- --check
 
   # ===================================================================
   # The web interface ships compiled into the binary.
@@ -130,7 +130,7 @@ jobs:
             target/
           key: clippy-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
       - name: Run Clippy
-        run: cargo clippy --all-targets --all-features -- -D clippy::all -D warnings
+        run: cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D clippy::all -D warnings
 
   # ===================================================================
   # Guard the published API of vuio-core.
@@ -233,11 +233,21 @@ jobs:
         run: cargo check -p vuio-core --no-default-features
       - name: Build each feature alone
         run: |
-          for feature in casting dashboard diagnostics mcp metadata web-ui; do
+          for feature in casting dashboard diagnostics mcp mediainfo metadata web-ui \
+                         demux transcode transcode-ac3 transcode-dts transcode-aac; do
             echo "::group::$feature"
             cargo check -p vuio-core --no-default-features --features "$feature"
             echo "::endgroup::"
           done
+      # The transcode features are on by default, which makes their *absence*
+      # the path that rots unnoticed. Everything else here proves a feature
+      # builds; this proves the server still builds and behaves without one.
+      - name: Build with the decoders dropped
+        run: |
+          cargo check -p vuio-core --no-default-features \
+            --features casting,dashboard,diagnostics,mcp,mediainfo,metadata,web-ui
+          cargo test -p vuio-core --lib --no-default-features \
+            --features casting,dashboard,diagnostics,mcp,mediainfo,metadata,web-ui,unstable-internals
       - name: Build with everything
         run: cargo check -p vuio-core --all-features
 
@@ -338,9 +348,9 @@ jobs:
         run: |
           sudo apt-get update
           if [ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
           elif [ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]; then
-            sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+            sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross
           fi
       - name: Configure cross-linker (Linux ARM)
         if: runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf')
@@ -383,7 +393,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git
+            pkg install -y curl bash git cmake
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           run: |
             set -e
@@ -421,7 +431,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git rust
+            pkg install -y curl bash git rust cmake
           run: |
             set -e
             rustc -vV
@@ -500,9 +510,9 @@ jobs:
         run: |
           sudo apt-get update
           if [ "${{ matrix.target }}" == "aarch64-unknown-linux-gnu" ]; then
-            sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross
           elif [ "${{ matrix.target }}" == "armv7-unknown-linux-gnueabihf" ]; then
-            sudo apt-get install -y gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+            sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross
           fi
       - name: Configure cross-linker (Linux ARM)
         if: runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf')
@@ -542,7 +552,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git
+            pkg install -y curl bash git cmake
             curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
           run: |
             set -e
@@ -613,7 +623,7 @@ jobs:
           mem: "6144"
           cache-after-prepare: true
           prepare: |
-            pkg install -y curl bash git rust
+            pkg install -y curl bash git rust cmake
           run: |
             set -e
             rustc -vV

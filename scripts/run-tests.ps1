@@ -236,15 +236,15 @@ function Invoke-QualityChecks {
     Write-Status "Running code quality checks..."
     
     # Format check
-    $result = & cargo fmt --all -- --check
+    $result = & cargo fmt -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web -- --check
     if ($LASTEXITCODE -ne 0) {
-        Write-Error "Code formatting issues found. Run 'cargo fmt' to fix."
+        Write-Error "Code formatting issues found. Run 'cargo fmt -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web' to fix."
         return $false
     }
     Write-Success "Code formatting is correct"
     
     # Clippy lints
-    $result = & cargo clippy --all-targets --all-features -- -D warnings
+    $result = & cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D warnings
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Clippy lints failed"
         return $false

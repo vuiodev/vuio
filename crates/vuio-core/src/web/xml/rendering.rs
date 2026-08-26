@@ -143,6 +143,171 @@ pub struct BrowseRenderContext {
     pub autoplay_enabled: bool,
     pub update_id: u32,
     pub bookmarks: HashMap<i64, u32>,
+    /// Whether, and how, to offer a decoded alternative for AC-3/DTS items.
+    ///
+    /// `None` in a build with no decoder, or with `[transcode] enabled = false`
+    /// — either way the writers emit exactly the one `<res>` they always did.
+    pub transcode: Option<TranscodeAdvert>,
+}
+
+/// One resource this server can produce in place of an item it may not play.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AdvertResource {
+    /// MIME type of the produced resource.
+    pub mime: &'static str,
+    /// Path suffix under `/media/{id}/` that serves it.
+    pub path: &'static str,
+    /// The `DLNA.ORG_OP` value this resource can actually honour.
+    ///
+    /// Stated per resource, and it differs: constant-bitrate LPCM divides a byte
+    /// offset straight back into a sample, so it is `11`; a re-encoded AAC
+    /// stream has no length to seek within, so it is `00`; a remuxed film is
+    /// `10`, time seek only, because a byte offset into a stream produced on
+    /// demand does not name a fixed place in it.
+    pub op: &'static str,
+    /// Whether the `<res>` states a `size`.
+    ///
+    /// None of them do, and for three different reasons. Decoded LPCM has an
+    /// exact length that only its plan knows; re-encoded AAC has no length at
+    /// all until it exists; and the remuxed film has one the streaming handler
+    /// works out from the file's soundtracks and then makes true by padding the
+    /// body — which a browse response must not open the file to learn. A `size`
+    /// here would be a second, worse answer to a question the response itself
+    /// answers exactly.
+    ///
+    /// Kept as a field rather than deleted because it is the shape of the
+    /// question, and a resource with a length known up front would state it.
+    pub sized: bool,
+}
+
+/// The item a decoded alternative is being written for.
+///
+/// Grouped rather than passed loose because every one of these is a property of
+/// the same row, and a `<res>` writer taking seven positional arguments is one
+/// transposed pair away from advertising a film's duration as its size.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct AdvertItem<'a> {
+    pub file_id: i64,
+    pub mime: &'a str,
+    pub duration: Option<u64>,
+    /// The stored file's size. Not written into any `<res>` today — see
+    /// [`AdvertResource::sized`] — and kept because it is what a resource with a
+    /// length known from the index would be sized from.
+    pub source_size: u64,
+    /// Whether this item's audio is AC-3 or E-AC-3, which decides between
+    /// [`TranscodeAdvert::audio`] and [`TranscodeAdvert::audio_if_dolby`].
+    pub audio_is_dolby: bool,
+}
+
+/// How a decoded alternative resource should be advertised.
+///
+/// A plain value rather than a read of the config, so the XML writers stay
+/// feature-blind and a test can set up either case directly. It carries both
+/// answers because one DIDL response mixes films and music: the item's own MIME
+/// type selects between them at the point the `<res>` is written.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TranscodeAdvert {
+    /// What an audio item is offered instead.
+    pub audio: AdvertResource,
+    /// What an audio item already carrying Dolby is offered instead.
+    ///
+    /// The decoded alternative exists because the renderer may not decode the
+    /// original, so offering an AC-3 file an AC-3 alternative offers it the one
+    /// codec it is already known to be stuck on, re-encoded a second time —
+    /// worse than the original and no more playable. Only `audio_format =
+    /// "ac3"` can collide this way, since AC-3 and E-AC-3 are the only sources
+    /// decoded here that AAC and LPCM are not; under the other two settings
+    /// this is the same resource as [`Self::audio`] and the distinction costs
+    /// nothing.
+    pub audio_if_dolby: AdvertResource,
+    /// What a video item is offered instead, where this build can produce one.
+    ///
+    /// `None` in a build with no remuxer or no encoder. A film then gets no
+    /// second resource at all rather than being offered its own soundtrack in
+    /// place of itself.
+    pub video: Option<AdvertResource>,
+    /// Whether the decoded resource is listed before the original.
+    pub first: bool,
+}
+
+impl TranscodeAdvert {
+    /// The resource to offer for an item of `mime`, if there is one.
+    ///
+    /// `is_dolby` is the caller's answer to whether the item's *audio* is AC-3
+    /// or E-AC-3 — decided in `web::item_audio_is_dolby`, because resolving a
+    /// stored codec name is exactly the feature-gated knowledge these writers
+    /// are kept clear of. It is meaningless for video, where the soundtrack is
+    /// re-encoded inside a container either way.
+    pub(crate) fn resource_for(&self, mime: &str, is_dolby: bool) -> Option<AdvertResource> {
+        if mime.starts_with("video/") {
+            self.video
+        } else if is_dolby {
+            Some(self.audio_if_dolby)
+        } else {
+            Some(self.audio)
+        }
+    }
+
+    /// Write the decoded alternative for `item`.
+    fn write<W: std::fmt::Write>(
+        &self,
+        output: &mut W,
+        context: &BrowseRenderContext,
+        item: &AdvertItem<'_>,
+    ) -> std::fmt::Result {
+        self.write_didl(output, &context.server_ip, context.server_port, item)
+    }
+
+    /// The same, for the fallback writer, which carries its address loose rather
+    /// than in a context.
+    ///
+    /// `DLNA.ORG_CI=1` is the conversion indicator: a renderer matching on
+    /// protocolInfo has to be told these bytes were produced rather than stored,
+    /// and every other `<res>` this server writes says `CI=0`.
+    pub(crate) fn write_didl<W: std::fmt::Write>(
+        &self,
+        output: &mut W,
+        server_ip: &str,
+        server_port: u16,
+        item: &AdvertItem<'_>,
+    ) -> std::fmt::Result {
+        let &AdvertItem {
+            file_id,
+            mime,
+            duration,
+            source_size,
+            audio_is_dolby,
+        } = item;
+        let Some(resource) = self.resource_for(mime, audio_is_dolby) else {
+            return Ok(());
+        };
+        write!(
+            output,
+            r#"<res protocolInfo="http-get:*:{}:DLNA.ORG_OP={};DLNA.ORG_CI=1;DLNA.ORG_FLAGS=01700000000000000000000000000000""#,
+            resource.mime, resource.op
+        )?;
+        if resource.sized {
+            write!(
+                output,
+                r#" size="{}""#,
+                crate::web::promised_transcode_length(source_size)
+            )?;
+        }
+        if let Some(seconds) = duration {
+            write!(
+                output,
+                r#" duration="{:02}:{:02}:{:02}""#,
+                seconds / 3600,
+                (seconds % 3600) / 60,
+                seconds % 60
+            )?;
+        }
+        write!(
+            output,
+            ">http://{}:{}/media/{}/{}</res>",
+            server_ip, server_port, file_id, resource.path
+        )
+    }
 }
 
 /// UPnP container classes.
@@ -377,56 +542,111 @@ pub(super) fn write_media_view<W: std::fmt::Write, V: MediaFileView>(
             _ => mime,
         }
     };
-    write!(
-        output,
-        r#"<res protocolInfo="http-get:*:{wire_mime}:{flags}" size="{}""#,
-        if is_radio { 0 } else { file.size() }
-    )?;
-    if !is_radio && (mime.starts_with("video/") || mime.starts_with("audio/")) {
-        if let Some(seconds) = file.duration_secs().map(|value| value as u64) {
-            write!(
-                output,
-                r#" duration="{:02}:{:02}:{:02}""#,
-                seconds / 3600,
-                (seconds % 3600) / 60,
-                seconds % 60
-            )?;
-        }
-    }
-    if !is_radio {
-        // Renderers use these to decide whether they can play a track before
-        // fetching a byte of it. Note that DLNA's `res@bitrate` is *bytes* per
-        // second, not bits, which is the usual thing to get wrong.
-        if let Some(bits_per_second) = file.bit_rate().filter(|rate| *rate > 0) {
-            write!(output, r#" bitrate="{}""#, bits_per_second / 8)?;
-        }
-        if let Some(sample_rate) = file.sample_rate().filter(|rate| *rate > 0) {
-            write!(output, r#" sampleFrequency="{sample_rate}""#)?;
-        }
-        if let Some(channels) = file.channels().filter(|count| *count > 0) {
-            write!(output, r#" nrAudioChannels="{channels}""#)?;
-        }
-        if let Some(bits) = file.bits_per_sample().filter(|bits| *bits > 0) {
-            write!(output, r#" bitsPerSample="{bits}""#)?;
-        }
-    }
-    if matches!(
-        context.client,
-        crate::web::client::DlnaClientProfile::LgTv
-            | crate::web::client::DlnaClientProfile::PanasonicTv
-    ) && has_srt
-    {
-        write!(
+    // A second resource for an item whose audio this renderer may not be able to
+    // decode. Both are offered and the renderer picks — which is the whole point:
+    // there is no reliable table of which television model licensed which codec,
+    // and guessing wrong is worse than letting it choose. `prefer` decides the
+    // order, for the renderers that take the first without looking.
+    let audio_is_dolby = crate::web::item_audio_is_dolby(file.codec(), mime, file.filename());
+    let transcoded = context
+        .transcode
+        .filter(|_| !is_radio)
+        .filter(|_| crate::web::item_needs_transcode(file.codec(), mime, file.filename()))
+        .filter(|advert| advert.resource_for(mime, audio_is_dolby).is_some())
+        .filter(|_| {
+            !mime.starts_with("video/") || crate::web::item_can_remux_video(file.video_codec())
+        });
+    let is_dts = !mime.starts_with("video/")
+        || file
+            .codec()
+            .map(|c| c.trim().to_ascii_lowercase())
+            .map(|c| c == "dca" || c == "dts" || c == "a_dts")
+            .unwrap_or_else(|| {
+                mime.contains("dts") || file.filename().to_ascii_lowercase().ends_with(".dts")
+            });
+    // See `browse.rs`: this decides whether to hide the original, not whether to
+    // offer the decoded resource. The decoded resource is offered either way.
+    let is_forced = transcoded.as_ref().is_some_and(|a| a.first && is_dts);
+    let item_duration = file.duration_secs().map(|value| value as u64);
+    if let Some(advert) = transcoded.filter(|a| a.first) {
+        advert.write(
             output,
-            r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
-            context.server_ip, context.server_port, file_id
+            context,
+            &AdvertItem {
+                file_id,
+                mime,
+                duration: item_duration,
+                source_size: file.size(),
+                audio_is_dolby,
+            },
         )?;
     }
-    write!(
-        output,
-        ">http://{}:{}/media/{}</res>",
-        context.server_ip, context.server_port, file_id
-    )?;
+
+    if !is_forced {
+        write!(
+            output,
+            r#"<res protocolInfo="http-get:*:{wire_mime}:{flags}" size="{}""#,
+            if is_radio { 0 } else { file.size() }
+        )?;
+        if !is_radio && (mime.starts_with("video/") || mime.starts_with("audio/")) {
+            if let Some(seconds) = file.duration_secs().map(|value| value as u64) {
+                write!(
+                    output,
+                    r#" duration="{:02}:{:02}:{:02}""#,
+                    seconds / 3600,
+                    (seconds % 3600) / 60,
+                    seconds % 60
+                )?;
+            }
+        }
+        if !is_radio {
+            // Renderers use these to decide whether they can play a track before
+            // fetching a byte of it. Note that DLNA's `res@bitrate` is *bytes* per
+            // second, not bits, which is the usual thing to get wrong.
+            if let Some(bits_per_second) = file.bit_rate().filter(|rate| *rate > 0) {
+                write!(output, r#" bitrate="{}""#, bits_per_second / 8)?;
+            }
+            if let Some(sample_rate) = file.sample_rate().filter(|rate| *rate > 0) {
+                write!(output, r#" sampleFrequency="{sample_rate}""#)?;
+            }
+            if let Some(channels) = file.channels().filter(|count| *count > 0) {
+                write!(output, r#" nrAudioChannels="{channels}""#)?;
+            }
+            if let Some(bits) = file.bits_per_sample().filter(|bits| *bits > 0) {
+                write!(output, r#" bitsPerSample="{bits}""#)?;
+            }
+        }
+        if matches!(
+            context.client,
+            crate::web::client::DlnaClientProfile::LgTv
+                | crate::web::client::DlnaClientProfile::PanasonicTv
+        ) && has_srt
+        {
+            write!(
+                output,
+                r#" pv:subtitleFileUri="http://{}:{}/media/{}/subtitle" pv:subtitleFileType="SRT""#,
+                context.server_ip, context.server_port, file_id
+            )?;
+        }
+        write!(
+            output,
+            ">http://{}:{}/media/{}</res>",
+            context.server_ip, context.server_port, file_id
+        )?;
+        if let Some(advert) = transcoded.filter(|a| !a.first) {
+            advert.write(
+            output,
+            context,
+            &AdvertItem {
+                file_id,
+                mime,
+                duration: item_duration,
+                source_size: file.size(),
+                audio_is_dolby,
+            },
+        )?;
+        }
+    }
     if context.client == crate::web::client::DlnaClientProfile::LgTv && has_srt {
         write!(
             output,

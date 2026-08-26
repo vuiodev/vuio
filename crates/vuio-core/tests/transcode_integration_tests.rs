@@ -1,0 +1,882 @@
+//! Serving AC-3 as audio a renderer without a Dolby licence can play.
+//!
+//! These drive the real router, so what they assert is what a TV receives. The
+//! contract that matters is the one a DLNA renderer depends on and cannot
+//! recover from if it is wrong: the `Content-Length` promised to a `HEAD` is the
+//! number of bytes a `GET` delivers, and a byte range returns exactly the slice
+//! of the full decode that lives at that offset.
+
+#![cfg(feature = "transcode-ac3")]
+
+use axum::{
+    body::Body,
+    extract::ConnectInfo,
+    http::{header, Method, Request, StatusCode},
+};
+use std::net::SocketAddr;
+use std::sync::Arc;
+use tempfile::{tempdir, TempDir};
+use tower::ServiceExt;
+
+use vuio_core::config::{AppConfig, MonitoredDirectoryConfig, ValidationMode};
+use vuio_core::database::sqlite::SqliteDatabase;
+use vuio_core::database::{DatabaseManager, MediaFile, MediaRepository};
+use vuio_core::platform::filesystem::create_platform_filesystem_manager;
+use vuio_core::platform::PlatformInfo;
+use vuio_core::state::AppState;
+use vuio_core::web::diagnostics::WebHandlerMetrics;
+use vuio_core::web::{create_router, Surface};
+
+/// A real 48 kHz stereo AC-3 bitstream — the same ffmpeg-encoded 440 Hz sine the
+/// vendored decoder validates itself against. Using it here rather than a
+/// synthetic stub is the point: the response is only meaningful if the bytes
+/// really decode.
+const AC3: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
+
+/// The DTS conformance fixture: 48 kHz 5.1, five 1024-byte frames of 512
+/// samples. The codec that actually wants an AC-3 alternative — a television
+/// without a Dolby licence has no DTS licence either, but one *with* Dolby and
+/// without DTS is the common set this default is aimed at.
+#[cfg(feature = "transcode-dts")]
+const DTS: &[u8] = include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+
+/// One AC-3 file in a library, and the router over it.
+async fn library() -> (TempDir, AppState, i64) {
+    library_of("sine.ac3", "audio/ac3", AC3.to_vec()).await
+}
+
+/// One DTS file, long enough that a byte range into it means something.
+///
+/// The conformance fixture is five frames — 53 milliseconds — so it is looped.
+/// A decoder walks sync words and neither knows nor cares that it is hearing
+/// the same tenth of a second repeatedly; what matters here is that there are
+/// enough seconds of it to seek into.
+#[cfg(feature = "transcode-dts")]
+async fn dts_library() -> (TempDir, AppState, i64) {
+    let bitstream: Vec<u8> = std::iter::repeat_n(DTS, 200).flatten().copied().collect();
+    library_of("sine.dts", "audio/vnd.dts", bitstream).await
+}
+
+/// One file in a library, and the router over it.
+async fn library_of(name: &str, mime: &str, bitstream: Vec<u8>) -> (TempDir, AppState, i64) {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("media");
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join(name);
+    std::fs::write(&path, &bitstream).unwrap();
+
+    let database = Arc::new(
+        SqliteDatabase::new(temp.path().join("transcode.db"))
+            .await
+            .unwrap(),
+    );
+    database.initialize().await.unwrap();
+    database
+        .bulk_store_media_files(&[MediaFile::new(
+            path.clone(),
+            bitstream.len() as u64,
+            mime.to_string(),
+        )])
+        .await
+        .unwrap();
+    let id = database
+        .collect_all_media_files()
+        .await
+        .unwrap()
+        .first()
+        .unwrap()
+        .id
+        .unwrap();
+
+    let mut config = AppConfig::default();
+    config.media.directories = vec![MonitoredDirectoryConfig {
+        path: root.to_string_lossy().into_owned(),
+        recursive: true,
+        case_sensitive: None,
+        extensions: None,
+        exclude_patterns: None,
+        validation_mode: ValidationMode::Skip,
+    }];
+    let config = Arc::new(config);
+
+    let state = AppState {
+        media_directories: Arc::new(tokio::sync::RwLock::new(config.media.directories.clone())),
+        unavailable_roots: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        config: config.clone(),
+        config_source: Arc::new(Default::default()),
+        http_binding: Arc::new(vuio_core::state::HttpBinding::new(8080)),
+        live_config: Arc::new(vuio_core::state::LiveConfig::new(config)),
+        database,
+        auth: Arc::new(vuio_core::web::auth::AuthState::testing()),
+        platform_info: Arc::new(PlatformInfo::detect().await.unwrap()),
+        filesystem_manager: Arc::from(create_platform_filesystem_manager()),
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        web_metrics: Arc::new(WebHandlerMetrics::new()),
+        runtime_diagnostics: Arc::new(
+            vuio_core::platform::diagnostics::SystemDiagnosticsSampler::new(),
+        ),
+        lifecycle_stats: Arc::new(vuio_core::lifecycle::ApplicationStats::new()),
+        bookmarks: Arc::new(tokio::sync::Mutex::new(
+            vuio_core::runtime_state::BookmarkRegistry::new(
+                vuio_core::runtime_state::BOOKMARK_MAX_ENTRIES,
+            ),
+        )),
+        log_file_path: temp.path().join("vuio.log"),
+        browse_cache: Arc::new(tokio::sync::Mutex::new(
+            vuio_core::runtime_state::BrowseResponseCache::new(),
+        )),
+        active_monitors: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        active_casts: Arc::new(tokio::sync::Mutex::new(
+            vuio_core::runtime_state::ActiveCastRegistry::new(),
+        )),
+        #[cfg(feature = "mediainfo")]
+        mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        #[cfg(feature = "casting")]
+        discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
+        upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        radio: Arc::new(Default::default()),
+        #[cfg(feature = "transcode")]
+        transcode: Arc::new(Default::default()),
+        cancellation: tokio_util::sync::CancellationToken::new(),
+        background_tasks: tokio_util::task::TaskTracker::new(),
+    };
+
+    (temp, state, id)
+}
+
+fn peer() -> SocketAddr {
+    "127.0.0.1:50000".parse().unwrap()
+}
+
+async fn request(
+    state: &AppState,
+    id: i64,
+    method: Method,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("/media/{id}/transcode/audio.wav"))
+        .extension(ConnectInfo(peer()));
+    if let Some(range) = range {
+        builder = builder.header(header::RANGE, range);
+    }
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, body)
+}
+
+/// Assert a ranged response is the same audio as that slice of the whole.
+///
+/// "Same" to within one LSB per sample, not byte-for-byte. A seek primes the
+/// decoder one frame early rather than replaying the file from the start, so
+/// the IMDCT's floating-point state is reached by a different route and a
+/// sample sitting exactly on a rounding boundary can quantise to the adjacent
+/// integer. That is 1/32768 — around -90 dBFS, inaudible, and the tolerance the
+/// decoder's own conformance tests use. Anything larger means the seek landed
+/// somewhere else entirely.
+///
+/// `range_start` is needed because a byte range may begin mid-sample, and
+/// pairing bytes from the wrong phase turns a 1-LSB difference into a 256-LSB
+/// one. The partial sample at each end is compared as bytes instead.
+fn assert_same_audio(part: &[u8], whole_slice: &[u8], range_start: usize, what: &str) {
+    assert_eq!(part.len(), whole_slice.len(), "{what}: length");
+
+    // Byte offset into the PCM payload, and how far into a 4-byte stereo sample
+    // frame the range begins.
+    let phase = range_start.saturating_sub(44) % 4;
+    let lead = if phase == 0 { 0 } else { 4 - phase };
+    let lead = lead.min(part.len());
+
+    let mut worst = 0i32;
+    let mut worst_at = 0usize;
+    for (i, (a, b)) in part[lead..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(whole_slice[lead..].as_chunks::<2>().0)
+        .enumerate()
+    {
+        let x = i16::from_le_bytes([a[0], a[1]]) as i32;
+        let y = i16::from_le_bytes([b[0], b[1]]) as i32;
+        if (x - y).abs() > worst {
+            worst = (x - y).abs();
+            worst_at = i;
+        }
+    }
+    assert!(
+        worst <= 1,
+        "{what}: samples differ by up to {worst} LSB (first worst at sample {worst_at}) \
+         — the seek landed in the wrong place, not merely rounded differently"
+    );
+}
+
+/// The same, against the AC-3 resource.
+#[cfg(feature = "transcode-dts")]
+async fn ac3_request(
+    state: &AppState,
+    id: i64,
+    method: Method,
+    range: Option<&str>,
+) -> (StatusCode, axum::http::HeaderMap, Vec<u8>) {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(format!("/media/{id}/transcode/audio.ac3"))
+        .extension(ConnectInfo(peer()));
+    if let Some(range) = range {
+        builder = builder.header(header::RANGE, range);
+    }
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(builder.body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024 * 1024)
+        .await
+        .unwrap()
+        .to_vec();
+    (status, headers, body)
+}
+
+/// Bytes in every syncframe of an AC-3 stream, read from its first header.
+///
+/// AC-3 is constant-bitrate and the encoder holds one frame-size code for the
+/// whole stream, so the first frame's size is every frame's size — which is the
+/// property the seekable resource is built on. At 48 kHz a frame is four bytes
+/// per kilobit of the declared rate.
+#[cfg(feature = "transcode-dts")]
+fn ac3_frame_len(stream: &[u8]) -> usize {
+    /// Nominal bitrates in kbps, indexed by `frmsizecod >> 1`.
+    const RATES: [usize; 19] = [
+        32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 384, 448, 512, 576, 640,
+    ];
+    assert_eq!(stream[4] >> 6, 0, "the fixture is 48 kHz");
+    RATES[usize::from(stream[4] & 0x3F) >> 1] * 4
+}
+
+fn header_u64(headers: &axum::http::HeaderMap, name: header::HeaderName) -> u64 {
+    headers[&name].to_str().unwrap().parse().unwrap()
+}
+
+#[tokio::test]
+async fn an_ac3_file_is_served_as_playable_wav() {
+    let (_temp, state, id) = library().await;
+    let (status, headers, body) = request(&state, id, Method::GET, None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(headers[header::CONTENT_TYPE], "audio/vnd.wave; codec=1");
+    assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+
+    // A renderer matching on protocolInfo has to be told this was converted, or
+    // it may assume the bytes are the stored file.
+    let features = headers["contentFeatures.dlna.org"].to_str().unwrap();
+    assert!(
+        features.contains("DLNA.ORG_CI=1"),
+        "a transcoded resource must declare the conversion: {features}"
+    );
+
+    assert_eq!(&body[0..4], b"RIFF");
+    assert_eq!(&body[8..12], b"WAVE");
+    assert_eq!(&body[36..40], b"data");
+    assert_eq!(
+        body.len() as u64,
+        header_u64(&headers, header::CONTENT_LENGTH),
+        "the body must be exactly as long as the header promised"
+    );
+
+    // 16-bit stereo at 48 kHz, and the payload length the header declares must
+    // be the payload actually delivered.
+    assert_eq!(u16::from_le_bytes([body[22], body[23]]), 2, "channels");
+    assert_eq!(
+        u32::from_le_bytes([body[24], body[25], body[26], body[27]]),
+        48_000,
+        "sample rate"
+    );
+    let declared = u32::from_le_bytes([body[40], body[41], body[42], body[43]]) as usize;
+    assert_eq!(declared, body.len() - 44);
+
+    // The fixture is a 440 Hz sine, so silence here would mean we produced a
+    // correctly-shaped empty response instead of decoding anything.
+    let mut sum = 0f64;
+    for c in body[44..].as_chunks::<2>().0 {
+        let v = i16::from_le_bytes([c[0], c[1]]) as f64;
+        sum += v * v;
+    }
+    let rms = (sum / ((body.len() - 44) as f64 / 2.0)).sqrt();
+    assert!(rms > 100.0, "decoded audio is silent (rms {rms})");
+}
+
+#[tokio::test]
+async fn head_promises_the_length_that_get_delivers() {
+    let (_temp, state, id) = library().await;
+    let (head_status, head_headers, head_body) = request(&state, id, Method::HEAD, None).await;
+    let (_, get_headers, get_body) = request(&state, id, Method::GET, None).await;
+
+    assert_eq!(head_status, StatusCode::OK);
+    assert!(head_body.is_empty(), "HEAD carries no body");
+    assert_eq!(
+        header_u64(&head_headers, header::CONTENT_LENGTH),
+        header_u64(&get_headers, header::CONTENT_LENGTH),
+    );
+    assert_eq!(
+        get_body.len() as u64,
+        header_u64(&head_headers, header::CONTENT_LENGTH)
+    );
+}
+
+#[tokio::test]
+async fn a_byte_range_returns_exactly_that_slice_of_the_full_decode() {
+    let (_temp, state, id) = library().await;
+    let (_, _, whole) = request(&state, id, Method::GET, None).await;
+
+    // A range starting inside the audio, deliberately not on a frame boundary,
+    // so the seek has to land mid-frame and discard the right number of samples.
+    let start = 44 + 1536 * 2 * 2 + 5000;
+    let end = start + 20_000;
+    let (status, headers, part) = request(
+        &state,
+        id,
+        Method::GET,
+        Some(&format!("bytes={start}-{end}")),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        headers[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {start}-{end}/{}", whole.len())
+    );
+    assert_eq!(part.len(), end - start + 1);
+    assert_same_audio(&part, &whole[start..=end], start, "mid-frame range");
+}
+
+/// The case that only shows up deeper into the file.
+///
+/// Seeking starts the decoder one frame early so the IMDCT overlap is warm.
+/// Opening a decoder necessarily decodes that frame, and if it is then fed to
+/// the decoder a *second* time its samples run through the overlap buffer twice
+/// — every frame after it lands somewhere a sequential decode never goes, and
+/// the range stops being the audio its Content-Range claims.
+///
+/// It cancels out at frame 1, where the pre-roll is frame 0 and the whole-file
+/// decode primes on frame 0 too, which is why the seeks here are deliberately
+/// several frames in. A live server caught this; the frame-1 test did not.
+#[tokio::test]
+async fn a_deep_seek_matches_the_sequential_decode_frame_for_frame() {
+    let (_temp, state, id) = library().await;
+    let (_, _, whole) = request(&state, id, Method::GET, None).await;
+
+    for frame in [2usize, 5, 8] {
+        let start = 44 + frame * 1536 * 2 * 2 + 777;
+        let end = start + 8_000;
+        assert!(
+            end < whole.len(),
+            "fixture is long enough for frame {frame}"
+        );
+        let (status, _, part) = request(
+            &state,
+            id,
+            Method::GET,
+            Some(&format!("bytes={start}-{end}")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_same_audio(
+            &part,
+            &whole[start..=end],
+            start,
+            &format!("range into frame {frame}"),
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_range_spanning_the_header_boundary_is_still_exact() {
+    let (_temp, state, id) = library().await;
+    let (_, _, whole) = request(&state, id, Method::GET, None).await;
+
+    // Straddles the 44-byte header and the first samples — the case where the
+    // header and the decode both have to contribute to one response.
+    let (status, _, part) = request(&state, id, Method::GET, Some("bytes=20-2043")).await;
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(part.len(), 2024);
+    // The WAV header is copied, not decoded, so those bytes must match exactly.
+    assert_eq!(&part[..24], &whole[20..44], "the tail of the WAV header");
+    assert_same_audio(&part[24..], &whole[44..=2043], 44, "audio after the header");
+}
+
+#[tokio::test]
+async fn a_range_past_the_end_is_refused_rather_than_truncated() {
+    let (_temp, state, id) = library().await;
+    let (_, _, whole) = request(&state, id, Method::GET, None).await;
+    let past = whole.len() + 10;
+    let (status, _, _) = request(&state, id, Method::GET, Some(&format!("bytes={past}-"))).await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+}
+
+#[tokio::test]
+async fn turning_the_feature_off_withdraws_the_resource() {
+    let (_temp, mut state, id) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.enabled = false;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    // The handler reads the live config, not the startup snapshot, so turning
+    // this off takes effect on reload rather than at the next restart.
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let (status, _, _) = request(&state, id, Method::GET, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_file_that_needs_no_transcoding_has_no_transcoded_resource() {
+    let (temp, state, _) = library().await;
+    let mp3 = temp.path().join("media").join("song.mp3");
+    std::fs::write(&mp3, b"not really an mp3").unwrap();
+    state
+        .database
+        .bulk_store_media_files(&[MediaFile::new(mp3, 17, "audio/mpeg".to_string())])
+        .await
+        .unwrap();
+    let id = state
+        .database
+        .collect_all_media_files()
+        .await
+        .unwrap()
+        .iter()
+        .find(|f| f.filename == "song.mp3")
+        .unwrap()
+        .id
+        .unwrap();
+
+    let (status, _, _) = request(&state, id, Method::GET, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn concurrent_transcodes_are_capped_rather_than_queued() {
+    let (_temp, state, id) = library().await;
+    // One slot, so the second request must be refused outright.
+    let state = AppState {
+        transcode: Arc::new(vuio_core::media::transcode::TranscodeState::new(1)),
+        ..state
+    };
+
+    let router = create_router(state.clone(), Surface::Primary);
+    let first = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}/transcode/audio.wav"))
+                .extension(ConnectInfo(peer()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    // The first response's body still holds the permit until it is consumed.
+    let second = router
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}/transcode/audio.wav"))
+                .extension(ConnectInfo(peer()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(second.headers()[header::RETRY_AFTER], "5");
+}
+
+// ---------------------------------------------------------------------------
+// What a television is actually told
+//
+// The stream above is only reachable if the browse response mentions it. These
+// drive the real SOAP endpoint, because the DIDL is generated in two places —
+// the indexed path and the fallback — and an item must not lose its alternative
+// depending on which one served it.
+// ---------------------------------------------------------------------------
+
+use axum::extract::State;
+use axum::http::{HeaderMap, HeaderValue};
+use vuio_core::web::soap::content_directory_control;
+
+fn browse_request(object_id: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">
+  <s:Body>
+    <u:Browse xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1">
+      <ObjectID>{object_id}</ObjectID>
+      <BrowseFlag>BrowseDirectChildren</BrowseFlag>
+      <Filter>*</Filter>
+      <StartingIndex>0</StartingIndex>
+      <RequestedCount>50</RequestedCount>
+      <SortCriteria></SortCriteria>
+    </u:Browse>
+  </s:Body>
+</s:Envelope>"#
+    )
+}
+
+/// Browse the audio tree as a Samsung set — one of the profiles that actually
+/// dropped DTS support, and the one with the most quirks around `<res>`.
+async fn browse_audio(state: &AppState) -> String {
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "soapaction",
+        HeaderValue::from_static("\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\""),
+    );
+    headers.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static("DLNADOC/1.50 SEC_HHP_[TV]UE40D7000/1.0"),
+    );
+    let response =
+        content_directory_control(State(state.clone()), headers, browse_request("audio/!all"))
+            .await;
+    assert_eq!(response.status(), StatusCode::OK);
+    // DIDL is double-escaped inside the SOAP body; unescape enough to read it.
+    String::from_utf8(
+        axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap()
+    .replace("&lt;", "<")
+    .replace("&gt;", ">")
+    .replace("&quot;", "\"")
+}
+
+#[tokio::test]
+async fn an_ac3_item_is_offered_both_the_original_and_a_decoded_resource() {
+    let (_temp, state, id) = library().await;
+    let didl = browse_audio(&state).await;
+
+    assert_eq!(
+        didl.matches("<res ").count(),
+        2,
+        "expected the original and one decoded alternative:\n{didl}"
+    );
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.wav")),
+        "the decoded resource must be reachable:\n{didl}"
+    );
+    assert!(
+        didl.contains("DLNA.ORG_CI=1"),
+        "the decoded resource must declare the conversion:\n{didl}"
+    );
+    assert!(
+        didl.contains("audio/vnd.wave"),
+        "its MIME must differ from the original's, or protocolInfo matching \
+         cannot tell them apart:\n{didl}"
+    );
+    // The original must survive untouched — a TV that can play AC-3 should see
+    // exactly what it saw before.
+    assert!(
+        didl.contains(&format!(">http://127.0.0.1:8080/media/{id}</res>"))
+            || didl.contains(&format!("/media/{id}</res>"))
+    );
+}
+
+#[tokio::test]
+async fn the_original_is_listed_first_by_default() {
+    let (_temp, state, _) = library().await;
+    let didl = browse_audio(&state).await;
+    let original = didl.find("audio/ac3").expect("original res");
+    let decoded = didl.find("audio/vnd.wave").expect("decoded res");
+    assert!(
+        original < decoded,
+        "a renderer that takes the first resource must keep getting the original:\n{didl}"
+    );
+}
+
+#[tokio::test]
+async fn forced_transcode_serves_the_decoded_resource_exclusively() {
+    let (_temp, mut state, _) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.mode = vuio_core::config::TranscodeMode::Forced;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_audio(&state).await;
+    assert!(
+        didl.find("audio/vnd.wave").is_some(),
+        "the decoded resource must be present:\n{didl}"
+    );
+    assert!(
+        didl.find("audio/ac3").is_none(),
+        "the original unsupported resource must be omitted in forced mode:\n{didl}"
+    );
+}
+
+#[tokio::test]
+async fn with_the_feature_off_an_item_has_exactly_one_resource() {
+    let (_temp, mut state, _) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.enabled = false;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_audio(&state).await;
+    assert_eq!(
+        didl.matches("<res ").count(),
+        1,
+        "turning the feature off must leave the DIDL exactly as it was:\n{didl}"
+    );
+    assert!(!didl.contains("DLNA.ORG_CI=1"));
+}
+
+// ---------------------------------------------------------------------------
+// The compressed alternative
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "transcode-aac")]
+#[tokio::test]
+async fn the_aac_resource_streams_adts_without_claiming_to_be_seekable() {
+    let (_temp, state, id) = library().await;
+    let response = create_router(state.clone(), Surface::Primary)
+        .oneshot(
+            Request::builder()
+                .uri(format!("/media/{id}/transcode/audio.aac"))
+                .extension(ConnectInfo(peer()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CONTENT_TYPE], "audio/aac");
+    // Its length is not knowable in advance, so it must not claim otherwise —
+    // and must not advertise ranges it would then refuse.
+    assert!(response.headers().get(header::CONTENT_LENGTH).is_none());
+    assert!(response.headers().get(header::ACCEPT_RANGES).is_none());
+    let features = response.headers()["contentFeatures.dlna.org"]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        features.contains("DLNA.ORG_OP=00"),
+        "no seeking: {features}"
+    );
+    assert!(features.contains("DLNA.ORG_CI=1"), "converted: {features}");
+
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024 * 1024)
+        .await
+        .unwrap();
+    assert!(!body.is_empty());
+    assert_eq!(body[0], 0xFF, "ADTS syncword");
+    assert_eq!(body[1] & 0xF0, 0xF0, "ADTS syncword");
+    // The point of choosing AAC over LPCM.
+    assert!(
+        body.len() < AC3.len() * 4,
+        "AAC output should be far smaller than the equivalent PCM"
+    );
+}
+
+#[cfg(feature = "transcode-aac")]
+#[tokio::test]
+async fn choosing_aac_advertises_the_aac_resource() {
+    let (_temp, mut state, id) = library().await;
+    let mut config = (*state.config).clone();
+    config.transcode.audio_format = vuio_core::config::TranscodeAudioFormat::Aac;
+    let config = Arc::new(config);
+    state.config = config.clone();
+    state.live_config = Arc::new(vuio_core::state::LiveConfig::new(config));
+
+    let didl = browse_audio(&state).await;
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.aac")),
+        "the advertised resource must be the one the config selected:\n{didl}"
+    );
+    assert!(didl.contains("audio/aac"));
+    assert!(!didl.contains("audio.wav"));
+}
+
+// ---------------------------------------------------------------------------
+// The Dolby alternative
+// ---------------------------------------------------------------------------
+
+/// The default, on the codec it is for. A DTS file has no Dolby in it, so AC-3
+/// is a real alternative — and the one a television without a DTS licence is
+/// most likely to hold a licence for.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_dts_item_is_offered_the_ac3_resource() {
+    let (_temp, state, id) = dts_library().await;
+    let didl = browse_audio(&state).await;
+
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.ac3")),
+        "the default must offer the AC-3 alternative:\n{didl}"
+    );
+    assert!(didl.contains("audio/ac3"), "{didl}");
+    // Constant-bitrate, so the seeking it advertises is seeking it can do.
+    assert!(
+        didl.contains("DLNA.ORG_OP=11;DLNA.ORG_CI=1"),
+        "the AC-3 resource is seekable and converted:\n{didl}"
+    );
+}
+
+/// And the default on the codec it is *not* for.
+///
+/// The decoded alternative exists for a renderer that may not decode the
+/// original. Offering an AC-3 file an AC-3 alternative offers such a renderer
+/// the codec it already could not play, re-encoded a second time — so a Dolby
+/// source falls back to LPCM however `audio_format` is set.
+#[tokio::test]
+async fn an_ac3_item_is_not_offered_ac3_back() {
+    let (_temp, state, id) = library().await;
+    let didl = browse_audio(&state).await;
+
+    assert!(
+        !didl.contains("transcode/audio.ac3"),
+        "an AC-3 file must not be offered AC-3 as its alternative:\n{didl}"
+    );
+    assert!(
+        didl.contains(&format!("/media/{id}/transcode/audio.wav")),
+        "it falls back to LPCM, which every renderer decodes:\n{didl}"
+    );
+}
+
+/// The AC-3 resource states a length before it has encoded a byte, and means
+/// it. That is the difference from the AAC sibling, and the reason AC-3 can be
+/// the default: a renderer that cannot scrub a film cannot scrub, but one that
+/// cannot scrub an album track is a renderer people notice.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn the_ac3_resource_promises_a_length_and_delivers_it() {
+    let (_temp, state, id) = dts_library().await;
+    let (head_status, head_headers, head_body) = ac3_request(&state, id, Method::HEAD, None).await;
+    let (get_status, get_headers, whole) = ac3_request(&state, id, Method::GET, None).await;
+
+    assert_eq!(head_status, StatusCode::OK);
+    assert_eq!(get_status, StatusCode::OK);
+    assert!(head_body.is_empty(), "HEAD carries no body");
+    assert_eq!(head_headers[header::CONTENT_TYPE], "audio/ac3");
+    assert_eq!(head_headers[header::ACCEPT_RANGES], "bytes");
+    let features = head_headers["contentFeatures.dlna.org"].to_str().unwrap();
+    assert!(features.contains("DLNA.ORG_OP=11"), "seekable: {features}");
+
+    let promised = header_u64(&head_headers, header::CONTENT_LENGTH);
+    assert_eq!(
+        promised,
+        header_u64(&get_headers, header::CONTENT_LENGTH),
+        "HEAD and GET must promise the same length"
+    );
+    assert_eq!(
+        whole.len() as u64,
+        promised,
+        "and the body must be exactly that long"
+    );
+
+    // What arrives is AC-3: syncframes of one constant size, which is what let
+    // the length be stated in the first place.
+    assert_eq!([whole[0], whole[1]], [0x0B, 0x77], "AC-3 syncword");
+    let frame = ac3_frame_len(&whole);
+    assert_eq!(
+        promised as usize % frame,
+        0,
+        "a constant-bitrate stream of {frame}-byte frames cannot be {promised} bytes"
+    );
+    for (index, at) in (0..whole.len()).step_by(frame).enumerate() {
+        assert_eq!(
+            [whole[at], whole[at + 1]],
+            [0x0B, 0x77],
+            "frame {index} at {at} has no syncword"
+        );
+    }
+}
+
+/// The seek itself: a byte range returns the audio that lives at that offset of
+/// the whole encode, which is what a scrub bar depends on.
+///
+/// "The audio", not "the bytes". AC-3 frames overlap — each one's transform
+/// covers half of the previous frame's samples — so an encoder restarted at the
+/// seek point has no overlap history to draw on and its first frame quantises
+/// differently. From the frame after that the state has converged and the
+/// output is identical, which is the strongest claim this can make and a
+/// stronger one than it needs: the discrepancy is a single 32-millisecond frame
+/// at the moment the viewer dragged to.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_byte_range_of_the_ac3_resource_is_the_audio_at_that_offset() {
+    let (_temp, state, id) = dts_library().await;
+    let (_, _, whole) = ac3_request(&state, id, Method::GET, None).await;
+    let frame = ac3_frame_len(&whole);
+
+    // Deliberately not on a frame boundary: the encoder has to restart at the
+    // frame containing `start` and drop the bytes before it, or every byte
+    // after the seek is offset against what the renderer asked for.
+    let start = frame * 9 + 137;
+    let end = start + frame * 4;
+    let (status, headers, part) = ac3_request(
+        &state,
+        id,
+        Method::GET,
+        Some(&format!("bytes={start}-{end}")),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        headers[header::CONTENT_RANGE].to_str().unwrap(),
+        format!("bytes {start}-{end}/{}", whole.len())
+    );
+    assert_eq!(part.len(), end - start + 1);
+
+    // Everything past the frame the seek landed inside is the whole encode's
+    // own bytes at that offset — which is what makes the byte offset an honest
+    // name for a moment in the audio.
+    let settled = frame - start % frame;
+    assert_eq!(
+        part[settled..],
+        whole[start + settled..=end],
+        "past the frame the seek opened in, a range must be the bytes the whole \
+         encode has at that offset"
+    );
+
+    // And the partial frame at the front is the tail of a real syncframe, not a
+    // frame restarted early: the next syncword lands exactly where the whole
+    // encode's does.
+    assert_eq!(
+        [part[settled], part[settled + 1]],
+        [0x0B, 0x77],
+        "the first whole frame of the range does not begin on a syncword"
+    );
+}
+
+/// A range past the end is refused rather than answered with fewer bytes than
+/// its own `Content-Range` claims.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn a_range_past_the_end_of_the_ac3_resource_is_refused() {
+    let (_temp, state, id) = dts_library().await;
+    let (_, headers, _) = ac3_request(&state, id, Method::HEAD, None).await;
+    let total = header_u64(&headers, header::CONTENT_LENGTH);
+
+    let (status, _, _) = ac3_request(
+        &state,
+        id,
+        Method::GET,
+        Some(&format!("bytes={}-{}", total + 10, total + 20)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+}

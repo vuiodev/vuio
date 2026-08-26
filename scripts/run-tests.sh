@@ -211,15 +211,15 @@ run_quality_checks() {
     print_status "Running code quality checks..."
     
     # Format check
-    if cargo fmt --all -- --check; then
+    if cargo fmt -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web -- --check; then
         print_success "Code formatting is correct"
     else
-        print_error "Code formatting issues found. Run 'cargo fmt' to fix."
+        print_error "Code formatting issues found. Run 'cargo fmt -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web' to fix."
         return 1
     fi
     
     # Clippy lints
-    if cargo clippy --all-targets --all-features -- -D warnings; then
+    if cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D warnings; then
         print_success "Clippy lints passed"
     else
         print_error "Clippy lints failed"

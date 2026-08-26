@@ -13,6 +13,14 @@ pub struct SampleInfo {
     pub composition_time_offset: i32,
 }
 
+/// One track's run of samples inside a movie fragment.
+pub struct TrackRun<'a> {
+    pub track_id: u32,
+    /// Decode time of this run's first sample, in the track's own timescale.
+    pub base_decode_time: u64,
+    pub samples: &'a [SampleInfo],
+}
+
 pub struct Fmp4Writer;
 
 impl Fmp4Writer {
@@ -27,9 +35,31 @@ impl Fmp4Writer {
         Self::wrap_box(&box_data)
     }
 
-    /// Build `moov` (Movie Header) init segment box for a track.
+    /// The `mvhd` timescale, and therefore the unit of every movie-level duration.
+    const MOVIE_TIMESCALE: u32 = 1000;
+
+    /// Build `moov` (Movie Header) init segment box for a single track.
+    ///
+    /// Used by the HLS path, where every rendition is its own single-track
+    /// stream: MSE cannot initialise a `SourceBuffer` for one track from a `moov`
+    /// that also describes another.
     pub fn build_moov(track: &TrackInfo) -> Vec<u8> {
+        Self::build_moov_for(&[track], None)
+    }
+
+    /// Build `moov` for one or more tracks, optionally declaring the movie's
+    /// total duration.
+    ///
+    /// A progressive stream needs both: one `moov` describing the video and audio
+    /// tracks together, and a duration, because a renderer with no
+    /// `Content-Length` to divide has nothing else to draw a scrub bar from.
+    /// `duration_ms` is written into `mvhd`, into each `tkhd`, and into `mehd` —
+    /// the last being the one a fragmented file is actually meant to carry, and
+    /// the one players look for.
+    pub fn build_moov_for(tracks: &[&TrackInfo], duration_ms: Option<u64>) -> Vec<u8> {
         let mut moov_body = Vec::new();
+        let movie_duration = duration_ms.unwrap_or(0).min(u64::from(u32::MAX)) as u32;
+        let next_track_id = tracks.iter().map(|t| t.id).max().unwrap_or(1) + 1;
 
         // 1. mvhd (Movie Header)
         let mut mvhd = Vec::new();
@@ -38,8 +68,8 @@ impl Fmp4Writer {
         mvhd.extend_from_slice(&[0; 3]); // flags
         mvhd.extend_from_slice(&[0; 4]); // creation_time
         mvhd.extend_from_slice(&[0; 4]); // modification_time
-        mvhd.extend_from_slice(&(1000u32).to_be_bytes()); // timescale = 1000 Hz
-        mvhd.extend_from_slice(&(0u32).to_be_bytes()); // duration = 0 for fMP4 init
+        mvhd.extend_from_slice(&Self::MOVIE_TIMESCALE.to_be_bytes());
+        mvhd.extend_from_slice(&movie_duration.to_be_bytes());
         mvhd.extend_from_slice(&(0x00010000u32).to_be_bytes()); // rate = 1.0
         mvhd.extend_from_slice(&(0x0100u16).to_be_bytes()); // volume = 1.0
         mvhd.extend_from_slice(&[0; 10]); // reserved
@@ -50,16 +80,35 @@ impl Fmp4Writer {
         mvhd.extend_from_slice(&[0; 12]);
         mvhd.extend_from_slice(&(0x40000000u32).to_be_bytes());
         mvhd.extend_from_slice(&[0; 24]); // pre_defined
-        mvhd.extend_from_slice(&(2u32).to_be_bytes()); // next_track_id
+        mvhd.extend_from_slice(&next_track_id.to_be_bytes());
         moov_body.extend_from_slice(&Self::wrap_box(&mvhd));
 
-        // 2. trak (Track Atom)
-        let trak = Self::build_trak(track);
-        moov_body.extend_from_slice(&trak);
+        // 2. trak (Track Atom), one per track.
+        //
+        // Every audio track goes into one alternate group, and only the first of
+        // them is enabled. Both halves matter and they say different things. The
+        // group says the soundtracks are alternatives: a player reading a file
+        // whose audio tracks are all in group zero is entitled to render them
+        // all at once, which for a film with three soundtracks is three
+        // soundtracks played over each other. The enabled bit says which one to
+        // start with, and exactly one track in a group should carry it — three
+        // tracks all claiming to be the default is a choice the renderer then
+        // makes for itself. Both match what every muxer writes.
+        let leading_audio = tracks
+            .iter()
+            .position(|track| track.track_kind == TrackKind::Audio);
+        for (index, track) in tracks.iter().enumerate() {
+            let audio = track.track_kind == TrackKind::Audio;
+            moov_body.extend_from_slice(&Self::build_trak(
+                track,
+                movie_duration,
+                u16::from(audio),
+                !audio || Some(index) == leading_audio,
+            ));
+        }
 
         // 3. mvex (Movie Extends Atom)
-        let mvex = Self::build_mvex(track.id);
-        moov_body.extend_from_slice(&mvex);
+        moov_body.extend_from_slice(&Self::build_mvex(tracks, duration_ms));
 
         let mut moov = Vec::new();
         moov.extend_from_slice(b"moov");
@@ -79,22 +128,31 @@ impl Fmp4Writer {
         }
     }
 
-    fn build_trak(track: &TrackInfo) -> Vec<u8> {
+    fn build_trak(
+        track: &TrackInfo,
+        movie_duration: u32,
+        alternate_group: u16,
+        enabled: bool,
+    ) -> Vec<u8> {
         let mut trak_body = Vec::new();
 
         // tkhd (Track Header)
         let mut tkhd = Vec::new();
         tkhd.extend_from_slice(b"tkhd");
         tkhd.push(0); // version
-        tkhd.extend_from_slice(&[0, 0, 7]); // flags = enabled + in_movie + in_preview
+        // flags = in_movie + in_preview, and enabled for a track a renderer
+        // should play without being asked. Clearing the enabled bit does not
+        // hide an alternate — it is how a group says "selectable, but not the
+        // one to start with".
+        tkhd.extend_from_slice(&[0, 0, if enabled { 0x7 } else { 0x6 }]);
         tkhd.extend_from_slice(&[0; 4]); // creation_time
         tkhd.extend_from_slice(&[0; 4]); // modification_time
         tkhd.extend_from_slice(&track.id.to_be_bytes()); // track_id
         tkhd.extend_from_slice(&[0; 4]); // reserved
-        tkhd.extend_from_slice(&[0; 4]); // duration
+        tkhd.extend_from_slice(&movie_duration.to_be_bytes()); // duration, mvhd units
         tkhd.extend_from_slice(&[0; 8]); // reserved
         tkhd.extend_from_slice(&[0; 2]); // layer
-        tkhd.extend_from_slice(&[0; 2]); // alternate_group
+        tkhd.extend_from_slice(&alternate_group.to_be_bytes());
         let vol = if track.track_kind == TrackKind::Audio {
             0x0100u16
         } else {
@@ -138,16 +196,28 @@ impl Fmp4Writer {
         mdhd.extend_from_slice(&[0; 4]); // modification_time
         mdhd.extend_from_slice(&timescale.to_be_bytes());
         mdhd.extend_from_slice(&[0; 4]); // duration
-        mdhd.extend_from_slice(&[0x55, 0xc4]); // lang: "und"
+        mdhd.extend_from_slice(&packed_language(track.language.as_deref()));
         mdhd.extend_from_slice(&[0; 2]); // pre_defined
         mdia_body.extend_from_slice(&Self::wrap_box(&mdhd));
 
         // hdlr (Handler Reference Atom)
-        let (handler_type, name) = match track.track_kind {
+        //
+        // The name field is nominally a description of the handler, and that is
+        // what it holds for a track with nothing better to say. But it is also
+        // where a good many renderers read the label they put beside a track in
+        // an audio menu, so a track the container named — "Commentary",
+        // "Director's cut" — carries that name here instead.
+        let (handler_type, default_name) = match track.track_kind {
             TrackKind::Video => (b"vide", "VideoHandler"),
             TrackKind::Audio => (b"soun", "SoundHandler"),
             TrackKind::Other => (b"hint", "HintHandler"),
         };
+        let name = track
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(default_name);
         let mut hdlr = Vec::new();
         hdlr.extend_from_slice(b"hdlr");
         hdlr.extend_from_slice(&[0; 4]); // version + flags
@@ -213,6 +283,21 @@ impl Fmp4Writer {
         Self::wrap_box(&minf)
     }
 
+    /// The `AudioSampleEntry` preamble every audio codec shares, up to the point
+    /// where its own configuration box begins.
+    fn audio_sample_entry(fourcc: &[u8; 4], track: &TrackInfo) -> Vec<u8> {
+        let mut sample_entry = Vec::new();
+        sample_entry.extend_from_slice(fourcc);
+        sample_entry.extend_from_slice(&[0; 6]); // reserved
+        sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
+        sample_entry.extend_from_slice(&[0; 8]); // reserved
+        sample_entry.extend_from_slice(&(track.channels.unwrap_or(2) as u16).to_be_bytes());
+        sample_entry.extend_from_slice(&(16u16).to_be_bytes()); // sample_size = 16
+        sample_entry.extend_from_slice(&[0; 4]); // pre_defined + reserved
+        sample_entry.extend_from_slice(&(track.sample_rate.unwrap_or(44100) << 16).to_be_bytes());
+        sample_entry
+    }
+
     fn build_stbl(track: &TrackInfo) -> Vec<u8> {
         let mut stbl_body = Vec::new();
 
@@ -262,20 +347,32 @@ impl Fmp4Writer {
                 }
                 Self::wrap_box(&sample_entry)
             }
-            TrackCodec::Aac | TrackCodec::Unsupported => {
-                let mut sample_entry = Vec::new();
-                sample_entry.extend_from_slice(b"mp4a");
-                sample_entry.extend_from_slice(&[0; 6]); // reserved
-                sample_entry.extend_from_slice(&(1u16).to_be_bytes()); // data_reference_index
-                sample_entry.extend_from_slice(&[0; 8]); // reserved
-                sample_entry
-                    .extend_from_slice(&(track.channels.unwrap_or(2) as u16).to_be_bytes());
-                sample_entry.extend_from_slice(&(16u16).to_be_bytes()); // sample_size = 16
-                sample_entry.extend_from_slice(&[0; 4]); // pre_defined + reserved
-                sample_entry.extend_from_slice(
-                    &(track.sample_rate.unwrap_or(44100) << 16).to_be_bytes(),
-                );
-
+            // Dolby, passed through. An `mp4a` entry cannot describe AC-3, so
+            // ISO-BMFF gives these their own sample entries, each carrying the
+            // record built from the bitstream's first syncframe (see
+            // `super::ac3_config`). A track reaching here as `Ac3` or `Eac3` is
+            // one being carried untouched; one that had to be decoded arrives
+            // restated as `Aac` and takes the branch below.
+            TrackCodec::Ac3 | TrackCodec::Eac3 => {
+                let (fourcc, config_box): (&[u8; 4], &[u8; 4]) =
+                    if track.codec_kind == TrackCodec::Eac3 {
+                        (b"ec-3", b"dec3")
+                    } else {
+                        (b"ac-3", b"dac3")
+                    };
+                let mut sample_entry = Self::audio_sample_entry(fourcc, track);
+                let mut config = Vec::with_capacity(4 + track.extra_data.len());
+                config.extend_from_slice(config_box);
+                config.extend_from_slice(&track.extra_data);
+                sample_entry.extend_from_slice(&Self::wrap_box(&config));
+                Self::wrap_box(&sample_entry)
+            }
+            // Everything else gets an `mp4a` entry. `Dts` is here only for
+            // exhaustiveness: a DTS track reaches this writer already restated
+            // as AAC, because what the fragment will carry is the re-encoded
+            // stream and not the source.
+            TrackCodec::Aac | TrackCodec::Dts | TrackCodec::Unsupported => {
+                let mut sample_entry = Self::audio_sample_entry(b"mp4a", track);
                 if !track.extra_data.is_empty() {
                     sample_entry
                         .extend_from_slice(&Self::wrap_box(&Self::build_esds(&track.extra_data)));
@@ -365,27 +462,65 @@ impl Fmp4Writer {
         esds
     }
 
-    fn build_mvex(track_id: u32) -> Vec<u8> {
-        let mut trex = Vec::new();
-        trex.extend_from_slice(b"trex");
-        trex.extend_from_slice(&[0; 4]); // version + flags
-        trex.extend_from_slice(&track_id.to_be_bytes());
-        trex.extend_from_slice(&(1u32).to_be_bytes()); // default_sample_description_index
-        trex.extend_from_slice(&[0; 12]); // default duration, size, flags
-
+    fn build_mvex(tracks: &[&TrackInfo], duration_ms: Option<u64>) -> Vec<u8> {
         let mut mvex = Vec::new();
         mvex.extend_from_slice(b"mvex");
-        mvex.extend_from_slice(&Self::wrap_box(&trex));
+
+        // mehd (Movie Extends Header) — the fragmented file's own statement of
+        // how long it is. `mvhd`'s duration describes the samples in the `moov`,
+        // of which a fragmented file has none, so this is the box a player reads
+        // to know the total. Omitted when the length is genuinely unknown rather
+        // than declared as zero, which some players read as "empty".
+        if let Some(duration_ms) = duration_ms.filter(|d| *d > 0) {
+            let mut mehd = Vec::new();
+            mehd.extend_from_slice(b"mehd");
+            mehd.push(1); // version 1 (64-bit fragment_duration)
+            mehd.extend_from_slice(&[0; 3]); // flags
+            mehd.extend_from_slice(&duration_ms.to_be_bytes());
+            mvex.extend_from_slice(&Self::wrap_box(&mehd));
+        }
+
+        for track in tracks {
+            let mut trex = Vec::new();
+            trex.extend_from_slice(b"trex");
+            trex.extend_from_slice(&[0; 4]); // version + flags
+            trex.extend_from_slice(&track.id.to_be_bytes());
+            trex.extend_from_slice(&(1u32).to_be_bytes()); // default_sample_description_index
+            trex.extend_from_slice(&[0; 12]); // default duration, size, flags
+            mvex.extend_from_slice(&Self::wrap_box(&trex));
+        }
         Self::wrap_box(&mvex)
     }
 
-    /// Build `moof` (Movie Fragment) box for a sequence of samples.
+    /// Build `moof` (Movie Fragment) box for one track's run of samples.
     pub fn build_moof(
         sequence_number: u32,
         track_id: u32,
         base_decode_time: u64,
         samples: &[SampleInfo],
         data_offset: u32,
+    ) -> Vec<u8> {
+        Self::build_moof_multi(
+            sequence_number,
+            &[TrackRun {
+                track_id,
+                base_decode_time,
+                samples,
+            }],
+            &[data_offset],
+        )
+    }
+
+    /// Build `moof` for one or more tracks sharing a single `mdat`.
+    ///
+    /// One `traf` per run, in the order given, and each run's `data_offset` must
+    /// point at where that run's samples start inside the following `mdat` —
+    /// measured, as `tfhd`'s `default-base-is-moof` flag says, from the first
+    /// byte of this `moof`.
+    pub fn build_moof_multi(
+        sequence_number: u32,
+        runs: &[TrackRun<'_>],
+        data_offsets: &[u32],
     ) -> Vec<u8> {
         let mut moof_body = Vec::new();
 
@@ -396,7 +531,22 @@ impl Fmp4Writer {
         mfhd.extend_from_slice(&sequence_number.to_be_bytes());
         moof_body.extend_from_slice(&Self::wrap_box(&mfhd));
 
-        // traf (Track Fragment)
+        for (run, data_offset) in runs.iter().zip(data_offsets) {
+            moof_body.extend_from_slice(&Self::build_traf(run, *data_offset));
+        }
+
+        let mut moof = Vec::new();
+        moof.extend_from_slice(b"moof");
+        moof.extend_from_slice(&moof_body);
+        Self::wrap_box(&moof)
+    }
+
+    fn build_traf(run: &TrackRun<'_>, data_offset: u32) -> Vec<u8> {
+        let TrackRun {
+            track_id,
+            base_decode_time,
+            samples,
+        } = *run;
         let mut traf_body = Vec::new();
 
         // tfhd (Track Fragment Header)
@@ -458,12 +608,7 @@ impl Fmp4Writer {
         let mut traf = Vec::new();
         traf.extend_from_slice(b"traf");
         traf.extend_from_slice(&traf_body);
-        moof_body.extend_from_slice(&Self::wrap_box(&traf));
-
-        let mut moof = Vec::new();
-        moof.extend_from_slice(b"moof");
-        moof.extend_from_slice(&moof_body);
-        Self::wrap_box(&moof)
+        Self::wrap_box(&traf)
     }
 
     /// Build `mdat` (Media Data) box wrapping packet byte payloads.
@@ -493,9 +638,128 @@ impl Fmp4Writer {
         fallback_base_decode_time: u64,
         packets: &[MediaPacket],
     ) -> Vec<u8> {
+        let samples = Self::samples_for(track, packets);
+        let base_decode_time = packets
+            .first()
+            .map(|p| p.dts)
+            .unwrap_or(fallback_base_decode_time);
+        let run = TrackRun {
+            track_id: track.id,
+            base_decode_time,
+            samples: &samples,
+        };
+
+        // Build moof first with a placeholder data_offset of 0 to measure its size.
+        let moof_placeholder = Self::build_moof_multi(sequence_number, &[run], &[0]);
+        // data_offset = moof box size + 8 bytes for the mdat header
+        let data_offset = moof_placeholder.len() as u32 + 8;
+
+        // Rebuild with the correct data_offset
+        let run = TrackRun {
+            track_id: track.id,
+            base_decode_time,
+            samples: &samples,
+        };
+        let moof = Self::build_moof_multi(sequence_number, &[run], &[data_offset]);
+        let mdat = Self::build_mdat(packets);
+
+        let mut segment = Vec::with_capacity(moof.len() + mdat.len());
+        segment.extend_from_slice(&moof);
+        segment.extend_from_slice(&mdat);
+        segment
+    }
+
+    /// Build one fragment carrying several tracks — the progressive layout.
+    ///
+    /// A `moof` with a `traf` per track, then a single `mdat` holding each
+    /// track's samples in the same order. Both trafs in one fragment rather than
+    /// alternating single-track fragments: it is what every muxer emits for a
+    /// progressive file, and the format a television is most likely to have been
+    /// tested against.
+    ///
+    /// `fallback_base_decode_times` supplies a run's base decode time only when
+    /// that track contributed no packets to this fragment.
+    pub fn build_multi_track_segment(
+        sequence_number: u32,
+        tracks: &[(&TrackInfo, &[MediaPacket])],
+        fallback_base_decode_times: &[u64],
+    ) -> Vec<u8> {
+        let sample_sets: Vec<Vec<SampleInfo>> = tracks
+            .iter()
+            .map(|(track, packets)| Self::samples_for(track, packets))
+            .collect();
+        let bases: Vec<u64> = tracks
+            .iter()
+            .enumerate()
+            .map(|(i, (_, packets))| {
+                packets
+                    .first()
+                    .map(|p| p.dts)
+                    .unwrap_or_else(|| fallback_base_decode_times.get(i).copied().unwrap_or(0))
+            })
+            .collect();
+
+        fn runs<'a>(
+            tracks: &[(&TrackInfo, &[MediaPacket])],
+            bases: &[u64],
+            sets: &'a [Vec<SampleInfo>],
+        ) -> Vec<TrackRun<'a>> {
+            tracks
+                .iter()
+                .enumerate()
+                .map(|(i, (track, _))| TrackRun {
+                    track_id: track.id,
+                    base_decode_time: bases[i],
+                    samples: &sets[i],
+                })
+                .collect()
+        }
+
+        // Measure the moof with placeholder offsets, then rebuild with the real
+        // ones. The box's size does not depend on the offsets it carries — every
+        // `data_offset` is a fixed-width 32-bit field — so one measuring pass is
+        // enough.
+        let placeholder = Self::build_moof_multi(
+            sequence_number,
+            &runs(tracks, &bases, &sample_sets),
+            &vec![0u32; tracks.len()],
+        );
+        let mut offset = placeholder.len() as u32 + 8;
+        let mut data_offsets = Vec::with_capacity(tracks.len());
+        for (_, packets) in tracks {
+            data_offsets.push(offset);
+            offset += packets.iter().map(|p| p.data.len() as u32).sum::<u32>();
+        }
+
+        let moof = Self::build_moof_multi(
+            sequence_number,
+            &runs(tracks, &bases, &sample_sets),
+            &data_offsets,
+        );
+
+        let payload: usize = tracks
+            .iter()
+            .map(|(_, packets)| packets.iter().map(|p| p.data.len()).sum::<usize>())
+            .sum();
+        let mut mdat = Vec::with_capacity(8 + payload);
+        mdat.extend_from_slice(b"mdat");
+        for (_, packets) in tracks {
+            for packet in *packets {
+                mdat.extend_from_slice(&packet.data);
+            }
+        }
+        let mdat = Self::wrap_box(&mdat);
+
+        let mut segment = Vec::with_capacity(moof.len() + mdat.len());
+        segment.extend_from_slice(&moof);
+        segment.extend_from_slice(&mdat);
+        segment
+    }
+
+    fn samples_for(track: &TrackInfo, packets: &[MediaPacket]) -> Vec<SampleInfo> {
         let timescale = Self::timescale_for(track);
 
-        let samples: Vec<SampleInfo> = packets
+        packets
             .iter()
             .enumerate()
             .map(|(i, p)| {
@@ -523,26 +787,7 @@ impl Fmp4Writer {
                     composition_time_offset: (p.pts as i64 - p.dts as i64) as i32,
                 }
             })
-            .collect();
-
-        let base_decode_time = packets
-            .first()
-            .map(|p| p.dts)
-            .unwrap_or(fallback_base_decode_time);
-
-        // Build moof first with a placeholder data_offset of 0 to measure its size.
-        let moof_placeholder = Self::build_moof(sequence_number, track.id, base_decode_time, &samples, 0);
-        // data_offset = moof box size + 8 bytes for the mdat header
-        let data_offset = moof_placeholder.len() as u32 + 8;
-
-        // Rebuild with the correct data_offset
-        let moof = Self::build_moof(sequence_number, track.id, base_decode_time, &samples, data_offset);
-        let mdat = Self::build_mdat(packets);
-
-        let mut segment = Vec::with_capacity(moof.len() + mdat.len());
-        segment.extend_from_slice(&moof);
-        segment.extend_from_slice(&mdat);
-        segment
+            .collect()
     }
 
     fn wrap_box(contents: &[u8]) -> Vec<u8> {
@@ -554,9 +799,133 @@ impl Fmp4Writer {
     }
 }
 
+/// A track's language, as `mdhd` carries it.
+///
+/// ISO-BMFF packs three lowercase ISO-639-2/T letters into fifteen bits, each
+/// letter held as its distance from `0x60` — one below `a`, not `a` itself,
+/// which is why the "und" every muxer writes for an unknown language comes out
+/// as `0x55c4` and not a value fifty-nine lower. That is also what
+/// anything unrecognisable resolves to here: a television offered a soundtrack
+/// labelled with a language it cannot parse tends to hide the track, where an
+/// honest "undetermined" leaves it listed.
+///
+/// Matroska stores the two-letter ISO-639-1 forms in some files and the
+/// three-letter ones in others, and appends a country suffix (`pt-BR`) in a few.
+/// Only the three-letter form fits the field, so that is the one taken; the rest
+/// is undetermined rather than guessed at.
+fn packed_language(language: Option<&str>) -> [u8; 2] {
+    /// `und`, the value for a language not stated.
+    const UNDETERMINED: [u8; 2] = [0x55, 0xc4];
+
+    let Some(language) = language else {
+        return UNDETERMINED;
+    };
+    let code = language.trim().split(['-', '_']).next().unwrap_or_default();
+    let bytes = code.as_bytes();
+    if bytes.len() != 3 || !bytes.iter().all(|b| b.is_ascii_alphabetic()) {
+        return UNDETERMINED;
+    }
+    let packed = bytes.iter().fold(0u16, |packed, byte| {
+        (packed << 5) | u16::from(byte.to_ascii_lowercase() - 0x60)
+    });
+    packed.to_be_bytes()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_language_is_packed_as_three_five_bit_letters() {
+        // The value every muxer writes for a language it does not know, and the
+        // one every reader recognises.
+        assert_eq!(packed_language(None), [0x55, 0xc4]);
+        assert_eq!(packed_language(Some("und")), [0x55, 0xc4]);
+        // 'e'-0x60 = 5, 'n'-0x60 = 14, 'g'-0x60 = 7, in fifteen bits.
+        let eng: u16 = (5 << 10) | (14 << 5) | 7;
+        assert_eq!(packed_language(Some("eng")), eng.to_be_bytes());
+        assert_eq!(packed_language(Some("ENG")), packed_language(Some("eng")));
+    }
+
+    /// Only the three-letter form fits the field. Anything else is undetermined
+    /// rather than guessed at — a television offered a soundtrack labelled with
+    /// a language it cannot parse tends to hide the track entirely.
+    #[test]
+    fn a_language_that_does_not_fit_the_field_is_undetermined() {
+        for input in ["en", "english", "", "  ", "e1g", "日本語"] {
+            assert_eq!(
+                packed_language(Some(input)),
+                [0x55, 0xc4],
+                "{input:?} must not be packed into fifteen bits"
+            );
+        }
+        // A country suffix is dropped rather than taken as part of the code.
+        assert_eq!(packed_language(Some("por-BR")), packed_language(Some("por")));
+    }
+
+    fn track_of(id: u32, kind: TrackKind) -> TrackInfo {
+        TrackInfo {
+            id,
+            track_kind: kind,
+            codec: "AAC".into(),
+            codec_kind: TrackCodec::Aac,
+            language: None,
+            name: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            width: None,
+            height: None,
+            is_default: true,
+            extra_data: vec![0x11, 0x90],
+        }
+    }
+
+    /// Every `tkhd` in a `moov`, as (flags, alternate_group), in track order.
+    fn track_headers(moov: &[u8]) -> Vec<(u32, u16)> {
+        let mut out = Vec::new();
+        let mut from = 0;
+        while let Some(at) = moov[from..].windows(4).position(|w| w == b"tkhd") {
+            // tkhd body: version(1) + flags(3) + creation(4) + modification(4)
+            // + track_id(4) + reserved(4) + duration(4) + reserved(8) + layer(2).
+            let body = from + at + 4;
+            let flags = u32::from_be_bytes([0, moov[body + 1], moov[body + 2], moov[body + 3]]);
+            let group = u16::from_be_bytes(moov[body + 34..body + 36].try_into().unwrap());
+            out.push((flags, group));
+            from = body;
+        }
+        out
+    }
+
+    /// Audio tracks must be declared alternatives of each other, or a player is
+    /// entitled to render every one of them at once — and exactly one of them
+    /// carries the enabled bit, or three tracks all claim to be the default.
+    ///
+    /// The values are ffmpeg's, checked against a file it muxed: the alternates
+    /// differ from the leading track in the enabled bit and nothing else.
+    #[test]
+    fn only_the_leading_soundtrack_is_enabled_and_they_share_a_group() {
+        let tracks = [
+            track_of(1, TrackKind::Video),
+            track_of(2, TrackKind::Audio),
+            track_of(3, TrackKind::Audio),
+            track_of(4, TrackKind::Audio),
+        ];
+        let refs: Vec<&TrackInfo> = tracks.iter().collect();
+        assert_eq!(
+            track_headers(&Fmp4Writer::build_moov_for(&refs, None)),
+            vec![(0x7, 0), (0x7, 1), (0x6, 1), (0x6, 1)]
+        );
+    }
+
+    /// A lone soundtrack is the leading one, so the single-track path a browser
+    /// rendition takes is unaffected by any of that.
+    #[test]
+    fn a_single_track_moov_is_enabled_whatever_it_carries() {
+        for kind in [TrackKind::Audio, TrackKind::Video] {
+            let moov = Fmp4Writer::build_moov(&track_of(1, kind));
+            assert_eq!(track_headers(&moov)[0].0, 0x7, "{kind:?}");
+        }
+    }
 
     #[test]
     fn test_ftyp_box_magic() {
@@ -578,6 +947,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![],
         };
         let moov = Fmp4Writer::build_moov(&track);
@@ -611,6 +981,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![],
         };
         assert_eq!(Fmp4Writer::timescale_for(&track), 90_000);
@@ -629,6 +1000,7 @@ mod tests {
             channels: Some(2),
             width: None,
             height: None,
+            is_default: false,
             extra_data: vec![],
         };
         assert_eq!(Fmp4Writer::timescale_for(&track), 48_000);
@@ -647,6 +1019,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![],
         };
         let packets = vec![MediaPacket {
@@ -733,6 +1106,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![],
         };
         let moov = Fmp4Writer::build_moov(&track);
@@ -755,6 +1129,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![0x01, 0x64, 0x00, 0x28, 0xAB, 0xCD], // fake AVCDecoderConfigurationRecord
         };
         let moov = Fmp4Writer::build_moov(&track);
@@ -778,6 +1153,7 @@ mod tests {
             channels: None,
             width: Some(3840),
             height: Some(2160),
+            is_default: false,
             extra_data: vec![0x01, 0x02, 0x20, 0x00, 0x00, 0x00], // fake HEVCDecoderConfigurationRecord
         };
         let moov = Fmp4Writer::build_moov(&track);
@@ -799,6 +1175,7 @@ mod tests {
             channels: None,
             width: Some(1920),
             height: Some(1080),
+            is_default: false,
             extra_data: vec![],
         };
         let moov = Fmp4Writer::build_moov(&track);
@@ -820,6 +1197,7 @@ mod tests {
             channels: Some(2),
             width: None,
             height: None,
+            is_default: false,
             extra_data: audio_specific_config.clone(),
         };
         let moov = Fmp4Writer::build_moov(&track);

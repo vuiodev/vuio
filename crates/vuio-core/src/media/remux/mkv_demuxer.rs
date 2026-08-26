@@ -1,5 +1,6 @@
 //! Matroska (.mkv) track inspection and sample packet demuxing via Symphonia.
 
+#[allow(unused_imports)]
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -11,19 +12,90 @@ pub enum TrackKind {
     Other,
 }
 
-/// The subset of codecs this remuxer can pass through into browser-playable fMP4.
+/// What one track is in, as far as this pipeline is concerned.
 ///
-/// This is a passthrough remuxer, not a transcoder: everything here is real content
-/// Symphonia can identify (E-AC-3/AC-3/DTS/TrueHD audio, VP9/AV1 video, ...), but with
-/// no decoder/encoder in the pipeline those tracks are marked `Unsupported` and left out
-/// of what gets offered to the browser rather than shipped as a broken stream.
+/// Video is passthrough — AVC and HEVC go into fMP4 as the bytes they already
+/// are — and so is AAC audio. AC-3, E-AC-3 and DTS are the three the vendored
+/// decoders handle: named here rather than lumped into `Unsupported` even in a
+/// build with no decoder compiled in, because "AC-3, which this build cannot
+/// decode" is a diagnostic and "unsupported" is a shrug. Whether a *named*
+/// codec can actually be produced is a separate question, asked through
+/// [`TrackCodec::is_playable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum TrackCodec {
     Avc,
     Hevc,
     Aac,
+    /// AC-3, "Dolby Digital" (ATSC A/52).
+    Ac3,
+    /// E-AC-3, "Dolby Digital Plus" (A/52 Annex E).
+    Eac3,
+    /// DTS Coherent Acoustics.
+    Dts,
     #[default]
     Unsupported,
+}
+
+impl TrackCodec {
+    /// The decoder this track needs, if it needs one at all.
+    ///
+    /// `None` covers both ends: a codec that is already playable everywhere
+    /// (AAC), and one nothing here can do anything with.
+    #[cfg(feature = "transcode")]
+    pub fn transcode_codec(self) -> Option<crate::media::transcode::TranscodeCodec> {
+        use crate::media::transcode::TranscodeCodec;
+        match self {
+            Self::Ac3 => Some(TranscodeCodec::Ac3),
+            Self::Eac3 => Some(TranscodeCodec::Eac3),
+            Self::Dts => Some(TranscodeCodec::Dts),
+            _ => None,
+        }
+    }
+
+    /// Whether this build can put this track in front of a browser or a TV —
+    /// either by passing it through untouched, or by decoding it.
+    ///
+    /// The answer is a compile-time constant reached at runtime, so the
+    /// playlist writer and the segment handler agree without either carrying a
+    /// `#[cfg]`: a build without `transcode-dts` drops a DTS rendition rather
+    /// than offering one it would then fail to produce.
+    pub fn is_playable(self) -> bool {
+        match self {
+            Self::Avc | Self::Hevc | Self::Aac => true,
+            #[cfg(feature = "transcode")]
+            Self::Ac3 | Self::Eac3 | Self::Dts => self
+                .transcode_codec()
+                .is_some_and(|codec| codec.is_decodable() && cfg!(feature = "transcode-aac")),
+            #[cfg(not(feature = "transcode"))]
+            Self::Ac3 | Self::Eac3 | Self::Dts => false,
+            Self::Unsupported => false,
+        }
+    }
+
+    /// Whether a progressive MP4 built for a television can carry this track —
+    /// either as the bitstream it already is, or decoded into one that can be.
+    ///
+    /// Wider than [`TrackCodec::is_playable`], which asks the same question on a
+    /// browser's behalf. A browser's media source cannot take AC-3 under any
+    /// circumstances, so for the HLS path a Dolby track is only ever reachable
+    /// by decoding it. A television is the one device that usually can: it is
+    /// what Dolby Digital was designed for, and handing it a stereo AAC downmix
+    /// of a 5.1 track would throw away the surround it was about to play. So
+    /// AC-3 and E-AC-3 are carried whatever this build can decode — passing a
+    /// track through needs no decoder at all — and only DTS, which televisions
+    /// commonly do lack, has to be re-encoded to be heard.
+    pub fn plays_on_a_television(self) -> bool {
+        match self {
+            Self::Avc | Self::Hevc | Self::Aac | Self::Ac3 | Self::Eac3 => true,
+            #[cfg(feature = "transcode")]
+            Self::Dts => self
+                .transcode_codec()
+                .is_some_and(|codec| codec.is_decodable() && cfg!(feature = "transcode-aac")),
+            #[cfg(not(feature = "transcode"))]
+            Self::Dts => false,
+            Self::Unsupported => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -38,6 +110,13 @@ pub struct TrackInfo {
     pub channels: Option<u8>,
     pub width: Option<u32>,
     pub height: Option<u32>,
+    /// Whether the container marks this the default track of its kind.
+    ///
+    /// Which of a film's audio tracks to carry, when it has several. Language is
+    /// deliberately not consulted: a wrong guess is worse than a predictable
+    /// one, and the fix if it turns out to matter is one resource per track.
+    #[serde(default)]
+    pub is_default: bool,
     /// Raw decoder config record for `codec_kind`: an AVC/HEVCDecoderConfigurationRecord
     /// for video (Matroska's CodecPrivate for these codecs already *is* this record), or
     /// the raw AudioSpecificConfig for AAC. Empty when `codec_kind` is `Unsupported`.
@@ -80,7 +159,17 @@ pub fn browser_video_track(tracks: &[TrackInfo]) -> Option<&TrackInfo> {
 pub fn browser_audio_tracks(tracks: &[TrackInfo]) -> Vec<&TrackInfo> {
     tracks
         .iter()
-        .filter(|t| t.track_kind == TrackKind::Audio && t.codec_kind == TrackCodec::Aac)
+        .filter(|t| t.track_kind == TrackKind::Audio && t.codec_kind.is_playable())
+        .collect()
+}
+
+/// Audio tracks a progressive MP4 for a television can carry, in container
+/// order. Wider than [`browser_audio_tracks`] by exactly the Dolby codecs a
+/// television plays for itself — see [`TrackCodec::plays_on_a_television`].
+pub fn television_audio_tracks(tracks: &[TrackInfo]) -> Vec<&TrackInfo> {
+    tracks
+        .iter()
+        .filter(|t| t.track_kind == TrackKind::Audio && t.codec_kind.plays_on_a_television())
         .collect()
 }
 
@@ -91,13 +180,15 @@ impl MkvDemuxer {
     /// info such as duration.
     #[cfg(feature = "casting")]
     pub fn inspect(path: &Path) -> Result<FileInfo> {
-        use symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
+        use symphonia::core::codecs::audio::well_known::{
+            CODEC_ID_AAC, CODEC_ID_AC3, CODEC_ID_DCA, CODEC_ID_EAC3, CODEC_ID_TRUEHD,
+        };
         use symphonia::core::codecs::video::well_known::extra_data::{
             VIDEO_EXTRA_DATA_ID_AVC_DECODER_CONFIG, VIDEO_EXTRA_DATA_ID_HEVC_DECODER_CONFIG,
         };
         use symphonia::core::codecs::video::well_known::{CODEC_ID_H264, CODEC_ID_HEVC};
         use symphonia::core::formats::probe::Hint;
-        use symphonia::core::formats::FormatOptions;
+        use symphonia::core::formats::{FormatOptions, TrackFlags};
         use symphonia::core::io::MediaSourceStream;
         use symphonia::core::meta::MetadataOptions;
         use symphonia::core::units::Timestamp;
@@ -171,14 +262,23 @@ impl MkvDemuxer {
                     channels: None,
                     width: v.width.map(u32::from),
                     height: v.height.map(u32::from),
+                    is_default: t.flags.contains(TrackFlags::DEFAULT),
                     extra_data,
                 });
             } else if let Some(a) = params.audio() {
-                let (codec_kind, codec_name) = if a.codec == CODEC_ID_AAC {
-                    (TrackCodec::Aac, "AAC")
-                } else {
-                    (TrackCodec::Unsupported, "Audio")
+                let (codec_kind, codec_name) = match a.codec {
+                    CODEC_ID_AAC => (TrackCodec::Aac, "AAC"),
+                    CODEC_ID_AC3 => (TrackCodec::Ac3, "AC-3"),
+                    CODEC_ID_EAC3 => (TrackCodec::Eac3, "E-AC-3"),
+                    CODEC_ID_DCA => (TrackCodec::Dts, "DTS"),
+                    CODEC_ID_TRUEHD => (TrackCodec::Unsupported, "TrueHD"),
+                    _ => (TrackCodec::Unsupported, "Audio"),
                 };
+                // Only AAC carries a decoder config worth keeping. AC-3 and DTS
+                // frames describe themselves in their own headers, so their
+                // decoders need nothing from the container — and the AAC track
+                // re-encoded *from* one of them gets its `AudioSpecificConfig`
+                // from the encoder's shape, not from the source.
                 let extra_data = if codec_kind == TrackCodec::Aac {
                     a.extra_data.as_ref().map(|d| d.to_vec()).unwrap_or_default()
                 } else {
@@ -196,6 +296,7 @@ impl MkvDemuxer {
                     channels: a.channels.clone().map(|c| c.count() as u8),
                     width: None,
                     height: None,
+                    is_default: t.flags.contains(TrackFlags::DEFAULT),
                     extra_data,
                 });
             }
@@ -243,6 +344,10 @@ impl MkvDemuxer {
         // A safety valve, not a tuning knob: guards against runaway loops if a track's
         // packets never accumulate to `target_duration_secs` (e.g. a corrupt duration).
         const MAX_PACKETS_PER_SEGMENT: usize = 4096;
+        // How far before the requested time to aim the seek. One Matroska tick:
+        // enough to land at or before the block asked for, and short enough that
+        // nothing else is read to get there.
+        const SEEK_BACKOFF_SECS: f64 = 0.001;
         use symphonia::core::formats::probe::Hint;
         use symphonia::core::formats::{FormatOptions, SeekMode, SeekTo};
         use symphonia::core::io::MediaSourceStream;
@@ -257,11 +362,15 @@ impl MkvDemuxer {
             hint.with_extension(ext);
         }
 
+        let mut meta_opts = MetadataOptions::default();
+        meta_opts.limit_tag_bytes = symphonia::core::common::Limit::Maximum(0);
+        meta_opts.limit_visual_bytes = symphonia::core::common::Limit::Maximum(0);
+
         let mut format = symphonia::default::get_probe().probe(
             &hint,
             stream,
             FormatOptions::default(),
-            MetadataOptions::default(),
+            meta_opts,
         )?;
 
         let track_time_base = format
@@ -281,7 +390,14 @@ impl MkvDemuxer {
         // Coarse lands on the container's own cue point (a keyframe) at or before the
         // requested time, where Accurate lands on the nearest sample — which is usually
         // mid-GOP, and produced segments a player could not start on.
-        let target_time = Time::try_from_secs_f64(start_secs.max(0.0)).unwrap_or(Time::ZERO);
+        // Backed off by a hair, because symphonia's seek lands on the first
+        // block whose presentation time is at or *after* the request, and asking
+        // for exactly a keyframe's own timestamp is answered with the block
+        // after it — half a second of film, gone, at the start of every segment.
+        // Asking a millisecond earlier lands one frame before the keyframe
+        // instead, which the filter below then drops.
+        let target_time = Time::try_from_secs_f64((start_secs - SEEK_BACKOFF_SECS).max(0.0))
+            .unwrap_or(Time::ZERO);
         let _ = format.seek(
             SeekMode::Coarse,
             SeekTo::Time {
@@ -290,6 +406,8 @@ impl MkvDemuxer {
             },
         );
 
+        let start_ticks =
+            (start_secs.max(0.0) * output_timescale as f64).round() as u64;
         let target_ticks =
             (target_duration_secs.max(0.0) * output_timescale as f64).round() as u64;
 
@@ -320,14 +438,39 @@ impl MkvDemuxer {
                     let dts = rescale(packet.dts.get());
                     let dur = rescale(packet.dur.get() as i64);
                     let is_keyframe = packet_is_keyframe(&packet.data, codec);
-                    // Guarantee the segment opens on a random-access point even where
-                    // the container's cue index is sparse enough that the seek above
-                    // landed mid-GOP. Dropping these leading frames loses nothing: they
-                    // depend on references the player would not have when starting here,
-                    // and the previous segment already covers their span.
-                    if packets.is_empty() && !is_keyframe {
+
+                    // Every track is partitioned strictly by the packet's own
+                    // presentation time, so a packet lands in exactly one segment
+                    // and consecutive segments meet without a gap or an overlap.
+                    // Note what this deliberately does *not* do: round the start
+                    // forward to a keyframe. A film's keyframes are eight to
+                    // twelve seconds apart, so rounding hands back a stretch of
+                    // film several segments further on than the caller asked for,
+                    // and the player's timeline and the media stop describing the
+                    // same thing. Opening on a keyframe is real, and is the
+                    // caller's to arrange by asking for a range that starts on
+                    // one — which is what `web::remux_streaming::segmentation`
+                    // reads the container's cue index to do.
+                    //
+                    // A caller that needs samples from before its segment — the
+                    // audio re-encode does, to prime an encoder — asks for an
+                    // earlier `start_secs` rather than being handed a packet that
+                    // also belongs to its neighbour.
+                    if pts < start_ticks {
                         continue;
                     }
+                    // Matroska stores no per-block duration: a `SimpleBlock` is a
+                    // timestamp and a payload, and symphonia can only report a
+                    // duration where the track declares `DefaultDuration` or the
+                    // codec implies one. Accumulating durations alone therefore
+                    // runs to the packet ceiling on any track that declares
+                    // neither — which is a segment holding the whole film. The
+                    // presentation time is the check that does not depend on the
+                    // container being generous.
+                    if pts >= start_ticks + target_ticks && !packets.is_empty() {
+                        break;
+                    }
+
                     accumulated_ticks += dur;
                     packets.push(MediaPacket {
                         track_id: packet.track_id,
@@ -385,7 +528,7 @@ impl MkvDemuxer {
 /// each frame's composition offset (negative for frames presented before their decode
 /// position, which `trun` version 1 stores as a signed value).
 #[cfg(feature = "casting")]
-fn derive_decode_timestamps(packets: &mut [MediaPacket]) {
+pub(crate) fn derive_decode_timestamps(packets: &mut [MediaPacket]) {
     let mut decode_times: Vec<u64> = packets.iter().map(|p| p.pts).collect();
     decode_times.sort_unstable();
     for (packet, dts) in packets.iter_mut().zip(decode_times) {
@@ -398,7 +541,7 @@ fn derive_decode_timestamps(packets: &mut [MediaPacket]) {
 /// timescale). Uses 128-bit arithmetic since `ticks * numer * output_timescale` can
 /// exceed 64 bits for a multi-hour file's later timestamps.
 #[cfg(feature = "casting")]
-fn rescale_ticks(ticks: i64, time_base: symphonia::core::units::TimeBase, output_timescale: u32) -> u64 {
+pub(crate) fn rescale_ticks(ticks: i64, time_base: symphonia::core::units::TimeBase, output_timescale: u32) -> u64 {
     let ticks = i128::from(ticks.max(0));
     let numer = i128::from(time_base.numer.get());
     let denom = i128::from(time_base.denom.get());
@@ -413,7 +556,7 @@ fn rescale_ticks(ticks: i64, time_base: symphonia::core::units::TimeBase, output
 /// Assumes a 4-byte NAL length prefix, which is what Matroska muxers use in practice
 /// (the AVC/HEVCDecoderConfigurationRecord's `lengthSizeMinusOne` is almost always 3).
 #[cfg(feature = "casting")]
-fn packet_is_keyframe(data: &[u8], codec: TrackCodec) -> bool {
+pub(crate) fn packet_is_keyframe(data: &[u8], codec: TrackCodec) -> bool {
     match codec {
         TrackCodec::Avc => nal_units(data, 4).any(|nal| !nal.is_empty() && (nal[0] & 0x1F) == 5),
         TrackCodec::Hevc => {

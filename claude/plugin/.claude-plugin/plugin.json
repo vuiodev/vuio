@@ -1,7 +1,7 @@
 {
   "name": "vuio",
   "displayName": "VuIO Media Server",
-  "version": "0.0.44",
+  "version": "0.0.45",
   "description": "Browse, search and cast your VuIO media library — and control the TVs and speakers on your network — from Claude.",
   "author": {
     "name": "vyrti",
