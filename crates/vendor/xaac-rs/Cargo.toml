@@ -73,6 +73,7 @@ path = "tests/codec.rs"
 
 [dependencies.libxaac-sys]
 version = "0.1.0"
+path = "../libxaac-sys"
 
 [dependencies.pyo3]
 version = "0.27"

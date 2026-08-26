@@ -193,7 +193,7 @@ hex = { version = "0.4", optional = true }
 oxideav-core = { path = "../vendor/oxideav-core", optional = true }
 vuio-codec-ac3 = { path = "../vuio-codec-ac3", optional = true }
 oxideav-dts = { path = "../vendor/oxideav-dts", optional = true }
-xaac-rs = { version = "0.2", optional = true }
+xaac-rs = { path = "../vendor/xaac-rs", version = "0.2", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
 # over TLS. `rustls-no-provider` rather than a provider-selecting feature because

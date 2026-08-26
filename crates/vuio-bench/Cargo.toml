@@ -41,4 +41,4 @@ vuio-core = { path = "../vuio-core", version = "0.0.45", features = ["unstable-i
 vuio-codec-ac3 = { path = "../vuio-codec-ac3" }
 oxideav-dts = { path = "../vendor/oxideav-dts" }
 oxideav-core = { path = "../vendor/oxideav-core" }
-xaac-rs = "0.2"
+xaac-rs = { path = "../vendor/xaac-rs", version = "0.2" }
