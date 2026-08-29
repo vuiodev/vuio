@@ -14,6 +14,7 @@ use crate::error::AppResult as Result;
 use crate::media::ScanPolicy;
 
 mod file_ids;
+#[allow(unused_imports)]
 pub use file_ids::BoundedFileIdCache;
 
 /// Events that can occur in the file system for media files
@@ -74,9 +75,15 @@ pub trait FileSystemWatcher: Send + Sync {
     async fn is_watching(&self, path: &Path) -> bool;
 }
 
+#[cfg(target_os = "linux")]
+type ActiveFileIdCache = notify_debouncer_full::NoCache;
+
+#[cfg(not(target_os = "linux"))]
+type ActiveFileIdCache = self::file_ids::BoundedFileIdCache;
+
 /// Cross-platform file system watcher implementation
 pub struct CrossPlatformWatcher {
-    debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, BoundedFileIdCache>>>>,
+    debouncer: Arc<RwLock<Option<Debouncer<RecommendedWatcher, ActiveFileIdCache>>>>,
     event_sender: mpsc::Sender<FileSystemEvent>,
     event_receiver: Arc<RwLock<Option<mpsc::Receiver<FileSystemEvent>>>>,
     watched_paths: Arc<std::sync::Mutex<HashMap<PathBuf, WatchRegistration>>>,
@@ -110,7 +117,7 @@ fn normalized_watch_key(path: &Path) -> PathBuf {
 impl CrossPlatformWatcher {
     /// Create a new cross-platform file system watcher
     pub fn new() -> Self {
-        let (event_sender, event_receiver) = mpsc::channel(256); // Reduced buffer size for memory efficiency
+        let (event_sender, event_receiver) = mpsc::channel(4096); // Buffer size scaled for large media bursts
 
         Self {
             debouncer: Arc::new(RwLock::new(None)),
@@ -240,6 +247,11 @@ fn convert_watcher_events(
 
     for event in events {
         match event.event.kind {
+            notify::EventKind::Access(_) => {
+                // Ignore open, read, and close events completely.
+                // Converting access into modified events causes recursive event storms.
+                continue;
+            }
             notify::EventKind::Create(_) => {
                 for path in &event.event.paths {
                     if path.is_dir() {
@@ -287,7 +299,10 @@ fn convert_watcher_events(
                             }
                         }
                     }
-                    _ => {
+                    notify::event::ModifyKind::Data(_)
+                    | notify::event::ModifyKind::Metadata(_)
+                    | notify::event::ModifyKind::Any
+                    | notify::event::ModifyKind::Other => {
                         // Only process modify events for media files
                         let media_paths: Vec<_> = event
                             .event
@@ -317,31 +332,17 @@ fn convert_watcher_events(
                     });
                 }
             }
-            notify::EventKind::Other => {
-                // Handle platform-specific events for media files only
+            notify::EventKind::Other | notify::EventKind::Any => {
+                // Only process existing media files for generic/other events
                 let media_paths: Vec<_> = event
                     .event
                     .paths
                     .iter()
-                    .filter(|path| path_is_relevant(path, policies))
+                    .filter(|path| path.is_file() && path_is_relevant(path, policies))
                     .collect();
 
                 for path in media_paths {
                     debug!("Media file other event: {}", path.display());
-                    fs_events.push(FileSystemEvent::Modified(path.clone()));
-                }
-            }
-            _ => {
-                // Handle other event types as modifications for media files only
-                let media_paths: Vec<_> = event
-                    .event
-                    .paths
-                    .iter()
-                    .filter(|path| path_is_relevant(path, policies))
-                    .collect();
-
-                for path in media_paths {
-                    debug!("Media file generic event: {}", path.display());
                     fs_events.push(FileSystemEvent::Modified(path.clone()));
                 }
             }
@@ -456,7 +457,7 @@ impl CrossPlatformWatcher {
                                 convert_watcher_events(relevant_events, &policy_snapshot);
                             for fs_event in fs_events {
                                 if let Err(e) = event_sender.try_send(fs_event) {
-                                    error!("Failed to send file system event: {}", e);
+                                    warn!("File system event dropped (queue full, will reconcile on periodic sweep): {}", e);
                                     let failed_path = match e.into_inner() {
                                         FileSystemEvent::Created(path)
                                         | FileSystemEvent::Modified(path)
@@ -493,7 +494,7 @@ impl CrossPlatformWatcher {
                     }
                 }
             },
-            BoundedFileIdCache::new(),
+            ActiveFileIdCache::default(),
             Config::default(),
         )?;
 

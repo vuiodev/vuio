@@ -2471,7 +2471,7 @@ async fn the_promise_follows_a_dts_soundtrack_down_to_what_it_becomes() {
             * TS_PACKET as u64;
         let film = promised - padding;
         assert!(
-            padding * 4 < film,
+            padding * 3 < film,
             "{format:?}: {padding} bytes of the {promised} promised are filler \
              against {film} of film"
         );

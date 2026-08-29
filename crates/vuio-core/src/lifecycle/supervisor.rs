@@ -693,8 +693,6 @@ pub(super) async fn run_monitoring_supervisor<D: DatabaseManager + 'static>(
     global: CancellationToken,
 ) -> anyhow::Result<()> {
     let mut changes = state.live_config.subscribe();
-    let mut watching = true;
-
     // Started unconditionally: it registers the watches and takes the receiver, and if
     // monitoring is off the registrations are released immediately below.
     let consumer = match start_file_monitoring(watcher.clone(), state.clone(), global.clone()).await
@@ -707,6 +705,7 @@ pub(super) async fn run_monitoring_supervisor<D: DatabaseManager + 'static>(
             None
         }
     };
+    let mut watching = consumer.is_some();
 
     async fn apply<D: DatabaseManager + 'static>(
         watcher: &Arc<CrossPlatformWatcher>,

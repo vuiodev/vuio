@@ -161,3 +161,50 @@ async fn test_file_events() {
 
     watcher.stop_watching().await.unwrap();
 }
+
+#[test]
+fn test_convert_watcher_events_ignores_access() {
+    use notify::event::{AccessKind, AccessMode};
+
+    let policy = ScanPolicy::platform_default(Path::new("/media"), true);
+    let policies = vec![policy];
+
+    let access_event = DebouncedEvent {
+        event: notify::Event {
+            kind: notify::EventKind::Access(AccessKind::Open(AccessMode::Read)),
+            paths: vec![PathBuf::from("/media/video.mp4")],
+            attrs: notify::event::EventAttributes::default(),
+        },
+        time: std::time::Instant::now(),
+    };
+
+    let converted = convert_watcher_events(vec![access_event], &policies);
+    assert!(
+        converted.is_empty(),
+        "Access/read events must be ignored and not converted to modifications"
+    );
+}
+
+#[test]
+fn test_convert_watcher_events_handles_modify() {
+    use notify::event::{ModifyKind, DataChange};
+
+    let policy = ScanPolicy::platform_default(Path::new("/media"), true);
+    let policies = vec![policy];
+
+    let modify_event = DebouncedEvent {
+        event: notify::Event {
+            kind: notify::EventKind::Modify(ModifyKind::Data(DataChange::Content)),
+            paths: vec![PathBuf::from("/media/song.flac")],
+            attrs: notify::event::EventAttributes::default(),
+        },
+        time: std::time::Instant::now(),
+    };
+
+    let converted = convert_watcher_events(vec![modify_event], &policies);
+    assert_eq!(converted.len(), 1);
+    match &converted[0] {
+        FileSystemEvent::Modified(p) => assert_eq!(p, Path::new("/media/song.flac")),
+        _ => panic!("Expected FileSystemEvent::Modified"),
+    }
+}

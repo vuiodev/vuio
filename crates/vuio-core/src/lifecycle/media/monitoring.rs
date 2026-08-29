@@ -73,27 +73,7 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                 event = event_receiver.recv() => {
                     let Some(event) = event else { break; };
                     if let Err(e) = handle_file_system_event(event, &app_state_clone).await {
-                        error!("Failed to handle file system event; reconciling all roots: {}", e);
-                        let configured_roots = app_state_clone
-                            .media_directories
-                            .read()
-                            .await
-                            .clone();
-                        for root in &configured_roots {
-                            let path = PathBuf::from(&root.path);
-                            if path.is_dir() {
-                                let scanner = media::MediaScanner::with_database(app_state_clone.database.clone());
-                                let policy = media::ScanPolicy::from_config(&app_state_clone.current_config(), root);
-                                let scan = if root.recursive {
-                                    scanner.scan_directory_recursive_with_policy(&policy).await
-                                } else {
-                                    scanner.scan_directory_with_policy(&policy).await
-                                };
-                                if scan.is_ok() {
-                                    increment_content_update_id(&app_state_clone).await;
-                                }
-                            }
-                        }
+                        warn!("Failed to handle file system event (will reconcile on periodic sweep): {}", e);
                     }
                 }
                 _ = reconciliation.tick() => {

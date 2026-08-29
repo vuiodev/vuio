@@ -242,7 +242,7 @@ Deploy VuIO to a Kubernetes cluster using the official Helm chart from GHCR. For
 
 ```bash
 # Install directly from GitHub Container Registry
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.45
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.46
 ```
 
 Or install from local source:

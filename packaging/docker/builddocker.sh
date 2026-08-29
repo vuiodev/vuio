@@ -1,6 +1,6 @@
 export GITHUB_ORG="vuiodev"
 export IMAGE_NAME="vuio"
-export VERSION_TAG="v0.0.45"
+export VERSION_TAG="v0.0.46"
 
 docker login ghcr.io
 
