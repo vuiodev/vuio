@@ -72,9 +72,22 @@ pub enum TrackKind {
 /// top-level elements at the first cluster, so a `Cues` element it was not told
 /// about in advance is one it never reads.
 pub fn build_mkv(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
+    build_mkv_inner(tracks, duration_ms, false)
+}
+
+/// The same film with an `EditionEntry` that omits its nominally mandatory
+/// `EditionUID`, matching Matroska emitted by ffmpeg in the wild. Players ignore
+/// the incomplete chapter metadata; this fixture makes sure browser remuxing
+/// does too.
+pub fn build_mkv_with_invalid_chapters(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
+    build_mkv_inner(tracks, duration_ms, true)
+}
+
+fn build_mkv_inner(tracks: &[Track], duration_ms: f64, invalid_chapters: bool) -> Vec<u8> {
     const ID_SEEK_HEAD: u32 = 0x114D9B74;
     const ID_INFO: u32 = 0x1549A966;
     const ID_TRACKS: u32 = 0x1654AE6B;
+    const ID_CHAPTERS: u32 = 0x1043A770;
     const ID_CLUSTER: u32 = 0x1F43B675;
     const ID_CUES: u32 = 0x1C53BB6B;
 
@@ -128,6 +141,16 @@ pub fn build_mkv(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
     }
     let tracks_el = master(ID_TRACKS, &entries);
 
+    // ffmpeg has emitted EditionEntry without EditionUID. Symphonia treats
+    // that optional metadata defect as fatal for the entire container, while
+    // players simply ignore the chapters.
+    let chapters = if invalid_chapters {
+        let edition = master(0x45B9, &uint_el(0x45DB, 1)); // EditionFlagDefault only.
+        master(ID_CHAPTERS, &edition)
+    } else {
+        Vec::new()
+    };
+
     // --- Clusters, one per second of content ---
     // Every sample from every track, in presentation order, so the interleaving
     // is what a real muxer would produce and a demuxer walking forward sees both
@@ -143,8 +166,14 @@ pub fn build_mkv(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
     let mut clusters = Vec::new();
     // (cluster timestamp in ms, byte offset from the start of the segment's data)
     let mut cue_points: Vec<(u64, u64)> = Vec::new();
-    let seek_head_len = seek_head_placeholder_len();
-    let mut cursor = seek_head_len + info.len() as u64 + tracks_el.len() as u64;
+    let seek_entries: Vec<(u32, u64)> = if invalid_chapters {
+        vec![(ID_INFO, 0), (ID_TRACKS, 0), (ID_CHAPTERS, 0), (ID_CUES, 0)]
+    } else {
+        vec![(ID_INFO, 0), (ID_TRACKS, 0), (ID_CUES, 0)]
+    };
+    let seek_head_len = seek_head(&seek_entries).len() as u64;
+    let mut cursor =
+        seek_head_len + info.len() as u64 + tracks_el.len() as u64 + chapters.len() as u64;
 
     let mut index = 0usize;
     while index < all.len() {
@@ -188,11 +217,18 @@ pub fn build_mkv(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
     let cues = master(ID_CUES, &cues_body);
 
     // --- SeekHead, now that the positions it points at are known ---
-    let seek_head = seek_head(&[
+    let mut seek_entries = vec![
         (ID_INFO, seek_head_len),
         (ID_TRACKS, seek_head_len + info.len() as u64),
-        (ID_CUES, cues_pos),
-    ]);
+    ];
+    if invalid_chapters {
+        seek_entries.push((
+            ID_CHAPTERS,
+            seek_head_len + info.len() as u64 + tracks_el.len() as u64,
+        ));
+    }
+    seek_entries.push((ID_CUES, cues_pos));
+    let seek_head = seek_head(&seek_entries);
     assert_eq!(
         seek_head.len() as u64,
         seek_head_len,
@@ -204,6 +240,7 @@ pub fn build_mkv(tracks: &[Track], duration_ms: f64) -> Vec<u8> {
     segment_body.extend(seek_head);
     segment_body.extend(info);
     segment_body.extend(tracks_el);
+    segment_body.extend(chapters);
     segment_body.extend(clusters);
     segment_body.extend(cues);
 
@@ -240,10 +277,6 @@ fn seek_head(entries: &[(u32, u64)]) -> Vec<u8> {
         body.extend(master(0x4DBB, &seek));
     }
     master(0x114D9B74, &body)
-}
-
-fn seek_head_placeholder_len() -> u64 {
-    seek_head(&[(0x1549A966, 0), (0x1654AE6B, 0), (0x1C53BB6B, 0)]).len() as u64
 }
 
 /// The bytes of an EBML element ID, written verbatim as the class ID they are.

@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "vuio",
   "display_name": "VuIO Media Server",
-  "version": "0.0.47",
+  "version": "0.0.48",
   "description": "Browse, search and cast your VuIO media library from Claude.",
   "long_description": "Connects Claude to a VuIO media server on your network. Search the library, browse folders, build playlists, and cast to DLNA, Chromecast and AirPlay devices.\n\nThis bundle runs `vuio mcp`, which bridges Claude's stdio connection to a VuIO server that is already running. It does not start a server or open the library database itself — point it at the machine that does.",
   "author": {
@@ -17,7 +17,14 @@
   "documentation": "https://github.com/vuiodev/vuio#ai-agent--mcp-integration",
   "support": "https://github.com/vuiodev/vuio/issues",
   "license": "MIT OR Apache-2.0",
-  "keywords": ["dlna", "upnp", "chromecast", "airplay", "media-server", "casting"],
+  "keywords": [
+    "dlna",
+    "upnp",
+    "chromecast",
+    "airplay",
+    "media-server",
+    "casting"
+  ],
   "server": {
     "type": "binary",
     "entry_point": "bin/vuio",
@@ -55,6 +62,10 @@
   "tools_generated": true,
   "compatibility": {
     "claude_desktop": ">=1.0.0",
-    "platforms": ["darwin", "win32", "linux"]
+    "platforms": [
+      "darwin",
+      "win32",
+      "linux"
+    ]
   }
 }

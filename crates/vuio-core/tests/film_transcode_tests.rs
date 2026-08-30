@@ -9,7 +9,7 @@
 
 mod common;
 
-use common::{build_mkv, video_sample, Track, TrackKind, AVCC};
+use common::{build_mkv, build_mkv_with_invalid_chapters, video_sample, Track, TrackKind, AVCC};
 use std::sync::Arc;
 use tower::ServiceExt;
 use vuio_core::database::MediaRepository;
@@ -25,6 +25,10 @@ const AC3_FRAME_MS: f64 = AC3_FRAME_SAMPLES as f64 / 48.0;
 /// Build a film: `AC3` looped to fill `seconds`, beside a 25 fps video track
 /// with a keyframe every second.
 pub fn film(seconds: f64) -> Vec<u8> {
+    film_container(seconds, false)
+}
+
+fn film_container(seconds: f64, invalid_chapters: bool) -> Vec<u8> {
     let frames: Vec<&[u8]> = AC3
         .as_chunks::<AC3_FRAME_LEN>()
         .0
@@ -52,37 +56,39 @@ pub fn film(seconds: f64) -> Vec<u8> {
         })
         .collect();
 
-    build_mkv(
-        &[
-            Track {
-                number: 1,
-                codec_id: "V_MPEG4/ISO/AVC",
-                codec_private: AVCC.to_vec(),
-                kind: TrackKind::Video {
-                    width: 640,
-                    height: 360,
-                },
-                samples: video_samples,
-                all_keyframes: false,
-                is_default: true,
-                language: None,
+    let tracks = [
+        Track {
+            number: 1,
+            codec_id: "V_MPEG4/ISO/AVC",
+            codec_private: AVCC.to_vec(),
+            kind: TrackKind::Video {
+                width: 640,
+                height: 360,
             },
-            Track {
-                number: 2,
-                codec_id: "A_AC3",
-                codec_private: Vec::new(),
-                kind: TrackKind::Audio {
-                    sample_rate: 48_000.0,
-                    channels: 2,
-                },
-                samples: audio_samples,
-                all_keyframes: true,
-                is_default: true,
-                language: Some("eng"),
+            samples: video_samples,
+            all_keyframes: false,
+            is_default: true,
+            language: None,
+        },
+        Track {
+            number: 2,
+            codec_id: "A_AC3",
+            codec_private: Vec::new(),
+            kind: TrackKind::Audio {
+                sample_rate: 48_000.0,
+                channels: 2,
             },
-        ],
-        seconds * 1000.0,
-    )
+            samples: audio_samples,
+            all_keyframes: true,
+            is_default: true,
+            language: Some("eng"),
+        },
+    ];
+    if invalid_chapters {
+        build_mkv_with_invalid_chapters(&tracks, seconds * 1000.0)
+    } else {
+        build_mkv(&tracks, seconds * 1000.0)
+    }
 }
 
 #[test]
@@ -123,6 +129,29 @@ fn the_fixture_really_is_a_matroska_file_with_an_ac3_track() {
         "AC-3 must be named, not lumped in with Unsupported"
     );
     assert_eq!(audio.sample_rate, Some(48_000));
+}
+
+#[test]
+fn the_browser_ignores_invalid_chapter_metadata_but_the_tv_reader_is_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("Film-with-invalid-chapters.mkv");
+    std::fs::write(&path, film_container(6.0, true)).unwrap();
+
+    let ordinary_error = vuio_core::media::remux::MkvDemuxer::inspect(&path)
+        .expect_err("the ordinary Symphonia reader remains strict");
+    assert!(format!("{ordinary_error:#}").contains("missing edition uid"));
+
+    use vuio_core::media::remux::{TrackCodec, TrackKind as K};
+    let info = vuio_core::media::remux::MkvDemuxer::inspect_for_browser(&path)
+        .expect("the browser reader ignores chapters it does not use");
+    assert!(info
+        .tracks
+        .iter()
+        .any(|track| track.track_kind == K::Video && track.codec_kind == TrackCodec::Avc));
+    assert!(info
+        .tracks
+        .iter()
+        .any(|track| track.track_kind == K::Audio && track.codec_kind == TrackCodec::Ac3));
 }
 
 // ── Step 1: what the scanner records ──────────────────────────────────────
@@ -408,6 +437,63 @@ async fn the_master_playlist_offers_the_films_ac3_track_as_a_rendition() {
     assert!(
         playlist.contains("mp4a.40.2"),
         "the rendition arrives as AAC-LC whatever the source was:\n{playlist}"
+    );
+}
+
+/// DTS follows the same browser path as Dolby: decode the Matroska track and
+/// expose AAC-LC to HLS/MSE. Keep this separate from the AC-3 fixture so a DTS
+/// decoder regression cannot hide behind the shared playlist assertions.
+#[cfg(feature = "transcode-dts")]
+#[tokio::test]
+async fn the_browser_hls_path_decodes_dts_to_aac() {
+    let (_temp, state, id) = scanned_dts_film(8.0).await;
+    let (status, _, body) = get(
+        &state,
+        &format!("/media/{id}/hls/master.m3u8"),
+        Method::GET,
+        None,
+    )
+    .await;
+    let playlist = String::from_utf8(body).expect("the master playlist is text");
+    assert_eq!(status, StatusCode::OK);
+    assert!(playlist.contains("audio/0/index.m3u8"), "{playlist}");
+    assert!(playlist.contains("mp4a.40.2"), "{playlist}");
+
+    let (status, _, init) = get(
+        &state,
+        &format!("/media/{id}/hls/audio/0/init.mp4"),
+        Method::GET,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        find_box(&init, "mp4a").is_some(),
+        "DTS must be restated as AAC"
+    );
+
+    let (status, _, segment) = get(
+        &state,
+        &format!("/media/{id}/hls/audio/0/segment/0"),
+        Method::GET,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let trun = find_box(&segment, "trun").expect("an AAC sample run");
+    let samples = u32::from_be_bytes(trun[4..8].try_into().unwrap());
+    assert!(
+        samples > 150,
+        "four seconds of DTS decoded to only {samples} AAC frames"
+    );
+    let mdat = boxes(&segment)
+        .into_iter()
+        .find(|(name, _)| name == "mdat")
+        .expect("an mdat")
+        .1;
+    assert!(
+        !mdat.is_empty(),
+        "the decoded DTS rendition is silent/empty"
     );
 }
 
