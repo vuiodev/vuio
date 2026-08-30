@@ -86,6 +86,7 @@ function loadAndPlayTrack() {
     document.getElementById('player-track-count').textContent = (currentTrackIndex + 1) + '/' + playlist.length;
 
     const audioEl = document.getElementById('audio-element');
+    resetAudioBufferProgress();
     audioEl.src = '/media/' + file.id;
     audioEl.play().then(() => {
         updatePlayPauseUI(true);
@@ -152,7 +153,41 @@ function closePlayer() {
     const audioEl = document.getElementById('audio-element');
     audioEl.pause();
     audioEl.src = '';
+    resetAudioBufferProgress();
     document.getElementById('audio-player-bar').style.display = 'none';
+}
+
+// Show the range that is useful at the current playhead. After a seek the old
+// range remains at buffered[0], so using end(0) would leave the cache display
+// stuck behind playback even while the browser fills a new range.
+function syncAudioBufferProgress() {
+    if (!audioEl.duration || !Number.isFinite(audioEl.duration)) {
+        resetAudioBufferProgress();
+        return;
+    }
+
+    const playhead = audioEl.currentTime;
+    let bufferedEnd = playhead;
+    const tolerance = 0.25;
+    for (let index = 0; index < audioEl.buffered.length; index++) {
+        const start = audioEl.buffered.start(index);
+        const end = audioEl.buffered.end(index);
+        if (playhead >= start - tolerance && playhead <= end + tolerance) {
+            bufferedEnd = Math.max(playhead, end);
+            break;
+        }
+    }
+
+    const playedPercent = Math.min(100, Math.max(0, playhead / audioEl.duration * 100));
+    const bufferedPercent = Math.min(100, Math.max(playedPercent, bufferedEnd / audioEl.duration * 100));
+    slider.style.setProperty('--played-percent', playedPercent + '%');
+    slider.style.setProperty('--buffered-percent', bufferedPercent + '%');
+}
+
+function resetAudioBufferProgress() {
+    const progressSlider = document.getElementById('player-progress-slider');
+    progressSlider.style.setProperty('--played-percent', '0%');
+    progressSlider.style.setProperty('--buffered-percent', '0%');
 }
 
 // Setup Audio Element event listeners
@@ -169,7 +204,12 @@ audioEl.addEventListener('timeupdate', () => {
         currentEl.textContent = formatPlayerTime(curTime);
         durationEl.textContent = formatPlayerTime(durTime);
     }
+    syncAudioBufferProgress();
 });
+
+for (const event of ['durationchange', 'loadedmetadata', 'progress', 'seeking', 'seeked']) {
+    audioEl.addEventListener(event, syncAudioBufferProgress);
+}
 
 audioEl.addEventListener('ended', () => {
     playNext();

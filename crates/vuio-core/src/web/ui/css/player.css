@@ -166,7 +166,13 @@
 .player-progress-bar input[type="range"]::-webkit-slider-runnable-track {
     width: 100%;
     height: 6px;
-    background: rgba(255, 255, 255, 0.12);
+    background: linear-gradient(to right,
+        var(--accent-color) 0,
+        var(--accent-color) var(--played-percent, 0%),
+        rgba(255, 255, 255, 0.35) var(--played-percent, 0%),
+        rgba(255, 255, 255, 0.35) var(--buffered-percent, 0%),
+        rgba(255, 255, 255, 0.12) var(--buffered-percent, 0%),
+        rgba(255, 255, 255, 0.12) 100%);
     border-radius: 3px;
     border: none;
 }
@@ -191,7 +197,13 @@
 .player-progress-bar input[type="range"]::-moz-range-track {
     width: 100%;
     height: 6px;
-    background: rgba(255, 255, 255, 0.12);
+    background: linear-gradient(to right,
+        var(--accent-color) 0,
+        var(--accent-color) var(--played-percent, 0%),
+        rgba(255, 255, 255, 0.35) var(--played-percent, 0%),
+        rgba(255, 255, 255, 0.35) var(--buffered-percent, 0%),
+        rgba(255, 255, 255, 0.12) var(--buffered-percent, 0%),
+        rgba(255, 255, 255, 0.12) 100%);
     border-radius: 3px;
     border: none;
 }

@@ -1,5 +1,5 @@
 # Written by scripts/build-web.sh. Do not edit.
 source = "git@github.com:vuiodev/vuio-web.git"
-commit = "7d8beabc6cc349603af3fcc8273a0bb5a18c136d"
-describe = "7d8beab"
+commit = "284eb4defb280c47abd686da6e1d64cc82877587"
+describe = "284eb4d-dirty"
 version = "0.0.1"

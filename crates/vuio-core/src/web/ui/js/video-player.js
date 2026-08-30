@@ -11,11 +11,13 @@ const BROWSER_UNPLAYABLE_VIDEO = new Set(['avi', 'wmv', 'flv', 'mpg', 'mpeg']);
 
 const PLYR_VERSION = '3.8.4';
 const HLS_VERSION = '1.6.17';
+const VIDEO_FORWARD_BUFFER_SECONDS = 60;
 
 let videoPlyr = null;
 let videoHls = null;
 let videoModalFile = null;
 let hlsScriptPromise = null;
+let videoBufferProgressTimer = null;
 
 // hls.js is half a megabyte and no local file needs it, so it is fetched on
 // first use rather than linked from <head>.
@@ -65,7 +67,10 @@ async function mountVideoPlayer(file, url) {
     const video = document.createElement('video');
     video.setAttribute('playsinline', '');
     video.setAttribute('controls', '');
-    video.preload = 'metadata';
+    // Direct files are buffered by the browser rather than hls.js. `auto` is
+    // the strongest standards-based request for read-ahead; the browser still
+    // owns the exact native-media buffer size.
+    video.preload = 'auto';
     video.addEventListener('error', () => showVideoUnsupported(file), { once: true });
 
     if (file.subs) {
@@ -106,6 +111,7 @@ async function mountVideoPlayer(file, url) {
         storage: { enabled: true, key: 'vuio-plyr' },
         seekTime: 10,
     });
+    setupVideoBufferProgress(video);
 
     videoPlyr.on('loadedmetadata', () => {
         if (video.videoWidth && video.videoHeight) {
@@ -132,10 +138,17 @@ async function attachHlsSource(video, url, file) {
     try {
         const Hls = await loadHls();
         if (!Hls || !Hls.isSupported()) throw new Error('Media Source Extensions unavailable');
-        videoHls = new Hls({ enableWorker: true });
+        videoHls = new Hls({
+            enableWorker: true,
+            maxBufferLength: VIDEO_FORWARD_BUFFER_SECONDS,
+            maxMaxBufferLength: VIDEO_FORWARD_BUFFER_SECONDS,
+        });
         videoHls.on(Hls.Events.ERROR, (event, data) => {
             if (data && data.fatal) showVideoUnsupported(file);
         });
+        // MSE appends do not consistently produce a media `progress` event.
+        // Keep the visible read-ahead in step with the real SourceBuffer.
+        videoHls.on(Hls.Events.BUFFER_APPENDED, () => scheduleVideoBufferProgress(video));
         setupAudioTrackUi(videoHls, Hls);
         videoHls.loadSource(url);
         videoHls.attachMedia(video);
@@ -149,6 +162,51 @@ async function attachHlsSource(video, url, file) {
         showVideoUnsupported(file);
         return false;
     }
+}
+
+// Plyr derives its gray buffer bar from video.buffered.end(0). That works only
+// until the first seek: browsers retain the old range at index 0 and append the
+// new read-ahead as a later range, so playback is buffered correctly while the
+// bar remains stuck at the old position. Follow the range containing the
+// playhead instead. The played bar covers everything behind currentTime, making
+// the remaining gray part an honest view of the useful forward buffer.
+function setupVideoBufferProgress(video) {
+    if (videoBufferProgressTimer) clearInterval(videoBufferProgressTimer);
+    const update = () => scheduleVideoBufferProgress(video);
+    for (const event of ['durationchange', 'loadedmetadata', 'progress',
+                         'seeking', 'seeked', 'timeupdate']) {
+        video.addEventListener(event, update);
+    }
+    // Native media can extend a range without emitting another `progress`
+    // event, and Plyr may subsequently restore its end(0)-based value. Keep the
+    // small display-only correction authoritative while this player is open.
+    videoBufferProgressTimer = setInterval(() => syncVideoBufferProgress(video), 250);
+    update();
+}
+
+function scheduleVideoBufferProgress(video) {
+    requestAnimationFrame(() => syncVideoBufferProgress(video));
+}
+
+function syncVideoBufferProgress(video) {
+    const progress = video.closest('.plyr')?.querySelector('.plyr__progress__buffer');
+    if (!progress || !Number.isFinite(video.duration) || video.duration <= 0) return;
+
+    const playhead = video.currentTime;
+    let bufferedEnd = playhead;
+    // Timestamp rounding at a segment boundary can put the playhead a few
+    // milliseconds outside a TimeRange that is usable in practice.
+    const tolerance = 0.25;
+    for (let index = 0; index < video.buffered.length; index++) {
+        const start = video.buffered.start(index);
+        const end = video.buffered.end(index);
+        if (playhead >= start - tolerance && playhead <= end + tolerance) {
+            bufferedEnd = Math.max(playhead, end);
+            break;
+        }
+    }
+
+    progress.value = Math.min(100, Math.max(0, bufferedEnd / video.duration * 100));
 }
 
 // Populates the audio-track <select> once hls.js knows the master playlist's
@@ -244,6 +302,10 @@ function showVideoUnsupported(file) {
 // both the close path and the fall-back-to-unsupported path.
 function teardownVideoPlayback() {
     resetAudioTrackUi();
+    if (videoBufferProgressTimer) {
+        clearInterval(videoBufferProgressTimer);
+        videoBufferProgressTimer = null;
+    }
     if (videoHls) {
         videoHls.destroy();
         videoHls = null;
