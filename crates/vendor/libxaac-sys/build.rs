@@ -70,6 +70,12 @@ fn main() {
             cmake_cmd.arg(format!("-DCMAKE_SYSTEM_NAME={system_name}"));
             cmake_cmd.arg(format!("-DCMAKE_C_COMPILER={}", c_compiler.display()));
             cmake_cmd.arg(format!("-DCMAKE_ASM_COMPILER={}", c_compiler.display()));
+            if let Ok(ar) = env::var("CMAKE_AR").or_else(|_| env::var("AR")) {
+                cmake_cmd.arg(format!("-DCMAKE_AR={ar}"));
+            }
+            if let Ok(ranlib) = env::var("CMAKE_RANLIB").or_else(|_| env::var("RANLIB")) {
+                cmake_cmd.arg(format!("-DCMAKE_RANLIB={ranlib}"));
+            }
         }
 
         // libxaac builds 32-bit arm as `-mfloat-abi=softfp` unless told

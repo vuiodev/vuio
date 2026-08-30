@@ -99,3 +99,53 @@ fn test_path_validation() {
         // A format-only check is what's intended.
     }
 }
+
+#[test]
+fn test_platform_user_directories() {
+    let config = PlatformConfig::for_current_platform();
+
+    // Default paths should be inside user spaces (containing 'vuio') rather than system / executable root
+    assert!(
+        config.config_dir.to_string_lossy().contains("vuio"),
+        "config_dir should be a dedicated vuio directory: {:?}",
+        config.config_dir
+    );
+    assert!(
+        config.database_dir.to_string_lossy().contains("vuio"),
+        "database_dir should be a dedicated vuio directory: {:?}",
+        config.database_dir
+    );
+    assert!(
+        config.cache_dir.to_string_lossy().contains("vuio"),
+        "cache_dir should be a dedicated vuio directory: {:?}",
+        config.cache_dir
+    );
+    assert!(
+        config.log_dir.to_string_lossy().contains("vuio"),
+        "log_dir should be a dedicated vuio directory: {:?}",
+        config.log_dir
+    );
+}
+
+#[test]
+fn test_ensure_directories_exist_in_temp() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let base = temp_dir.path();
+
+    let config = PlatformConfig {
+        os_type: OsType::current(),
+        default_media_dir: base.join("media"),
+        config_dir: base.join("config"),
+        log_dir: base.join("logs"),
+        cache_dir: base.join("cache"),
+        database_dir: base.join("database"),
+        preferred_ports: vec![8080],
+        metadata: HashMap::new(),
+    };
+
+    assert!(config.ensure_directories_exist().is_ok());
+    assert!(config.config_dir.exists());
+    assert!(config.log_dir.exists());
+    assert!(config.cache_dir.exists());
+    assert!(config.database_dir.exists());
+}

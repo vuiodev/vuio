@@ -374,8 +374,8 @@ mod apple_native {
                 break;
             }
 
-            for i in 0..num_packets as usize {
-                out_len += packet_descs[i].mDataByteSize as usize;
+            for desc in packet_descs.iter().take(num_packets as usize) {
+                out_len += desc.mDataByteSize as usize;
             }
         }
 
@@ -393,12 +393,14 @@ fn bench_xaac(
     let start = Instant::now();
     use xaac_rs::{Encoder, EncoderConfig, OutputFormat, Profile};
 
-    let mut config = EncoderConfig::default();
-    config.profile = Profile::AacLc;
-    config.sample_rate = sample_rate;
-    config.channels = channels;
-    config.bitrate = 128_000;
-    config.output_format = OutputFormat::Adts;
+    let config = EncoderConfig {
+        profile: Profile::AacLc,
+        sample_rate,
+        channels,
+        bitrate: 128_000,
+        output_format: OutputFormat::Adts,
+        ..Default::default()
+    };
 
     let mut encoder = Encoder::new(config).map_err(|e| format!("{e:?}"))?;
     let frame_bytes = encoder.input_frame_bytes();

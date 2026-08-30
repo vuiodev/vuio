@@ -74,11 +74,6 @@ impl AppConfig {
             );
         }
 
-        // Ensure all platform directories exist
-        platform_config
-            .ensure_directories_exist()
-            .context("Failed to create platform directories")?;
-
         Ok(())
     }
 
