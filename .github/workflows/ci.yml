@@ -24,12 +24,19 @@ on:
         description: 'Required for "release", "release-freebsd-aarch64", or "docker" task: The tag for the action (e.g., v1.0.1)'
         required: false
 
-
-
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   BINARY_NAME: vuio
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_GIT_FETCH_WITH_CLI: true
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   format:
@@ -103,16 +110,16 @@ jobs:
           fi
 
   clippy:
-    name: Clippy on ${{ matrix.os }}
+    name: Clippy
     if: |
       github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
       github.event_name == 'pull_request' ||
       (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 8G
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -120,17 +127,26 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Cache Cargo dependencies
+      - name: Cache Cargo registry, git dependencies and compiler artifacts
         uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: clippy-${{ matrix.os }}-${{ hashFiles('**/Cargo.lock') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            .sccache
+          key: clippy-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            clippy-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
+            clippy-${{ runner.os }}-
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Run Clippy
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D clippy::all -D warnings
+      - name: Show sccache stats
+        if: always()
+        run: sccache --show-stats || true
 
   # ===================================================================
   # Guard the published API of vuio-core.
@@ -215,6 +231,8 @@ jobs:
       (github.event_name == 'workflow_dispatch' && github.event.inputs.task_to_run == 'test')
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      RUSTC_WRAPPER: sccache
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -224,14 +242,22 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: features-${{ hashFiles('**/Cargo.lock') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            .sccache
+          key: features-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            features-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
+            features-${{ runner.os }}-
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Build with no features
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo check -p vuio-core --no-default-features
       - name: Build each feature alone
+        env:
+          RUSTC_WRAPPER: sccache
         run: |
           for feature in casting dashboard diagnostics mcp mediainfo metadata web-ui \
                          demux transcode transcode-ac3 transcode-dts transcode-aac; do
@@ -281,21 +307,27 @@ jobs:
         uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: msrv-${{ steps.msrv.outputs.version }}-${{ hashFiles('**/Cargo.lock') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            .sccache
+          key: msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
+            msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
       # No --locked: Cargo.lock is deliberately gitignored in this repo, so a
       # fresh checkout has none and --locked would fail before compiling.
       - name: Check the crate with default features
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo check -p vuio-core
 
   # ===================================================================
   # Run Tests and Checks (Push, Pull Requests, or Manual 'test' run)
   # ===================================================================
   test_and_check:
-    name: Test on ${{ matrix.target }}
+    name: Test/build on ${{ matrix.target }}
     # This job runs for branch pushes, pull requests, or when manually triggered with 'test'.
     if: |
       github.event_name == 'push' && !startsWith(github.ref, 'refs/tags/') ||
@@ -304,45 +336,62 @@ jobs:
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
         include:
           - runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            mode: native-test
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
+            mode: build-only
           - runner: macos-15-intel
             target: x86_64-apple-darwin
+            mode: native-test
           - runner: ubuntu-latest
             target: aarch64-unknown-linux-gnu
+            mode: cross-linux
           - runner: ubuntu-latest
             target: armv7-unknown-linux-gnueabihf
+            mode: cross-linux
           - runner: windows-latest
             target: aarch64-pc-windows-msvc
+            mode: build-only
           - runner: macos-14
             target: aarch64-apple-darwin
+            mode: native-test
           - runner: ubuntu-latest
             target: x86_64-unknown-freebsd
+            mode: freebsd-vm
+
+    env:
+      SCCACHE_DIR: ${{ github.workspace }}/.sccache
+      SCCACHE_CACHE_SIZE: 8G
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
       - name: Install Rust toolchain (stable)
-        if: matrix.target != 'x86_64-unknown-freebsd'
+        if: matrix.mode != 'freebsd-vm'
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Cache Cargo dependencies
-        if: matrix.target != 'x86_64-unknown-freebsd'
+      - name: Cache Cargo registry, git dependencies and compiler artifacts
+        if: matrix.mode != 'freebsd-vm'
         uses: actions/cache@v6
         with:
           path: |
-            ~/.cargo/bin/
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ matrix.target }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+            ~/.cargo/registry
+            ~/.cargo/git
+            .sccache
+          key: test-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            test-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
+            test-${{ runner.os }}-${{ matrix.target }}-
+            test-${{ runner.os }}-
+      - name: Install sccache
+        if: matrix.mode != 'freebsd-vm'
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Install dependencies for ARM cross-compile (Linux)
         if: runner.os == 'Linux' && (matrix.target == 'aarch64-unknown-linux-gnu' || matrix.target == 'armv7-unknown-linux-gnueabihf')
         run: |
@@ -376,14 +425,23 @@ jobs:
             echo "linker = \"$HOME/bin/arm-linux-gnueabihf-gcc-wrap\"" >> ~/.cargo/config.toml
             echo "CC_armv7_unknown_linux_gnueabihf=$HOME/bin/arm-linux-gnueabihf-gcc-wrap" >> "$GITHUB_ENV"
           fi
-      - name: Build project
-        if: matrix.target != 'x86_64-unknown-freebsd'
-        run: cargo build --target ${{ matrix.target }}
-      - name: Run tests
-        if: matrix.target != 'aarch64-unknown-linux-gnu' && matrix.target != 'armv7-unknown-linux-gnueabihf' && matrix.target != 'aarch64-pc-windows-msvc' && matrix.target != 'x86_64-pc-windows-msvc' && matrix.target != 'x86_64-unknown-freebsd'
+      - name: Run native tests
+        if: matrix.mode == 'native-test'
+        env:
+          RUSTC_WRAPPER: sccache
         run: cargo test --target ${{ matrix.target }}
+      - name: Fast PR compile check for non-native target
+        if: matrix.mode != 'native-test' && matrix.mode != 'freebsd-vm' && github.event_name == 'pull_request'
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo check --target ${{ matrix.target }}
+      - name: Full build for non-native target
+        if: matrix.mode != 'native-test' && matrix.mode != 'freebsd-vm' && github.event_name != 'pull_request'
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo build --target ${{ matrix.target }}
       - name: Build and test in FreeBSD VM
-        if: matrix.target == 'x86_64-unknown-freebsd'
+        if: matrix.mode == 'freebsd-vm'
         uses: vmactions/freebsd-vm@v1
         with:
           release: "14"
@@ -407,6 +465,9 @@ jobs:
             cargo test --test issue_24_pagination
             cargo test --test path_normalization_integration_tests
             cargo test --test regression_tests
+      - name: Show sccache stats
+        if: always() && matrix.mode != 'freebsd-vm'
+        run: sccache --show-stats || true
 
 
   # ===================================================================
@@ -460,6 +521,7 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
+      max-parallel: 1
       matrix:
         include:
           - runner: ubuntu-latest
@@ -502,6 +564,22 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - name: Cache Cargo registry, git dependencies and compiler artifacts
+        if: matrix.target != 'x86_64-unknown-freebsd'
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            .sccache
+          key: release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
+            release-${{ runner.os }}-${{ matrix.target }}-
+            release-${{ runner.os }}-
+      - name: Install sccache
+        if: matrix.target != 'x86_64-unknown-freebsd'
+        uses: mozilla-actions/sccache-action@v0.0.9
       - name: Install NSIS (Windows)
         if: false # runner.os == 'Windows' - Disabled by user request
         run: choco install nsis
@@ -540,7 +618,9 @@ jobs:
           fi
       - name: Build binary
         if: matrix.target != 'x86_64-unknown-freebsd'
-        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo build --release --target ${{ matrix.target }} --bin ${{ env.BINARY_NAME }}
       - name: Build binary in FreeBSD VM
         if: matrix.target == 'x86_64-unknown-freebsd'
         uses: vmactions/freebsd-vm@v1
@@ -744,12 +824,12 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: |
             type=gha,scope=buildx-chef
-            type=gha,scope=buildx-deps-${{ hashFiles('**/Cargo.lock') }}
+            type=gha,scope=buildx-deps-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
             type=gha,scope=buildx-build
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ env.BINARY_NAME }}:buildcache
           cache-to: |
             type=gha,mode=max,scope=buildx-chef
-            type=gha,mode=max,scope=buildx-deps-${{ hashFiles('**/Cargo.lock') }}
+            type=gha,mode=max,scope=buildx-deps-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
             type=gha,mode=max,scope=buildx-build
             type=registry,ref=ghcr.io/${{ github.repository_owner }}/${{ env.BINARY_NAME }}:buildcache,mode=max
           build-args: |
@@ -911,7 +991,3 @@ jobs:
           git add Formula/vuio.rb
           git commit -m "Update vuio formula to version ${VERSION}"
           git push origin main
-
-
-
-
