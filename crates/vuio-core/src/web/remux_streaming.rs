@@ -145,9 +145,15 @@ async fn load_file_info<D: DatabaseManager>(
         })?
         .ok_or(AppError::NotFound)?;
 
-    let info = MkvDemuxer::inspect(&file_info.path).unwrap_or_else(|_| FileInfo {
-        tracks: Vec::new(),
-        duration_secs: None,
+    let info = MkvDemuxer::inspect_for_browser(&file_info.path).unwrap_or_else(|err| {
+        error!(
+            "Failed to inspect MKV file {} for browser playback: {err:#}",
+            file_info.path.display()
+        );
+        FileInfo {
+            tracks: Vec::new(),
+            duration_secs: None,
+        }
     });
 
     Ok((file_info.path, info))
@@ -313,7 +319,7 @@ fn build_segment_bytes(
         );
     }
 
-    let mut packets = MkvDemuxer::extract_track_packets(
+    let mut packets = MkvDemuxer::extract_track_packets_for_browser(
         path,
         track.id,
         track.codec_kind,
@@ -391,7 +397,7 @@ fn build_reencoded_segment(
     let request_from = (from - LONGEST_SOURCE_FRAME).max(0);
     let request_len = (from + len as i64 - request_from).max(0);
 
-    let packets = MkvDemuxer::extract_track_packets(
+    let packets = MkvDemuxer::extract_track_packets_for_browser(
         path,
         track.id,
         track.codec_kind,
@@ -577,5 +583,48 @@ mod tests {
             boundaries,
             vec![0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0, 60.0]
         );
+    }
+
+    #[test]
+    #[ignore = "diagnostic helper for a locally generated Matroska fixture"]
+    fn write_local_hls_fixture_segments() {
+        let path = std::path::Path::new("/tmp/mkv-playback-fixture.mkv");
+        let info = MkvDemuxer::inspect_for_browser(path).expect("inspect local MKV fixture");
+        let track = browser_video_track(&info.tracks)
+            .expect("a browser-compatible video track")
+            .clone();
+        let layout = segmentation(path, &info);
+
+        std::fs::write(
+            "/tmp/mkv-playback-playlist.m3u8",
+            HlsGenerator::build_media_playlist(&layout.boundaries),
+        )
+        .expect("write playlist");
+
+        let mut init = Fmp4Writer::build_ftyp();
+        init.extend_from_slice(&Fmp4Writer::build_moov(&track));
+        std::fs::write("/tmp/mkv-playback-init.mp4", init).expect("write init segment");
+
+        for seq in 0..layout.boundaries.len().saturating_sub(1) as u32 {
+            let (start, end) = layout.range(seq).expect("segment range");
+            let packets = MkvDemuxer::extract_track_packets_for_browser(
+                path,
+                track.id,
+                track.codec_kind,
+                Fmp4Writer::timescale_for(&track),
+                start,
+                end - start,
+            )
+            .expect("extract packets");
+            eprintln!(
+                "segment {seq}: {start:.3}..{end:.3}, {} packets",
+                packets.len()
+            );
+            std::fs::write(
+                format!("/tmp/mkv-playback-segment-{seq}.m4s"),
+                build_segment_bytes(path, &track, seq, start, end),
+            )
+            .expect("write media segment");
+        }
     }
 }

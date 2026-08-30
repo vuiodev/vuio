@@ -1,6 +1,6 @@
 [package]
 name = "vuio-bench"
-version = "0.0.47"
+version = "0.0.48"
 edition = "2021"
 authors = ["vyrti"]
 description = "Generates large VuIO libraries for performance work. Not published."
@@ -37,7 +37,7 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 # because it opens every internal module and carries no stability promise. This
 # crate is `publish = false` and exists only to drive the database from the
 # inside, which is the same category as core's own dev-dependency on itself.
-vuio-core = { path = "../vuio-core", version = "0.0.47", features = ["unstable-internals", "transcode-aac", "transcode-ac3", "transcode-dts"] }
+vuio-core = { path = "../vuio-core", version = "0.0.48", features = ["unstable-internals", "transcode-aac", "transcode-ac3", "transcode-dts"] }
 vuio-codec-ac3 = { path = "../vuio-codec-ac3" }
 oxideav-dts = { path = "../vendor/oxideav-dts" }
 oxideav-core = { path = "../vendor/oxideav-core" }
