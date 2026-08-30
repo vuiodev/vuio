@@ -8,6 +8,41 @@ And Less then 100Mb for 100000 objects.
 - **Cross-platform**: Native binaries for Linux, macOS,  Windows (x64 and arm), Freebsd (x64), Docker, and Kubernetes. Repo with setup packages for all linux flows, DEB, RPM, APK, Pacman, musl and tar.gz.
 - **Single binary, no dependencies**, All is included in the binary, no need to install anything else,  just download and run.
 
+---
+
+## Screenshots
+
+<p align="center">
+  <img src="screen/vuio.jpg" alt="VuIO Web UI & Media Player" width="100%">
+</p>
+
+<div align="center">
+
+<details>
+<summary><b>◀ Previous &nbsp;&nbsp;&nbsp; <code>[ 1 / 3 ] Web UI & Media Player</code> &nbsp;&nbsp;&nbsp; Next ▶</b></summary>
+<br>
+
+<p align="center">
+  <img src="screen/vuio2.jpg" alt="VuIO System Stats & Diagnostics" width="100%">
+</p>
+
+<details>
+<summary><b>◀ Previous &nbsp;&nbsp;&nbsp; <code>[ 2 / 3 ] System Stats & Diagnostics</code> &nbsp;&nbsp;&nbsp; Next ▶</b></summary>
+<br>
+
+<p align="center">
+  <img src="screen/vuio3.jpg" alt="VuIO Admin & Transcode Settings" width="100%">
+</p>
+
+<p align="center"><b><code>[ 3 / 3 ] Admin & Transcode Settings</code></b></p>
+
+</details>
+</details>
+
+</div>
+
+---
+
 ## Features
 
 - **DLNA/UPnP Media Server** – Stream to any Smart TV or DLNA renderer with SSDP and mDNS (Bonjour) discovery.
