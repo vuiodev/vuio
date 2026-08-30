@@ -12,29 +12,22 @@ And Less then 100Mb for 100000 objects.
 
 ## Screenshots
 
-<p align="center">
-  <img src="screen/vuio.jpg" alt="VuIO Web UI & Media Player" width="100%">
-</p>
-
 <div align="center">
 
 <details>
-<summary><b>◀ Previous &nbsp;&nbsp;&nbsp; <code>[ 1 / 3 ] Web UI & Media Player</code> &nbsp;&nbsp;&nbsp; Next ▶</b></summary>
-<br>
-
-<p align="center">
-  <img src="screen/vuio2.jpg" alt="VuIO System Stats & Diagnostics" width="100%">
-</p>
+<summary align="center">
+  <p><b>1 / 3 — Web UI & Media Player &nbsp; (Click image to switch ▶)</b></p>
+  <img src="screen/vuio.jpg" alt="VuIO Web UI & Media Player" width="100%">
+</summary>
 
 <details>
-<summary><b>◀ Previous &nbsp;&nbsp;&nbsp; <code>[ 2 / 3 ] System Stats & Diagnostics</code> &nbsp;&nbsp;&nbsp; Next ▶</b></summary>
-<br>
+<summary align="center">
+  <p><b>2 / 3 — System Stats & Diagnostics &nbsp; (Click image to switch ▶)</b></p>
+  <img src="screen/vuio2.jpg" alt="VuIO System Stats & Diagnostics" width="100%">
+</summary>
 
-<p align="center">
-  <img src="screen/vuio3.jpg" alt="VuIO Admin & Transcode Settings" width="100%">
-</p>
-
-<p align="center"><b><code>[ 3 / 3 ] Admin & Transcode Settings</code></b></p>
+<p align="center"><b>3 / 3 — Admin & Transcode Settings &nbsp; (Click image to cycle back ◀)</b></p>
+<img src="screen/vuio3.jpg" alt="VuIO Admin & Transcode Settings" width="100%">
 
 </details>
 </details>
