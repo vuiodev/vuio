@@ -1,14 +1,14 @@
 Package: vuio
-Version: 0.0.46
+Version: 0.0.47
 Architecture: arm64
 Maintainer: VuIO <vuio@vuio.dev>
 Installed-Size: 17884
 Depends: libc6 (>= 2.17)
-Filename: pool/main/v/vuio/vuio_0.0.46_arm64.deb
-Size: 6529456
-MD5sum: 5fa9e43bcbca74e1d5ada9e6163b3d87
-SHA1: 7f86a3761be5abf5d8349ff96af33e0963621501
-SHA256: d24d3a64d71e8cd6f27cb00fd0274c09f570dd821bf64ca974db89e972ad5830
+Filename: pool/main/v/vuio/vuio_0.0.47_arm64.deb
+Size: 6530154
+MD5sum: ed07e03ac5c87c8909800af40e2e6646
+SHA1: 738f9e3868e73e1abda12a872b2b9e4787d6659a
+SHA256: b28ce3ddf5028bb073c89fee4e411b10589eff9e9531ed79ea6a7316e0f56c9b
 Section: net
 Priority: optional
 Homepage: https://github.com/vuio/vuio
