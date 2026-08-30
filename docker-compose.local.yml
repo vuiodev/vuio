@@ -61,6 +61,7 @@ services:
       
       # Media Configuration
       - VUIO_MEDIA_DIRS=/media  # Comma-separated for multiple dirs: /media/movies,/media/tv,/media/music
+      # - VUIO_SUPPORTED_EXTENSIONS=mp4,mkv,flac  # Replace the global scanned-extension list
       - VUIO_SCAN_ON_STARTUP=true
       - VUIO_WATCH_CHANGES=true
       - VUIO_CLEANUP_DELETED=true

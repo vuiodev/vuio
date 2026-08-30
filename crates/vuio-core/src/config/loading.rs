@@ -14,6 +14,52 @@ fn env_flag(name: &str) -> Option<bool> {
     })
 }
 
+/// Docker's default global media-extension list.
+///
+/// Kept in one function so an unset `VUIO_SUPPORTED_EXTENSIONS` remains exactly
+/// backward-compatible while a set variable can replace the whole list.
+fn default_docker_supported_extensions() -> Vec<String> {
+    [
+        "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "3gp", "mp3", "flac",
+        "wav", "aac", "ogg", "wma", "ac3", "eac3", "ec3", "dts", "jpg", "jpeg", "png",
+        "gif", "bmp", "webp", "heif", "heic", "avif",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect()
+}
+
+/// Parse the comma-separated extension syntax used by the Docker environment.
+///
+/// The scanner already treats extensions case-insensitively and accepts either
+/// `mkv` or `.mkv` in TOML. Normalising here makes the generated container
+/// configuration unambiguous and prevents spelling variants becoming duplicate
+/// entries.
+fn parse_supported_extensions(value: &str) -> Vec<String> {
+    let mut extensions = Vec::new();
+    for value in value.split(',') {
+        let extension = value
+            .trim()
+            .trim_start_matches('.')
+            .to_ascii_lowercase();
+        if !extension.is_empty() && !extensions.contains(&extension) {
+            extensions.push(extension);
+        }
+    }
+    extensions
+}
+
+fn supported_extensions(value: Option<&str>) -> Vec<String> {
+    value
+        .map(parse_supported_extensions)
+        .unwrap_or_else(default_docker_supported_extensions)
+}
+
+fn supported_extensions_from_env() -> Vec<String> {
+    let value = std::env::var("VUIO_SUPPORTED_EXTENSIONS").ok();
+    supported_extensions(value.as_deref())
+}
+
 impl AppConfig {
     /// Parse and validate a complete VuIO TOML document without writing it.
     pub fn from_toml_str(content: &str) -> Result<Self> {
@@ -109,39 +155,7 @@ impl AppConfig {
                 .ok()
                 .and_then(|value| value.parse().ok())
                 .unwrap_or_else(default_full_rescan_interval_hours),
-            supported_extensions: vec![
-                "mp4".to_string(),
-                "mkv".to_string(),
-                "avi".to_string(),
-                "mov".to_string(),
-                "wmv".to_string(),
-                "flv".to_string(),
-                "webm".to_string(),
-                "m4v".to_string(),
-                "3gp".to_string(),
-                "mp3".to_string(),
-                "flac".to_string(),
-                "wav".to_string(),
-                "aac".to_string(),
-                "ogg".to_string(),
-                "wma".to_string(),
-                // Elementary Dolby and DTS streams. Listed because VuIO can now
-                // decode them for renderers that cannot — before that there was
-                // nothing useful to do with one, which is why they were absent.
-                "ac3".to_string(),
-                "eac3".to_string(),
-                "ec3".to_string(),
-                "dts".to_string(),
-                "jpg".to_string(),
-                "jpeg".to_string(),
-                "png".to_string(),
-                "gif".to_string(),
-                "bmp".to_string(),
-                "webp".to_string(),
-                "heif".to_string(),
-                "heic".to_string(),
-                "avif".to_string(),
-            ],
+            supported_extensions: supported_extensions_from_env(),
         };
 
         let database = DatabaseConfig {
@@ -583,5 +597,40 @@ impl AppConfig {
     pub fn get_platform_media_directories() -> Vec<PathBuf> {
         let platform_config = PlatformConfig::for_current_platform();
         platform_config.get_default_media_directories()
+    }
+}
+
+#[cfg(test)]
+mod env_tests {
+    use super::{parse_supported_extensions, supported_extensions};
+
+    #[test]
+    fn docker_extensions_accept_the_same_human_friendly_forms_as_toml() {
+        assert_eq!(
+            parse_supported_extensions(" MP4, .Mkv,flac, FLAC, , .DTS "),
+            ["mp4", "mkv", "flac", "dts"]
+        );
+    }
+
+    #[test]
+    fn an_unset_override_keeps_the_existing_docker_defaults() {
+        let defaults = supported_extensions(None);
+        assert!(defaults.contains(&"mp4".to_string()));
+        assert!(defaults.contains(&"mkv".to_string()));
+        assert!(defaults.contains(&"ac3".to_string()));
+        assert!(defaults.contains(&"dts".to_string()));
+    }
+
+    #[test]
+    fn a_set_override_replaces_the_docker_defaults() {
+        assert_eq!(
+            supported_extensions(Some("mkv,flac")),
+            ["mkv", "flac"]
+        );
+    }
+
+    #[test]
+    fn an_explicit_empty_list_can_disable_regular_media_scanning() {
+        assert!(parse_supported_extensions(" , . , ").is_empty());
     }
 }

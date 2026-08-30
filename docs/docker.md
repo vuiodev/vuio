@@ -110,6 +110,7 @@ A container is configured via environment variables. In Docker environments, the
 | `VUIO_SERVER_NAME` | `VuIO` | DLNA & AirPlay server friendly name |
 | `VUIO_UUID` | random | Device UUID (set a fixed UUID for persistence across restarts) |
 | `VUIO_MEDIA_DIRS` | `/media` | Comma-separated list of media directories to scan |
+| `VUIO_SUPPORTED_EXTENSIONS` | Built-in media formats | Comma-separated global list of file extensions to scan (for example `mp4,mkv,flac`; leading dots are optional) |
 | `VUIO_SCAN_ON_STARTUP` | `true` | Automatically scan media directories on container startup |
 | `VUIO_WATCH_CHANGES` | `true` | Monitor file system changes in real time |
 | `VUIO_CLEANUP_DELETED` | `true` | Automatically remove deleted files from database |
