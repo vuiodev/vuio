@@ -10,7 +10,7 @@
       "name": "vuio",
       "displayName": "VuIO Media Server",
       "description": "Browse, search and cast your VuIO media library — and control the TVs and speakers on your network — from Claude.",
-      "version": "0.0.46",
+      "version": "0.0.47",
       "author": {
         "name": "vyrti",
         "url": "https://github.com/vuiodev"

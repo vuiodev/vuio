@@ -1,6 +1,6 @@
 [package]
 name = "vuio-core"
-version = "0.0.46"
+version = "0.0.47"
 edition = "2021"
 rust-version = "1.95"
 authors = ["vyrti"]
@@ -168,7 +168,7 @@ sysinfo = { version = "0.39", default-features = false, features = ["system", "d
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
 vuio-cast = { path = "../vuio-cast", version = "0.0.4", default-features = false, optional = true }
-vuio-web = { path = "../vuio-web", version = "0.0.46", optional = true }
+vuio-web = { path = "../vuio-web", version = "0.0.47", optional = true }
 jwalk = "0.9"
 tokio-stream = "0.1"
 hap-crypto = { version = "1.4", optional = true }
