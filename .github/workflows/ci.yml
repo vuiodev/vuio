@@ -134,7 +134,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .sccache
-          key: clippy-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          key: clippy-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             clippy-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
             clippy-${{ runner.os }}-
@@ -245,7 +245,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .sccache
-          key: features-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          key: features-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             features-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
             features-${{ runner.os }}-
@@ -310,7 +310,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .sccache
-          key: msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          key: msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
             msrv-${{ steps.msrv.outputs.version }}-${{ runner.os }}-
@@ -384,7 +384,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .sccache
-          key: test-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          key: test-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             test-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
             test-${{ runner.os }}-${{ matrix.target }}-
@@ -572,7 +572,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             .sccache
-          key: release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          key: release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}
           restore-keys: |
             release-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml') }}-
             release-${{ runner.os }}-${{ matrix.target }}-
