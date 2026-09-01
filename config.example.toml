@@ -22,7 +22,7 @@ uuid = "129c3ee9-4fd2-45ea-9f11-7a15e6d831ef"
 
 [network]
 interface_selection = "Auto"  # "Auto", "All", or a specific interface name
-multicast_ttl = 4             # Currently not applied: the SSDP socket TTL is fixed at 4
+multicast_ttl = 4             # SSDP multicast time-to-live
 announce_interval_seconds = 300
 # mdns_enabled = true                     # Also advertise over Bonjour/DNS-SD
 # upnp_callback_allowed_networks = []     # Extra CIDRs allowed as UPnP event callbacks

@@ -443,65 +443,25 @@ impl NetworkManager for MacOSNetworkManager {
         &self,
         config: &SsdpConfig,
     ) -> PlatformResult<SsdpSocket> {
-        // Try primary port first
-        match self.try_bind_port_macos(config.primary_port).await {
-            Ok(socket) => {
-                let interfaces = self.get_local_interfaces().await?;
-                let suitable_interfaces: Vec<_> = interfaces
-                    .into_iter()
-                    .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
-                    .collect();
+        let socket = crate::platform::network::bind_ssdp_socket(config.primary_port)?;
+        let interfaces = self.get_local_interfaces().await?;
+        let suitable_interfaces: Vec<_> = interfaces
+            .into_iter()
+            .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
+            .collect();
 
-                if suitable_interfaces.is_empty() {
-                    return Err(PlatformError::NetworkConfig(
-                        "No suitable network interfaces found on macOS".to_string(),
-                    ));
-                }
-
-                return Ok(SsdpSocket {
-                    socket,
-                    port: config.primary_port,
-                    interfaces: suitable_interfaces,
-                    multicast_enabled: false,
-                });
-            }
-            Err(primary_error) => {
-                warn!(
-                    "Primary port {} failed on macOS: {}. Trying fallback ports.",
-                    config.primary_port, primary_error
-                );
-
-                // Try fallback ports
-                for &port in &config.fallback_ports {
-                    if let Ok(socket) = self.try_bind_port_macos(port).await {
-                        info!("Using fallback port {} on macOS", port);
-                        let interfaces = self.get_local_interfaces().await?;
-                        let suitable_interfaces: Vec<_> = interfaces
-                            .into_iter()
-                            .filter(|iface| {
-                                !iface.is_loopback && iface.is_up && iface.supports_multicast
-                            })
-                            .collect();
-
-                        if suitable_interfaces.is_empty() {
-                            return Err(PlatformError::NetworkConfig(
-                                "No suitable network interfaces found on macOS".to_string(),
-                            ));
-                        }
-
-                        return Ok(SsdpSocket {
-                            socket,
-                            port,
-                            interfaces: suitable_interfaces,
-                            multicast_enabled: false,
-                        });
-                    }
-                }
-
-                // If all fallbacks also fail, return the original error from the primary port
-                Err(primary_error)
-            }
+        if suitable_interfaces.is_empty() {
+            return Err(PlatformError::NetworkConfig(
+                "No suitable network interfaces found on macOS".to_string(),
+            ));
         }
+
+        Ok(SsdpSocket {
+            socket,
+            port: config.primary_port,
+            interfaces: suitable_interfaces,
+            multicast_enabled: false,
+        })
     }
 
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
@@ -640,7 +600,11 @@ impl NetworkManager for MacOSNetworkManager {
     }
 
     async fn is_port_available(&self, port: u16) -> bool {
-        (self.try_bind_port_macos(port).await).is_ok()
+        if port == 1900 {
+            crate::platform::network::bind_ssdp_socket(port).is_ok()
+        } else {
+            self.try_bind_port_macos(port).await.is_ok()
+        }
     }
 
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {

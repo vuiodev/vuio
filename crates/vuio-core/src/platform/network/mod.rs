@@ -18,6 +18,7 @@ pub mod macos;
 mod socket;
 #[cfg(target_os = "windows")]
 pub mod windows;
+pub(crate) use socket::bind_ssdp_socket;
 pub use socket::SsdpSocket;
 
 // Re-export platform-specific managers
@@ -49,10 +50,8 @@ pub type PlatformNetworkManager = bsd::BsdNetworkManager;
 /// Configuration for SSDP networking
 #[derive(Debug, Clone)]
 pub struct SsdpConfig {
-    /// Primary port to attempt binding (usually 1900)
+    /// SSDP receive port (1900 for standards-compliant discovery)
     pub primary_port: u16,
-    /// Fallback ports to try if primary port is unavailable
-    pub fallback_ports: Vec<u16>,
     /// Multicast address for SSDP (usually 239.255.255.250)
     pub multicast_address: IpAddr,
     /// Interval between SSDP announcements
@@ -69,7 +68,6 @@ impl Default for SsdpConfig {
     fn default() -> Self {
         Self {
             primary_port: 1900,
-            fallback_ports: vec![8080, 8081, 8082, 9090],
             multicast_address: SSDP_MULTICAST_IP,
             announce_interval: Duration::from_secs(300), // 5 minutes
             max_retries: 3,
@@ -196,35 +194,6 @@ impl BaseNetworkManager {
         })
     }
 
-    /// Find an available port from the configuration
-    async fn find_available_port(&self) -> PlatformResult<u16> {
-        // Try primary port first
-        if self
-            .is_port_available_internal(self.config.primary_port)
-            .await
-        {
-            return Ok(self.config.primary_port);
-        }
-
-        warn!(
-            "Primary port {} is not available, trying fallback ports",
-            self.config.primary_port
-        );
-
-        // Try fallback ports
-        for &port in &self.config.fallback_ports {
-            if self.is_port_available_internal(port).await {
-                info!("Using fallback port {}", port);
-                return Ok(port);
-            }
-        }
-
-        Err(PlatformError::NetworkConfig(format!(
-            "No available ports found. Tried primary port {} and fallback ports {:?}",
-            self.config.primary_port, self.config.fallback_ports
-        )))
-    }
-
     /// Internal method to check if a port is available
     async fn is_port_available_internal(&self, port: u16) -> bool {
         (self.try_bind_port(port).await).is_ok()
@@ -273,12 +242,6 @@ impl NetworkManager for BaseNetworkManager {
         &self,
         config: &SsdpConfig,
     ) -> PlatformResult<SsdpSocket> {
-        let port = if config.interfaces.is_empty() {
-            self.find_available_port().await?
-        } else {
-            config.primary_port
-        };
-
         let interfaces = if config.interfaces.is_empty() {
             self.get_local_interfaces().await?
         } else {
@@ -292,7 +255,7 @@ impl NetworkManager for BaseNetworkManager {
             ));
         }
 
-        SsdpSocket::new(port, suitable_interfaces).await
+        SsdpSocket::new(config.primary_port, suitable_interfaces).await
     }
 
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
@@ -407,7 +370,11 @@ impl NetworkManager for BaseNetworkManager {
     }
 
     async fn is_port_available(&self, port: u16) -> bool {
-        self.is_port_available_internal(port).await
+        if port == 1900 {
+            bind_ssdp_socket(port).is_ok()
+        } else {
+            self.is_port_available_internal(port).await
+        }
     }
 
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {
@@ -496,7 +463,6 @@ mod tests {
     fn test_ssdp_config_default() {
         let config = SsdpConfig::default();
         assert_eq!(config.primary_port, 1900);
-        assert!(!config.fallback_ports.is_empty());
         assert_eq!(
             config.multicast_address,
             "239.255.255.250".parse::<IpAddr>().unwrap()

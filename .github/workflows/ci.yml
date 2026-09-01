@@ -344,7 +344,7 @@ jobs:
             mode: native-test
           - runner: windows-latest
             target: x86_64-pc-windows-msvc
-            mode: build-only
+            mode: windows-socket-test
           - runner: macos-15-intel
             target: x86_64-apple-darwin
             mode: native-test
@@ -430,6 +430,11 @@ jobs:
         env:
           RUSTC_WRAPPER: sccache
         run: cargo test --target ${{ matrix.target }}
+      - name: Test reusable SSDP binding on Windows
+        if: matrix.mode == 'windows-socket-test'
+        env:
+          RUSTC_WRAPPER: sccache
+        run: cargo test -p vuio-core reusable_ssdp_sockets_can_bind_in_either_startup_order --lib --target ${{ matrix.target }}
       - name: Fast PR compile check for non-native target
         if: matrix.mode != 'native-test' && matrix.mode != 'freebsd-vm' && github.event_name == 'pull_request'
         env:

@@ -478,72 +478,27 @@ impl NetworkManager for WindowsNetworkManager {
         &self,
         config: &SsdpConfig,
     ) -> PlatformResult<SsdpSocket> {
-        // Try primary port first
-        let primary_result = self.try_bind_port_windows(config.primary_port).await;
+        let socket = crate::platform::network::bind_ssdp_socket(config.primary_port)?;
+        let interfaces = self.get_local_interfaces().await?;
+        let suitable_interfaces: Vec<_> = interfaces
+            .into_iter()
+            .filter(|iface| !iface.is_loopback && iface.is_up)
+            .collect();
 
-        if let Ok(socket) = primary_result {
-            let interfaces = self.get_local_interfaces().await?;
-            let suitable_interfaces: Vec<_> = interfaces
-                .into_iter()
-                .filter(|iface| !iface.is_loopback && iface.is_up)
-                .collect();
+        // If no suitable interfaces found, use all interfaces (including loopback for testing)
+        let final_interfaces = if suitable_interfaces.is_empty() {
+            warn!("No suitable network interfaces found on Windows, using all available interfaces");
+            self.get_local_interfaces().await?
+        } else {
+            suitable_interfaces
+        };
 
-            // If no suitable interfaces found, use all interfaces (including loopback for testing)
-            let final_interfaces = if suitable_interfaces.is_empty() {
-                warn!("No suitable network interfaces found on Windows, using all available interfaces");
-                self.get_local_interfaces().await?
-            } else {
-                suitable_interfaces
-            };
-
-            return Ok(SsdpSocket {
-                socket,
-                port: config.primary_port,
-                interfaces: final_interfaces,
-                multicast_enabled: false,
-            });
-        }
-
-        let primary_error = primary_result.unwrap_err();
-        warn!(
-            "Primary port {} failed on Windows: {}",
-            config.primary_port, primary_error
-        );
-        let mut last_error = primary_error;
-
-        // Try fallback ports
-        for &port in &config.fallback_ports {
-            match self.try_bind_port_windows(port).await {
-                Ok(socket) => {
-                    info!("Using fallback port {} on Windows", port);
-                    let interfaces = self.get_local_interfaces().await?;
-                    let suitable_interfaces: Vec<_> = interfaces
-                        .into_iter()
-                        .filter(|iface| !iface.is_loopback && iface.is_up)
-                        .collect();
-
-                    // If no suitable interfaces found, use all interfaces
-                    let final_interfaces = if suitable_interfaces.is_empty() {
-                        self.get_local_interfaces().await?
-                    } else {
-                        suitable_interfaces
-                    };
-
-                    return Ok(SsdpSocket {
-                        socket,
-                        port,
-                        interfaces: final_interfaces,
-                        multicast_enabled: false,
-                    });
-                }
-                Err(e) => {
-                    debug!("Fallback port {} failed on Windows: {}", port, e);
-                    last_error = e;
-                }
-            }
-        }
-
-        Err(last_error)
+        Ok(SsdpSocket {
+            socket,
+            port: config.primary_port,
+            interfaces: final_interfaces,
+            multicast_enabled: false,
+        })
     }
 
     async fn get_local_interfaces(&self) -> PlatformResult<Vec<NetworkInterface>> {
@@ -698,7 +653,11 @@ impl NetworkManager for WindowsNetworkManager {
     }
 
     async fn is_port_available(&self, port: u16) -> bool {
-        self.try_bind_port_windows(port).await.is_ok()
+        if port == 1900 {
+            crate::platform::network::bind_ssdp_socket(port).is_ok()
+        } else {
+            self.try_bind_port_windows(port).await.is_ok()
+        }
     }
 
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {

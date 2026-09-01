@@ -58,18 +58,9 @@ impl UnifiedSsdpService {
     /// Create a new unified SSDP service with the appropriate platform adapter
     pub fn new<D: DatabaseManager>(state: AppState<D>) -> Self {
         let network_manager = Arc::new(PlatformNetworkManager::new());
-        let platform_adapter: Box<dyn SsdpPlatformAdapter> = if AppConfig::is_running_in_docker() {
-            Box::new(DefaultSsdpAdapter::new(vec![], false))
-        } else {
-            #[cfg(target_os = "windows")]
-            {
-                Box::new(DefaultSsdpAdapter::new(vec![], true))
-            }
-            #[cfg(not(target_os = "windows"))]
-            {
-                Box::new(DefaultSsdpAdapter::new(vec![8080, 8081, 8082, 9090], true))
-            }
-        };
+        let platform_adapter: Box<dyn SsdpPlatformAdapter> = Box::new(DefaultSsdpAdapter::new(
+            !AppConfig::is_running_in_docker(),
+        ));
 
         Self {
             network_manager,
@@ -587,14 +578,12 @@ pub async fn run_ssdp_service_until_cancelled<D: DatabaseManager>(
 
 /// Default, parameterized platform adapter for SSDP service behavior
 pub struct DefaultSsdpAdapter {
-    fallback_ports: Vec<u16>,
     require_multicast_support: bool,
 }
 
 impl DefaultSsdpAdapter {
-    pub fn new(fallback_ports: Vec<u16>, require_multicast_support: bool) -> Self {
+    pub fn new(require_multicast_support: bool) -> Self {
         Self {
-            fallback_ports,
             require_multicast_support,
         }
     }
@@ -637,7 +626,6 @@ impl SsdpPlatformAdapter for DefaultSsdpAdapter {
     fn get_ssdp_config(&self, config: &AppConfig) -> SsdpConfig {
         SsdpConfig {
             primary_port: SSDP_PORT,
-            fallback_ports: self.fallback_ports.clone(),
             multicast_address: SSDP_MULTICAST_IP,
             announce_interval: Duration::from_secs(config.network.announce_interval_seconds),
             max_retries: 3,

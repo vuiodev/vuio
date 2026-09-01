@@ -1,39 +1,14 @@
 use super::*;
 
 impl LinuxNetworkManager {
-    ///  bind to INADDR_ANY:1900
+    /// Bind the reusable receive socket to INADDR_ANY:1900.
     async fn create_receive_socket(&self, port: u16) -> PlatformResult<UdpSocket> {
         let socket_addr = SocketAddr::from(([0, 0, 0, 0], port)); // INADDR_ANY
 
-        let socket = UdpSocket::bind(socket_addr).await.map_err(|e| {
-            PlatformError::NetworkConfig(format!(
-                "Failed to bind receive socket to {}: {}",
-                socket_addr, e
-            ))
-        })?;
-
-        self.apply_receive_socket_options(&socket)?;
+        let socket = crate::platform::network::bind_ssdp_socket(port)?;
 
         info!("Created receive socket bound to {}", socket_addr);
         Ok(socket)
-    }
-
-    /// Apply receive socket options
-    fn apply_receive_socket_options(&self, socket: &UdpSocket) -> PlatformResult<()> {
-        let socket = socket2::SockRef::from(socket);
-        if let Err(error) = socket.set_reuse_address(true) {
-            warn!("Failed to set SO_REUSEADDR: {error}");
-        }
-
-        // This is necessary to prevent the "Address in use" error when creating the announcement socket.
-        if let Err(error) = socket.set_reuse_port(true) {
-            warn!(
-                "Failed to set SO_REUSEPORT: {error}. This might cause issues in some environments."
-            );
-        }
-
-        debug!("Applied receive socket options");
-        Ok(())
     }
 
     /// Join multicast membership on specific interface
@@ -349,7 +324,11 @@ impl NetworkManager for LinuxNetworkManager {
     }
 
     async fn is_port_available(&self, port: u16) -> bool {
-        self.try_bind_port_linux(port).await.is_ok()
+        if port == 1900 {
+            crate::platform::network::bind_ssdp_socket(port).is_ok()
+        } else {
+            self.try_bind_port_linux(port).await.is_ok()
+        }
     }
 
     async fn get_network_diagnostics(&self) -> PlatformResult<NetworkDiagnostics> {

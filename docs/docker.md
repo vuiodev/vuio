@@ -4,6 +4,7 @@ VuIO publishes official multi-architecture container images to GitHub Container 
 
 > [!NOTE]
 > SSDP/UPnP auto-discovery relies on multicast UDP (239.255.255.250:1900). For local devices (Smart TVs, AV receivers, Chromecast) to discover the server, container `--network host` mode is required.
+> VuIO can share UDP port 1900 with other multicast-aware SSDP services that enable compatible socket reuse. A service that reserves the port exclusively will still prevent SSDP discovery from starting.
 > Docker for macOS runs inside a lightweight virtual machine that blocks host multicast routing; on macOS, running the native binary (`brew install vuio`) is recommended for DLNA discovery.
 
 ---
