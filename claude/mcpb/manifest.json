@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "vuio",
   "display_name": "VuIO Media Server",
-  "version": "0.0.48",
+  "version": "0.0.49",
   "description": "Browse, search and cast your VuIO media library from Claude.",
   "long_description": "Connects Claude to a VuIO media server on your network. Search the library, browse folders, build playlists, and cast to DLNA, Chromecast and AirPlay devices.\n\nThis bundle runs `vuio mcp`, which bridges Claude's stdio connection to a VuIO server that is already running. It does not start a server or open the library database itself — point it at the machine that does.",
   "author": {

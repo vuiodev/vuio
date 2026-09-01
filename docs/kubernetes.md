@@ -11,7 +11,7 @@ VuIO provides an official Helm 3 chart to deploy the media server directly onto 
 Install the chart directly from GitHub Container Registry without cloning the repository:
 
 ```bash
-helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.48
+helm install vuio oci://ghcr.io/vuiodev/charts/vuio --version 0.0.49
 ```
 
 ### Local Installation
