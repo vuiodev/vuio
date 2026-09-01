@@ -526,7 +526,6 @@ jobs:
     timeout-minutes: 90
     strategy:
       fail-fast: false
-      max-parallel: 1
       matrix:
         include:
           - runner: ubuntu-latest
