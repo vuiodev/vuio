@@ -256,15 +256,26 @@ mod tests {
         let port = first.local_addr().expect("first local address").port();
         let second = bind_ssdp_socket(port).expect("second reusable socket");
         let group = std::net::Ipv4Addr::new(239, 255, 255, 250);
+        // GitHub's macOS runners have no default multicast route. Pinning the
+        // test to lo0 keeps it entirely inside the kernel. Other CI platforms
+        // provide a multicast-capable default interface and exercise that path.
+        #[cfg(target_os = "macos")]
+        let interface = std::net::Ipv4Addr::LOCALHOST;
+        #[cfg(not(target_os = "macos"))]
+        let interface = std::net::Ipv4Addr::UNSPECIFIED;
 
         first
-            .join_multicast_v4(group, std::net::Ipv4Addr::UNSPECIFIED)
+            .join_multicast_v4(group, interface)
             .expect("first multicast membership");
         second
-            .join_multicast_v4(group, std::net::Ipv4Addr::UNSPECIFIED)
+            .join_multicast_v4(group, interface)
             .expect("second multicast membership");
 
-        let sender = UdpSocket::bind("0.0.0.0:0").await.expect("sender");
+        let sender = UdpSocket::bind((interface, 0)).await.expect("sender");
+        #[cfg(target_os = "macos")]
+        socket2::SockRef::from(&sender)
+            .set_multicast_if_v4(&interface)
+            .expect("multicast interface");
         sender
             .set_multicast_loop_v4(true)
             .expect("multicast loopback");
