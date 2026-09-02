@@ -2,7 +2,7 @@
 name = "vuio-core"
 version = "0.0.49"
 edition = "2021"
-rust-version = "1.95"
+rust-version = "1.97"
 authors = ["vyrti"]
 description = "Embeddable VuIO DLNA/UPNP, Chromecast, and Airplay media server runtime"
 license = "MIT OR Apache-2.0"

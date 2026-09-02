@@ -2,7 +2,7 @@
 name = "vuio-cast"
 version = "0.0.4"
 edition = "2024"
-rust-version = "1.95"
+rust-version = "1.97"
 license = "MIT OR Apache-2.0"
 description = "Async Google Cast (Chromecast) client for Rust, with ring TLS. A fork of oxicast by Dennis Kribl."
 repository = "https://github.com/vuiodev/vuio"
