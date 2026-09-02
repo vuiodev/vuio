@@ -2161,7 +2161,7 @@ async fn every_picture_opens_with_an_access_unit_delimiter() {
 
 /// The vendored DTS conformance fixture: 48 kHz, 1024-byte frames of 512
 /// samples each, which is 768 kbps in eleven-millisecond frames.
-const DTS: &[u8] = include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+const DTS: &[u8] = include_bytes!("../../vuio-codec-dts/tests/fixtures/dts_5_frames.bin");
 const DTS_FRAME_LEN: usize = 1024;
 const DTS_FRAME_MS: f64 = 512.0 / 48.0;
 

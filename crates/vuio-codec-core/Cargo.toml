@@ -1,0 +1,23 @@
+[package]
+name = "vuio-codec-core"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+authors = ["vyrti"]
+description = "Core types and registries for VuIO audio codecs — timestamps, packets, frames, and registries. Forked from oxideav-core."
+repository = "https://github.com/vuiodev/vuio"
+homepage = "https://github.com/vuiodev/vuio"
+documentation = "https://docs.rs/vuio-codec-core"
+readme = "README.md"
+keywords = ["multimedia", "audio", "video", "codec", "pure-rust"]
+categories = ["multimedia", "encoding"]
+
+[features]
+default = []
+json-options = []
+
+[dependencies]
+thiserror = "2"
+serde_json = "1"
+bytemuck = "1"

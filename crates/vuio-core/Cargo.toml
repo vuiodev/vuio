@@ -185,15 +185,11 @@ symphonia = { version = "0.6", default-features = false, features = ["all"], opt
 getrandom = { version = "0.4", optional = true }
 plist = { version = "1.10", optional = true }
 hex = { version = "0.4", optional = true }
-# The AC-3 / E-AC-3 / DTS decoders and the AAC-LC encoder, vendored verbatim
-# under crates/vendor by `scripts/vendor-oxideav.sh`. Path deps with no version:
-# these are our copies, not registry crates, and `publish = false` on each says
-# so. They add no external crates — thiserror, serde_json and bytemuck were
-# already in the tree.
-oxideav-core = { path = "../vendor/oxideav-core", optional = true }
-vuio-codec-ac3 = { path = "../vuio-codec-ac3", optional = true }
-oxideav-dts = { path = "../vendor/oxideav-dts", optional = true }
-xaac-rs = { path = "../vendor/xaac-rs", version = "0.2", optional = true }
+# The AC-3 / E-AC-3 / DTS decoders and the AAC-LC encoder.
+oxideav-core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio-codec-core", optional = true }
+vuio-codec-ac3 = { version = "0.0.1", path = "../vuio-codec-ac3", optional = true }
+oxideav-dts = { package = "vuio-codec-dts", version = "0.0.1", path = "../vuio-codec-dts", optional = true }
+xaac-rs = { version = "0.2", path = "../vendor/xaac-rs", optional = true }
 rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
 # over TLS. `rustls-no-provider` rather than a provider-selecting feature because
@@ -210,7 +206,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-vuio-core = { path = ".", features = ["unstable-internals"] }
+vuio-core = { path = ".", version = "0.0.49", features = ["unstable-internals"] }
 # Symphonia reads tags but cannot write them, and the audio tests build their
 # fixtures by tagging generated files. Test-only, so it ships with nothing.
 audiotags = "0.5"

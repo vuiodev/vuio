@@ -39,6 +39,6 @@ tokio = { version = "1.53", features = ["rt-multi-thread", "macros"] }
 # inside, which is the same category as core's own dev-dependency on itself.
 vuio-core = { path = "../vuio-core", version = "0.0.49", features = ["unstable-internals", "transcode-aac", "transcode-ac3", "transcode-dts"] }
 vuio-codec-ac3 = { path = "../vuio-codec-ac3" }
-oxideav-dts = { path = "../vendor/oxideav-dts" }
-oxideav-core = { path = "../vendor/oxideav-core" }
+oxideav-dts = { package = "vuio-codec-dts", path = "../vuio-codec-dts" }
+oxideav-core = { package = "vuio-codec-core", path = "../vuio-codec-core" }
 xaac-rs = { path = "../vendor/xaac-rs", version = "0.2" }

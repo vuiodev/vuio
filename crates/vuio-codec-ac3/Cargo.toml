@@ -23,7 +23,7 @@ include = [
 ]
 
 [dependencies]
-oxideav-core = { version = "0.1", path = "../vendor/oxideav-core" }
+oxideav-core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio-codec-core" }
 rayon = "1.10"
 
 [lints.rust]

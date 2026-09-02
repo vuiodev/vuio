@@ -1,0 +1,22 @@
+[package]
+name = "vuio-codec-dts"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/vuiodev/vuio"
+homepage = "https://github.com/vuiodev/vuio"
+documentation = "https://docs.rs/vuio-codec-dts"
+authors = ["vyrti"]
+description = "Pure-Rust DTS audio decoder (Core profile) for VuIO. Forked from oxideav-dts."
+
+readme = "README.md"
+keywords = ["multimedia", "audio", "dts", "dca", "codec"]
+categories = ["multimedia::encoding", "multimedia::audio"]
+
+[dependencies]
+oxideav_core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio-codec-core", optional = true }
+
+[features]
+default = ["registry"]
+registry = ["dep:oxideav_core"]

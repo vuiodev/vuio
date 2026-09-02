@@ -270,7 +270,7 @@ fn primary_channels(bytes: &[u8], header: &DtsFrameHeader) -> Result<usize> {
 mod tests {
     use super::*;
 
-    const FIXTURE: &[u8] = include_bytes!("../../../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+    const FIXTURE: &[u8] = include_bytes!("../../../../vuio-codec-dts/tests/fixtures/dts_5_frames.bin");
 
     /// The fixture is 2-channel, so each frame's planes fold straight across.
     #[test]

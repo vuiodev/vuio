@@ -1,9 +1,0 @@
-# Written by scripts/vendor-oxideav.sh. Do not edit, and do not
-# hand-edit the vendored sources beside it — change them upstream
-# and re-run the script.
-source = "https://github.com/OxideAV/oxideav-dts"
-commit = "528203ed608223c5137843009054e05920af5c50"
-describe = "528203e"
-version = "0.0.1"
-vendored_at = "2026-08-24T08:53:00Z"
-patches = []

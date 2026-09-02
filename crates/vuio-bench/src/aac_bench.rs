@@ -9,7 +9,7 @@ use vuio_core::media::transcode::{PcmDecoder, TranscodeCodec};
 
 const AC3_FIXTURE: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
 const DTS_FIXTURE: &[u8] =
-    include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+    include_bytes!("../../vuio-codec-dts/tests/fixtures/dts_5_frames.bin");
 
 fn generate_sine_wave(sample_rate: u32, channels: u16, duration_secs: f64) -> Vec<i16> {
     let total_samples = (sample_rate as f64 * duration_secs) as usize;

@@ -7,7 +7,7 @@ description = "VuIO media server command-line application"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/vuiodev/vuio"
 homepage = "https://github.com/vuiodev/vuio"
-readme = "../../README.md"
+readme = "README.md"
 # Every binary is declared below. Without this, cargo also auto-discovers
 # `src/bin/*.rs`, and an auto-discovered target carries no `required-features` —
 # which is how `generate_test_media` came to be built in every configuration,

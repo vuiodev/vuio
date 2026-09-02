@@ -332,7 +332,7 @@ mod tests {
         include_bytes!("../../../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
     #[cfg(feature = "transcode-dts")]
     const DTS_FIXTURE: &[u8] =
-        include_bytes!("../../../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+        include_bytes!("../../../../vuio-codec-dts/tests/fixtures/dts_5_frames.bin");
 
     #[cfg(feature = "transcode-ac3")]
     #[test]

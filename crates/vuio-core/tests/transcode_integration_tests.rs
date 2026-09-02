@@ -38,7 +38,7 @@ const AC3: &[u8] = include_bytes!("../../vuio-codec-ac3/tests/fixtures/sine440_s
 /// without a Dolby licence has no DTS licence either, but one *with* Dolby and
 /// without DTS is the common set this default is aimed at.
 #[cfg(feature = "transcode-dts")]
-const DTS: &[u8] = include_bytes!("../../vendor/oxideav-dts/tests/fixtures/dts_5_frames.bin");
+const DTS: &[u8] = include_bytes!("../../vuio-codec-dts/tests/fixtures/dts_5_frames.bin");
 
 /// One AC-3 file in a library, and the router over it.
 async fn library() -> (TempDir, AppState, i64) {
