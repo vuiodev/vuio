@@ -208,7 +208,7 @@ pub fn unpack_14bit_to_16bit(input: &[u8], order: FourteenBitByteOrder) -> Resul
     let mut buf: u32 = 0;
     let mut bits_in_buf: u32 = 0;
 
-    for pair in input.chunks_exact(2) {
+    for pair in input.as_chunks::<2>().0 {
         let word = match order {
             FourteenBitByteOrder::BigEndian => u16::from_be_bytes([pair[0], pair[1]]),
             FourteenBitByteOrder::LittleEndian => u16::from_le_bytes([pair[0], pair[1]]),

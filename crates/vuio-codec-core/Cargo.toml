@@ -2,7 +2,7 @@
 name = "vuio-codec-core"
 version = "0.0.1"
 edition = "2024"
-rust-version = "1.97"
+rust-version = "1.98"
 license = "MIT OR Apache-2.0"
 authors = ["vyrti"]
 description = "Core types and registries for VuIO audio codecs — timestamps, packets, frames, and registries. Forked from oxideav-core."

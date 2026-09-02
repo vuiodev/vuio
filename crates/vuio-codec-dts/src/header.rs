@@ -1272,7 +1272,7 @@ pub fn encode_frame_header_le(header: &DtsFrameHeader) -> Result<Vec<u8>> {
     be.resize(16, 0);
     debug_assert_eq!(be.len() % 2, 0, "raw-LE encoder works on 16-bit words");
     // Word-swap pairs in place.
-    for pair in be.chunks_exact_mut(2) {
+    for pair in be.as_chunks_mut::<2>().0 {
         pair.swap(0, 1);
     }
     Ok(be)
@@ -1672,7 +1672,7 @@ pub fn parse_frame_header(bytes: &[u8]) -> Result<DtsFrameHeader> {
                 return Err(Error::UnexpectedEof);
             }
             let mut scratch = Vec::with_capacity(needed);
-            for chunk in bytes[..needed].chunks_exact(2) {
+            for chunk in bytes[..needed].as_chunks::<2>().0 {
                 scratch.push(chunk[1]);
                 scratch.push(chunk[0]);
             }
@@ -2223,7 +2223,7 @@ mod tests {
             0xCAFE,
         );
         let mut le = Vec::with_capacity(be.len());
-        for chunk in be.chunks_exact(2) {
+        for chunk in be.as_chunks::<2>().0 {
             le.push(chunk[1]);
             le.push(chunk[0]);
         }
@@ -3538,7 +3538,12 @@ mod tests {
     fn encode_normalises_le_input_to_raw_be_output() {
         let raw_be = build_be_header(1, 31, 0, 16, 1023, 9, 13, 25, 0, None, 0);
         // Byte-swap each pair to obtain the raw-LE form.
-        let raw_le: Vec<u8> = raw_be.chunks_exact(2).flat_map(|c| [c[1], c[0]]).collect();
+        let raw_le: Vec<u8> = raw_be
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .flat_map(|c| [c[1], c[0]])
+            .collect();
         let hdr_le = parse_frame_header(&raw_le).unwrap();
         assert_eq!(hdr_le.sync_word_encoding, SyncWordEncoding::RawLittleEndian);
 
@@ -3698,7 +3703,7 @@ mod tests {
         // Pad BE to 16 and word-swap.
         let mut expected = be.clone();
         expected.resize(16, 0);
-        for pair in expected.chunks_exact_mut(2) {
+        for pair in expected.as_chunks_mut::<2>().0 {
             pair.swap(0, 1);
         }
         assert_eq!(le, expected);
@@ -3933,7 +3938,7 @@ mod tests {
         assert_eq!(be.len(), le.len());
         assert_eq!(be.len() % 2, 0, "container-aligned");
         let mut expected = be.clone();
-        for pair in expected.chunks_exact_mut(2) {
+        for pair in expected.as_chunks_mut::<2>().0 {
             pair.swap(0, 1);
         }
         assert_eq!(le, expected);
@@ -4093,7 +4098,7 @@ mod tests {
                     // Cross-check: BE and LE outputs are pairwise byte-
                     // swaps of each other.
                     let mut swapped = encoded_be.clone();
-                    for pair in swapped.chunks_exact_mut(2) {
+                    for pair in swapped.as_chunks_mut::<2>().0 {
                         pair.swap(0, 1);
                     }
                     assert_eq!(encoded_le, swapped);

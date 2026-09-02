@@ -237,8 +237,8 @@ impl HfVqCodebook {
             .iter()
             .map(|packed| {
                 let mut v = [0.0_f64; HFREQ_VQ_VECTOR_LEN];
-                for (pair, out) in packed.iter().zip(v.chunks_exact_mut(2)) {
-                    out.copy_from_slice(&unpack_hfreq_vq_entry(*pair));
+                for (pair, out) in packed.iter().zip(v.as_chunks_mut::<2>().0) {
+                    *out = unpack_hfreq_vq_entry(*pair);
                 }
                 v
             })

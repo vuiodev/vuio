@@ -1278,7 +1278,7 @@ mod tests {
             be.extend_from_slice(&frame_bytes);
         }
         // Word-swap each 16-bit pair to produce the raw-LE form.
-        for pair in be.chunks_exact_mut(2) {
+        for pair in be.as_chunks_mut::<2>().0 {
             pair.swap(0, 1);
         }
         be
