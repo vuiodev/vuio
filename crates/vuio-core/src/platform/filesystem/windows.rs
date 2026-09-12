@@ -32,9 +32,14 @@ impl WindowsFileSystemManager {
     }
 
     /// Check if a path contains a drive letter (C:\path)
+    ///
+    /// The first character must be ASCII: callers strip it with `path_str[1..]`,
+    /// which would split a multi-byte character mid-codepoint on a path like
+    /// `Ü:\Musik`. A drive letter is A-Z anyway.
     fn has_drive_letter(&self, path: &Path) -> bool {
         let path_str = path.to_string_lossy();
         path_str.len() >= 3
+            && path_str.starts_with(|c: char| c.is_ascii_alphabetic())
             && path_str.chars().nth(1) == Some(':')
             && path_str.chars().nth(2) == Some('\\')
     }

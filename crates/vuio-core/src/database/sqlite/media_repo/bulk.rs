@@ -218,16 +218,34 @@ pub(in crate::database::sqlite) fn upsert_media_file(
     }
 }
 
+/// Fold the comparable and displayable text of a record to NFC.
+///
+/// Every write goes through here, whatever produced the record — an embedded
+/// tag, a filename, a scraper, a playlist — so one spelling reaches the columns
+/// that `LIKE` and FTS read, and the same spelling reaches a renderer. `path` is
+/// pointedly absent: it is the key the filesystem is opened with and keeps the
+/// bytes the filesystem reported. See `crate::text`.
+fn normalize_text_fields(file: &mut MediaFile) {
+    file.filename = crate::text::into_nfc(std::mem::take(&mut file.filename));
+    crate::text::normalize_field(&mut file.title);
+    crate::text::normalize_field(&mut file.artist);
+    crate::text::normalize_field(&mut file.album);
+    crate::text::normalize_field(&mut file.genre);
+    crate::text::normalize_field(&mut file.album_artist);
+}
+
 impl SqliteDatabase {
     fn prepared_records(files: &[MediaFile], already_canonical: bool) -> Result<Vec<MediaFile>> {
         files
             .iter()
             .map(|file| {
-                if already_canonical {
-                    Ok(file.clone())
+                let mut record = if already_canonical {
+                    file.clone()
                 } else {
-                    Self::canonical_file(file)
-                }
+                    Self::canonical_file(file)?
+                };
+                normalize_text_fields(&mut record);
+                Ok(record)
             })
             .collect()
     }

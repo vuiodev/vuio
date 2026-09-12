@@ -21,7 +21,7 @@ use crate::database::{
 /// [`migrations`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -350,6 +350,7 @@ fn migrations() -> Vec<(i64, String)> {
         (5, MIGRATION_V5.to_owned()),
         (6, MIGRATION_V6.to_owned()),
         (7, MIGRATION_V7.to_owned()),
+        (8, MIGRATION_V8.to_owned()),
     ]
 }
 
@@ -495,6 +496,44 @@ const MIGRATION_V7: &str = r#"
 ALTER TABLE media_files ADD COLUMN video_codec TEXT;
 "#;
 
+/// v7 → v8: one normalization form for stored text.
+///
+/// Rows scanned before this release hold whatever form the filesystem or tagger
+/// used, so a library scanned on macOS is largely NFD while the same files
+/// scanned on Windows are NFC. Searches are folded to NFC now, which would leave
+/// those older rows unfindable until something happened to rewrite them, so they
+/// are folded once here instead.
+///
+/// The `WHERE` keeps the write to rows that actually change: an ASCII-only
+/// library — most libraries — matches nothing and the migration is a scan.
+/// Updating `media_files` fires the FTS triggers, so the index follows.
+/// `path` is not touched; it is the key the file is opened with. See `crate::text`.
+const MIGRATION_V8: &str = r#"
+UPDATE media_files SET
+    filename     = nfc(filename),
+    title        = nfc(title),
+    artist       = nfc(artist),
+    album        = nfc(album),
+    genre        = nfc(genre),
+    album_artist = nfc(album_artist)
+WHERE filename     IS NOT nfc(filename)
+   OR title        IS NOT nfc(title)
+   OR artist       IS NOT nfc(artist)
+   OR album        IS NOT nfc(album)
+   OR genre        IS NOT nfc(genre)
+   OR album_artist IS NOT nfc(album_artist);
+
+UPDATE mediainfo SET
+    title          = nfc(title),
+    original_title = nfc(original_title),
+    overview       = nfc(overview),
+    genres         = nfc(genres)
+WHERE title          IS NOT nfc(title)
+   OR original_title IS NOT nfc(original_title)
+   OR overview       IS NOT nfc(overview)
+   OR genres         IS NOT nfc(genres);
+"#;
+
 /// Positions within [`MEDIA_COLUMNS`], shared by the owned decoder and the
 /// borrowed views so the two can never drift apart.
 pub(super) mod column {
@@ -570,6 +609,31 @@ pub(super) fn register_collations(connection: &Connection) -> Result<()> {
             crate::natural_cmp(left, right)
         })
         .context("Failed to register the natural collation")?;
+    register_nfc(connection)?;
+    Ok(())
+}
+
+/// Expose Unicode NFC folding to SQL, so a migration can normalize stored text
+/// without pulling every row through Rust. Deterministic and null-preserving,
+/// which is what lets `MIGRATION_V8` compare a column against its folded self.
+fn register_nfc(connection: &Connection) -> Result<()> {
+    connection
+        .create_scalar_function(
+            "nfc",
+            1,
+            rusqlite::functions::FunctionFlags::SQLITE_UTF8
+                | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let value = context.get_raw(0);
+                match value {
+                    rusqlite::types::ValueRef::Text(_) => {
+                        Ok(Some(crate::text::to_nfc(value.as_str()?).into_owned()))
+                    }
+                    _ => Ok(None),
+                }
+            },
+        )
+        .context("Failed to register the nfc function")?;
     Ok(())
 }
 

@@ -446,3 +446,128 @@ async fn a_write_ahead_log_left_behind_does_not_resurrect_records() {
         .unwrap()
         .is_some());
 }
+
+/// macOS hands back `Fu\u{308}\u{df}en` where Windows wrote `F\u{fc}\u{df}en`. The two look
+/// identical, share no bytes, and used to be two different libraries as far as
+/// search was concerned. Both spellings must reach the same row from either
+/// spelling of the query, through the FTS index and the `LIKE` filter alike.
+#[tokio::test]
+async fn either_normalization_form_finds_the_other() {
+    use crate::database::{DatabaseReadSession, MediaFileView, MediaFileQuery};
+
+    const NFC: &str = "Füßen";
+    const NFD: &str = "Fu\u{308}\u{df}en";
+    assert_ne!(NFC, NFD, "the premise: the two spellings differ byte for byte");
+
+    let temp = tempdir().unwrap();
+    let db = database(&temp, "normalization").await;
+
+    // Stored decomposed, as a scan of an HFS+ volume would produce.
+    let mut decomposed = MediaFile::new(
+        PathBuf::from(format!("/media/{NFD}.flac")),
+        1,
+        "audio/flac".to_owned(),
+    );
+    decomposed.title = Some(NFD.to_owned());
+    decomposed.artist = Some(NFD.to_owned());
+    let id = db.store_media_file(&decomposed).await.unwrap();
+
+    // Found by the composed spelling, which is what a browser or a phone sends.
+    assert_eq!(search_ids(&db, NFC).await, vec![Some(id)], "FTS missed NFC");
+    assert_eq!(search_ids(&db, NFD).await, vec![Some(id)], "FTS missed NFD");
+
+    let filtered = |text: &str| {
+        let db = db.clone();
+        let text = text.to_owned();
+        async move {
+            db.read(move |session| {
+                let mut ids = Vec::new();
+                session.visit_files(
+                    &MediaFileQuery::Filtered {
+                        after_id: None,
+                        mime_family: None,
+                        text: Some(text),
+                    },
+                    0,
+                    10,
+                    |file| {
+                        ids.push(file.id());
+                        Ok(())
+                    },
+                )?;
+                Ok(ids)
+            })
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(filtered(NFC).await, vec![Some(id)], "LIKE missed NFC");
+    assert_eq!(filtered(NFD).await, vec![Some(id)], "LIKE missed NFD");
+
+    // What we hand a renderer is the composed spelling, whatever was scanned:
+    // a TV that cannot place a combining mark shows "Fu" followed by a stray
+    // diaeresis otherwise.
+    let stored = db.get_file_by_path(&decomposed.path).await.unwrap().unwrap();
+    assert_eq!(stored.title.as_deref(), Some(NFC));
+    assert_eq!(stored.artist.as_deref(), Some(NFC));
+    assert_eq!(stored.filename, format!("{NFC}.flac"));
+
+    // The path is the exception: it is the key the file is opened with, so it
+    // keeps the bytes the filesystem reported.
+    assert_eq!(stored.path, decomposed.path);
+}
+
+/// A library scanned before this release holds whatever form the filesystem gave
+/// it. Those rows have to be folded by the migration, not left waiting for a
+/// rescan — a user who upgrades and searches for their own music would otherwise
+/// find nothing, which is exactly the state the fold is meant to end.
+#[tokio::test]
+async fn a_legacy_database_has_its_text_folded_by_the_migration() {
+    const NFC: &str = "Füßen";
+    const NFD: &str = "Fu\u{308}\u{df}en";
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("legacy.db");
+
+    {
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        crate::database::sqlite::schema::register_collations(&connection).unwrap();
+        connection.execute_batch(SCHEMA_V1).unwrap();
+        connection
+            .execute(
+                "INSERT INTO media_files
+                   (id, path, parent_path, filename, size, modified_secs, mime_type,
+                    mime_family, title, artist, album, created_at_secs, updated_at_secs)
+                 VALUES (11, ?1, '/media', ?2, 10, 100, 'audio/flac', 'audio', ?3, ?3, ?3,
+                         100, 100)",
+                rusqlite::params![
+                    format!("/media/{NFD}.flac"),
+                    format!("{NFD}.flac"),
+                    NFD,
+                ],
+            )
+            .unwrap();
+    }
+
+    let db = SqliteDatabase::new(path.clone()).await.unwrap();
+    db.initialize().await.unwrap();
+
+    // The path is untouched — it still has to open the file that is on disk.
+    let file = db
+        .get_file_by_path(std::path::Path::new(&format!("/media/{NFD}.flac")))
+        .await
+        .unwrap()
+        .expect("the migrated record is still there");
+    assert_eq!(file.id, Some(11), "the record kept its DIDL object id");
+
+    // Its text was folded in place.
+    assert_eq!(file.title.as_deref(), Some(NFC));
+    assert_eq!(file.artist.as_deref(), Some(NFC));
+    assert_eq!(file.album.as_deref(), Some(NFC));
+    assert_eq!(file.filename, format!("{NFC}.flac"));
+
+    // And the folded text reached the index the migration rebuilt.
+    let db = std::sync::Arc::new(db);
+    assert_eq!(search_ids(&db, NFC).await, vec![Some(11)]);
+    assert_eq!(search_ids(&db, NFD).await, vec![Some(11)]);
+}

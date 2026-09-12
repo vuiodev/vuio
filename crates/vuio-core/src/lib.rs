@@ -99,6 +99,11 @@ internal_modules!(
     web,
 );
 
+mod text;
+
+#[cfg(test)]
+mod unicode_corpus;
+
 // ── The stable public API ──────────────────────────────────────────────────
 pub use crate::error::{Error, ErrorKind, Result};
 pub use crate::runtime::{Runtime, RuntimeHandle, RuntimeOptions, RuntimeStatus};

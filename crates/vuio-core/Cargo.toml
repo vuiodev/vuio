@@ -164,6 +164,9 @@ bytes = "1.12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 quick-xml = "0.41"
 percent-encoding = "2.3"
+# Media text arrives in whichever normalization form the tagger or filesystem
+# used; comparing and indexing it requires one form. See `src/text.rs`.
+unicode-normalization = "0.1"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
@@ -190,7 +193,8 @@ oxideav-core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio
 vuio-codec-ac3 = { version = "0.0.1", path = "../vuio-codec-ac3", optional = true }
 oxideav-dts = { package = "vuio-codec-dts", version = "0.0.1", path = "../vuio-codec-dts", optional = true }
 xaac-rs = { version = "0.2", path = "../vendor/xaac-rs", optional = true }
-rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
+# `functions` registers the `nfc()` scalar the normalization migration uses.
+rusqlite = { version = "0.40.2", features = ["bundled", "collation", "functions"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
 # over TLS. `rustls-no-provider` rather than a provider-selecting feature because
 # `Runtime::start` already installs the ring provider process-wide, and a second
