@@ -44,6 +44,21 @@ fn samsung_keeps_titles_without_matching_extension() {
 }
 
 #[test]
+fn samsung_handles_unicode_near_the_extension_boundary() {
+    let title = "09 - Symphony No. 8 in E-Flat Major, Pt. 2 V. Wie Felsenabgrund mir zu Füßen";
+    let filename = format!("{title}.flac");
+
+    assert_eq!(
+        didl_display_title(Some(title), &filename, DlnaClientProfile::SamsungTv),
+        title
+    );
+    assert_eq!(
+        didl_display_title(None, &filename, DlnaClientProfile::SamsungTv),
+        title
+    );
+}
+
+#[test]
 fn non_samsung_keeps_filename_when_title_missing() {
     assert_eq!(
         didl_display_title(None, "movie.mp4", DlnaClientProfile::Standard),

@@ -110,11 +110,9 @@ pub(super) fn strip_matching_media_extension(base: &str, filename: &str) -> Stri
     else {
         return base.to_string();
     };
-    let suffix_len = ext.len() + 1; // '.' + ext
-    if base.len() > suffix_len {
-        let maybe = &base[base.len() - suffix_len..];
-        if maybe.as_bytes()[0] == b'.' && maybe[1..].eq_ignore_ascii_case(ext) {
-            return base[..base.len() - suffix_len].to_string();
+    if let Some((stem, base_ext)) = base.rsplit_once('.') {
+        if !stem.is_empty() && base_ext.eq_ignore_ascii_case(ext) {
+            return stem.to_string();
         }
     }
     base.to_string()
