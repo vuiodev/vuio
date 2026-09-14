@@ -1,6 +1,6 @@
 [package]
 name = "vuio-core"
-version = "0.0.49"
+version = "0.0.50"
 edition = "2021"
 rust-version = "1.98"
 authors = ["vyrti"]
@@ -171,7 +171,7 @@ sysinfo = { version = "0.39", default-features = false, features = ["system", "d
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
 vuio-cast = { path = "../vuio-cast", version = "0.0.4", default-features = false, optional = true }
-vuio-web = { path = "../vuio-web", version = "0.0.49", optional = true }
+vuio-web = { path = "../vuio-web", version = "0.0.50", optional = true }
 jwalk = "0.9"
 tokio-stream = "0.1"
 hap-crypto = { version = "1.4", optional = true }
@@ -210,7 +210,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-vuio-core = { path = ".", version = "0.0.49", features = ["unstable-internals"] }
+vuio-core = { path = ".", version = "0.0.50", features = ["unstable-internals"] }
 # Symphonia reads tags but cannot write them, and the audio tests build their
 # fixtures by tagging generated files. Test-only, so it ships with nothing.
 audiotags = "0.5"

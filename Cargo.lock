@@ -3290,7 +3290,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vuio-bench"
-version = "0.0.49"
+version = "0.0.50"
 dependencies = [
  "anyhow",
  "clap",
@@ -3325,7 +3325,7 @@ dependencies = [
 
 [[package]]
 name = "vuio-cli"
-version = "0.0.49"
+version = "0.0.50"
 dependencies = [
  "anyhow",
  "audiotags",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "vuio-core"
-version = "0.0.49"
+version = "0.0.50"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -3431,7 +3431,7 @@ dependencies = [
 
 [[package]]
 name = "vuio-web"
-version = "0.0.49"
+version = "0.0.50"
 dependencies = [
  "axum",
 ]
