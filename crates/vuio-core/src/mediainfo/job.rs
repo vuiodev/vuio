@@ -74,8 +74,7 @@ fn is_season_folder(folder_name: &str) -> bool {
     {
         return true;
     }
-    if trimmed.starts_with('s') && trimmed.len() <= 4 {
-        let rest = &trimmed[1..];
+    if let Some(rest) = trimmed.strip_prefix('s').filter(|_| trimmed.len() <= 4) {
         if !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()) {
             return true;
         }

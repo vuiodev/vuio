@@ -237,7 +237,7 @@ mod critical_path_scenarios {
                 "Testing long path ({} chars): {}",
                 long_path.len(),
                 if long_path.len() > 100 {
-                    &long_path[..100]
+                    long_path.get(..100).expect("test path is ASCII")
                 } else {
                     &long_path
                 }

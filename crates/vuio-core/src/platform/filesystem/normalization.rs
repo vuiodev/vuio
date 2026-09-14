@@ -60,9 +60,9 @@ impl WindowsPathNormalizer {
         canonical = canonical.replace('\\', "/");
 
         // Deduplicate slashes
-        if canonical.starts_with("//") {
+        if let Some(rest) = canonical.strip_prefix("//") {
             // UNC path: preserve leading double slash, clean the rest
-            let rest = canonical[2..].replace("//", "/");
+            let rest = rest.replace("//", "/");
             // Iterate until stable to handle multiple consecutive slashes
             let mut cleaned = rest;
             while cleaned.contains("//") {

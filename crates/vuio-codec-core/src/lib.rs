@@ -7,6 +7,7 @@
 //! source / filter) into a single value that consumers pass around.
 
 #![warn(missing_docs)]
+#![deny(clippy::string_slice)]
 
 pub mod arena;
 pub mod bits;

@@ -48,7 +48,8 @@ impl ArtworkCache {
 
     /// Where a key's file lives, given the extension implied by its content type.
     fn path_for(&self, key: &str, extension: &str) -> PathBuf {
-        self.root.join(&key[..2]).join(format!("{key}.{extension}"))
+        let shard = key.get(..2).unwrap_or(key);
+        self.root.join(shard).join(format!("{key}.{extension}"))
     }
 
     /// Find a cached file for `key`, whatever image type it was stored as.
@@ -141,7 +142,9 @@ mod tests {
         let path = cache.path_for(&key, "jpg");
         assert_eq!(
             path,
-            Path::new("/tmp/artwork").join(&key[..2]).join(format!("{key}.jpg"))
+            Path::new("/tmp/artwork")
+                .join(key.get(..2).unwrap())
+                .join(format!("{key}.jpg"))
         );
     }
 

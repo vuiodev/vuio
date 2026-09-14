@@ -72,13 +72,8 @@ fn as_year(token: &str) -> Option<u32> {
 /// `S02E05`, `s2e5`, and the `2x05` form.
 fn as_season_episode(token: &str) -> Option<(u32, u32)> {
     let lowered = token.to_ascii_lowercase();
-    let bytes = lowered.as_bytes();
-
-    if bytes.first() == Some(&b's') {
-        let rest = &lowered[1..];
-        if let Some(split) = rest.find('e') {
-            let (season, episode) = rest.split_at(split);
-            let episode = &episode[1..];
+    if let Some(rest) = lowered.strip_prefix('s') {
+        if let Some((season, episode)) = rest.split_once('e') {
             if !season.is_empty()
                 && !episode.is_empty()
                 && season.bytes().all(|b| b.is_ascii_digit())
@@ -90,9 +85,7 @@ fn as_season_episode(token: &str) -> Option<(u32, u32)> {
         return None;
     }
 
-    let split = lowered.find('x')?;
-    let (season, episode) = lowered.split_at(split);
-    let episode = &episode[1..];
+    let (season, episode) = lowered.split_once('x')?;
     if season.is_empty()
         || episode.is_empty()
         || !season.bytes().all(|b| b.is_ascii_digit())

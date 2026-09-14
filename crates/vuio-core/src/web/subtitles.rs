@@ -94,7 +94,7 @@ fn normalize_timestamp(stamp: &str) -> String {
         parts[0],
         parts[1],
         parts[2],
-        &millis[..millis.len().min(3)]
+        millis.get(..millis.len().min(3)).unwrap_or(millis)
     )
 }
 

@@ -179,7 +179,7 @@ pub(crate) fn join_path(base: &Uri, reference: &str) -> Result<Uri> {
     } else {
         let base_path = base.path();
         let directory = match base_path.rfind('/') {
-            Some(index) => &base_path[..=index],
+            Some(index) => base_path.split_at(index + 1).0,
             None => "/",
         };
         format!("{directory}{target_path}")

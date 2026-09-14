@@ -186,13 +186,10 @@ impl PlaylistFileManager {
 
         for line in content.lines() {
             let line = line.trim();
-            if line.starts_with("File") {
-                if let Some(eq_pos) = line.find('=') {
-                    let (key, value) = line.split_at(eq_pos);
-                    let value = &value[1..]; // Skip the '='
-
+            if let Some(line) = line.strip_prefix("File") {
+                if let Some((key, value)) = line.split_once('=') {
                     // Extract the number from "File1", "File2", etc.
-                    if let Ok(track_num) = key[4..].parse::<u32>() {
+                    if let Ok(track_num) = key.parse::<u32>() {
                         tracks.push((track_num, resolve_playlist_entry(base_dir, value.trim())));
                     }
                 }
@@ -520,8 +517,8 @@ impl PlaylistFileManager {
                 while i < lines.len() {
                     let line = lines[i].trim();
                     if line.starts_with("#EXTINF") {
-                        let name = if let Some(comma_pos) = line.find(',') {
-                            line[comma_pos + 1..].trim().to_string()
+                        let name = if let Some((_, name)) = line.split_once(',') {
+                            name.trim().to_string()
                         } else {
                             "Unknown Radio".to_string()
                         };
@@ -545,19 +542,19 @@ impl PlaylistFileManager {
 
                 for line in file_content.lines() {
                     let line = line.trim();
-                    if line.starts_with("File") {
-                        if let Some(eq_pos) = line.find('=') {
-                            if let Ok(num) = line[4..eq_pos].parse::<u32>() {
-                                let val = line[eq_pos + 1..].trim().to_string();
+                    if let Some(line) = line.strip_prefix("File") {
+                        if let Some((number, value)) = line.split_once('=') {
+                            if let Ok(num) = number.parse::<u32>() {
+                                let val = value.trim().to_string();
                                 if is_http_stream(&val) {
                                     urls.insert(num, val);
                                 }
                             }
                         }
-                    } else if line.starts_with("Title") {
-                        if let Some(eq_pos) = line.find('=') {
-                            if let Ok(num) = line[5..eq_pos].parse::<u32>() {
-                                let val = line[eq_pos + 1..].trim().to_string();
+                    } else if let Some(line) = line.strip_prefix("Title") {
+                        if let Some((number, value)) = line.split_once('=') {
+                            if let Ok(num) = number.parse::<u32>() {
+                                let val = value.trim().to_string();
                                 titles.insert(num, val);
                             }
                         }

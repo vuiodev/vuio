@@ -484,7 +484,7 @@ fn set_date(probed: &mut ProbedMetadata, value: &str, authoritative: bool) {
 fn standard_tag_name(tag: &StandardTag) -> String {
     let rendered = format!("{tag:?}");
     match rendered.find('(') {
-        Some(index) => rendered[..index].to_owned(),
+        Some(index) => rendered.split_at(index).0.to_owned(),
         None => rendered,
     }
 }
@@ -560,12 +560,13 @@ pub(crate) fn fallback_parse_filename(media_file: &mut MediaFile) {
                 let mut artist_name = part0;
                 let mut track_num = None;
                 if let Some(first_space) = part0.find(' ') {
-                    let maybe_num = &part0[..first_space].trim_end_matches('.');
+                    let (maybe_num, remainder) = part0.split_at(first_space);
+                    let maybe_num = maybe_num.trim_end_matches('.');
                     let clean: String = maybe_num.chars().filter(|c| c.is_ascii_digit()).collect();
-                    if !clean.is_empty() && clean == *maybe_num {
+                    if !clean.is_empty() && clean == maybe_num {
                         if let Ok(num) = clean.parse::<u32>() {
                             track_num = Some(num);
-                            artist_name = &part0[first_space + 1..];
+                            artist_name = remainder.trim_start_matches(' ');
                         }
                     }
                 }
@@ -583,14 +584,15 @@ pub(crate) fn fallback_parse_filename(media_file: &mut MediaFile) {
         let mut title_part = filename_sans_ext.as_str();
 
         if let Some(first_space) = filename_sans_ext.find(' ') {
-            let maybe_num = &filename_sans_ext[..first_space].trim_end_matches('.');
+            let (maybe_num, remainder) = filename_sans_ext.split_at(first_space);
+            let maybe_num = maybe_num.trim_end_matches('.');
             let clean: String = maybe_num.chars().filter(|c| c.is_ascii_digit()).collect();
-            if !clean.is_empty() && clean == *maybe_num {
+            if !clean.is_empty() && clean == maybe_num {
                 if let Ok(num) = clean.parse::<u32>() {
                     if media_file.track_number.is_none() {
                         media_file.track_number = Some(num);
                     }
-                    title_part = &filename_sans_ext[first_space + 1..];
+                    title_part = remainder.trim_start_matches(' ');
                 }
             }
         }

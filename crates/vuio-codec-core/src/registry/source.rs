@@ -309,10 +309,7 @@ fn dispatch(entry: &OpenerEntry, uri_str: &str) -> Result<SourceOutput> {
 /// `"file"` and `rest = uri`. Path-like inputs that happen to start with
 /// `c:` on Windows are treated as bare paths.
 pub(crate) fn split_scheme(uri: &str) -> (&str, &str) {
-    if let Some(idx) = uri.find(':') {
-        let (scheme, rest) = uri.split_at(idx);
-        let rest = &rest[1..]; // skip ':'
-
+    if let Some((scheme, rest)) = uri.split_once(':') {
         // Reject single-letter scheme that looks like a Windows drive letter.
         if scheme.len() == 1 && scheme.chars().next().unwrap().is_ascii_alphabetic() {
             return ("file", uri);

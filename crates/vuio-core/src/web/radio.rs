@@ -614,10 +614,9 @@ mod tests {
         let payload = &out[17..17 + units * 16];
         let text = String::from_utf8_lossy(payload);
         assert!(text.starts_with("StreamTitle='Artist - Song';"), "{text}");
+        let (_, padding) = text.split_once(';').expect("metadata terminator");
         assert!(
-            text[text.find(';').unwrap() + 1..]
-                .bytes()
-                .all(|byte| byte == 0),
+            padding.bytes().all(|byte| byte == 0),
             "the block must be padded with zeroes"
         );
 
