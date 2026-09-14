@@ -193,11 +193,10 @@ async fn fetch_tv_info(
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(e)) => {
-                current_element = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                current_element = e.name().as_ref().to_owned();
             }
             Ok(Event::Text(e)) => {
-                let decoded = reader.decoder().decode(e.as_ref())?;
-                let text = quick_xml::escape::unescape(&decoded)?.into_owned();
+                let text = quick_xml::escape::unescape(e.as_ref())?.into_owned();
                 match current_element.as_str() {
                     "friendlyName" if friendly_name.is_empty() => {
                         friendly_name = text;
@@ -225,7 +224,7 @@ async fn fetch_tv_info(
                 }
             }
             Ok(Event::End(e)) => {
-                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let name = e.name().as_ref().to_owned();
                 if name == "service" {
                     if !current_service_type.contains("AVTransport") {
                         in_av_transport_service = false;

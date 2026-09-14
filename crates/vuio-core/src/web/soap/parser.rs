@@ -114,11 +114,7 @@ pub(super) fn xml_element_text(body: &str, expected_name: &str) -> Option<String
                 capture = local_xml_name(element.name().as_ref()) == expected_name;
             }
             Event::Text(text) if capture => {
-                return reader
-                    .decoder()
-                    .decode(text.as_ref())
-                    .ok()
-                    .map(|value| value.into_owned());
+                return Some(text.as_ref().to_owned());
             }
             Event::End(_) => capture = false,
             Event::Eof => return None,
@@ -128,13 +124,10 @@ pub(super) fn xml_element_text(body: &str, expected_name: &str) -> Option<String
     }
 }
 
-fn local_xml_name(name: &[u8]) -> &str {
-    let local = name
-        .iter()
-        .rposition(|byte| *byte == b':')
-        .map(|position| &name[position + 1..])
-        .unwrap_or(name);
-    std::str::from_utf8(local).unwrap_or_default()
+fn local_xml_name(name: &str) -> &str {
+    name.rsplit_once(':')
+        .map(|(_, local)| local)
+        .unwrap_or(name)
 }
 
 fn invalid_soap_request(message: &'static str) -> Response {
@@ -167,7 +160,7 @@ pub(super) fn parse_browse_params(body: &str) -> BrowseParams {
                 current_element = local_xml_name(element.name().as_ref()).to_string();
             }
             Ok(Event::Text(ref text)) => {
-                let text = reader.decoder().decode(text.as_ref()).unwrap_or_default();
+                let text = text.as_ref();
                 match current_element.as_str() {
                     "ObjectID" => {
                         object_id = text.trim().to_string();
