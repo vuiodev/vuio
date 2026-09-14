@@ -2170,10 +2170,10 @@ fn parse_playback_info(xml: &str) -> anyhow::Result<HashMap<String, f64>> {
     loop {
         match reader.read_event()? {
             Event::Start(element) => {
-                current = String::from_utf8_lossy(element.name().as_ref()).into_owned();
+                current = element.name().as_ref().to_owned();
             }
             Event::Text(text) => {
-                let value = reader.decoder().decode(text.as_ref())?.into_owned();
+                let value = text.as_ref().to_owned();
                 match current.as_str() {
                     "key" => pending_key = Some(value),
                     "real" | "integer" => {

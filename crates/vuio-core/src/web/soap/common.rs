@@ -14,11 +14,10 @@ pub(super) fn parse_dir_index_prefix(path_prefix_str: &str) -> (Option<usize>, &
         if !num_str.is_empty() {
             if let Ok(idx) = num_str.parse::<usize>() {
                 let prefix_len = 1 + num_str.len();
-                let rem = if path_prefix_str.len() > prefix_len {
-                    path_prefix_str[prefix_len..].trim_start_matches('/')
-                } else {
-                    ""
-                };
+                let rem = path_prefix_str
+                    .get(prefix_len..)
+                    .unwrap_or_default()
+                    .trim_start_matches('/');
                 (Some(idx), rem)
             } else {
                 (None, path_prefix_str)

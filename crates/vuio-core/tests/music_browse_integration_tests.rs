@@ -567,7 +567,9 @@ async fn child_counts_match_the_children_actually_returned() {
         let start = response
             .find(&anchor)
             .unwrap_or_else(|| panic!("{container_id} not in response"));
-        response[start..]
+        response
+            .get(start..)
+            .expect("find returns a character boundary")
             .split("childCount=&quot;")
             .nth(1)
             .and_then(|rest| rest.split("&quot;").next())

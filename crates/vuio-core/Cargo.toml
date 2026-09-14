@@ -1,6 +1,6 @@
 [package]
 name = "vuio-core"
-version = "0.0.49"
+version = "0.0.50"
 edition = "2021"
 rust-version = "1.98"
 authors = ["vyrti"]
@@ -137,7 +137,7 @@ unstable-internals = []
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "fs", "time", "sync", "macros", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
-uuid = { version = "1.24", features = ["v4"] }
+uuid = { version = "1.26", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 thiserror = "2.0"
 anyhow = "1.0"
@@ -153,7 +153,7 @@ notify-debouncer-full = "0.7"
 toml = "1.1"
 toml_edit = "0.25"
 serde_json = "1.0"
-dirs = "6.0"
+dirs = "7.0"
 hostname = "0.4"
 ipnet = "2.12"
 http = "1.5"
@@ -162,13 +162,16 @@ hyper = { version = "1.11", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 bytes = "1.12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 percent-encoding = "2.3"
+# Media text arrives in whichever normalization form the tagger or filesystem
+# used; comparing and indexing it requires one form. See `src/text.rs`.
+unicode-normalization = "0.1"
 sysinfo = { version = "0.39", default-features = false, features = ["system", "disk", "network"], optional = true }
 socket2 = { version = "0.6", features = ["all"] }
 mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
 vuio-cast = { path = "../vuio-cast", version = "0.0.4", default-features = false, optional = true }
-vuio-web = { path = "../vuio-web", version = "0.0.49", optional = true }
+vuio-web = { path = "../vuio-web", version = "0.0.50", optional = true }
 jwalk = "0.9"
 tokio-stream = "0.1"
 hap-crypto = { version = "1.4", optional = true }
@@ -190,7 +193,8 @@ oxideav-core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio
 vuio-codec-ac3 = { version = "0.0.1", path = "../vuio-codec-ac3", optional = true }
 oxideav-dts = { package = "vuio-codec-dts", version = "0.0.1", path = "../vuio-codec-dts", optional = true }
 xaac-rs = { version = "0.2", path = "../vendor/xaac-rs", optional = true }
-rusqlite = { version = "0.40.2", features = ["bundled", "collation"] }
+# `functions` registers the `nfc()` scalar the normalization migration uses.
+rusqlite = { version = "0.40.2", features = ["bundled", "collation", "functions"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs
 # over TLS. `rustls-no-provider` rather than a provider-selecting feature because
 # `Runtime::start` already installs the ring provider process-wide, and a second
@@ -206,7 +210,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-vuio-core = { path = ".", version = "0.0.49", features = ["unstable-internals"] }
+vuio-core = { path = ".", version = "0.0.50", features = ["unstable-internals"] }
 # Symphonia reads tags but cannot write them, and the audio tests build their
 # fixtures by tagging generated files. Test-only, so it ships with nothing.
 audiotags = "0.5"

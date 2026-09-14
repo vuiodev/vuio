@@ -1,3 +1,5 @@
+#![deny(clippy::string_slice)]
+
 use super::*;
 use std::fmt::Write as _;
 
@@ -17,12 +19,20 @@ pub(super) fn write_xml_escaped<W: std::fmt::Write>(
             _ => None,
         };
         if let Some(replacement) = replacement {
-            target.write_str(&value[unescaped_start..offset])?;
+            target.write_str(
+                value
+                    .get(unescaped_start..offset)
+                    .expect("char indices are UTF-8 boundaries"),
+            )?;
             target.write_str(replacement)?;
             unescaped_start = offset + character.len_utf8();
         }
     }
-    target.write_str(&value[unescaped_start..])
+    target.write_str(
+        value
+            .get(unescaped_start..)
+            .expect("char indices are UTF-8 boundaries"),
+    )
 }
 
 pub(super) fn is_valid_xml_character(character: char) -> bool {
@@ -110,11 +120,9 @@ pub(super) fn strip_matching_media_extension(base: &str, filename: &str) -> Stri
     else {
         return base.to_string();
     };
-    let suffix_len = ext.len() + 1; // '.' + ext
-    if base.len() > suffix_len {
-        let maybe = &base[base.len() - suffix_len..];
-        if maybe.as_bytes()[0] == b'.' && maybe[1..].eq_ignore_ascii_case(ext) {
-            return base[..base.len() - suffix_len].to_string();
+    if let Some((stem, base_ext)) = base.rsplit_once('.') {
+        if !stem.is_empty() && base_ext.eq_ignore_ascii_case(ext) {
+            return stem.to_string();
         }
     }
     base.to_string()
@@ -419,7 +427,10 @@ pub(super) fn directory_container_id(object_id: &str, path: &str, name: &str) ->
         || path == "radio"
     {
         path.to_owned()
-    } else if path.starts_with('d') && path[1..].chars().all(|c| c.is_ascii_digit()) {
+    } else if path
+        .strip_prefix('d')
+        .is_some_and(|suffix| suffix.chars().all(|c| c.is_ascii_digit()))
+    {
         format!("{}/{}", object_id.trim_end_matches('/'), path)
     } else {
         format!("{}/{}", object_id.trim_end_matches('/'), name)

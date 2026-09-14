@@ -416,3 +416,51 @@ mod path_normalizer_tests {
         assert!(result.is_ok());
     }
 }
+
+/// `fallback_parse_filename` splits on " - " and on the first space, then indexes
+/// what it finds. Every sample is run as a bare stem, as an "artist - title" pair
+/// and behind a track number, because each shape takes a different branch.
+#[test]
+fn filename_fallback_survives_every_script_and_alignment() {
+    use std::path::PathBuf;
+    use std::time::SystemTime;
+
+    let blank = |path: PathBuf, filename: String| MediaFile {
+        id: None,
+        path,
+        filename,
+        size: 0,
+        modified: SystemTime::UNIX_EPOCH,
+        mime_type: "audio/mpeg".to_string(),
+        duration: None,
+        title: None,
+        artist: None,
+        album: None,
+        genre: None,
+        track_number: None,
+        year: None,
+        album_artist: None,
+        tags: Default::default(),
+        stream: Default::default(),
+        extra_tags: Vec::new(),
+        tags_version: 0,
+        subtitle_available: false,
+        created_at: SystemTime::UNIX_EPOCH,
+        updated_at: SystemTime::UNIX_EPOCH,
+    };
+
+    for sample in crate::unicode_corpus::alignment_sweep() {
+        for stem in [
+            sample.clone(),
+            format!("{sample} - {sample}"),
+            format!("{sample} - {sample} - {sample}"),
+            format!("01 - {sample}"),
+            format!("{sample}.{sample}"),
+        ] {
+            let filename = format!("{stem}.mp3");
+            let mut file = blank(PathBuf::from(format!("/music/{filename}")), filename);
+            fallback_parse_filename(&mut file);
+            assert!(file.title.is_some(), "no title parsed from {stem:?}");
+        }
+    }
+}

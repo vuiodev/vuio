@@ -68,10 +68,8 @@ impl LinuxNetworkManager {
             let line = line.trim();
 
             // Interface line: "2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc pfifo_fast state UP group default qlen 1000"
-            if let Some(colon_pos) = line.find(':') {
-                if let Some(second_colon) = line[colon_pos + 1..].find(':') {
-                    let second_colon_pos = colon_pos + 1 + second_colon;
-
+            if let Some((_, interface)) = line.split_once(':') {
+                if let Some((interface_name, _)) = interface.split_once(':') {
                     // Save previous interface with the best IP
                     if let Some(name) = &current_interface {
                         if !name.starts_with("lo") && !current_ips.is_empty() {
@@ -96,15 +94,14 @@ impl LinuxNetworkManager {
                     }
 
                     // Parse new interface
-                    let interface_name = line[colon_pos + 1..second_colon_pos].trim().to_string();
+                    let interface_name = interface_name.trim().to_string();
                     current_interface = Some(interface_name.clone());
                     current_ips.clear();
                     is_loopback = interface_name.starts_with("lo");
 
                     // Parse flags
-                    if let Some(flags_start) = line.find('<') {
-                        if let Some(flags_end) = line.find('>') {
-                            let flags = &line[flags_start + 1..flags_end];
+                    if let Some((_, flags)) = line.split_once('<') {
+                        if let Some((flags, _)) = flags.split_once('>') {
                             is_up = flags.contains("UP");
                             supports_multicast = flags.contains("MULTICAST");
                         }
@@ -114,8 +111,7 @@ impl LinuxNetworkManager {
 
             // IP address line: "    inet 192.168.1.100/24 brd 192.168.1.255 scope global dynamic eth0"
             if line.contains("inet ") && !line.contains("inet6") {
-                if let Some(inet_pos) = line.find("inet ") {
-                    let after_inet = &line[inet_pos + 5..];
+                if let Some((_, after_inet)) = line.split_once("inet ") {
                     if let Some(ip_part) = after_inet.split_whitespace().next() {
                         // Remove CIDR notation if present
                         let ip_str = ip_part.split('/').next().unwrap_or(ip_part);
@@ -446,8 +442,7 @@ impl LinuxNetworkManager {
                 let output_str = String::from_utf8_lossy(&output.stdout);
                 for line in output_str.lines() {
                     if line.contains("inet ") && !line.contains("inet6") {
-                        if let Some(inet_pos) = line.find("inet ") {
-                            let after_inet = &line[inet_pos + 5..];
+                        if let Some((_, after_inet)) = line.split_once("inet ") {
                             if let Some(ip_part) = after_inet.split_whitespace().next() {
                                 let ip_str = ip_part.split('/').next().unwrap_or(ip_part);
                                 if let Ok(ip) = ip_str.parse::<IpAddr>() {

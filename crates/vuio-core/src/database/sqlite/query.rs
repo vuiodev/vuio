@@ -147,6 +147,10 @@ const FTS_JOIN: &str = "media_files JOIN (\
 /// Returns `None` when nothing searchable is left, which the caller turns into
 /// an empty result rather than an unfiltered one.
 pub(super) fn fts5_query_from_user_text(text: &str) -> Option<String> {
+    // Folded first: a combining mark is `Mn`, not alphanumeric, so a decomposed
+    // `Fu\u{308}\u{df}en` would split here into `Fu` and `\u{df}en` and be searched as
+    // two tokens, while the composed spelling of the same word stays one.
+    let text = crate::text::to_nfc(text);
     let tokens: Vec<String> = text
         .split(|character: char| !character.is_alphanumeric())
         .filter(|token| !token.is_empty())
@@ -270,7 +274,9 @@ pub(super) fn plan(query: &MediaFileQuery) -> MediaQueryPlan {
                        OR media_files.album LIKE ? ESCAPE '\')"
                         .to_owned(),
                 );
-                let pattern = format!("%{}%", escape_like(text));
+                // The stored columns are NFC (see `crate::text`), so the needle
+                // has to be, or a decomposed term matches nothing.
+                let pattern = format!("%{}%", escape_like(&crate::text::to_nfc(text)));
                 for _ in 0..4 {
                     params.push(Value::Text(pattern.clone()));
                 }

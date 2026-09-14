@@ -354,7 +354,7 @@ async fn the_two_surfaces_differ_only_at_the_root() {
     assert!(
         shell.contains("/_app/immutable/"),
         "the web UI surface should serve the Svelte shell, got: {}",
-        &shell[..shell.len().min(200)]
+        shell.chars().take(200).collect::<String>()
     );
 
     let (status, body, _) = get(&state, Surface::Primary, "/").await;
@@ -452,7 +452,9 @@ async fn the_apps_bundles_are_served_with_immutable_caching() {
     let start = shell
         .find("/_app/immutable/")
         .expect("the shell loads a bundle");
-    let bundle: String = shell[start..]
+    let bundle: String = shell
+        .get(start..)
+        .expect("find returns a character boundary")
         .chars()
         .take_while(|character| !"\"'".contains(*character))
         .collect();

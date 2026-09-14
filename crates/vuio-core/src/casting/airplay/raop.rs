@@ -460,15 +460,15 @@ mod tests {
             bits.push_str(&format!("{byte:08b}"));
         }
         assert!(bits.starts_with("001"), "element type must be CPE: {bits}");
-        assert_eq!(&bits[3..7], "0000");
-        assert_eq!(&bits[7..19], "000000000000");
-        assert_eq!(&bits[19..20], "0", "hasSize");
-        assert_eq!(&bits[20..22], "00");
-        assert_eq!(&bits[22..23], "1", "isNotCompressed");
+        assert_eq!(bits.get(3..7), Some("0000"));
+        assert_eq!(bits.get(7..19), Some("000000000000"));
+        assert_eq!(bits.get(19..20), Some("0"), "hasSize");
+        assert_eq!(bits.get(20..22), Some("00"));
+        assert_eq!(bits.get(22..23), Some("1"), "isNotCompressed");
         // Samples follow MSB-first, left then right.
-        assert_eq!(&bits[23..39], "0001001000110100", "left = 0x1234");
-        assert_eq!(&bits[39..55], "0101011001111000", "right = 0x5678");
-        assert_eq!(&bits[55..58], "111", "END element");
+        assert_eq!(bits.get(23..39), Some("0001001000110100"), "left = 0x1234");
+        assert_eq!(bits.get(39..55), Some("0101011001111000"), "right = 0x5678");
+        assert_eq!(bits.get(55..58), Some("111"), "END element");
 
         // A full packet: 23 + 352*32 + 3 bits, rounded up to whole bytes.
         let packet = vec![0u8; FRAMES_PER_PACKET * BYTES_PER_FRAME];

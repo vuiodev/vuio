@@ -722,7 +722,12 @@ mod tests {
         let sources = dashboard_sources();
         let mut checked = 0;
         for (_, tail) in sources.match_indices("/assets/").map(|(index, matched)| {
-            (index, &sources[index + matched.len()..])
+            (
+                index,
+                sources
+                    .get(index + matched.len()..)
+                    .expect("match ends on a character boundary"),
+            )
         }) {
             let name: String = tail
                 .chars()

@@ -51,6 +51,7 @@
 // every target platform rather than a macOS-only build.
 #![cfg_attr(not(feature = "unstable-internals"), allow(dead_code))]
 #![deny(clippy::undocumented_unsafe_blocks)]
+#![deny(clippy::string_slice)]
 
 // Everything below is internal. `vuio-core` commits to the facade re-exported
 // after this block and nothing else: a surface small enough to keep stable for
@@ -98,6 +99,11 @@ internal_modules!(
     watcher,
     web,
 );
+
+mod text;
+
+#[cfg(test)]
+mod unicode_corpus;
 
 // ── The stable public API ──────────────────────────────────────────────────
 pub use crate::error::{Error, ErrorKind, Result};

@@ -24,7 +24,7 @@ include = [
 
 [dependencies]
 oxideav-core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio-codec-core" }
-rayon = "1.10"
+rayon = "1.12"
 
 [lints.rust]
 warnings = "allow"

@@ -94,7 +94,7 @@ fn normalize_timestamp(stamp: &str) -> String {
         parts[0],
         parts[1],
         parts[2],
-        &millis[..millis.len().min(3)]
+        millis.get(..millis.len().min(3)).unwrap_or(millis)
     )
 }
 
@@ -105,6 +105,18 @@ fn digits_only(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cue text is author-supplied and arrives in every script there is; timing
+    /// lines are indexed by byte offset, so malformed ones are fed in too.
+    #[test]
+    fn srt_conversion_survives_every_script_and_alignment() {
+        for sample in crate::unicode_corpus::alignment_sweep() {
+            let srt = format!("1\n00:00:01,000 --> 00:00:04,500\n{sample}\n");
+            assert!(srt_to_vtt(&srt).starts_with("WEBVTT"));
+            let malformed = format!("1\n{sample} --> {sample}\n{sample}\n");
+            assert!(srt_to_vtt(&malformed).starts_with("WEBVTT"));
+        }
+    }
 
     #[test]
     fn converts_a_basic_cue() {

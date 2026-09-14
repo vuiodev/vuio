@@ -143,7 +143,7 @@ jobs:
       - name: Run Clippy
         env:
           RUSTC_WRAPPER: sccache
-        run: cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D clippy::all -D warnings
+        run: cargo clippy -p vuio-core -p vuio-cli -p vuio-cast -p vuio-web --all-targets --all-features -- -D clippy::all -D clippy::string_slice -D warnings
       - name: Show sccache stats
         if: always()
         run: sccache --show-stats || true
