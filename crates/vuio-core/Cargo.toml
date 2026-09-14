@@ -137,7 +137,7 @@ unstable-internals = []
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1.53", features = ["rt-multi-thread", "net", "fs", "time", "sync", "macros", "io-util"] }
 serde = { version = "1.0", features = ["derive"] }
-uuid = { version = "1.24", features = ["v4"] }
+uuid = { version = "1.26", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 thiserror = "2.0"
 anyhow = "1.0"
@@ -153,7 +153,7 @@ notify-debouncer-full = "0.7"
 toml = "1.1"
 toml_edit = "0.25"
 serde_json = "1.0"
-dirs = "6.0"
+dirs = "7.0"
 hostname = "0.4"
 ipnet = "2.12"
 http = "1.5"
@@ -162,7 +162,7 @@ hyper = { version = "1.11", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 bytes = "1.12"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 percent-encoding = "2.3"
 # Media text arrives in whichever normalization form the tagger or filesystem
 # used; comparing and indexing it requires one form. See `src/text.rs`.

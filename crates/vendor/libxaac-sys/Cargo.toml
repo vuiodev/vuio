@@ -67,4 +67,4 @@ path = "examples/sample.rs"
 [dependencies]
 
 [build-dependencies]
-cc = "1.0"
+cc = "1.4"
