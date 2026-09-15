@@ -675,6 +675,8 @@ mod tests {
     /// subtitle flag — and it committed a fingerprint at the current
     /// `tags_version`, so the next scan saw a record already in step with its
     /// file and never looked inside it.
+    // Asserts on what the tag reader found, so it belongs to that feature.
+    #[cfg(feature = "metadata")]
     #[tokio::test]
     async fn a_created_file_is_indexed_with_its_metadata() {
         let temp = tempfile::TempDir::new().expect("temp dir");
@@ -716,6 +718,8 @@ mod tests {
     /// onto the old record committed a fresh fingerprint beside stale tags, and
     /// a later scan compared that fingerprint against the file, found them in
     /// step, and left the old title and duration in place for good.
+    // Asserts on what the tag reader found, so it belongs to that feature.
+    #[cfg(feature = "metadata")]
     #[tokio::test]
     async fn a_modified_file_has_its_metadata_re_read() {
         let temp = tempfile::TempDir::new().expect("temp dir");
@@ -758,6 +762,8 @@ mod tests {
     /// rewrite the record. It used to: the flag was flipped on a `MediaFile`
     /// read back from the database, whose `extra_tags` are never joined in, and
     /// writing that back deleted every tag the file really had.
+    // Asserts on what the tag reader found, so it belongs to that feature.
+    #[cfg(feature = "metadata")]
     #[tokio::test]
     async fn a_subtitle_appearing_keeps_the_media_file_s_tags() {
         let temp = tempfile::TempDir::new().expect("temp dir");
