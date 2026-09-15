@@ -113,14 +113,18 @@ mod tests {
         ];
 
         let database_path = temp.path().join("media.db");
-        let database = database::sqlite::SqliteDatabase::new(database_path.clone())
-            .await
-            .unwrap();
+        let database = std::sync::Arc::new(
+            database::sqlite::SqliteDatabase::new(database_path.clone())
+                .await
+                .unwrap(),
+        );
         database.initialize().await.unwrap();
         for (filename, _) in downloads {
             let completed = temp.path().join(filename);
             tokio::fs::write(&completed, b"media").await.unwrap();
-            index_media_file_path(&database, &completed).await.unwrap();
+            index_media_file_path(&database, &completed, None)
+                .await
+                .unwrap();
         }
         drop(database);
 

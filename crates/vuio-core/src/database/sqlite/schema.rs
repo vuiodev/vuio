@@ -776,7 +776,7 @@ fn seconds_to_time(seconds: i64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds.max(0) as u64)
 }
 
-pub(super) fn time_to_seconds(time: SystemTime) -> i64 {
+pub(in crate::database::sqlite) fn time_to_seconds(time: SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
 }
 

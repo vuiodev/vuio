@@ -974,6 +974,27 @@ pub trait MediaRepository: Send + Sync {
         self.bulk_update_media_files(files).await
     }
 
+    /// Set `subtitle_available` on the named records, touching no other column.
+    ///
+    /// A sidecar appearing or disappearing changes nothing about the media file
+    /// itself, so it must not go through the whole-record write path: that one
+    /// rewrites every column from a [`MediaFile`], and a `MediaFile` read back
+    /// from the database carries no `extra_tags` — they are not joined in — so
+    /// writing it back deletes the tags the file really has. Returns how many
+    /// records actually changed value.
+    async fn set_subtitle_available(&self, ids: &[i64], available: bool) -> Result<usize>;
+
+    /// Point existing records at new paths, keeping their identifiers.
+    ///
+    /// What a rename is. Removing the old records and inserting new ones gives
+    /// the same files new identifiers, and playlist entries and scraped
+    /// metadata reference media files by identifier with `ON DELETE CASCADE`,
+    /// so that loses them. Only the path columns are written, for the same
+    /// reason as [`MediaRepository::set_subtitle_available`]: a record read
+    /// back from the database carries no `extra_tags`. Returns how many records
+    /// moved; a destination already held by another record is skipped.
+    async fn relocate_media_files(&self, moves: &[(i64, PathBuf)]) -> Result<usize>;
+
     /// Remove multiple media files by paths in a single batch operation.
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
 
