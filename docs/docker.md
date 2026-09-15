@@ -34,6 +34,10 @@ services:
       - VUIO_MEDIA_DIRS=/media/movies,/media/music,/media/pictures
     volumes:
       - ./vuio-config:/config
+      # The database, and the artwork cache beside it. Separate from /config,
+      # and just as necessary: without it every playlist, radio station and
+      # saved credential goes when the container is recreated.
+      - ./vuio-data:/data
       - /path/to/movies:/media/movies:ro
       - /path/to/music:/media/music:ro
       - /path/to/pictures:/media/pictures:ro
@@ -55,6 +59,7 @@ docker run -d \
   --cap-add NET_RAW \
   -v /path/to/media:/media:ro \
   -v ./vuio-config:/config \
+  -v ./vuio-data:/data \
   -e VUIO_IP=192.168.1.100 \
   -e VUIO_PORT=8080 \
   -e VUIO_WEB_PORT=8090 \
@@ -71,6 +76,7 @@ docker run -d \
 ```yaml
 volumes:
   - ./vuio-config:/config
+  - ./vuio-data:/data
   - /path/to/media:/media:ro
 ```
 
@@ -78,6 +84,7 @@ volumes:
 ```yaml
 volumes:
   - ./vuio-config:/config
+  - ./vuio-data:/data
   - /home/user/Movies:/media/movies:ro
   - /home/user/Music:/media/music:ro
   - /home/user/Pictures:/media/pictures:ro
@@ -116,7 +123,7 @@ A container is configured via environment variables. In Docker environments, the
 | `VUIO_WATCH_CHANGES` | `true` | Monitor file system changes in real time |
 | `VUIO_CLEANUP_DELETED` | `true` | Automatically remove deleted files from database |
 | `VUIO_SCAN_PLAYLISTS` | `true` | Auto-import M3U/M3U8 and PLS playlists |
-| `VUIO_DB_PATH` | `/data/vuio.db` | SQLite database file location |
+| `VUIO_DB_PATH` | `/data/vuio.db` | SQLite database file location. Mount `/data`, or point this somewhere you do mount — playlists, radio stations and saved renderer credentials live here, and an unmounted path takes them with the container. |
 | `VUIO_DB_VACUUM` | `false` | Compact SQLite database index on startup |
 | `VUIO_DB_BACKUP` | `false` | Back up the index at startup, daily, and at shutdown |
 | `VUIO_DB_CACHE_MB` | `128` | Memory cache allocated for the SQLite index (in MB) |
