@@ -62,7 +62,7 @@ pub use super::{FrameHeader, MAX_PLANES};
 // pool-backing storage and the soundness-critical alignment constant
 // are identical for the `Rc` and `Arc` variants. See `arena/mod.rs`
 // for the full soundness rationale.
-use super::{buffer_layout, Buffer, MAX_ALIGN};
+use super::{Buffer, MAX_ALIGN, buffer_layout};
 
 /// `Send + Sync` pool of reusable byte buffers for arena-backed frame
 /// allocations. Mirrors [`crate::arena::ArenaPool`] in shape and

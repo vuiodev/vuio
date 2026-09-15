@@ -14,8 +14,7 @@ use vuio_core::{
         PlatformInfo,
     },
     runtime_state::{
-        ActiveCastRegistry, BookmarkRegistry, BrowseResponseCache,
-        BOOKMARK_MAX_ENTRIES,
+        ActiveCastRegistry, BookmarkRegistry, BrowseResponseCache, BOOKMARK_MAX_ENTRIES,
     },
     state::AppState,
     web::{diagnostics::WebHandlerMetrics, soap::content_directory_control},

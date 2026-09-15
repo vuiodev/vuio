@@ -6,8 +6,7 @@ mod common;
 
 use std::sync::Arc;
 use vuio_core::database::{
-    BroadcastMode, MediaFile, MediaRepository, RadioStationInput,
-    RadioStationRepository,
+    BroadcastMode, MediaFile, MediaRepository, RadioStationInput, RadioStationRepository,
 };
 
 /// Two simultaneous starts of one station must leave exactly one instance live
