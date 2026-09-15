@@ -193,6 +193,13 @@ pub struct UpnpSubscription {
     pub next_sequence: u32,
     pub consecutive_failures: u8,
     pub last_notification_at: std::time::Instant,
+    /// A content change arrived inside this subscription's throttle window and
+    /// still owes it a notification.
+    ///
+    /// The revision is not recorded with it: what a subscriber needs is the
+    /// latest, so a run of changes coalesces into one notification carrying
+    /// whatever the revision is by the time it goes out.
+    pub pending_notification: bool,
 }
 
 pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {

@@ -44,3 +44,5 @@ tracing = "0.1"
 uuid = { version = "1.26", features = ["v4"] }
 vuio-core = { path = "../vuio-core", version = "0.0.50" }
 
+[dev-dependencies]
+tempfile = "3.27"
