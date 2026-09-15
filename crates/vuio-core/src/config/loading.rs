@@ -55,6 +55,50 @@ fn supported_extensions(value: Option<&str>) -> Vec<String> {
         .unwrap_or_else(default_docker_supported_extensions)
 }
 
+/// The address the HTTP server binds, under either name it is set by.
+///
+/// `VUIO_INTERFACE` wins when both are present: it is the one an operator sets
+/// by hand, while `VUIO_BIND_INTERFACE` carries a default baked into the image.
+fn bind_interface(interface: Option<&str>, bind_interface: Option<&str>) -> String {
+    non_empty(interface)
+        .or_else(|| non_empty(bind_interface))
+        .unwrap_or("0.0.0.0")
+        .to_owned()
+}
+
+fn bind_interface_from_env() -> String {
+    let interface = std::env::var("VUIO_INTERFACE").ok();
+    let bind = std::env::var("VUIO_BIND_INTERFACE").ok();
+    bind_interface(interface.as_deref(), bind.as_deref())
+}
+
+/// Which interfaces SSDP announces on, from `VUIO_SSDP_INTERFACE`.
+///
+/// Spelled as in the config file: `Auto`, `All`, or an interface name. The
+/// chart and the image both set it and the runtime used to hardcode `Auto`
+/// regardless.
+fn ssdp_interface(value: Option<&str>) -> NetworkInterfaceConfig {
+    match non_empty(value) {
+        None => NetworkInterfaceConfig::Auto,
+        Some(value) if value.eq_ignore_ascii_case("auto") => NetworkInterfaceConfig::Auto,
+        Some(value) if value.eq_ignore_ascii_case("all") => NetworkInterfaceConfig::All,
+        Some(value) => NetworkInterfaceConfig::Specific(value.to_owned()),
+    }
+}
+
+fn ssdp_interface_from_env() -> NetworkInterfaceConfig {
+    let value = std::env::var("VUIO_SSDP_INTERFACE").ok();
+    ssdp_interface(value.as_deref())
+}
+
+/// A variable that is set to something. A container that exports a variable it
+/// has no value for exports it empty, which is not a setting.
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
 fn supported_extensions_from_env() -> Vec<String> {
     let value = std::env::var("VUIO_SUPPORTED_EXTENSIONS").ok();
     supported_extensions(value.as_deref())
@@ -86,7 +130,13 @@ impl AppConfig {
                 .unwrap_or_else(|_| "8080".to_string())
                 .parse()
                 .context("Invalid VUIO_PORT")?,
-            interface: std::env::var("VUIO_INTERFACE").unwrap_or_else(|_| "0.0.0.0".to_string()),
+            // Both spellings, because both are deployed: the Dockerfile and the
+            // Helm chart set VUIO_BIND_INTERFACE, docker-compose.yml sets
+            // VUIO_INTERFACE, and only the latter used to be read — so an
+            // operator restricting the chart to loopback got 0.0.0.0 anyway,
+            // which with the chart's default hostNetwork exposed administration
+            // on every interface of the host.
+            interface: bind_interface_from_env(),
             name: std::env::var("VUIO_SERVER_NAME")
                 .unwrap_or_else(|_| "VuIO DLNA Server".to_string()),
             uuid: std::env::var("VUIO_UUID").unwrap_or_else(|_| Uuid::new_v4().to_string()),
@@ -94,7 +144,7 @@ impl AppConfig {
         };
 
         let network = NetworkConfig {
-            interface_selection: NetworkInterfaceConfig::Auto,
+            interface_selection: ssdp_interface_from_env(),
             multicast_ttl: std::env::var("VUIO_MULTICAST_TTL")
                 .unwrap_or_else(|_| "4".to_string())
                 .parse()
@@ -602,7 +652,8 @@ impl AppConfig {
 
 #[cfg(test)]
 mod env_tests {
-    use super::{parse_supported_extensions, supported_extensions};
+    use super::{bind_interface, parse_supported_extensions, ssdp_interface, supported_extensions};
+    use crate::config::NetworkInterfaceConfig;
 
     #[test]
     fn docker_extensions_accept_the_same_human_friendly_forms_as_toml() {
@@ -632,5 +683,37 @@ mod env_tests {
     #[test]
     fn an_explicit_empty_list_can_disable_regular_media_scanning() {
         assert!(parse_supported_extensions(" , . , ").is_empty());
+    }
+    /// The Dockerfile and the Helm chart set `VUIO_BIND_INTERFACE`;
+    /// docker-compose.yml sets `VUIO_INTERFACE`. Only the latter was read, so
+    /// an operator who restricted the chart to loopback got 0.0.0.0 — and the
+    /// chart defaults to host networking, which put administration on every
+    /// interface of the host.
+    #[test]
+    fn either_spelling_restricts_the_bind_address() {
+        assert_eq!(bind_interface(None, Some("127.0.0.1")), "127.0.0.1");
+        assert_eq!(bind_interface(Some("127.0.0.1"), None), "127.0.0.1");
+        // The hand-set one wins; the other carries a default baked into the image.
+        assert_eq!(
+            bind_interface(Some("192.168.1.5"), Some("0.0.0.0")),
+            "192.168.1.5"
+        );
+        // A container exports a variable it has no value for as empty.
+        assert_eq!(bind_interface(Some(""), Some("10.0.0.2")), "10.0.0.2");
+        assert_eq!(bind_interface(None, None), "0.0.0.0");
+    }
+
+    /// `VUIO_SSDP_INTERFACE` was exported by the image and the chart and then
+    /// discarded: the Docker path hardcoded `Auto`.
+    #[test]
+    fn the_ssdp_interface_selection_is_read() {
+        assert_eq!(ssdp_interface(None), NetworkInterfaceConfig::Auto);
+        assert_eq!(ssdp_interface(Some("")), NetworkInterfaceConfig::Auto);
+        assert_eq!(ssdp_interface(Some("Auto")), NetworkInterfaceConfig::Auto);
+        assert_eq!(ssdp_interface(Some("all")), NetworkInterfaceConfig::All);
+        assert_eq!(
+            ssdp_interface(Some("eth0")),
+            NetworkInterfaceConfig::Specific("eth0".to_owned())
+        );
     }
 }
