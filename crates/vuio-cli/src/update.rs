@@ -372,8 +372,7 @@ mod tests {
         let downloaded = download.path().join("vuio");
         std::fs::write(&downloaded, b"new binary").expect("write downloaded");
 
-        let old_exe_path =
-            super::install_new_binary(&downloaded, &current_exe).expect("install");
+        let old_exe_path = super::install_new_binary(&downloaded, &current_exe).expect("install");
 
         assert_eq!(
             std::fs::read(&current_exe).expect("read installed"),
@@ -386,8 +385,15 @@ mod tests {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&current_exe).expect("stat").permissions().mode();
-            assert_eq!(mode & 0o777, 0o755, "the installed binary must be executable");
+            let mode = std::fs::metadata(&current_exe)
+                .expect("stat")
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o755,
+                "the installed binary must be executable"
+            );
         }
         assert!(
             leftovers(install.path()).is_empty(),
