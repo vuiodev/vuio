@@ -37,6 +37,16 @@ use tokio::sync::{Mutex, RwLock};
 #[derive(Default)]
 pub struct RadioManager {
     live: RwLock<HashMap<i64, Arc<Station>>>,
+    /// One lock per station, held across a whole start or stop.
+    ///
+    /// Starting is stop-then-build-then-install and each step awaits, so two
+    /// concurrent starts of one station used to get past the stop together,
+    /// build a [`Station`] each, and have the second `insert` drop the first
+    /// from the map. That did not stop it: the playout task owns an
+    /// `Arc<Station>` of its own, so it carried on reading files and writing
+    /// cursors with nothing left holding a handle to cancel it, and a later
+    /// `stop` reached only the instance the map had kept.
+    lifecycle: Mutex<HashMap<i64, Arc<Mutex<()>>>>,
     peers: Mutex<PeerCache>,
 }
 
@@ -54,19 +64,59 @@ impl RadioManager {
         state: &crate::state::AppState<D>,
         station: &RadioStation,
     ) -> Result<Arc<Station>> {
-        self.stop(station.id).await;
-        let running = Station::start(state.clone(), station)
-            .await
-            .with_context(|| format!("starting the station '{}'", station.name))?;
-        self.live.write().await.insert(station.id, running.clone());
-        Ok(running)
+        let lifecycle = self.lifecycle_lock(station.id).await;
+        let result = {
+            let _turn = lifecycle.lock().await;
+            self.take_off_the_air(station.id).await;
+            match Station::start(state.clone(), station)
+                .await
+                .with_context(|| format!("starting the station '{}'", station.name))
+            {
+                Ok(running) => {
+                    self.live.write().await.insert(station.id, running.clone());
+                    Ok(running)
+                }
+                Err(error) => Err(error),
+            }
+        };
+        self.release_lifecycle_lock(station.id, lifecycle).await;
+        result
     }
 
     /// Take a station off the air. Quiet if it was not on it.
     pub async fn stop(&self, id: i64) {
+        let lifecycle = self.lifecycle_lock(id).await;
+        {
+            let _turn = lifecycle.lock().await;
+            self.take_off_the_air(id).await;
+        }
+        self.release_lifecycle_lock(id, lifecycle).await;
+    }
+
+    /// The remove-and-cancel half of stopping. Callers hold the station's
+    /// lifecycle lock.
+    async fn take_off_the_air(&self, id: i64) {
         let station = self.live.write().await.remove(&id);
         if let Some(station) = station {
             station.shutdown().await;
+        }
+    }
+
+    /// The lifecycle lock for one station, created on demand.
+    async fn lifecycle_lock(&self, id: i64) -> Arc<Mutex<()>> {
+        Arc::clone(self.lifecycle.lock().await.entry(id).or_default())
+    }
+
+    /// Drop the entry once nobody else holds it. `stop` accepts any id, so
+    /// without this a caller could grow the map with ids that are not stations.
+    async fn release_lifecycle_lock(&self, id: i64, held: Arc<Mutex<()>>) {
+        let mut locks = self.lifecycle.lock().await;
+        // Ours and the map's. Any more means another task is already waiting
+        // its turn on this station and still needs the entry; it cannot arrive
+        // between the count and the removal, because reaching the entry at all
+        // means taking the lock this holds.
+        if Arc::strong_count(&held) == 2 {
+            locks.remove(&id);
         }
     }
 

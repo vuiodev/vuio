@@ -47,7 +47,7 @@
 //! matches the parent module exactly.
 
 use std::mem::{align_of, size_of};
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -62,7 +62,7 @@ pub use super::{FrameHeader, MAX_PLANES};
 // pool-backing storage and the soundness-critical alignment constant
 // are identical for the `Rc` and `Arc` variants. See `arena/mod.rs`
 // for the full soundness rationale.
-use super::{Buffer, MAX_ALIGN};
+use super::{buffer_layout, Buffer, MAX_ALIGN};
 
 /// `Send + Sync` pool of reusable byte buffers for arena-backed frame
 /// allocations. Mirrors [`crate::arena::ArenaPool`] in shape and
@@ -131,6 +131,18 @@ impl ArenaPool {
     /// [`Error::ResourceExhausted`] if every arena slot is already
     /// checked out by an [`Arena`] (or a [`Frame`] holding one).
     pub fn lease(self: &Arc<Self>) -> Result<Arena> {
+        // See the sibling pool in `arena/mod.rs`: a non-zero
+        // `cap_per_arena` the allocator cannot honour yields the
+        // zero-byte sentinel buffer, and pairing that with the
+        // unchecked requested cap would let `alloc` slice storage that
+        // was never allocated.
+        if self.cap_per_arena != 0 && buffer_layout(self.cap_per_arena).is_none() {
+            return Err(Error::resource_exhausted(format!(
+                "ArenaPool cap_per_arena of {} bytes is not allocatable",
+                self.cap_per_arena
+            )));
+        }
+
         let buffer = {
             let mut inner = self.inner.lock().expect("ArenaPool mutex poisoned");
             if let Some(buf) = inner.idle.pop() {
@@ -147,12 +159,15 @@ impl ArenaPool {
         };
 
         let base = buffer.ptr;
+        // Cap comes from the buffer we actually hold; see the sibling
+        // pool in `arena/mod.rs`.
+        let cap = buffer.cap;
         Ok(Arena {
             buffer: Mutex::new(Some(buffer)),
             base,
             cursor: AtomicUsize::new(0),
             alloc_count: AtomicU32::new(0),
-            cap: self.cap_per_arena,
+            cap,
             alloc_count_cap: self.max_alloc_count_per_arena,
             pool: Arc::downgrade(self),
         })
@@ -432,6 +447,21 @@ impl Arena {
     /// is still in use — Rust's borrow checker enforces this, since
     /// `reset` takes `&mut self`.
     pub fn reset(&mut self) {
+        // `alloc` hands out `&mut [T]` over these bytes without
+        // initialising them, which is only sound because the bytes are
+        // zero and `T: Zeroable`. A pool buffer is zeroed on release,
+        // so `reset` — which reuses the buffer in place — has to do the
+        // same, or the next `alloc` would build a `T` out of whatever
+        // the previous round wrote (an invalid `bool`, say).
+        let used = self.cursor.load(Ordering::Acquire);
+        if used > 0 {
+            // SAFETY: `base` points at `self.cap` bytes we own, and
+            // `used <= self.cap` because `alloc` never advances the
+            // cursor past the cap. `&mut self` proves no slice handed
+            // out earlier is still borrowing from `base` and that no
+            // other thread is inside `alloc`.
+            unsafe { ptr::write_bytes(self.base.as_ptr(), 0, used) };
+        }
         // `&mut self` proves exclusive access; non-atomic stores
         // would suffice, but the atomic API is uniform.
         self.cursor.store(0, Ordering::Release);
@@ -869,5 +899,43 @@ mod tests {
         });
         h1.join().unwrap();
         h2.join().unwrap();
+    }
+    #[test]
+    fn arena_reset_zeroes_reused_storage() {
+        // `alloc` promises zeroed bytes, and `Zeroable` is only a
+        // sufficient bound because of that promise. Reusing a buffer
+        // in place must therefore scrub it, exactly as returning it
+        // to the pool does.
+        let pool = small_pool(1, 64);
+        let mut arena = pool.lease().unwrap();
+        arena.alloc::<u8>(64).unwrap().fill(0xff);
+        arena.reset();
+        assert!(arena.alloc::<u8>(64).unwrap().iter().all(|&b| b == 0));
+
+        // The same bytes handed back as a type with a restricted
+        // representation: a leftover 0xff would be an invalid `bool`.
+        arena.reset();
+        assert!(arena.alloc::<bool>(64).unwrap().iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn pool_rejects_unallocatable_cap() {
+        // `usize::MAX` has no valid `Layout`, so the buffer would fall
+        // back to the zero-byte sentinel while the arena advertised
+        // `usize::MAX` of capacity — `alloc` would then slice storage
+        // that does not exist.
+        let pool = ArenaPool::new(1, usize::MAX);
+        assert!(matches!(pool.lease(), Err(Error::ResourceExhausted(_))));
+    }
+
+    #[test]
+    fn arena_capacity_matches_backing_storage() {
+        let pool = small_pool(1, 0);
+        let arena = pool.lease().unwrap();
+        assert_eq!(arena.capacity(), 0);
+        assert!(matches!(
+            arena.alloc::<u8>(1),
+            Err(Error::ResourceExhausted(_))
+        ));
     }
 }

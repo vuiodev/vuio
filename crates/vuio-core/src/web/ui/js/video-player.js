@@ -78,9 +78,11 @@ async function mountVideoPlayer(file, url) {
         track.kind = 'subtitles';
         track.srclang = 'en';
         track.label = 'English';
-        // Not /subtitle — that endpoint serves raw SRT for TVs, and <track>
-        // accepts WebVTT only.
-        track.src = url + '/subtitle.vtt';
+        // Built from the media id, not from `url`: for MKV that is the HLS
+        // manifest, and appending to it asks for a route that does not exist.
+        // Not /subtitle either — that endpoint serves raw SRT for TVs, and
+        // <track> accepts WebVTT only.
+        track.src = '/media/' + encodeURIComponent(file.id) + '/subtitle.vtt';
         video.appendChild(track);
     }
     stage.replaceChildren(video);
