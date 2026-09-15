@@ -8,6 +8,7 @@ use anyhow::Result;
 use rusqlite::{types::Value, OptionalExtension, Transaction};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::database::sqlite::directory::{prune, DirectoryDelta};
 use crate::database::sqlite::schema::time_to_seconds;
@@ -283,6 +284,81 @@ impl SqliteDatabase {
         self.bulk_store_media_files_impl(files, already_canonical)
             .await?;
         Ok(())
+    }
+
+    /// Point existing records at new paths, keeping their identifiers.
+    ///
+    /// What a rename actually is. Deleting the old rows and inserting new ones
+    /// would give the same files new identifiers, and `playlist_entries` and
+    /// `mediainfo` reference media files by identifier with `ON DELETE
+    /// CASCADE`: moving a folder in a file manager used to cost every playlist
+    /// membership and everything a scraper had found for it.
+    ///
+    /// Only the path columns are written. The whole-record path cannot be used
+    /// here, because the records a caller has in hand were read from the
+    /// database and so carry no `extra_tags`, which that path would take for
+    /// "no tags" and delete. A caller that also wants the file re-read can scan
+    /// the destination afterwards: the rows are already at the new paths, so
+    /// the scan updates them in place.
+    ///
+    /// Returns how many rows moved. A move whose destination is already taken
+    /// by another record is skipped rather than failing the batch.
+    pub(in crate::database::sqlite) async fn relocate_media_files_impl(
+        &self,
+        moves: &[(i64, PathBuf)],
+    ) -> Result<usize> {
+        if moves.is_empty() {
+            return Ok(0);
+        }
+        let moves = moves
+            .iter()
+            .map(|(id, path)| Ok((*id, Self::canonical_string(path)?)))
+            .collect::<Result<Vec<_>>>()?;
+        let updated_at = time_to_seconds(SystemTime::now());
+
+        self.transact(move |transaction| {
+            let mut delta = DirectoryDelta::new();
+            let mut moved = 0usize;
+            {
+                let mut taken = transaction
+                    .prepare_cached("SELECT 1 FROM media_files WHERE path = ? AND id != ?")?;
+                let mut relocate = transaction.prepare_cached(
+                    "UPDATE media_files                      SET path = ?1, parent_path = ?2, filename = ?3, updated_at_secs = ?4                      WHERE id = ?5                      RETURNING mime_family",
+                )?;
+                let mut previous = transaction
+                    .prepare_cached("SELECT path, mime_family FROM media_files WHERE id = ?")?;
+
+                for (id, path) in &moves {
+                    if taken.exists(rusqlite::params![path, id])? {
+                        continue;
+                    }
+                    let Some((old_path, family)) = previous
+                        .query_row([id], |row| {
+                            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                        })
+                        .optional()?
+                    else {
+                        continue;
+                    };
+                    let parent = SqliteDatabase::parent_directory(path).unwrap_or_default();
+                    let filename = path
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(path.as_str())
+                        .to_owned();
+                    let mut rows =
+                        relocate.query(rusqlite::params![path, parent, filename, updated_at, id])?;
+                    if rows.next()?.is_some() {
+                        delta.record(&old_path, &family, -1);
+                        delta.record(path, &family, 1);
+                        moved += 1;
+                    }
+                }
+            }
+            delta.apply(transaction)?;
+            Ok(moved)
+        })
+        .await
     }
 
     pub(in crate::database::sqlite) async fn bulk_remove_media_files_impl(

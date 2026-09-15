@@ -34,6 +34,43 @@ impl SqliteDatabase {
             .await
     }
 
+    /// Set `subtitle_available` on the named records and nothing else.
+    ///
+    /// A sidecar appearing or disappearing says nothing about the media file,
+    /// so the update must not travel through the whole-record write path: that
+    /// one rewrites every column from a `MediaFile`, and a `MediaFile` read
+    /// back from the database carries no `extra_tags` (they are not joined in),
+    /// which the write then takes for "this file has no extra tags" and deletes
+    /// the stored ones. Returns how many rows changed value.
+    pub(in crate::database::sqlite) async fn set_subtitle_available_impl(
+        &self,
+        ids: &[i64],
+        available: bool,
+    ) -> Result<usize> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let ids = ids.to_vec();
+        let updated_at = crate::database::sqlite::schema::time_to_seconds(std::time::SystemTime::now());
+        self.execute_write(move |connection| {
+            let transaction = connection.transaction()?;
+            let mut changed = 0usize;
+            {
+                let mut update = transaction.prepare_cached(
+                    "UPDATE media_files SET subtitle_available = ?, updated_at_secs = ? \
+                     WHERE id = ? AND subtitle_available != ?",
+                )?;
+                let flag = i64::from(available);
+                for id in &ids {
+                    changed += update.execute(rusqlite::params![flag, updated_at, id, flag])?;
+                }
+            }
+            transaction.commit()?;
+            Ok(changed)
+        })
+        .await
+    }
+
     pub(in crate::database::sqlite) async fn remove_media_file_impl(
         &self,
         path: &Path,
