@@ -39,20 +39,67 @@ pub struct MediaInfoJobState {
     pub cancelled: bool,
     /// Held so a later request can stop the run. Not reported to the client.
     pub cancel: Option<CancellationToken>,
+    /// Which run this state describes. Bumped by every [`Self::reserve`].
+    ///
+    /// A run only writes to the state while the generation it was given is
+    /// still the current one, so a worker that has been superseded — or that
+    /// finishes after a later run has started — cannot report its own
+    /// completion over the run that is actually going.
+    pub generation: u64,
 }
 
 impl MediaInfoJobState {
-    fn begin(&mut self, total: usize, cancel: CancellationToken) {
+    /// Claim the job for a new run, if no run holds it.
+    ///
+    /// Claiming is separate from [`Self::begin`] because setting a run up takes
+    /// a database query, and checking `running` on one side of that await and
+    /// claiming it on the other is not a claim at all: two requests arriving
+    /// together both saw an idle job, both started a worker, and the second
+    /// `begin` overwrote the first's cancellation token — so cancelling reached
+    /// only one of them and either could report the run finished while the
+    /// other was still going.
+    fn reserve(&mut self) -> Option<u64> {
+        if self.running {
+            return None;
+        }
+        let generation = self.generation.wrapping_add(1);
         *self = Self {
             running: true,
-            total,
             started_at: Some(SystemTime::now()),
-            cancel: Some(cancel),
+            generation,
             ..Self::default()
         };
+        Some(generation)
     }
 
-    fn finish(&mut self, cancelled: bool, error: Option<String>) {
+    /// Release a reservation whose run never started, so the next request can
+    /// claim the job instead of waiting out a run that is not happening.
+    fn abandon(&mut self, generation: u64, error: Option<String>) {
+        if self.generation != generation {
+            return;
+        }
+        self.running = false;
+        self.started_at = None;
+        self.finished_at = Some(SystemTime::now());
+        if error.is_some() {
+            self.last_error = error;
+        }
+    }
+
+    /// Record what the reserved run turned out to consist of.
+    fn begin(&mut self, generation: u64, total: usize, cancel: CancellationToken) -> bool {
+        if self.generation != generation {
+            return false;
+        }
+        self.total = total;
+        self.cancel = Some(cancel);
+        true
+    }
+
+    fn finish(&mut self, generation: u64, cancelled: bool, error: Option<String>) {
+        if self.generation != generation {
+            return;
+        }
         self.running = false;
         self.cancelled = cancelled;
         self.finished_at = Some(SystemTime::now());
@@ -200,31 +247,46 @@ pub async fn run_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>)
         bail!("Online media info is turned off");
     }
 
-    {
-        let job = state.mediainfo_job.lock().await;
-        if job.running {
-            bail!("A media info fetch is already running");
-        }
-    }
+    // Claimed before the query below, not after: the check and the claim have
+    // to be one step, or two requests arriving together each start a run.
+    let Some(generation) = state.mediainfo_job.lock().await.reserve() else {
+        bail!("A media info fetch is already running");
+    };
 
     let threshold = settings.min_confidence.min(100);
-    let pending = state
+    let pending = match state
         .database
         .media_ids_missing_mediainfo(MEDIAINFO_VERSION, threshold)
-        .await?;
+        .await
+    {
+        Ok(pending) => pending,
+        Err(error) => {
+            // Nothing is going to run, so the job must not be left claimed.
+            state
+                .mediainfo_job
+                .lock()
+                .await
+                .abandon(generation, Some(error.to_string()));
+            return Err(error);
+        }
+    };
     let total = pending.len();
 
     // A child of the application token, so shutdown stops the run without the
     // caller having to remember to cancel it.
     let cancel = state.cancellation.child_token();
+    if !state
+        .mediainfo_job
+        .lock()
+        .await
+        .begin(generation, total, cancel.clone())
     {
-        let mut job = state.mediainfo_job.lock().await;
-        job.begin(total, cancel.clone());
+        bail!("A media info fetch is already running");
     }
 
     let tracker = state.background_tasks.clone();
     tracker.spawn(async move {
-        let outcome = fetch_all(&state, pending, cancel.clone()).await;
+        let outcome = fetch_all(&state, generation, pending, cancel.clone()).await;
         let cancelled = cancel.is_cancelled();
         let error = outcome.err().map(|error| error.to_string());
         if let Some(error) = error.as_deref() {
@@ -232,7 +294,7 @@ pub async fn run_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>)
         }
         {
             let mut job = state.mediainfo_job.lock().await;
-            job.finish(cancelled, error);
+            job.finish(generation, cancelled, error);
         }
         // Titles, descriptions and artwork all just changed. This bumps the
         // ContentDirectory revision, drops the browse cache and notifies every
@@ -245,6 +307,7 @@ pub async fn run_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>)
 
 async fn fetch_all<D: DatabaseManager + 'static>(
     state: &AppState<D>,
+    generation: u64,
     pending: Vec<i64>,
     cancel: CancellationToken,
 ) -> Result<()> {
@@ -278,6 +341,10 @@ async fn fetch_all<D: DatabaseManager + 'static>(
         };
         {
             let mut job = state.mediainfo_job.lock().await;
+            if job.generation != generation {
+                // Superseded. Its progress is not ours to write.
+                return Ok(());
+            }
             job.current = Some(file.filename.clone());
         }
 
@@ -300,6 +367,9 @@ async fn fetch_all<D: DatabaseManager + 'static>(
         };
 
         let mut job = state.mediainfo_job.lock().await;
+        if job.generation != generation {
+            return Ok(());
+        }
         job.processed += 1;
         match outcome {
             Ok(Some(record)) => {
@@ -484,7 +554,8 @@ mod tests {
             last_error: Some("old".into()),
             ..MediaInfoJobState::default()
         };
-        job.begin(10, CancellationToken::new());
+        let generation = job.reserve().expect("idle job");
+        assert!(job.begin(generation, 10, CancellationToken::new()));
         assert!(job.running);
         assert_eq!(job.total, 10);
         assert_eq!(job.processed, 0);
@@ -495,11 +566,53 @@ mod tests {
     #[test]
     fn finishing_records_why_it_stopped() {
         let mut job = MediaInfoJobState::default();
-        job.begin(1, CancellationToken::new());
-        job.finish(true, Some("boom".into()));
+        let generation = job.reserve().expect("idle job");
+        assert!(job.begin(generation, 1, CancellationToken::new()));
+        job.finish(generation, true, Some("boom".into()));
         assert!(!job.running);
         assert!(job.cancelled);
         assert!(job.cancel.is_none());
         assert_eq!(job.last_error.as_deref(), Some("boom"));
+    }
+
+    /// The job is claimed before the run is set up, so a second request that
+    /// arrives while the first is still querying the database is refused.
+    ///
+    /// It used to check `running` and claim the job on opposite sides of that
+    /// query, so both requests got through, both started a worker, and the
+    /// second claim replaced the first's cancellation token — cancelling then
+    /// reached one run and left the other going.
+    #[test]
+    fn a_second_request_cannot_claim_a_reserved_job() {
+        let mut job = MediaInfoJobState::default();
+        let first = job.reserve().expect("idle job");
+        assert!(job.running, "reserving marks the job taken immediately");
+        assert!(
+            job.reserve().is_none(),
+            "no second run while the first holds the job"
+        );
+
+        // And the loser cannot write over the winner's run either.
+        let stale = first.wrapping_sub(1);
+        assert!(!job.begin(stale, 99, CancellationToken::new()));
+        assert_eq!(job.total, 0);
+        job.finish(stale, true, Some("not mine".into()));
+        assert!(job.running, "a superseded run cannot end the current one");
+        assert!(job.last_error.is_none());
+
+        job.finish(first, false, None);
+        assert!(!job.running);
+    }
+
+    /// A reservation whose setup fails has to be released, or the next request
+    /// waits out a run that is not happening.
+    #[test]
+    fn an_abandoned_reservation_frees_the_job() {
+        let mut job = MediaInfoJobState::default();
+        let generation = job.reserve().expect("idle job");
+        job.abandon(generation, Some("the query failed".into()));
+        assert!(!job.running);
+        assert_eq!(job.last_error.as_deref(), Some("the query failed"));
+        assert!(job.reserve().is_some(), "the job is claimable again");
     }
 }
