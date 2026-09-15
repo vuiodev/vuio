@@ -134,6 +134,7 @@ pub async fn content_directory_subscribe<D: DatabaseManager>(
             next_sequence: 1,
             consecutive_failures: 0,
             last_notification_at: now,
+            pending_notification: false,
         },
     );
     drop(subscriptions);
@@ -289,64 +290,106 @@ async fn send_event_notification(
     }
 }
 
+/// One subscription's share of a notification round.
+type ClaimedNotification = (String, String, u32, uuid::Uuid);
+
+/// Which subscriptions may be notified now, and when the soonest one the
+/// throttle held back becomes eligible.
+///
+/// A subscription inside its window is marked pending rather than skipped. It
+/// used to be skipped outright with nothing to bring it back, so the last
+/// change of a burst — and any change landing within 250 ms of a subscribe —
+/// was simply never announced, and a television held a stale library until
+/// some unrelated change happened to fall outside a window.
+fn claim_notifications(
+    subscriptions: &mut std::collections::HashMap<String, crate::state::UpnpSubscription>,
+    now: std::time::Instant,
+) -> (Vec<ClaimedNotification>, Option<std::time::Duration>) {
+    let mut claimed = Vec::new();
+    let mut soonest: Option<std::time::Duration> = None;
+
+    subscriptions.retain(|_, subscription| subscription.expires_at > now);
+    for (sid, subscription) in subscriptions.iter_mut() {
+        let since = now.duration_since(subscription.last_notification_at);
+        if since < MIN_NOTIFICATION_INTERVAL {
+            subscription.pending_notification = true;
+            let remaining = MIN_NOTIFICATION_INTERVAL - since;
+            soonest = Some(soonest.map_or(remaining, |current| current.min(remaining)));
+            continue;
+        }
+        let sequence = subscription.next_sequence;
+        subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
+        subscription.last_notification_at = now;
+        subscription.pending_notification = false;
+        claimed.push((
+            sid.clone(),
+            subscription.callback_url.clone(),
+            sequence,
+            subscription.generation,
+        ));
+    }
+    (claimed, soonest)
+}
+
 pub async fn notify_content_change<D: DatabaseManager>(
     state: &AppState<D>,
     _published_update_id: u32,
 ) {
     use futures_util::{stream, StreamExt};
 
-    let now = std::time::Instant::now();
-    // Keep notification batches serialized so subscribers observe monotonically
-    // increasing SEQ values even when content changes are published concurrently.
-    let update_id = state.content_update_id.load(Ordering::SeqCst);
-    let notifications = {
-        let mut subscriptions = state.upnp_subscriptions.lock().await;
-        subscriptions.retain(|_, subscription| subscription.expires_at > now);
-        subscriptions
-            .iter_mut()
-            .filter_map(|(sid, subscription)| {
-                if now.duration_since(subscription.last_notification_at) < MIN_NOTIFICATION_INTERVAL
-                {
-                    return None;
-                }
-                let sequence = subscription.next_sequence;
-                subscription.next_sequence = subscription.next_sequence.wrapping_add(1);
-                subscription.last_notification_at = now;
-                Some((
-                    sid.clone(),
-                    subscription.callback_url.clone(),
-                    sequence,
-                    subscription.generation,
-                ))
-            })
-            .collect::<Vec<_>>()
-    };
+    loop {
+        let now = std::time::Instant::now();
+        // Keep notification batches serialized so subscribers observe
+        // monotonically increasing SEQ values even when content changes are
+        // published concurrently.
+        let update_id = state.content_update_id.load(Ordering::SeqCst);
+        let (notifications, retry_after) =
+            claim_notifications(&mut *state.upnp_subscriptions.lock().await, now);
 
-    let results = stream::iter(notifications.into_iter().map(
-        |(sid, url, sequence, generation)| async move {
-            let success = send_event_notification(&url, &sid, sequence, update_id).await;
-            (sid, generation, success)
-        },
-    ))
-    .buffer_unordered(8)
-    .collect::<Vec<_>>()
-    .await;
+        let results = stream::iter(notifications.into_iter().map(
+            |(sid, url, sequence, generation)| async move {
+                let success = send_event_notification(&url, &sid, sequence, update_id).await;
+                (sid, generation, success)
+            },
+        ))
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
 
-    let mut subscriptions = state.upnp_subscriptions.lock().await;
-    for (sid, generation, success) in results {
-        if let Some(subscription) = subscriptions
-            .get_mut(&sid)
-            .filter(|subscription| subscription.generation == generation)
         {
-            if success {
-                subscription.consecutive_failures = 0;
-            } else {
-                subscription.consecutive_failures =
-                    subscription.consecutive_failures.saturating_add(1);
+            let mut subscriptions = state.upnp_subscriptions.lock().await;
+            for (sid, generation, success) in results {
+                if let Some(subscription) = subscriptions
+                    .get_mut(&sid)
+                    .filter(|subscription| subscription.generation == generation)
+                {
+                    if success {
+                        subscription.consecutive_failures = 0;
+                    } else {
+                        subscription.consecutive_failures =
+                            subscription.consecutive_failures.saturating_add(1);
+                    }
+                }
+            }
+            subscriptions.retain(|_, subscription| subscription.consecutive_failures < 3);
+
+            // Nothing is owed once every throttled subscription has been served
+            // — by this task or by another round that got there first.
+            if !subscriptions
+                .values()
+                .any(|subscription| subscription.pending_notification)
+            {
+                return;
             }
         }
+
+        // Something was held back. Wait out its window and go round again; the
+        // revision it carries will be whatever is current by then, which is
+        // what a subscriber wants. The caller runs this inside a select against
+        // cancellation, so shutdown does not wait on the sleep.
+        let Some(wait) = retry_after else { return };
+        tokio::time::sleep(wait).await;
     }
-    subscriptions.retain(|_, subscription| subscription.consecutive_failures < 3);
 }
 
 #[cfg(test)]
@@ -399,5 +442,88 @@ mod tests {
             &[]
         )
         .is_none());
+    }
+    fn subscription(last_notification_at: std::time::Instant) -> crate::state::UpnpSubscription {
+        crate::state::UpnpSubscription {
+            callback_url: "http://192.168.1.25:1234/events".to_owned(),
+            peer: "192.168.1.25".parse().unwrap(),
+            generation: uuid::Uuid::new_v4(),
+            expires_at: last_notification_at + std::time::Duration::from_secs(1800),
+            next_sequence: 1,
+            consecutive_failures: 0,
+            last_notification_at,
+            pending_notification: false,
+        }
+    }
+
+    /// A change inside the throttle window must still be announced, once the
+    /// window closes. It used to be dropped with nothing to bring it back, so
+    /// two changes 250 ms apart — or one right after a subscribe — left a
+    /// television holding a stale library indefinitely.
+    #[test]
+    fn a_throttled_change_is_owed_a_later_notification() {
+        let start = std::time::Instant::now();
+        let mut subscriptions = std::collections::HashMap::new();
+        subscriptions.insert("uuid:one".to_owned(), subscription(start));
+
+        // First change, a moment after the subscribe: inside the window.
+        let (claimed, retry_after) = claim_notifications(
+            &mut subscriptions,
+            start + std::time::Duration::from_millis(10),
+        );
+        assert!(claimed.is_empty(), "the throttle holds this one back");
+        assert_eq!(retry_after, Some(std::time::Duration::from_millis(240)));
+        assert!(subscriptions["uuid:one"].pending_notification);
+
+        // A second change lands before the window closes. The two coalesce:
+        // still one notification owed, not two.
+        let (claimed, retry_after) = claim_notifications(
+            &mut subscriptions,
+            start + std::time::Duration::from_millis(100),
+        );
+        assert!(claimed.is_empty());
+        assert_eq!(retry_after, Some(std::time::Duration::from_millis(150)));
+
+        // Once the window closes it goes out, and nothing is owed after that.
+        let (claimed, retry_after) =
+            claim_notifications(&mut subscriptions, start + MIN_NOTIFICATION_INTERVAL);
+        assert_eq!(claimed.len(), 1, "the coalesced change is delivered");
+        assert_eq!(claimed[0].2, 1, "with the sequence it was waiting on");
+        assert_eq!(retry_after, None);
+        assert!(!subscriptions["uuid:one"].pending_notification);
+    }
+
+    /// The delay reported is the soonest window to close, not the latest, or a
+    /// subscription would wait behind one throttled after it.
+    #[test]
+    fn the_retry_delay_follows_the_soonest_window() {
+        let start = std::time::Instant::now();
+        let mut subscriptions = std::collections::HashMap::new();
+        subscriptions.insert("uuid:early".to_owned(), subscription(start));
+        subscriptions.insert(
+            "uuid:late".to_owned(),
+            subscription(start + std::time::Duration::from_millis(100)),
+        );
+
+        let (claimed, retry_after) = claim_notifications(
+            &mut subscriptions,
+            start + std::time::Duration::from_millis(150),
+        );
+        assert!(claimed.is_empty());
+        assert_eq!(retry_after, Some(std::time::Duration::from_millis(100)));
+    }
+
+    /// An idle subscriber is notified straight away; the throttle only applies
+    /// to one that has just been notified.
+    #[test]
+    fn an_idle_subscription_is_notified_at_once() {
+        let start = std::time::Instant::now();
+        let mut subscriptions = std::collections::HashMap::new();
+        subscriptions.insert("uuid:one".to_owned(), subscription(start));
+
+        let (claimed, retry_after) =
+            claim_notifications(&mut subscriptions, start + std::time::Duration::from_secs(1));
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(retry_after, None);
     }
 }
