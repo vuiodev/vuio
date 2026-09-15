@@ -30,6 +30,8 @@ fn decode_base64(s: &str) -> Vec<u8> {
     bytes
 }
 
+// Asserts on tags read out of the file, which is the `metadata` feature.
+#[cfg(feature = "metadata")]
 #[tokio::test]
 #[cfg_attr(
     target_os = "freebsd",
@@ -340,6 +342,7 @@ async fn test_cover_art_retrieval_and_xml() {
         )),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
@@ -509,6 +512,7 @@ https://cast1.asurahosting.com/proxy/julien/stream
         )),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
@@ -704,6 +708,7 @@ fn with_apev2_tag(mut audio: Vec<u8>, items: &[(&str, &str)]) -> Vec<u8> {
 
 /// The regression behind issue #11: a library in a container the old tag reader
 /// could not open produced categories with nothing in them.
+#[cfg(feature = "metadata")]
 #[tokio::test]
 #[cfg_attr(
     target_os = "freebsd",
@@ -783,6 +788,7 @@ async fn tags_from_a_container_the_old_reader_could_not_open() {
 /// A file can carry both those and ID3 frames, so the reader drains the whole
 /// metadata log rather than skipping to the newest revision, which would drop
 /// whichever set came first.
+#[cfg(feature = "metadata")]
 #[tokio::test]
 #[cfg_attr(
     target_os = "freebsd",

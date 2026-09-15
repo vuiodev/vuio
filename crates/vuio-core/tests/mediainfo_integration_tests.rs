@@ -323,6 +323,8 @@ fn authed(method: &str, uri: &str, body: Option<&str>) -> Request<Body> {
         .unwrap()
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn the_status_endpoint_lists_every_provider() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -366,6 +368,8 @@ async fn the_status_endpoint_lists_every_provider() {
     assert_eq!(body["stats"]["total"], 0);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn a_saved_credential_is_never_returned_by_the_api() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -407,6 +411,8 @@ async fn a_saved_credential_is_never_returned_by_the_api() {
     assert_eq!(tmdb["has_credential"], true);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn an_empty_token_clears_the_stored_one() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -449,6 +455,8 @@ async fn an_empty_token_clears_the_stored_one() {
     assert_eq!(omdb["has_credential"], false);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn a_credential_for_an_unknown_or_keyless_provider_is_rejected() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -478,6 +486,8 @@ async fn a_credential_for_an_unknown_or_keyless_provider_is_rejected() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn cancelling_when_nothing_is_running_is_a_conflict() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -490,6 +500,8 @@ async fn cancelling_when_nothing_is_running_is_a_conflict() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn running_with_the_feature_turned_off_is_refused() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -507,6 +519,8 @@ async fn running_with_the_feature_turned_off_is_refused() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn the_endpoints_require_management_auth() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -526,6 +540,8 @@ async fn the_endpoints_require_management_auth() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn browse_json_carries_the_fetched_title_and_synopsis() {
     let (database, id, temp) = database_with_one_file().await;
@@ -548,6 +564,8 @@ async fn browse_json_carries_the_fetched_title_and_synopsis() {
     assert_eq!(file["info_art"], true);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn an_uncertain_match_is_stored_but_never_shown() {
     // Searching TVmaze for "Arrival" returns the series "Dead on Arrival". It is
@@ -597,6 +615,8 @@ async fn an_uncertain_match_is_stored_but_never_shown() {
     assert_eq!(status["flagged"][0]["matched_title"], "Dead on Arrival");
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn browse_json_reports_no_media_info_when_none_was_fetched() {
     let (database, _id, temp) = database_with_one_file().await;

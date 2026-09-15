@@ -14,7 +14,7 @@ use vuio_core::{
         PlatformInfo,
     },
     runtime_state::{
-        ActiveCastRegistry, BookmarkRegistry, BrowseResponseCache, RendererCache,
+        ActiveCastRegistry, BookmarkRegistry, BrowseResponseCache,
         BOOKMARK_MAX_ENTRIES,
     },
     state::AppState,
@@ -169,7 +169,8 @@ async fn samsungtv_state_with_video(temp: &tempfile::TempDir) -> AppState {
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
-        discovered_tvs: Arc::new(RendererCache::new()),
+        #[cfg(feature = "casting")]
+        discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
         #[cfg(feature = "transcode")]
