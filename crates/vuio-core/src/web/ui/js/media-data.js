@@ -116,6 +116,11 @@ async function loadMoreMedia(firstPage = false, generation = mediaLoadGeneration
         if (generation !== mediaLoadGeneration) return;
         filesData = firstPage ? page.files : filesData.concat(page.files);
         nextMediaCursor = page.next_cursor;
+        // `appendLoadMore` reads `mediaLoading` to decide whether its button is
+        // disabled, and nothing renders again after the `finally` below clears
+        // the flag. Clear it here or the button stays disabled for good and the
+        // rest of the library is unreachable.
+        mediaLoading = false;
         render();
     } catch (error) {
         console.error('Failed to load media:', error);

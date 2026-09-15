@@ -169,13 +169,12 @@ impl Station {
 
     /// Everything a listener needs to start receiving audio.
     ///
-    /// The burst is taken before the receiver is created, so the two cannot
-    /// overlap: `subscribe` only yields chunks sent after this moment.
+    /// Subscribing and snapshotting the burst both happen under the burst lock;
+    /// see [`Station::publish`] for why the two must not be split.
     pub fn attach(&self) -> Attachment {
+        let held = self.burst.lock();
         let audio = self.audio.subscribe();
-        let burst = self
-            .burst
-            .lock()
+        let burst = held
             .map(|held| held.iter().cloned().collect())
             .unwrap_or_default();
         Attachment {
@@ -183,6 +182,34 @@ impl Station {
             audio,
             now_playing: self.now_playing.subscribe(),
             listeners: self.listeners.clone(),
+        }
+    }
+
+    /// Send a chunk to every listener and remember it for the next one to join.
+    ///
+    /// Both halves happen under the burst lock, which [`Station::attach`] also
+    /// holds across subscribing and snapshotting. That pairing is what makes the
+    /// burst-to-live handover seamless: a chunk published before a listener
+    /// attaches is already in the burst it copies, and one published after it
+    /// reaches the receiver it just created. Split either pair and a chunk that
+    /// crosses a join lands in both (repeated audio) or in neither (a gap).
+    /// Neither call here blocks, so nothing is held across an await.
+    fn publish(&self, bytes: Bytes) {
+        let burst = self.burst.lock();
+
+        // An error here only means nobody is listening, which is not a problem
+        // a station should react to: it stays on the air either way.
+        let _ = self.audio.send(bytes.clone());
+
+        if let Ok(mut burst) = burst {
+            let mut held: usize = burst.iter().map(Bytes::len).sum();
+            held += bytes.len();
+            burst.push_back(bytes);
+            while held > BURST_BYTES && burst.len() > 1 {
+                if let Some(dropped) = burst.pop_front() {
+                    held -= dropped.len();
+                }
+            }
         }
     }
 
@@ -216,6 +243,13 @@ impl Station {
     /// Take the station off the air and wait for the task to notice.
     pub async fn shutdown(&self) {
         self.cancel.cancel();
+    }
+
+    /// Whether this instance has been taken off the air. A `Station` the
+    /// [`RadioManager`](crate::radio::RadioManager) has replaced or stopped
+    /// reads `true` here even though callers may still hold a handle to it.
+    pub fn is_off_air(&self) -> bool {
+        self.cancel.is_cancelled()
     }
 }
 
@@ -378,6 +412,47 @@ struct Playout<D: DatabaseManager + 'static> {
     random: SplitMix64,
 }
 
+/// The station's playout clock: when, in real time, the audio emitted so far
+/// was due to have been heard.
+///
+/// One per station rather than one per track. `wait` runs `LEAD` ahead of real
+/// time so a player has something buffered, and that lead is the station's to
+/// take once. Restarting the clock at every track took it again on each one,
+/// so a station drifted a further two seconds ahead of its listeners per track
+/// — after enough of them a whole short track could go out inside a burst.
+struct PlayoutClock {
+    /// Real time at which the stream's audio clock read zero.
+    anchor: Instant,
+    /// Audio emitted since then.
+    audio: Duration,
+}
+
+impl PlayoutClock {
+    fn new() -> Self {
+        Self {
+            anchor: Instant::now(),
+            audio: Duration::ZERO,
+        }
+    }
+
+    /// When the audio emitted so far is due to go out, allowing for the lead.
+    fn due(&self) -> Instant {
+        self.anchor + self.audio.saturating_sub(LEAD)
+    }
+
+    /// Re-anchor once reading has fallen more than the lead behind the clock —
+    /// a slow disk, a stalled network share. Catching that up would mean
+    /// emptying the reader at listeners as fast as it reads, which is what
+    /// restarting the clock per track used to avoid; this keeps that protection
+    /// without handing out a fresh lead at every track boundary.
+    fn resynchronise(&mut self, now: Instant) {
+        let behind = now.saturating_duration_since(self.due());
+        if behind > LEAD {
+            self.anchor += behind;
+        }
+    }
+}
+
 impl<D: DatabaseManager + 'static> Playout<D> {
     async fn run(mut self) {
         tracing::info!(
@@ -386,6 +461,8 @@ impl<D: DatabaseManager + 'static> Playout<D> {
             codec = self.station.codec.as_str(),
             "Radio station is on the air"
         );
+
+        let mut clock = PlayoutClock::new();
 
         loop {
             if self.station.cancel.is_cancelled() {
@@ -405,7 +482,7 @@ impl<D: DatabaseManager + 'static> Playout<D> {
                 if self.station.cancel.is_cancelled() {
                     return;
                 }
-                if let Err(error) = self.play(track).await {
+                if let Err(error) = self.play(track, &mut clock).await {
                     // A track that has been moved or is not what its extension
                     // claims should cost one track, not the station.
                     tracing::warn!(
@@ -463,8 +540,9 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         self.state.radio.stop(self.row.id).await;
     }
 
-    /// Play one track, in real time, to everyone listening.
-    async fn play(&self, track: &Track) -> Result<()> {
+    /// Play one track, in real time, to everyone listening. `clock` is the
+    /// station's, not this track's — see [`PlayoutClock`].
+    async fn play(&self, track: &Track, clock: &mut PlayoutClock) -> Result<()> {
         let mut reader = TrackReader::open(&track.path, self.station.codec).await?;
 
         // `send_replace` rather than `send`: what is playing is state the studio
@@ -483,10 +561,6 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         self.record_cursor(&track.path).await;
 
         let skips_at_start = self.station.skip_requests.load(Ordering::Relaxed);
-        // The clock restarts each track, which keeps a slow disk earlier in the
-        // stream from making a later track play early.
-        let anchor = Instant::now();
-        let mut audio_clock = Duration::ZERO;
         let mut chunk = BytesMut::with_capacity(CHUNK_BYTES + 2048);
         let mut chunk_time = Duration::ZERO;
 
@@ -498,16 +572,16 @@ impl<D: DatabaseManager + 'static> Playout<D> {
             self.accumulate(&mut chunk, &mut chunk_time, frame);
 
             if chunk.len() >= CHUNK_BYTES {
-                self.emit(&mut chunk, &mut chunk_time, &mut audio_clock);
-                if !self.wait(anchor, audio_clock, skips_at_start).await {
+                self.emit(&mut chunk, &mut chunk_time, clock);
+                if !self.wait(clock, skips_at_start).await {
                     return Ok(());
                 }
             }
         }
 
         if !chunk.is_empty() {
-            self.emit(&mut chunk, &mut chunk_time, &mut audio_clock);
-            self.wait(anchor, audio_clock, skips_at_start).await;
+            self.emit(&mut chunk, &mut chunk_time, clock);
+            self.wait(clock, skips_at_start).await;
         }
         Ok(())
     }
@@ -517,43 +591,34 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         *chunk_time += frame.duration;
     }
 
-    /// Send a chunk to every listener and remember it for the next one to join.
-    fn emit(&self, chunk: &mut BytesMut, chunk_time: &mut Duration, audio_clock: &mut Duration) {
+    /// Close off the chunk being accumulated, advance the station clock by the
+    /// audio it holds, and put it on the air.
+    fn emit(&self, chunk: &mut BytesMut, chunk_time: &mut Duration, clock: &mut PlayoutClock) {
         let bytes = chunk.split().freeze();
-        *audio_clock += *chunk_time;
+        clock.audio += *chunk_time;
         *chunk_time = Duration::ZERO;
 
-        // An error here only means nobody is listening, which is not a problem
-        // a station should react to: it stays on the air either way.
-        let _ = self.station.audio.send(bytes.clone());
-
-        if let Ok(mut burst) = self.station.burst.lock() {
-            let mut held: usize = burst.iter().map(Bytes::len).sum();
-            held += bytes.len();
-            burst.push_back(bytes);
-            while held > BURST_BYTES && burst.len() > 1 {
-                if let Some(dropped) = burst.pop_front() {
-                    held -= dropped.len();
-                }
-            }
-        }
+        self.station.publish(bytes);
     }
 
     /// Hold the stream to real time. Returns false if the track should end now.
-    async fn wait(&self, anchor: Instant, audio_clock: Duration, skips_at_start: u64) -> bool {
+    async fn wait(&self, clock: &mut PlayoutClock, skips_at_start: u64) -> bool {
         if self.station.skip_requests.load(Ordering::Relaxed) != skips_at_start {
             return false;
         }
 
-        let target = anchor + audio_clock.saturating_sub(LEAD);
+        let target = clock.due();
         let now = Instant::now();
         if target > now {
             tokio::select! {
                 _ = tokio::time::sleep(target - now) => {}
                 _ = self.station.cancel.cancelled() => return false,
             }
-        } else if self.station.cancel.is_cancelled() {
-            return false;
+        } else {
+            if self.station.cancel.is_cancelled() {
+                return false;
+            }
+            clock.resynchronise(now);
         }
         true
     }
@@ -698,5 +763,147 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(untagged.stream_title(), "track01");
+    }
+
+    /// A station for exercising the burst/live handover: no queue, no playout
+    /// task, just the channel and the burst that `publish` and `attach` share.
+    fn silent_station() -> Station {
+        let (audio, _) = broadcast::channel(CHANNEL_DEPTH);
+        let (now_playing, _) = watch::channel(NowPlaying::default());
+        Station {
+            id: 1,
+            name: "test".to_owned(),
+            genre: String::new(),
+            codec: Codec::Mp3,
+            skipped_files: 0,
+            queue_len: 0,
+            started_at: Instant::now(),
+            audio,
+            now_playing,
+            listeners: Arc::new(AtomicUsize::new(0)),
+            burst: Arc::new(Mutex::new(VecDeque::new())),
+            skip_requests: Arc::new(AtomicU64::new(0)),
+            cancel: CancellationToken::new(),
+        }
+    }
+
+    /// Whatever order a join and a chunk happen in, the listener hears that
+    /// chunk exactly once: once from the burst it copied, or once from the
+    /// channel it subscribed to, never both and never neither.
+    #[test]
+    fn joining_never_repeats_or_drops_a_chunk() {
+        // A barrier rather than a bare spawn: the window is a handful of
+        // instructions wide, and without lining the two threads up on it the
+        // publisher reliably finishes before the join even starts.
+        for _ in 0..5_000 {
+            let station = Arc::new(silent_station());
+            let gate = Arc::new(std::sync::Barrier::new(2));
+
+            let publisher = {
+                let station = Arc::clone(&station);
+                let gate = Arc::clone(&gate);
+                std::thread::spawn(move || {
+                    gate.wait();
+                    station.publish(Bytes::from_static(b"chunk"));
+                })
+            };
+            gate.wait();
+            let mut attachment = station.attach();
+            publisher.join().expect("publisher thread");
+
+            let mut heard = attachment.burst.len();
+            while let Ok(chunk) = attachment.audio.try_recv() {
+                assert_eq!(chunk, Bytes::from_static(b"chunk"));
+                heard += 1;
+            }
+            assert_eq!(heard, 1, "the chunk must be heard exactly once");
+        }
+    }
+
+    /// The handover is one critical section, not two. Holding the lock
+    /// `publish` holds pins `attach` at its start, so publishing a chunk from
+    /// here reproduces exactly the interleaving that used to double it: the bug
+    /// subscribed before taking the lock, so the waiting listener received this
+    /// chunk *and* then copied it out of the burst.
+    #[test]
+    fn a_chunk_published_across_a_join_is_heard_once() {
+        let station = Arc::new(silent_station());
+        let (ready, started) = std::sync::mpsc::channel();
+
+        let mut held = station.burst.lock().expect("burst lock");
+        let worker = {
+            let station = Arc::clone(&station);
+            std::thread::spawn(move || {
+                let _ = ready.send(());
+                station.attach()
+            })
+        };
+        started.recv().expect("attach thread starts");
+        // Long enough for that thread to reach the lock. Under the fix there is
+        // nothing before it to reach; the bug subscribed on the way. Either way
+        // a correct `attach` gives the same answer, so no timing here can make
+        // this test fail against code that holds the invariant.
+        std::thread::sleep(Duration::from_millis(200));
+
+        // The publishing half by hand, in the order `publish` does it.
+        let chunk = Bytes::from_static(b"chunk");
+        let _ = station.audio.send(chunk.clone());
+        held.push_back(chunk);
+        drop(held);
+
+        let mut attachment = worker.join().expect("attach thread");
+        let mut heard = attachment.burst.len();
+        while attachment.audio.try_recv().is_ok() {
+            heard += 1;
+        }
+        assert_eq!(heard, 1, "the chunk must be heard exactly once");
+    }
+
+    /// The lead is the station's to take once. Taking it again at every track
+    /// boundary pushed the station a further two seconds ahead of its listeners
+    /// per track, so a long enough station ran arbitrarily far ahead of itself.
+    #[test]
+    fn the_lead_is_taken_once_for_the_station_not_once_per_track() {
+        let mut clock = PlayoutClock::new();
+        let anchor = clock.anchor;
+        let chunk = Duration::from_millis(500);
+
+        // Four tracks of two seconds each. Nothing about a track boundary is
+        // visible to the clock, which is the point.
+        let tracks = 4u32;
+        let chunks_per_track = 4u32;
+        for _ in 0..tracks {
+            for _ in 0..chunks_per_track {
+                clock.audio += chunk;
+            }
+        }
+
+        let played = chunk * tracks * chunks_per_track;
+        assert_eq!(
+            clock.due(),
+            anchor + played - LEAD,
+            "the whole station runs exactly one lead ahead of real time"
+        );
+        // The shape the bug produced, for contrast: one lead per track.
+        assert_ne!(clock.due(), anchor + played - LEAD * tracks);
+    }
+
+    /// Reading that falls far behind must not be caught up by dumping audio at
+    /// listeners as fast as it comes off the disk.
+    #[test]
+    fn a_reader_that_stalls_re_anchors_instead_of_racing_to_catch_up() {
+        let mut clock = PlayoutClock::new();
+        clock.audio = Duration::from_secs(10);
+        let due = clock.due();
+
+        // A hiccup inside the lead is absorbed: the station keeps its place.
+        clock.resynchronise(due + LEAD);
+        assert_eq!(clock.due(), due, "a small stall does not move the anchor");
+
+        // A longer one re-anchors to now, so the next chunk is due immediately
+        // and no more than that.
+        let now = due + LEAD + Duration::from_secs(30);
+        clock.resynchronise(now);
+        assert_eq!(clock.due(), now);
     }
 }

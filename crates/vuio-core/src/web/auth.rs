@@ -31,6 +31,10 @@ const MAX_MANAGEMENT_CONCURRENCY: usize = 32;
 struct Session {
     peer: IpAddr,
     expires_at: Instant,
+    /// Which admin token this session was minted against. A session outlives a
+    /// change of that token only if the two still agree, so rotating a leaked
+    /// token also revokes the access it already bought.
+    token_generation: u64,
 }
 
 /// The parts of `[management]` that can change while the server runs.
@@ -40,6 +44,11 @@ struct Session {
 #[derive(Debug)]
 struct ManagementSettings {
     admin_token: String,
+    /// Incremented by [`AuthState::apply`] whenever `admin_token` changes.
+    /// Read under the same lock as the token it describes, so a login that
+    /// raced a rotation stamps its session with the generation it actually
+    /// authenticated against rather than the one that replaced it.
+    token_generation: u64,
     session_ttl: Duration,
     allowed_networks: Vec<IpNet>,
     token_path: PathBuf,
@@ -148,6 +157,7 @@ impl AuthState {
             forced_on,
             settings: std::sync::RwLock::new(ManagementSettings {
                 admin_token,
+                token_generation: 0,
                 session_ttl: session_ttl(config),
                 allowed_networks,
                 token_path,
@@ -182,11 +192,29 @@ impl AuthState {
             .settings
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        let token_rotated = settings.admin_token != admin_token;
         settings.admin_token = admin_token;
+        if token_rotated {
+            settings.token_generation = settings.token_generation.wrapping_add(1);
+        }
         settings.session_ttl = session_ttl(config);
         settings.allowed_networks = allowed_networks;
         settings.token_path = token_path;
         drop(settings);
+
+        if token_rotated {
+            // Cookies issued under the old token are already refused by the
+            // generation check in `session_from_headers`; this only stops the
+            // dead entries counting towards `MAX_SESSIONS`. A login that read
+            // the old token before the write lock above may still insert after
+            // this clear, which is why the check, not the clear, is what
+            // enforces the revocation.
+            self.sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            tracing::warn!("Management token changed; existing sessions revoked");
+        }
 
         // `forced_on` wins: a config file must not be able to switch off auth that
         // --auth or VUIO_AUTH asked for.
@@ -215,6 +243,7 @@ impl AuthState {
             forced_on: true,
             settings: std::sync::RwLock::new(ManagementSettings {
                 admin_token: "test-management-token-which-is-long-enough".to_owned(),
+                token_generation: 0,
                 session_ttl: Duration::from_secs(3600),
                 allowed_networks: Vec::new(),
                 token_path: PathBuf::from("admin.token"),
@@ -254,12 +283,13 @@ impl AuthState {
         }
     }
 
-    /// Constant-time comparison against the current admin token.
-    fn token_matches(&self, candidate: &str) -> bool {
-        constant_time_eq(
-            candidate.as_bytes(),
-            self.settings_read().admin_token.as_bytes(),
-        )
+    /// Constant-time comparison against the current admin token, yielding the
+    /// generation of the token that matched so a caller minting a session
+    /// records the credential it really checked.
+    fn token_matches(&self, candidate: &str) -> Option<u64> {
+        let settings = self.settings_read();
+        constant_time_eq(candidate.as_bytes(), settings.admin_token.as_bytes())
+            .then_some(settings.token_generation)
     }
 
     /// Whether the request carries the admin token as a bearer credential.
@@ -272,12 +302,13 @@ impl AuthState {
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|token| self.token_matches(token))
+            .is_some_and(|token| self.token_matches(token).is_some())
     }
 
     fn session_from_headers(&self, headers: &HeaderMap, peer: IpAddr) -> Option<String> {
         let token = cookie_value(headers, "vuio_session")?;
         let now = Instant::now();
+        let generation = self.settings_read().token_generation;
         let mut sessions = self
             .sessions
             .lock()
@@ -285,7 +316,11 @@ impl AuthState {
         sessions.retain(|_, session| session.expires_at > now);
         sessions
             .get(&token)
-            .filter(|session| session.peer == peer && session.expires_at > now)
+            .filter(|session| {
+                session.peer == peer
+                    && session.expires_at > now
+                    && session.token_generation == generation
+            })
             .map(|_| token)
     }
 
@@ -322,8 +357,12 @@ impl AuthState {
         true
     }
 
-    fn create_session(&self, peer: IpAddr) -> Option<String> {
+    /// `token_generation` is the one [`AuthState::token_matches`] reported for
+    /// the credential this login presented, not the one current at insert time
+    /// — a rotation in between must leave the new session dead on arrival.
+    fn create_session(&self, peer: IpAddr, token_generation: u64) -> Option<String> {
         let now = Instant::now();
+        let session_ttl = self.settings_read().session_ttl;
         let mut sessions = self
             .sessions
             .lock()
@@ -337,7 +376,8 @@ impl AuthState {
             token.clone(),
             Session {
                 peer,
-                expires_at: now + self.settings_read().session_ttl,
+                expires_at: now + session_ttl,
+                token_generation,
             },
         );
         Some(token)
@@ -714,10 +754,10 @@ pub async fn login<D: DatabaseManager>(
     if !state.auth.rate_limit_login(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    if !state.auth.token_matches(&request.token) {
+    let Some(token_generation) = state.auth.token_matches(&request.token) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(session) = state.auth.create_session(peer.ip()) else {
+    };
+    let Some(session) = state.auth.create_session(peer.ip(), token_generation) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
@@ -937,5 +977,98 @@ mod tests {
     fn management_auth_defaults_off() {
         assert!(!ManagementConfig::default().enabled);
         assert!(!crate::config::AppConfig::default_for_platform().management.enabled);
+    }
+    /// Rotating a leaked management token has to revoke the access it already
+    /// bought: a cookie minted under the old token must stop working the moment
+    /// the new one is loaded, while a login against the new token still works.
+    #[test]
+    fn rotating_the_token_revokes_existing_sessions() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+
+        let token_a = temp_dir.path().join("a.token");
+        let token_b = temp_dir.path().join("b.token");
+        write_private_token(&token_a, &"a".repeat(40)).expect("write a");
+        write_private_token(&token_b, &"b".repeat(40)).expect("write b");
+
+        let config_with = |path: &Path| ManagementConfig {
+            enabled: true,
+            token_file: Some(path.display().to_string()),
+            ..ManagementConfig::default()
+        };
+
+        let auth =
+            AuthState::load(&config_with(&token_a), &config_path, true).expect("auth state");
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let generation = auth.token_matches(&"a".repeat(40)).expect("token a matches");
+        let session = auth.create_session(peer, generation).expect("session");
+        let cookie = |session: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::COOKIE,
+                format!("vuio_session={session}").parse().unwrap(),
+            );
+            headers
+        };
+        assert!(
+            auth.session_from_headers(&cookie(&session), peer).is_some(),
+            "the session works under the token it was issued with"
+        );
+
+        auth.apply(&config_with(&token_b), &config_path)
+            .expect("rotate to token b");
+
+        assert!(
+            auth.session_from_headers(&cookie(&session), peer).is_none(),
+            "a cookie issued under the old token must not survive rotation"
+        );
+        assert!(auth.token_matches(&"a".repeat(40)).is_none());
+
+        let generation = auth.token_matches(&"b".repeat(40)).expect("token b matches");
+        let session = auth.create_session(peer, generation).expect("session");
+        assert!(
+            auth.session_from_headers(&cookie(&session), peer).is_some(),
+            "the new token still logs in"
+        );
+    }
+
+    /// A login that validated the old token but inserted its session after the
+    /// rotation had already swept the map must not end up authenticated — the
+    /// generation it carries, not the sweep, is what revokes it.
+    #[test]
+    fn a_login_racing_a_rotation_does_not_retain_authority() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let token_a = temp_dir.path().join("a.token");
+        let token_b = temp_dir.path().join("b.token");
+        write_private_token(&token_a, &"a".repeat(40)).expect("write a");
+        write_private_token(&token_b, &"b".repeat(40)).expect("write b");
+
+        let config_with = |path: &Path| ManagementConfig {
+            enabled: true,
+            token_file: Some(path.display().to_string()),
+            ..ManagementConfig::default()
+        };
+        let auth =
+            AuthState::load(&config_with(&token_a), &config_path, true).expect("auth state");
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // The order a racing login would produce: check the token, rotate, then
+        // insert the session.
+        let generation = auth.token_matches(&"a".repeat(40)).expect("token a matches");
+        auth.apply(&config_with(&token_b), &config_path)
+            .expect("rotate to token b");
+        let session = auth.create_session(peer, generation).expect("session");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("vuio_session={session}").parse().unwrap(),
+        );
+        assert!(
+            auth.session_from_headers(&headers, peer).is_none(),
+            "a session minted against the superseded token carries no authority"
+        );
     }
 }
