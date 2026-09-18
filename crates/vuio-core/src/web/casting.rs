@@ -1,7 +1,7 @@
 //! TV discovery and dashboard playlist-casting API handlers.
 
 pub(crate) mod helpers;
-pub use helpers::{cast_file_helper, cast_playlist_helper, cast_tracks_helper};
+pub use helpers::{cast_file_helper, cast_tracks_helper};
 
 use crate::{
     database::{DatabaseManager, FileLocation, MediaFileView},
@@ -333,48 +333,48 @@ pub(crate) fn is_castable_mime(mime: &str) -> bool {
         )
 }
 
-async fn create_and_cast_playlist<D: DatabaseManager + 'static>(
+/// Cast an explicit list of files, in the order the caller gave them.
+///
+/// It used to build a real playlist to do this — "Web Cast - <folder>", written to the
+/// database, handed to the renderer, and then deleted only if the cast had failed. On
+/// success it stayed, so every cast through this endpoint left another one behind:
+/// visible to every DLNA client under Music → Playlists, duplicated on each repeat, and
+/// costing a ContentDirectory revision (and every browse cache with it) coming and
+/// going. The API reference has always described the playlist as temporary.
+///
+/// Nothing needed it to be a row. `cast_tracks_helper` resolves the files to URLs before
+/// it returns, and the queue monitor it spawns carries its own copy of the list, so the
+/// playlist was written, read once, and left. The files are resolved directly now and
+/// the library is not touched at all.
+async fn cast_file_ids<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     renderer_id: &str,
     folder_name: &str,
     file_ids: &[i64],
 ) -> Result<serde_json::Value, String> {
-    let playlist_name = format!("Web Cast - {folder_name}");
-    let playlist_id = state
-        .database
-        .create_playlist(&playlist_name, None)
-        .await
-        .map_err(|error| format!("Failed to create cast playlist: {error}"))?;
-    let tracks = file_ids
-        .iter()
-        .enumerate()
-        .map(|(position, id)| (*id, position as u32))
-        .collect::<Vec<_>>();
-    if let Err(error) = state
-        .database
-        .batch_add_to_playlist(playlist_id, &tracks)
-        .await
-    {
-        let _ = state.database.delete_playlist(playlist_id).await;
-        return Err(format!("Failed to create cast playlist: {error}"));
-    }
-    crate::web::eventing::publish_content_change(state).await;
-    match cast_playlist_helper(state, playlist_id, renderer_id, 0).await {
-        Ok(value) => Ok(value),
-        Err(error) => {
-            let _ = state.database.delete_playlist(playlist_id).await;
-            crate::web::eventing::publish_content_change(state).await;
-            Err(error)
+    let mut tracks = Vec::with_capacity(file_ids.len());
+    for file_id in file_ids {
+        // A file that has gone since the page listing it was drawn is skipped rather
+        // than failing the cast, which is what dropping it from a playlist would have
+        // done: `MediaFileQuery::Playlist` returns the rows that are still there.
+        match state.database.get_file_location_by_id(*file_id).await {
+            Ok(Some(file)) if is_castable_mime(&file.mime_type) => tracks.push(file),
+            Ok(_) => {}
+            Err(error) => return Err(format!("Database error: {error}")),
         }
     }
+    if tracks.is_empty() {
+        return Err(format!("Nothing castable was found in '{folder_name}'"));
+    }
+    cast_tracks_helper(state, tracks, renderer_id, 0).await
 }
 
-/// Create a temporary playlist with the provided video files and cast it to the device.
+/// Cast the provided files to the device as a queue.
 pub async fn api_cast_playlist<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     axum::Json(payload): axum::Json<ApiCastPlaylistRequest>,
 ) -> impl IntoResponse {
-    match create_and_cast_playlist(
+    match cast_file_ids(
         &state,
         &payload.renderer_id,
         &payload.folder_name,

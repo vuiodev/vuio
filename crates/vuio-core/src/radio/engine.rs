@@ -34,7 +34,7 @@ use anyhow::{bail, Result};
 use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{broadcast, watch};
@@ -99,6 +99,10 @@ pub struct Station {
     burst: Arc<Mutex<VecDeque<Bytes>>>,
     /// Bumped to ask the playout task to move on to the next track.
     skip_requests: Arc<AtomicU64>,
+    /// Consecutive passes over the queue that produced no audio at all, which is
+    /// what a station whose files have gone looks like from in here. Reset by the
+    /// first chunk that goes out. See [`Playout::run`].
+    silent_passes: Arc<AtomicU32>,
     cancel: CancellationToken,
 }
 
@@ -149,6 +153,7 @@ impl Station {
             listeners: Arc::new(AtomicUsize::new(0)),
             burst: Arc::new(Mutex::new(VecDeque::new())),
             skip_requests: Arc::new(AtomicU64::new(0)),
+            silent_passes: Arc::new(AtomicU32::new(0)),
             cancel: cancel.clone(),
         });
 
@@ -233,6 +238,15 @@ impl Station {
 
     pub fn listeners(&self) -> usize {
         self.listeners.load(Ordering::Relaxed)
+    }
+
+    /// How many passes over the queue in a row have produced no audio.
+    ///
+    /// Zero for a station that is playing. Anything else means every track was
+    /// unreadable — an unmounted share, a folder emptied under it — and the
+    /// playout task is waiting before trying the queue again.
+    pub fn silent_passes(&self) -> u32 {
+        self.silent_passes.load(Ordering::Relaxed)
     }
 
     /// Ask the playout task to move on to the next track.
@@ -453,6 +467,14 @@ impl PlayoutClock {
     }
 }
 
+/// How long to wait after the nth consecutive pass that broadcast nothing.
+fn silent_pass_backoff(passes: u32) -> Duration {
+    const FIRST_SECONDS: u64 = 5;
+    const LONGEST_SECONDS: u64 = 60;
+    let doublings = passes.clamp(1, 6) - 1;
+    Duration::from_secs((FIRST_SECONDS << doublings).min(LONGEST_SECONDS))
+}
+
 impl<D: DatabaseManager + 'static> Playout<D> {
     async fn run(mut self) {
         tracing::info!(
@@ -478,19 +500,33 @@ impl<D: DatabaseManager + 'static> Playout<D> {
             }
 
             let queue = std::mem::take(&mut self.tracks);
+            let quiet_so_far = self.station.silent_passes() > 0;
+            let mut broadcast_something = false;
             for track in &queue {
                 if self.station.cancel.is_cancelled() {
                     return;
                 }
-                if let Err(error) = self.play(track, &mut clock).await {
+                match self.play(track, &mut clock).await {
+                    Ok(chunks) => broadcast_something |= chunks > 0,
                     // A track that has been moved or is not what its extension
-                    // claims should cost one track, not the station.
-                    tracing::warn!(
+                    // claims should cost one track, not the station. Once a whole
+                    // pass has failed this drops to debug: a station whose share
+                    // has gone would otherwise write one warning per track per
+                    // pass, for as long as it stays gone.
+                    Err(error) if !quiet_so_far => tracing::warn!(
                         station = %self.row.name,
                         path = %track.path.display(),
                         "Skipping a track that could not be broadcast: {error:#}"
-                    );
+                    ),
+                    Err(error) => tracing::debug!(
+                        station = %self.row.name,
+                        path = %track.path.display(),
+                        "Skipping a track that could not be broadcast: {error:#}"
+                    ),
                 }
+            }
+            if broadcast_something {
+                self.station.silent_passes.store(0, Ordering::Relaxed);
             }
 
             match self.row.mode {
@@ -505,6 +541,18 @@ impl<D: DatabaseManager + 'static> Playout<D> {
                 // Rebuilding rather than replaying picks up anything added to
                 // the folders since the station started.
                 BroadcastMode::Loop | BroadcastMode::Shuffle => {
+                    // A pass that broadcast nothing and a pass that broadcast a
+                    // queue are the same shape from here, and going straight
+                    // round again is only right for the second. A station whose
+                    // files have gone — an unmounted share, a folder emptied
+                    // under it — failed to open every track, rebuilt the queue
+                    // from rows that are all still there, and started over, with
+                    // nothing anywhere on that path that waits. It span a core
+                    // and wrote a warning per track per turn until the disk
+                    // filled or someone stopped it.
+                    if !broadcast_something && !self.wait_out_a_silent_pass().await {
+                        return;
+                    }
                     self.row.cursor_path = None;
                     match build_queue(&self.state, &self.row).await {
                         Ok(plan) => {
@@ -527,6 +575,33 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         }
     }
 
+    /// Wait before trying a queue that produced nothing again.
+    ///
+    /// Returns false if the station was taken off the air while waiting. The wait
+    /// grows — five seconds, then ten, twenty, forty, and a minute from then on —
+    /// so a share that comes back is picked up quickly and one that does not costs
+    /// a query a minute.
+    async fn wait_out_a_silent_pass(&self) -> bool {
+        let passes = self
+            .station
+            .silent_passes
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let wait = silent_pass_backoff(passes);
+        // Once, on the pass that discovered it, rather than once per track.
+        if passes == 1 {
+            tracing::warn!(
+                station = %self.row.name,
+                seconds = wait.as_secs(),
+                "Nothing in this station's queue could be broadcast; waiting before trying again"
+            );
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(wait) => true,
+            _ = self.station.cancel.cancelled() => false,
+        }
+    }
+
     /// Take the station off the air for good, so a restart does not resume it.
     async fn stop_permanently(&self) {
         if let Err(error) = self
@@ -542,7 +617,7 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
     /// Play one track, in real time, to everyone listening. `clock` is the
     /// station's, not this track's — see [`PlayoutClock`].
-    async fn play(&self, track: &Track, clock: &mut PlayoutClock) -> Result<()> {
+    async fn play(&self, track: &Track, clock: &mut PlayoutClock) -> Result<usize> {
         let mut reader = TrackReader::open(&track.path, self.station.codec).await?;
 
         // `send_replace` rather than `send`: what is playing is state the studio
@@ -563,6 +638,7 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         let skips_at_start = self.station.skip_requests.load(Ordering::Relaxed);
         let mut chunk = BytesMut::with_capacity(CHUNK_BYTES + 2048);
         let mut chunk_time = Duration::ZERO;
+        let mut emitted = 0usize;
 
         loop {
             let frame = match reader.next_frame().await? {
@@ -573,17 +649,19 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
             if chunk.len() >= CHUNK_BYTES {
                 self.emit(&mut chunk, &mut chunk_time, clock);
+                emitted += 1;
                 if !self.wait(clock, skips_at_start).await {
-                    return Ok(());
+                    return Ok(emitted);
                 }
             }
         }
 
         if !chunk.is_empty() {
             self.emit(&mut chunk, &mut chunk_time, clock);
+            emitted += 1;
             self.wait(clock, skips_at_start).await;
         }
-        Ok(())
+        Ok(emitted)
     }
 
     fn accumulate(&self, chunk: &mut BytesMut, chunk_time: &mut Duration, frame: Frame) {
@@ -664,6 +742,23 @@ impl SplitMix64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The wait after a fruitless pass: quick enough that a share coming back is
+    /// picked up while someone is still standing at the hi-fi, long enough that a
+    /// station whose folder has gone costs one query a minute rather than a core.
+    #[test]
+    fn the_silent_pass_backoff_grows_and_settles() {
+        let seconds = |passes| silent_pass_backoff(passes).as_secs();
+        assert_eq!(seconds(1), 5);
+        assert_eq!(seconds(2), 10);
+        assert_eq!(seconds(3), 20);
+        assert_eq!(seconds(4), 40);
+        assert_eq!(seconds(5), 60);
+        assert_eq!(seconds(100), 60, "and never longer than a minute");
+        // Nothing calls it with zero, but a schedule that starts by not waiting
+        // at all would be the bug this exists to fix.
+        assert_eq!(seconds(0), 5);
+    }
 
     #[test]
     fn a_seed_reproduces_its_shuffle() {
@@ -783,6 +878,7 @@ mod tests {
             listeners: Arc::new(AtomicUsize::new(0)),
             burst: Arc::new(Mutex::new(VecDeque::new())),
             skip_requests: Arc::new(AtomicU64::new(0)),
+            silent_passes: Arc::new(AtomicU32::new(0)),
             cancel: CancellationToken::new(),
         }
     }
