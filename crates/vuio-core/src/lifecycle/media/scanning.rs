@@ -209,10 +209,26 @@ pub(in crate::lifecycle) fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+/// Mark library roots that have gone offline, and eventually drop what they held.
+///
+/// `cleanup_enabled` is `media.cleanup_deleted_files`, taken here for the same reason
+/// [`validate_and_cleanup_deleted_files`] takes it: "do not remove anything from the
+/// index automatically" has to mean every automatic removal, and this one is the
+/// largest of them. It used to remove regardless — so an operator who had switched
+/// automatic cleanup off still lost a whole library's rows, and with them the playlist
+/// entries and scraped metadata that cascade off those row identifiers, because a NAS
+/// was unplugged for a week. The files were never gone; only the mount was.
+///
+/// `grace_hours` of zero means never, as `media.full_rescan_interval_hours` of zero
+/// means never. It used to mean *immediately*: the comparison is `>=`, so a root that
+/// failed a single `read_dir` — a network hiccup, a mount that had not come up yet, a
+/// folder momentarily empty — had everything indexed under it deleted by the next
+/// five-minute tick.
 pub(in crate::lifecycle) async fn reconcile_unavailable_media_roots<D: DatabaseManager>(
     database: &Arc<D>,
     roots: &[PathBuf],
     grace_hours: u64,
+    cleanup_enabled: bool,
 ) -> anyhow::Result<usize> {
     let now = unix_now_secs();
     let grace_secs = grace_hours.saturating_mul(3600);
@@ -260,9 +276,16 @@ pub(in crate::lifecycle) async fn reconcile_unavailable_media_roots<D: DatabaseM
             .await?;
 
         let permission_denied = reason.starts_with("permission denied");
-        if !permission_denied && now.saturating_sub(unavailable_since) >= grace_secs {
+        let past_grace = grace_secs > 0 && now.saturating_sub(unavailable_since) >= grace_secs;
+        if cleanup_enabled && !permission_denied && past_grace {
             removed += database.remove_derived_content_by_source(root).await?;
             removed += database.remove_media_under_path(root).await?.removed_files;
+        } else if !cleanup_enabled && !permission_denied && past_grace {
+            debug!(
+                "Library {} has been offline past its grace period; keeping its index \
+                 because cleanup_deleted_files is off",
+                root.display()
+            );
         }
     }
     Ok(removed)
@@ -337,6 +360,7 @@ pub(in crate::lifecycle) async fn perform_initial_media_scan<D: DatabaseManager 
         database,
         &configured_roots,
         config.media.unavailable_root_grace_hours,
+        config.media.cleanup_deleted_files,
     )
     .await?;
     if hidden > 0 {
@@ -600,6 +624,72 @@ mod tests {
         .expect("cleanup");
         assert_eq!(removed, 2);
         assert_eq!(indexed_paths(&database).await, vec![canonical_root(&present)]);
+    }
+
+    /// An offline library whose grace has run out: the state the removal below is
+    /// guarded on, seeded rather than waited for.
+    async fn offline_past_grace() -> (Arc<SqliteDatabase>, PathBuf, PathBuf, tempfile::TempDir) {
+        let root = tempfile::TempDir::new().expect("root");
+        let file = root.path().join("on-the-nas.mp4");
+        std::fs::write(&file, b"x").expect("write");
+        let (database, temp) = database_with(std::slice::from_ref(&file)).await;
+        let stored = canonical_root(&file);
+        let offline = root.path().to_path_buf();
+
+        database
+            .set_root_availability(&database::RootAvailability {
+                path: offline.clone(),
+                last_seen_secs: 0,
+                // Eight days, against the seven-day default.
+                unavailable_since_secs: Some(unix_now_secs().saturating_sub(8 * 24 * 3600)),
+                indexed_count: 1,
+                reason: "not connected: the share is not mounted".to_owned(),
+            })
+            .await
+            .expect("availability");
+
+        // Unmount it: `read_dir` now fails, which is what makes the root unavailable.
+        drop(root);
+        (database, offline, stored, temp)
+    }
+
+    /// `cleanup_deleted_files = false` has to stop this removal too. It did not, and
+    /// this is the largest automatic removal there is: a whole library's rows, and with
+    /// them the playlist entries and fetched metadata that cascade off those row
+    /// identifiers. A NAS unplugged for a week emptied the playlists that referenced it
+    /// on a server explicitly told to remove nothing by itself.
+    #[tokio::test]
+    async fn an_offline_library_survives_its_grace_when_cleanup_is_off() {
+        let (database, offline, stored, _temp) = offline_past_grace().await;
+
+        let removed = reconcile_unavailable_media_roots(&database, &[offline.clone()], 168, false)
+            .await
+            .expect("reconcile");
+
+        assert_eq!(removed, 0, "nothing is removed automatically");
+        assert_eq!(indexed_paths(&database).await, vec![stored.clone()]);
+
+        // And with it on, the same call removes the library, as it always has.
+        let removed = reconcile_unavailable_media_roots(&database, &[offline], 168, true)
+            .await
+            .expect("reconcile");
+        assert_eq!(removed, 1);
+        assert!(indexed_paths(&database).await.is_empty());
+    }
+
+    /// Zero hours means never, as zero means never for the full rescan interval. It
+    /// used to mean immediately — `now - since >= 0` is always true — so one failed
+    /// `read_dir` on a flaky mount dropped the whole library on the next tick.
+    #[tokio::test]
+    async fn a_zero_grace_period_keeps_an_offline_library_indefinitely() {
+        let (database, offline, stored, _temp) = offline_past_grace().await;
+
+        let removed = reconcile_unavailable_media_roots(&database, &[offline], 0, true)
+            .await
+            .expect("reconcile");
+
+        assert_eq!(removed, 0);
+        assert_eq!(indexed_paths(&database).await, vec![stored]);
     }
 
     /// A configured library that is offline is not the same as one that was removed:

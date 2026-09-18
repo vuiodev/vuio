@@ -88,7 +88,7 @@ watch_for_changes = true   # Enable real-time file system monitoring
 cleanup_deleted_files = true # Auto-remove missing files from the database
 autoplay_enabled = true    # Let renderers continue to next item in folder automatically
 scan_playlists = true      # Discover and import M3U/M3U8 and PLS playlists
-unavailable_root_grace_hours = 168 # Hours an offline library root keeps its indexed content (default: 7 days)
+unavailable_root_grace_hours = 168 # Hours an offline library root keeps its indexed content; 0 keeps it forever (default: 7 days)
 supported_extensions = ["mp4", "mkv", "avi", "mov", "mp3", "flac", "wav", "m4a", "jpg", "png"]
 ```
 

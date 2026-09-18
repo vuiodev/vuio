@@ -269,15 +269,20 @@ const MEDIA_FIELDS: &[FieldSpec] = &[
         Impact::Live,
         "Read .m3u and .pls files found in the libraries.",
     ),
-    optional(
-        "media.unavailable_root_grace_hours",
-        "Offline library grace",
-        FieldKind::Int {
-            min: 1,
-            max: 8_760,
-        },
-        Impact::Live,
-        "How long a library that has gone offline keeps its indexed content before it is dropped.",
+    noted(
+        optional(
+            "media.unavailable_root_grace_hours",
+            "Offline library grace",
+            FieldKind::Int {
+                min: 0,
+                max: 8_760,
+            },
+            Impact::Live,
+            "How long a library that has gone offline keeps its indexed content before it is dropped.",
+        ),
+        "0 keeps it indefinitely. Dropping it also drops the playlist entries and fetched \
+         metadata that hang off those files, and nothing is dropped at all while \
+         \"Remove deleted files\" is off.",
     ),
     noted(
         optional(
