@@ -499,8 +499,14 @@ mod tests {
             Some("b".repeat(64)),
             "the binary-mode spelling names the same file"
         );
-        assert_eq!(super::digest_from_manifest(&sums, "vuio-windows-x86_64.exe"), None);
-        assert_eq!(super::digest_from_manifest("", "vuio-linux-x86_64.tar.gz"), None);
+        assert_eq!(
+            super::digest_from_manifest(&sums, "vuio-windows-x86_64.exe"),
+            None
+        );
+        assert_eq!(
+            super::digest_from_manifest("", "vuio-linux-x86_64.tar.gz"),
+            None
+        );
     }
 
     #[test]
