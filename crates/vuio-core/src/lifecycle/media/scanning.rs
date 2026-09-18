@@ -662,7 +662,8 @@ mod tests {
     async fn an_offline_library_survives_its_grace_when_cleanup_is_off() {
         let (database, offline, stored, _temp) = offline_past_grace().await;
 
-        let removed = reconcile_unavailable_media_roots(&database, &[offline.clone()], 168, false)
+        let removed =
+            reconcile_unavailable_media_roots(&database, std::slice::from_ref(&offline), 168, false)
             .await
             .expect("reconcile");
 
