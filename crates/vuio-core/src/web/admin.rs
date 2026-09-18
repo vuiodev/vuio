@@ -192,8 +192,9 @@ const NETWORK_FIELDS: &[FieldSpec] = &[
             Impact::Live,
             "Auto, All, or a specific interface name or address.",
         ),
-        "Only affects the address advertised in media URLs. It does not choose which \
-         interface SSDP binds to.",
+        "Chooses the interfaces SSDP joins the discovery group on and announces from. \
+         All covers every interface that is up and can carry multicast, which is what \
+         a host with two networks needs for both to find the server.",
     ),
     noted(
         field(
