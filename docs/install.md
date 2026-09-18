@@ -321,3 +321,8 @@ VuIO features a built-in self-updater. To update an existing installed binary to
 ```bash
 vuio --update
 ```
+
+What it downloads is checked against the SHA-256 the release publishes for it — the
+digest GitHub records for every asset, or the `SHA256SUMS` file beside them — before
+anything is written into the installation. A release that publishes neither, or an
+asset that does not match, is refused and the installed binary is left alone.

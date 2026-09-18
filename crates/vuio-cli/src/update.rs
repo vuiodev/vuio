@@ -15,7 +15,16 @@ struct GithubRelease {
 struct GithubAsset {
     name: String,
     browser_download_url: String,
+    /// `sha256:<hex>`, computed by GitHub itself when the asset was uploaded.
+    /// Absent on assets old enough to predate the field, which is what the
+    /// `SHA256SUMS` fallback below is for.
+    #[serde(default)]
+    digest: Option<String>,
 }
+
+/// The checksum manifest published beside the release assets, for assets that
+/// carry no digest of their own. Written by the release workflow.
+const CHECKSUM_ASSET: &str = "SHA256SUMS";
 
 /// Helper function to detect the correct asset name for the current platform
 fn get_target_asset_name() -> Option<&'static str> {
@@ -74,6 +83,104 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
         }
     }
     false
+}
+
+/// The SHA-256 an asset is expected to hash to, as lowercase hex.
+///
+/// Nothing about the download used to be checked beyond the HTTP status: whatever
+/// answered for the asset URL was extracted, made executable and renamed over the
+/// running binary. A release that was replaced, an account that was taken, a proxy
+/// with a certificate the machine trusts — any of them was code execution on a host
+/// that had only asked for an update.
+///
+/// Preferred source is the digest GitHub computes for every asset it stores, because
+/// it needs no second request and is not something a mirror can restate. The manifest
+/// is the fallback, for assets uploaded before that field existed.
+async fn expected_digest(
+    client: &reqwest::Client,
+    release: &GithubRelease,
+    asset: &GithubAsset,
+) -> Result<String> {
+    if let Some(digest) = asset.digest.as_deref().and_then(parse_sha256_digest) {
+        return Ok(digest);
+    }
+
+    let Some(manifest) = release
+        .assets
+        .iter()
+        .find(|candidate| candidate.name == CHECKSUM_ASSET)
+    else {
+        return Err(anyhow!(
+            "Release {} publishes no checksum for {}, so it cannot be verified. \
+             Download and install it by hand if you trust it.",
+            release.tag_name,
+            asset.name
+        ));
+    };
+
+    let body = client
+        .get(&manifest.browser_download_url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to download {CHECKSUM_ASSET}"))?
+        .error_for_status()
+        .with_context(|| format!("Failed to download {CHECKSUM_ASSET}"))?
+        .text()
+        .await
+        .with_context(|| format!("Failed to read {CHECKSUM_ASSET}"))?;
+
+    digest_from_manifest(&body, &asset.name).ok_or_else(|| {
+        anyhow!(
+            "{CHECKSUM_ASSET} in release {} has no entry for {}",
+            release.tag_name,
+            asset.name
+        )
+    })
+}
+
+/// `sha256:<64 hex>` as GitHub writes it, lowercased. Any other algorithm is
+/// refused rather than ignored: an unrecognised prefix must not read as "no digest".
+fn parse_sha256_digest(value: &str) -> Option<String> {
+    let hex = value.trim().strip_prefix("sha256:")?.trim();
+    is_sha256_hex(hex).then(|| hex.to_ascii_lowercase())
+}
+
+/// One entry out of a `sha256sum` manifest: `<hex>  <name>`, or `<hex> *<name>`
+/// for the binary-mode spelling. Lines for other assets, and anything that is not
+/// an entry, are skipped.
+fn digest_from_manifest(manifest: &str, asset_name: &str) -> Option<String> {
+    manifest.lines().find_map(|line| {
+        let (hex, name) = line.split_once(char::is_whitespace)?;
+        let name = name.trim().trim_start_matches('*');
+        (name == asset_name && is_sha256_hex(hex)).then(|| hex.to_ascii_lowercase())
+    })
+}
+
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Refuse anything that is not byte-for-byte what the release says it is.
+fn verify_download(bytes: &[u8], expected: &str, asset_name: &str) -> Result<()> {
+    let actual = sha256_hex(bytes);
+    if actual != expected {
+        return Err(anyhow!(
+            "{asset_name} does not match the checksum published for it. \
+             Expected {expected}, got {actual}. Nothing has been installed."
+        ));
+    }
+    Ok(())
 }
 
 /// Run the update process.
@@ -136,6 +243,10 @@ pub async fn update_binary() -> Result<()> {
             )
         })?;
 
+    // Asked for before the download, so a release that cannot be verified costs
+    // nothing but the question.
+    let expected_digest = expected_digest(&client, &release, asset).await?;
+
     println!(
         "Downloading release from {} ...",
         asset.browser_download_url
@@ -165,6 +276,11 @@ pub async fn update_binary() -> Result<()> {
         .bytes()
         .await
         .context("Failed to read downloaded bytes")?;
+    // Before it is written anywhere, let alone extracted or executed.
+    verify_download(&bytes, &expected_digest, &asset.name).inspect_err(|_| {
+        let _ = fs::remove_dir_all(&temp_dir_path);
+    })?;
+    println!("Checksum verified: sha256:{expected_digest}");
     fs::write(&downloaded_file_path, bytes).context("Failed to write downloaded file")?;
     println!(
         "Downloaded asset saved to {}",
@@ -328,6 +444,64 @@ fn staging_path(current_exe: &Path) -> PathBuf {
 mod tests {
     use super::{is_newer_version, staging_path};
     use std::path::Path;
+
+    /// Nothing about the download used to be checked beyond its HTTP status.
+    #[test]
+    fn a_release_digest_is_read_and_held_to() {
+        let payload = b"the new binary";
+        let digest = super::sha256_hex(payload);
+
+        assert_eq!(
+            super::parse_sha256_digest(&format!("sha256:{}", digest.to_uppercase())).as_deref(),
+            Some(digest.as_str()),
+            "GitHub's own spelling, lowercased"
+        );
+        assert!(super::verify_download(payload, &digest, "vuio-linux-x86_64.tar.gz").is_ok());
+
+        // One byte different is a different release.
+        let mut tampered = payload.to_vec();
+        tampered.push(b'!');
+        let error = super::verify_download(&tampered, &digest, "vuio-linux-x86_64.tar.gz")
+            .expect_err("a mismatch must not install");
+        assert!(
+            error.to_string().contains("Nothing has been installed"),
+            "{error}"
+        );
+    }
+
+    /// An algorithm we cannot check must read as "no digest", which is refused,
+    /// rather than as a digest that happens to pass.
+    #[test]
+    fn only_a_well_formed_sha256_counts_as_a_digest() {
+        assert!(super::parse_sha256_digest("sha512:abc").is_none());
+        assert!(super::parse_sha256_digest("deadbeef").is_none());
+        assert!(super::parse_sha256_digest("sha256:").is_none());
+        assert!(super::parse_sha256_digest("sha256:nothex").is_none());
+        // 63 characters, one short.
+        assert!(super::parse_sha256_digest(&format!("sha256:{}", "a".repeat(63))).is_none());
+        assert!(super::parse_sha256_digest(&format!("sha256:{}", "a".repeat(64))).is_some());
+    }
+
+    /// The manifest fallback, for assets uploaded before GitHub computed digests.
+    #[test]
+    fn the_checksum_manifest_is_read_per_asset() {
+        let sums = format!(
+            "{}  vuio-linux-x86_64.tar.gz\n{} *vuio-macos-arm64.tar.gz\n\n# a comment\n",
+            "a".repeat(64),
+            "b".repeat(64)
+        );
+        assert_eq!(
+            super::digest_from_manifest(&sums, "vuio-linux-x86_64.tar.gz"),
+            Some("a".repeat(64))
+        );
+        assert_eq!(
+            super::digest_from_manifest(&sums, "vuio-macos-arm64.tar.gz"),
+            Some("b".repeat(64)),
+            "the binary-mode spelling names the same file"
+        );
+        assert_eq!(super::digest_from_manifest(&sums, "vuio-windows-x86_64.exe"), None);
+        assert_eq!(super::digest_from_manifest("", "vuio-linux-x86_64.tar.gz"), None);
+    }
 
     #[test]
     fn compares_release_versions() {
