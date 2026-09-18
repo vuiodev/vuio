@@ -121,3 +121,74 @@ async fn a_start_and_a_stop_do_not_interleave() {
     state.background_tasks.close();
     state.background_tasks.wait().await;
 }
+
+/// A looping station whose files have gone — an unmounted share, a folder
+/// emptied under it — must wait before trying its queue again.
+///
+/// Every track failed to open, the queue was rebuilt from rows that are all
+/// still there, and the loop went straight round again: nothing anywhere on
+/// that path waits. It span a core and wrote a warning per track per turn until
+/// someone stopped it. The station stays on the air, because a share that comes
+/// back should start playing again on its own.
+#[tokio::test]
+async fn a_station_whose_files_have_gone_waits_instead_of_spinning() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let media = temp.path().join("media");
+    std::fs::create_dir_all(&media).expect("media dir");
+    let media = std::fs::canonicalize(&media).expect("canonical media dir");
+
+    // Indexed, and then removed from disk: exactly the state an unmounted share
+    // leaves behind, and the one `build_queue` cannot tell from a healthy queue.
+    let mut tracks = Vec::new();
+    for index in 0..4 {
+        let track = media.join(format!("track{index}.mp3"));
+        std::fs::write(&track, b"not really an mp3").expect("write track");
+        tracks.push(track);
+    }
+
+    let state = common::state_over(temp.path(), &media).await;
+    for track in &tracks {
+        state
+            .database
+            .store_media_file(&MediaFile::new(track.clone(), 17, "audio/mpeg".to_owned()))
+            .await
+            .expect("index track");
+    }
+    for track in &tracks {
+        std::fs::remove_file(track).expect("unmount");
+    }
+
+    let row = state
+        .database
+        .create_radio_station(&RadioStationInput {
+            name: "gone".to_owned(),
+            genre: String::new(),
+            folders: vec![media.to_string_lossy().into_owned()],
+            mode: BroadcastMode::Loop,
+        })
+        .await
+        .expect("create station");
+
+    let station = state.radio.start(&state, &row).await.expect("start");
+
+    // Long enough for a spinning task to have gone round hundreds of times, and
+    // far short of the five seconds the first wait lasts.
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(
+        station.silent_passes(),
+        1,
+        "one pass produced nothing and the task is waiting, not looping"
+    );
+    assert!(
+        !station.is_off_air(),
+        "a share that comes back should find its station still there"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    assert_eq!(station.silent_passes(), 1, "still waiting, still one pass");
+
+    state.radio.stop(row.id).await;
+    state.cancellation.cancel();
+    state.background_tasks.close();
+    state.background_tasks.wait().await;
+}

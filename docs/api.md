@@ -31,7 +31,9 @@ Discovers DLNA, Chromecast, and compatible AirPlay renderers on the local networ
   ```
 
 ### Cast playlist to TV
-Creates a temporary playlist and starts casting it to the selected playback device.
+Casts the given files to the selected playback device as a queue, in the order they are
+listed. Nothing is written to the library: the files are resolved to URLs, handed to the
+renderer, and that is the whole of it. Files that are no longer indexed are skipped.
 * **Endpoint**: `POST /api/cast/playlist`
 * **Content-Type**: `application/json`
 * **Request Payload**:
@@ -46,7 +48,6 @@ Creates a temporary playlist and starts casting it to the selected playback devi
   ```json
   {
     "status": "playing",
-    "playlist_id": 12,
     "tracks_count": 3,
     "current_index": 0,
     "current_file": "Kuhnya.s05.e01.tahiy.mkv",
