@@ -86,7 +86,11 @@ impl HlsGenerator {
     /// a playlist may never do is state a duration the segment does not have. A
     /// player builds its whole timeline out of these numbers, and one that
     /// disagrees with the media by even a fraction stalls on the difference.
-    pub fn build_media_playlist(boundaries: &[f64]) -> String {
+    /// `version` is a token that changes when the file's contents do. It rides
+    /// on every URL here because a browser caches segments by URL and is told
+    /// they are good for an hour: without it, a film replaced in place is
+    /// played back out of the browser's own cache as the old one.
+    pub fn build_media_playlist(boundaries: &[f64], version: Option<&str>) -> String {
         let target = boundaries
             .windows(2)
             .map(|w| w[1] - w[0])
@@ -100,13 +104,15 @@ impl HlsGenerator {
         playlist.push_str(&format!("#EXT-X-TARGETDURATION:{target}\n"));
         playlist.push_str("#EXT-X-MEDIA-SEQUENCE:0\n");
         playlist.push_str("#EXT-X-PLAYLIST-TYPE:VOD\n");
-        playlist.push_str("#EXT-X-MAP:URI=\"init.mp4\"\n\n");
+        let query = version.map(|v| format!("?v={v}")).unwrap_or_default();
+        playlist.push_str(&format!("#EXT-X-MAP:URI=\"init.mp4{query}\"\n\n"));
 
         for (i, pair) in boundaries.windows(2).enumerate() {
             playlist.push_str(&format!(
-                "#EXTINF:{:.3},\nsegment/{}\n",
+                "#EXTINF:{:.3},\nsegment/{}{}\n",
                 (pair[1] - pair[0]).max(0.0),
-                i
+                i,
+                query
             ));
         }
 
@@ -367,12 +373,32 @@ mod tests {
         // 10 seconds of content at a 4-second target: 4, 4, then a 2-second remainder —
         // not another 4-second entry that overruns the real content.
         let playlist =
-            HlsGenerator::build_media_playlist(&HlsGenerator::uniform_boundaries(10.0, 4));
+            HlsGenerator::build_media_playlist(&HlsGenerator::uniform_boundaries(10.0, 4), None);
         assert!(playlist.contains("#EXTINF:4.000,\nsegment/0\n"));
         assert!(playlist.contains("#EXTINF:4.000,\nsegment/1\n"));
         assert!(playlist.contains("#EXTINF:2.000,\nsegment/2\n"));
         assert!(!playlist.contains("segment/3"));
         assert!(playlist.contains("#EXT-X-MAP:URI=\"init.mp4\""));
+    }
+
+    /// Segments are served with an hour of `Cache-Control: public`, and a
+    /// browser caches those by URL. Replacing a film's contents while it keeps
+    /// its database row therefore replayed the old film out of the browser's
+    /// own cache — so every URL a playlist hands out carries a token that
+    /// changes with the file, the init segment's included.
+    #[test]
+    fn segment_urls_carry_the_file_version() {
+        let playlist = HlsGenerator::build_media_playlist(&[0.0, 4.0, 8.0], Some("1f4-65a"));
+        assert!(
+            playlist.contains("#EXT-X-MAP:URI=\"init.mp4?v=1f4-65a\""),
+            "{playlist}"
+        );
+        assert!(playlist.contains("segment/0?v=1f4-65a\n"), "{playlist}");
+        assert!(playlist.contains("segment/1?v=1f4-65a\n"), "{playlist}");
+
+        // A different version is a different set of URLs, which is the point.
+        let replaced = HlsGenerator::build_media_playlist(&[0.0, 4.0, 8.0], Some("2aa-700"));
+        assert_ne!(replaced, playlist);
     }
 
     /// A film's keyframes are not four seconds apart, and a playlist that says
@@ -381,7 +407,7 @@ mod tests {
     /// finding something else there.
     #[test]
     fn test_media_playlist_states_the_real_length_of_uneven_segments() {
-        let playlist = HlsGenerator::build_media_playlist(&[0.0, 12.429, 22.814, 33.242]);
+        let playlist = HlsGenerator::build_media_playlist(&[0.0, 12.429, 22.814, 33.242], None);
         assert!(playlist.contains("#EXTINF:12.429,\nsegment/0\n"), "{playlist}");
         assert!(playlist.contains("#EXTINF:10.385,\nsegment/1\n"), "{playlist}");
         assert!(playlist.contains("#EXTINF:10.428,\nsegment/2\n"), "{playlist}");

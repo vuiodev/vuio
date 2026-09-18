@@ -18,6 +18,9 @@ pub(super) async fn create_lifecycle_backup<B: DatabaseBackend>(
     );
     let destination = backup_dir.join(filename);
     database.create_backup(&destination).await?;
+    // A backup is a copy of the `secrets` table like any other. See
+    // `crate::database::restrict_to_owner`.
+    crate::database::restrict_database_to_owner::<B>(&destination)?;
 
     let mut entries = tokio::fs::read_dir(&backup_dir).await?;
     let mut backups = Vec::new();

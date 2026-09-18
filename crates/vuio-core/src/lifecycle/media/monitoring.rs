@@ -90,6 +90,10 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                         &app_state_clone.database,
                         &configured_directories,
                         app_state_clone.current_config().media.unavailable_root_grace_hours,
+                        // Read live, like the sweep below: switching automatic removal
+                        // off has to stop this pass too, and take effect without a
+                        // restart.
+                        app_state_clone.current_config().media.cleanup_deleted_files,
                     )
                     .await
                     {

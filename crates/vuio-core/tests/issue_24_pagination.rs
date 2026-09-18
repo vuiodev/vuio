@@ -14,8 +14,7 @@ use vuio_core::{
         PlatformInfo,
     },
     runtime_state::{
-        ActiveCastRegistry, BookmarkRegistry, BrowseResponseCache, RendererCache,
-        BOOKMARK_MAX_ENTRIES,
+        ActiveCastRegistry, BookmarkRegistry, BrowseResponseCache, BOOKMARK_MAX_ENTRIES,
     },
     state::AppState,
     web::{diagnostics::WebHandlerMetrics, soap::content_directory_control},
@@ -141,7 +140,8 @@ async fn issue_24_philips_probe_reports_full_total_and_supports_followup_pages()
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
-        discovered_tvs: Arc::new(RendererCache::new()),
+        #[cfg(feature = "casting")]
+        discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
         #[cfg(feature = "transcode")]
@@ -248,7 +248,8 @@ async fn dlna_browse_returns_naturally_sorted_episodes() {
         active_casts: Arc::new(tokio::sync::Mutex::new(ActiveCastRegistry::new())),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
-        discovered_tvs: Arc::new(RendererCache::new()),
+        #[cfg(feature = "casting")]
+        discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
         #[cfg(feature = "transcode")]

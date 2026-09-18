@@ -7,6 +7,12 @@ mod conformance {
     backend_conformance_tests!(crate::database::sqlite::SqliteDatabase);
 }
 
+async fn database_at(path: &std::path::Path) -> Arc<SqliteDatabase> {
+    let db = SqliteDatabase::new(path.to_path_buf()).await.unwrap();
+    db.initialize().await.unwrap();
+    Arc::new(db)
+}
+
 async fn database(temp: &tempfile::TempDir, name: &str) -> Arc<SqliteDatabase> {
     let db = SqliteDatabase::new(temp.path().join(format!("{name}.db")))
         .await
@@ -570,4 +576,51 @@ async fn a_legacy_database_has_its_text_folded_by_the_migration() {
     let db = std::sync::Arc::new(db);
     assert_eq!(search_ids(&db, NFC).await, vec![Some(11)]);
     assert_eq!(search_ids(&db, NFD).await, vec![Some(11)]);
+}
+
+/// The database holds the `secrets` table — provider API keys, and the pairing secret
+/// an AirPlay receiver hands over once. It was created at the process umask, so on a
+/// normal system any local user could read them out of it, while the admin token beside
+/// it is written 0600 and the server refuses to start if it is group- or other-readable.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_new_database_is_readable_only_by_its_owner() {
+    use crate::database::SecretStore;
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("vuio.db");
+    let database = database_at(&path).await;
+    // A write, so the write-ahead log and the shared-memory index really exist.
+    database.set_secret("tmdb", b"an-api-key").await.unwrap();
+
+    let mode = |path: &std::path::Path| {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    };
+    assert_eq!(mode(&path) & 0o077, 0, "the database itself");
+    for sidecar in SqliteDatabase::sidecar_extensions() {
+        let path = path.with_extension(sidecar);
+        if path.exists() {
+            assert_eq!(mode(&path) & 0o077, 0, "{}", path.display());
+        }
+    }
+}
+
+/// And an installation that has been running for a year, whose database was created
+/// before any of this, is narrowed when it is next opened rather than left as it was.
+#[cfg(unix)]
+#[tokio::test]
+async fn an_existing_database_is_narrowed_when_it_is_opened() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("vuio.db");
+    drop(database_at(&path).await);
+    // As the umask would have left it.
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let _database = database_at(&path).await;
+    let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode & 0o077, 0, "reopening narrows what it finds");
+    assert_eq!(mode & 0o700, 0o600, "and keeps the owner's own bits");
 }

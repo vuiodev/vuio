@@ -31,6 +31,10 @@ const MAX_MANAGEMENT_CONCURRENCY: usize = 32;
 struct Session {
     peer: IpAddr,
     expires_at: Instant,
+    /// Which admin token this session was minted against. A session outlives a
+    /// change of that token only if the two still agree, so rotating a leaked
+    /// token also revokes the access it already bought.
+    token_generation: u64,
 }
 
 /// The parts of `[management]` that can change while the server runs.
@@ -40,6 +44,11 @@ struct Session {
 #[derive(Debug)]
 struct ManagementSettings {
     admin_token: String,
+    /// Incremented by [`AuthState::apply`] whenever `admin_token` changes.
+    /// Read under the same lock as the token it describes, so a login that
+    /// raced a rotation stamps its session with the generation it actually
+    /// authenticated against rather than the one that replaced it.
+    token_generation: u64,
     session_ttl: Duration,
     allowed_networks: Vec<IpNet>,
     token_path: PathBuf,
@@ -148,6 +157,7 @@ impl AuthState {
             forced_on,
             settings: std::sync::RwLock::new(ManagementSettings {
                 admin_token,
+                token_generation: 0,
                 session_ttl: session_ttl(config),
                 allowed_networks,
                 token_path,
@@ -163,30 +173,62 @@ impl AuthState {
     ///
     /// Everything here used to be frozen at startup. The values are cheap per-request
     /// reads with no derived state behind them, so the only real work is re-reading the
-    /// token file when its path changes.
+    /// token file.
     ///
     /// A failure leaves the previous settings in place: half-applying an allowlist while
     /// keeping the old token would be worse than not applying it at all.
     pub fn apply(&self, config: &ManagementConfig, config_path: &Path) -> Result<()> {
         let token_path = resolve_token_path(config, config_path);
         let allowed_networks = parse_networks(config)?;
-        let admin_token = if token_path == self.settings_read().token_path {
-            // Same file: keep the token in memory rather than re-reading, so a file that
-            // has become unreadable cannot lock out a server that is running fine.
-            self.settings_read().admin_token.clone()
-        } else {
-            load_admin_token(&token_path)?
+        // Always re-read, including when the path has not changed. Skipping that read
+        // meant the one rotation an operator actually has — writing a new token into
+        // `admin.token` and reloading — did nothing at all: the old token kept working,
+        // the new one was refused, and the sessions the old one had bought stayed valid,
+        // all without a word to say so. A leaked credential was live until a restart.
+        //
+        // The property that shortcut existed for is kept below instead: a file that has
+        // become unreadable falls back to the token already in use rather than locking
+        // out a server that is running fine. That is only defensible when the file is
+        // the same one that token came from; a new path that cannot be read is a
+        // configuration error and fails the reload.
+        let admin_token = match load_admin_token(&token_path) {
+            Ok(token) => token,
+            Err(error) if token_path == self.settings_read().token_path => {
+                tracing::warn!(
+                    "Keeping the management token already in use: {error:#}"
+                );
+                self.settings_read().admin_token.clone()
+            }
+            Err(error) => return Err(error),
         };
 
         let mut settings = self
             .settings
             .write()
             .unwrap_or_else(|error| error.into_inner());
+        let token_rotated = settings.admin_token != admin_token;
         settings.admin_token = admin_token;
+        if token_rotated {
+            settings.token_generation = settings.token_generation.wrapping_add(1);
+        }
         settings.session_ttl = session_ttl(config);
         settings.allowed_networks = allowed_networks;
         settings.token_path = token_path;
         drop(settings);
+
+        if token_rotated {
+            // Cookies issued under the old token are already refused by the
+            // generation check in `session_from_headers`; this only stops the
+            // dead entries counting towards `MAX_SESSIONS`. A login that read
+            // the old token before the write lock above may still insert after
+            // this clear, which is why the check, not the clear, is what
+            // enforces the revocation.
+            self.sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .clear();
+            tracing::warn!("Management token changed; existing sessions revoked");
+        }
 
         // `forced_on` wins: a config file must not be able to switch off auth that
         // --auth or VUIO_AUTH asked for.
@@ -215,6 +257,7 @@ impl AuthState {
             forced_on: true,
             settings: std::sync::RwLock::new(ManagementSettings {
                 admin_token: "test-management-token-which-is-long-enough".to_owned(),
+                token_generation: 0,
                 session_ttl: Duration::from_secs(3600),
                 allowed_networks: Vec::new(),
                 token_path: PathBuf::from("admin.token"),
@@ -232,6 +275,27 @@ impl AuthState {
 
     pub fn token_path(&self) -> PathBuf {
         self.settings_read().token_path.clone()
+    }
+
+    /// Whether `address` may reach the management surface at all.
+    ///
+    /// The allowlist is a restriction an operator wrote down, and it used to be
+    /// consulted only on the path a token guards — so on a server left in the default
+    /// open mode, where it is the only access control there is, setting it did nothing
+    /// whatsoever. Every management endpoint stayed reachable from every address the
+    /// listener answers on: the config writer, the restart button, the radio controls,
+    /// the credential store. The dashboard offers the field beside the token switch and
+    /// says nothing about depending on it.
+    ///
+    /// An empty list keeps exactly the meaning it had. With a token required that is
+    /// loopback plus the private ranges, which is [`Self::network_allowed`]'s default;
+    /// without one it is no restriction at all, because narrowing an open server to the
+    /// private ranges would be a new refusal nobody asked for.
+    fn management_peer_allowed(&self, address: IpAddr) -> bool {
+        if !self.enabled() && self.settings_read().allowed_networks.is_empty() {
+            return true;
+        }
+        self.network_allowed(address)
     }
 
     fn network_allowed(&self, address: IpAddr) -> bool {
@@ -254,12 +318,13 @@ impl AuthState {
         }
     }
 
-    /// Constant-time comparison against the current admin token.
-    fn token_matches(&self, candidate: &str) -> bool {
-        constant_time_eq(
-            candidate.as_bytes(),
-            self.settings_read().admin_token.as_bytes(),
-        )
+    /// Constant-time comparison against the current admin token, yielding the
+    /// generation of the token that matched so a caller minting a session
+    /// records the credential it really checked.
+    fn token_matches(&self, candidate: &str) -> Option<u64> {
+        let settings = self.settings_read();
+        constant_time_eq(candidate.as_bytes(), settings.admin_token.as_bytes())
+            .then_some(settings.token_generation)
     }
 
     /// Whether the request carries the admin token as a bearer credential.
@@ -272,12 +337,13 @@ impl AuthState {
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.strip_prefix("Bearer "))
-            .is_some_and(|token| self.token_matches(token))
+            .is_some_and(|token| self.token_matches(token).is_some())
     }
 
     fn session_from_headers(&self, headers: &HeaderMap, peer: IpAddr) -> Option<String> {
         let token = cookie_value(headers, "vuio_session")?;
         let now = Instant::now();
+        let generation = self.settings_read().token_generation;
         let mut sessions = self
             .sessions
             .lock()
@@ -285,7 +351,11 @@ impl AuthState {
         sessions.retain(|_, session| session.expires_at > now);
         sessions
             .get(&token)
-            .filter(|session| session.peer == peer && session.expires_at > now)
+            .filter(|session| {
+                session.peer == peer
+                    && session.expires_at > now
+                    && session.token_generation == generation
+            })
             .map(|_| token)
     }
 
@@ -322,8 +392,12 @@ impl AuthState {
         true
     }
 
-    fn create_session(&self, peer: IpAddr) -> Option<String> {
+    /// `token_generation` is the one [`AuthState::token_matches`] reported for
+    /// the credential this login presented, not the one current at insert time
+    /// — a rotation in between must leave the new session dead on arrival.
+    fn create_session(&self, peer: IpAddr, token_generation: u64) -> Option<String> {
         let now = Instant::now();
+        let session_ttl = self.settings_read().session_ttl;
         let mut sessions = self
             .sessions
             .lock()
@@ -337,7 +411,8 @@ impl AuthState {
             token.clone(),
             Session {
                 peer,
-                expires_at: now + self.settings_read().session_ttl,
+                expires_at: now + session_ttl,
+                token_generation,
             },
         );
         Some(token)
@@ -714,10 +789,10 @@ pub async fn login<D: DatabaseManager>(
     if !state.auth.rate_limit_login(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    if !state.auth.token_matches(&request.token) {
+    let Some(token_generation) = state.auth.token_matches(&request.token) else {
         return StatusCode::UNAUTHORIZED.into_response();
-    }
-    let Some(session) = state.auth.create_session(peer.ip()) else {
+    };
+    let Some(session) = state.auth.create_session(peer.ip(), token_generation) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
 
@@ -758,11 +833,14 @@ pub async fn require_management<D: DatabaseManager>(
     request: Request<Body>,
     next: Next,
 ) -> Response {
+    // Before the `enabled` check, not after it: the allowlist applies to a server that
+    // requires no token just as much as to one that does. See
+    // [`AuthState::management_peer_allowed`].
+    if !state.auth.management_peer_allowed(peer.ip()) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
     if !state.auth.enabled() {
         return next.run(request).await;
-    }
-    if !state.auth.network_allowed(peer.ip()) {
-        return StatusCode::FORBIDDEN.into_response();
     }
     if !state.auth.rate_limit_management(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
@@ -937,5 +1015,223 @@ mod tests {
     fn management_auth_defaults_off() {
         assert!(!ManagementConfig::default().enabled);
         assert!(!crate::config::AppConfig::default_for_platform().management.enabled);
+    }
+    /// Rotating a leaked management token has to revoke the access it already
+    /// bought: a cookie minted under the old token must stop working the moment
+    /// the new one is loaded, while a login against the new token still works.
+    #[test]
+    fn rotating_the_token_revokes_existing_sessions() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+
+        let token_a = temp_dir.path().join("a.token");
+        let token_b = temp_dir.path().join("b.token");
+        write_private_token(&token_a, &"a".repeat(40)).expect("write a");
+        write_private_token(&token_b, &"b".repeat(40)).expect("write b");
+
+        let config_with = |path: &Path| ManagementConfig {
+            enabled: true,
+            token_file: Some(path.display().to_string()),
+            ..ManagementConfig::default()
+        };
+
+        let auth =
+            AuthState::load(&config_with(&token_a), &config_path, true).expect("auth state");
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let generation = auth.token_matches(&"a".repeat(40)).expect("token a matches");
+        let session = auth.create_session(peer, generation).expect("session");
+        let cookie = |session: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::COOKIE,
+                format!("vuio_session={session}").parse().unwrap(),
+            );
+            headers
+        };
+        assert!(
+            auth.session_from_headers(&cookie(&session), peer).is_some(),
+            "the session works under the token it was issued with"
+        );
+
+        auth.apply(&config_with(&token_b), &config_path)
+            .expect("rotate to token b");
+
+        assert!(
+            auth.session_from_headers(&cookie(&session), peer).is_none(),
+            "a cookie issued under the old token must not survive rotation"
+        );
+        assert!(auth.token_matches(&"a".repeat(40)).is_none());
+
+        let generation = auth.token_matches(&"b".repeat(40)).expect("token b matches");
+        let session = auth.create_session(peer, generation).expect("session");
+        assert!(
+            auth.session_from_headers(&cookie(&session), peer).is_some(),
+            "the new token still logs in"
+        );
+    }
+
+    /// Writing a new token into the file the server is already using is the only
+    /// rotation most operators will ever perform. It used to do nothing until a
+    /// restart, because `apply` re-read the file only when its *path* changed: the
+    /// leaked token kept working and the new one was refused.
+    #[test]
+    fn rewriting_the_token_file_in_place_rotates_the_token() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let token_path = temp_dir.path().join("admin.token");
+        write_private_token(&token_path, &"a".repeat(40)).expect("write a");
+
+        let config = ManagementConfig {
+            enabled: true,
+            token_file: Some(token_path.display().to_string()),
+            ..ManagementConfig::default()
+        };
+        let auth = AuthState::load(&config, &config_path, true).expect("auth state");
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+
+        let generation = auth.token_matches(&"a".repeat(40)).expect("token a matches");
+        let session = auth.create_session(peer, generation).expect("session");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("vuio_session={session}").parse().unwrap(),
+        );
+        assert!(auth.session_from_headers(&headers, peer).is_some());
+
+        // The same path, rewritten in place, as `printf ... > admin.token` leaves it.
+        std::fs::remove_file(&token_path).expect("remove");
+        write_private_token(&token_path, &"b".repeat(40)).expect("write b");
+        auth.apply(&config, &config_path).expect("reload");
+
+        assert!(
+            auth.token_matches(&"a".repeat(40)).is_none(),
+            "the replaced token must stop being accepted"
+        );
+        assert!(
+            auth.token_matches(&"b".repeat(40)).is_some(),
+            "the token now in the file must be accepted"
+        );
+        assert!(
+            auth.session_from_headers(&headers, peer).is_none(),
+            "a cookie bought with the replaced token must not survive it"
+        );
+    }
+
+    /// The fallback that shortcut existed for, kept: a token file that has become
+    /// unreadable leaves the running server with the token it already had rather than
+    /// failing the reload and locking everyone out.
+    #[test]
+    fn an_unreadable_token_file_keeps_the_token_in_use() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let token_path = temp_dir.path().join("admin.token");
+        write_private_token(&token_path, &"a".repeat(40)).expect("write a");
+
+        let config = ManagementConfig {
+            enabled: true,
+            token_file: Some(token_path.display().to_string()),
+            ..ManagementConfig::default()
+        };
+        let auth = AuthState::load(&config, &config_path, true).expect("auth state");
+
+        // Too short to load, which is the failure `load_admin_token` can be made to
+        // produce on every platform; a mode the owner cannot read is not one of them.
+        std::fs::write(&token_path, "short").expect("truncate");
+        auth.apply(&config, &config_path)
+            .expect("an unreadable token file must not fail the reload");
+        assert!(
+            auth.token_matches(&"a".repeat(40)).is_some(),
+            "the token already in use stays in use"
+        );
+    }
+
+    /// `allowed_networks` used to be read only when a token was required, so an
+    /// operator who restricted the dashboard to one subnet and left it open got no
+    /// restriction at all — on exactly the server where the list is the only control
+    /// there is.
+    #[test]
+    fn the_allowlist_applies_without_a_token() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let auth = AuthState::load(
+            &ManagementConfig {
+                enabled: false,
+                allowed_networks: vec!["192.168.10.0/24".to_owned()],
+                ..ManagementConfig::default()
+            },
+            &config_path,
+            false,
+        )
+        .expect("auth state");
+
+        assert!(!auth.enabled(), "this server requires no token");
+        assert!(auth.management_peer_allowed("192.168.10.5".parse().unwrap()));
+        assert!(auth.management_peer_allowed("127.0.0.1".parse().unwrap()));
+        assert!(
+            !auth.management_peer_allowed("192.168.20.5".parse().unwrap()),
+            "an address outside the configured list is refused"
+        );
+        assert!(!auth.management_peer_allowed("203.0.113.5".parse().unwrap()));
+    }
+
+    /// And an empty list still means what it did: an open server stays open, rather
+    /// than acquiring a private-ranges-only rule nobody asked for.
+    #[test]
+    fn no_allowlist_leaves_an_open_server_open() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let auth = AuthState::load(&ManagementConfig::default(), &config_path, false)
+            .expect("auth state");
+
+        assert!(!auth.enabled());
+        assert!(auth.management_peer_allowed("203.0.113.5".parse().unwrap()));
+
+        // With a token required, the same empty list is loopback and the private
+        // ranges, which is the behaviour `network_allowed` has always had.
+        let guarded = AuthState::load(&ManagementConfig::default(), &config_path, true)
+            .expect("auth state");
+        assert!(guarded.enabled());
+        assert!(!guarded.management_peer_allowed("203.0.113.5".parse().unwrap()));
+        assert!(guarded.management_peer_allowed("10.0.0.5".parse().unwrap()));
+    }
+
+    /// A login that validated the old token but inserted its session after the
+    /// rotation had already swept the map must not end up authenticated — the
+    /// generation it carries, not the sweep, is what revokes it.
+    #[test]
+    fn a_login_racing_a_rotation_does_not_retain_authority() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let config_path = temp_dir.path().join("config.toml");
+        let token_a = temp_dir.path().join("a.token");
+        let token_b = temp_dir.path().join("b.token");
+        write_private_token(&token_a, &"a".repeat(40)).expect("write a");
+        write_private_token(&token_b, &"b".repeat(40)).expect("write b");
+
+        let config_with = |path: &Path| ManagementConfig {
+            enabled: true,
+            token_file: Some(path.display().to_string()),
+            ..ManagementConfig::default()
+        };
+        let auth =
+            AuthState::load(&config_with(&token_a), &config_path, true).expect("auth state");
+        let peer: IpAddr = "127.0.0.1".parse().unwrap();
+
+        // The order a racing login would produce: check the token, rotate, then
+        // insert the session.
+        let generation = auth.token_matches(&"a".repeat(40)).expect("token a matches");
+        auth.apply(&config_with(&token_b), &config_path)
+            .expect("rotate to token b");
+        let session = auth.create_session(peer, generation).expect("session");
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("vuio_session={session}").parse().unwrap(),
+        );
+        assert!(
+            auth.session_from_headers(&headers, peer).is_none(),
+            "a session minted against the superseded token carries no authority"
+        );
     }
 }

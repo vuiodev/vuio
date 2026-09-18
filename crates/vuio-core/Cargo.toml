@@ -210,7 +210,14 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-vuio-core = { path = ".", version = "0.0.50", features = ["unstable-internals"] }
+# `default-features = false` is load-bearing. Cargo unifies a package's own
+# dev-dependency on itself back into the package, so without it every test
+# build turned the default features back on — `--no-default-features` compiled
+# the web UI and every decoder regardless, and the feature matrix could not
+# check the minimal builds it exists to check.
+vuio-core = { path = ".", version = "0.0.50", default-features = false, features = [
+    "unstable-internals",
+] }
 # Symphonia reads tags but cannot write them, and the audio tests build their
 # fixtures by tagging generated files. Test-only, so it ships with nothing.
 audiotags = "0.5"

@@ -542,6 +542,11 @@ pub struct MediaConfig {
     pub autoplay_enabled: bool,
     #[serde(default = "default_scan_playlists")]
     pub scan_playlists: bool,
+    /// How long a library root that has gone offline keeps the rows it held. `0`
+    /// keeps them indefinitely, as `0` disables the full rescan below; it used to
+    /// mean the opposite, dropping a library the moment one `read_dir` failed.
+    ///
+    /// Nothing is dropped while `cleanup_deleted_files` is off, whatever this says.
     #[serde(default = "default_unavailable_root_grace_hours")]
     pub unavailable_root_grace_hours: u64,
     /// Hours between full sweeps of every root. `0` disables them, leaving

@@ -1,3 +1,7 @@
+//! Every test here drives the MCP endpoint, which only exists with that
+//! feature compiled in.
+#![cfg(feature = "mcp")]
+
 //! End-to-end tests for the MCP endpoint.
 //!
 //! Everything here goes through the real router, because the transport is most
@@ -134,6 +138,7 @@ async fn make_test_state() -> (TempDir, AppState) {
         )),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
@@ -843,7 +848,14 @@ async fn post_endpoints_enforce_tiered_body_limits() {
         .unwrap();
     assert_eq!(soap_response.status(), StatusCode::PAYLOAD_TOO_LARGE);
 
-    for path in ["/mcp", "/api/cast/playlist"] {
+    // `/api/cast/playlist` only exists with casting compiled in; the limit it
+    // shares with `/mcp` is the point, so it is checked when it is there.
+    let json_paths: &[&str] = if cfg!(feature = "casting") {
+        &["/mcp", "/api/cast/playlist"]
+    } else {
+        &["/mcp"]
+    };
+    for &path in json_paths {
         let response = router
             .clone()
             .oneshot(

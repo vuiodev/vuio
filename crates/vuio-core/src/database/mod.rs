@@ -12,6 +12,61 @@ pub mod conformance;
 pub mod playlist_formats;
 pub mod sqlite;
 
+/// Keep a database file — and anything the engine writes beside it — to its owner.
+///
+/// The `secrets` table holds the credentials the dashboard is careful never to show
+/// again: provider API keys, and the pairing secret a receiver hands over once. The
+/// admin token beside them is written `0600` and the server refuses to start if it is
+/// readable by group or other; the database was created at whatever the process umask
+/// gave, which on a normal system is `0644`. So the same class of secret was guarded in
+/// one file and world-readable in the other, sidecars and backups included.
+///
+/// Applied to a file that already exists as well as one about to be created, because
+/// the installations this matters to most are the ones that have been running for a
+/// year. A mode that is already owner-only is left alone, and a mode that is not is
+/// narrowed rather than replaced, so an operator who chose `0700` keeps it.
+///
+/// On the main database file this also covers the write-ahead log and the shared-memory
+/// index without naming them: SQLite creates both with the permissions of the database
+/// they belong to. They are narrowed explicitly too, for the ones already on disk.
+pub(crate) fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            // Nothing there yet, or not ours to look at. Either way there is nothing
+            // to narrow, and a database that cannot be stat'd will fail louder than
+            // this a moment later.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))?;
+            tracing::warn!(
+                "Narrowed {} to its owner; it holds stored credentials",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// [`restrict_to_owner`] for a database and every sidecar its backend may have written.
+pub(crate) fn restrict_database_to_owner<B: DatabaseBackend>(path: &Path) -> std::io::Result<()> {
+    restrict_to_owner(path)?;
+    for sidecar in B::sidecar_extensions() {
+        restrict_to_owner(&path.with_extension(sidecar))?;
+    }
+    Ok(())
+}
+
 /// The storage backend the server runs on.
 ///
 /// Backend selection is a compile-time decision made here and nowhere else.
@@ -973,6 +1028,27 @@ pub trait MediaRepository: Send + Sync {
     async fn bulk_update_canonical_media_files(&self, files: &[MediaFile]) -> Result<()> {
         self.bulk_update_media_files(files).await
     }
+
+    /// Set `subtitle_available` on the named records, touching no other column.
+    ///
+    /// A sidecar appearing or disappearing changes nothing about the media file
+    /// itself, so it must not go through the whole-record write path: that one
+    /// rewrites every column from a [`MediaFile`], and a `MediaFile` read back
+    /// from the database carries no `extra_tags` — they are not joined in — so
+    /// writing it back deletes the tags the file really has. Returns how many
+    /// records actually changed value.
+    async fn set_subtitle_available(&self, ids: &[i64], available: bool) -> Result<usize>;
+
+    /// Point existing records at new paths, keeping their identifiers.
+    ///
+    /// What a rename is. Removing the old records and inserting new ones gives
+    /// the same files new identifiers, and playlist entries and scraped
+    /// metadata reference media files by identifier with `ON DELETE CASCADE`,
+    /// so that loses them. Only the path columns are written, for the same
+    /// reason as [`MediaRepository::set_subtitle_available`]: a record read
+    /// back from the database carries no `extra_tags`. Returns how many records
+    /// moved; a destination already held by another record is skipped.
+    async fn relocate_media_files(&self, moves: &[(i64, PathBuf)]) -> Result<usize>;
 
     /// Remove multiple media files by paths in a single batch operation.
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize>;
