@@ -12,6 +12,61 @@ pub mod conformance;
 pub mod playlist_formats;
 pub mod sqlite;
 
+/// Keep a database file — and anything the engine writes beside it — to its owner.
+///
+/// The `secrets` table holds the credentials the dashboard is careful never to show
+/// again: provider API keys, and the pairing secret a receiver hands over once. The
+/// admin token beside them is written `0600` and the server refuses to start if it is
+/// readable by group or other; the database was created at whatever the process umask
+/// gave, which on a normal system is `0644`. So the same class of secret was guarded in
+/// one file and world-readable in the other, sidecars and backups included.
+///
+/// Applied to a file that already exists as well as one about to be created, because
+/// the installations this matters to most are the ones that have been running for a
+/// year. A mode that is already owner-only is left alone, and a mode that is not is
+/// narrowed rather than replaced, so an operator who chose `0700` keeps it.
+///
+/// On the main database file this also covers the write-ahead log and the shared-memory
+/// index without naming them: SQLite creates both with the permissions of the database
+/// they belong to. They are narrowed explicitly too, for the ones already on disk.
+pub(crate) fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let metadata = match std::fs::metadata(path) {
+            Ok(metadata) => metadata,
+            // Nothing there yet, or not ours to look at. Either way there is nothing
+            // to narrow, and a database that cannot be stat'd will fail louder than
+            // this a moment later.
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error),
+        };
+        let mode = metadata.permissions().mode() & 0o777;
+        if mode & 0o077 != 0 {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode & 0o700))?;
+            tracing::warn!(
+                "Narrowed {} to its owner; it holds stored credentials",
+                path.display()
+            );
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
+/// [`restrict_to_owner`] for a database and every sidecar its backend may have written.
+pub(crate) fn restrict_database_to_owner<B: DatabaseBackend>(path: &Path) -> std::io::Result<()> {
+    restrict_to_owner(path)?;
+    for sidecar in B::sidecar_extensions() {
+        restrict_to_owner(&path.with_extension(sidecar))?;
+    }
+    Ok(())
+}
+
 /// The storage backend the server runs on.
 ///
 /// Backend selection is a compile-time decision made here and nowhere else.
