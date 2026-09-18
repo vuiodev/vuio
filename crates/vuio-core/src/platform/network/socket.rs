@@ -153,6 +153,18 @@ impl SsdpSocket {
         Ok(())
     }
 
+    /// Choose the interface multicast leaves by, for every send that follows.
+    ///
+    /// SSDP announcements are multicast, and a host with more than one interface
+    /// sends them out of exactly one unless it is told otherwise — so a server on a
+    /// NAS with two NICs announced itself to one subnet and was invisible on the
+    /// other. The announcer sets this per interface and sends the same set of
+    /// announcements once for each; unicast sends, which is everything the M-SEARCH
+    /// responder does, are unaffected by it.
+    pub fn set_multicast_interface(&self, address: std::net::Ipv4Addr) -> std::io::Result<()> {
+        socket2::SockRef::from(&self.socket).set_multicast_if_v4(&address)
+    }
+
     pub async fn send_to(&self, data: &[u8], addr: SocketAddr) -> PlatformResult<usize> {
         self.socket
             .send_to(data, addr)

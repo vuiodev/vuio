@@ -48,12 +48,20 @@ Discovery protocols and LAN advertisement.
 
 ```toml
 [network]
-interface_selection = "Auto" # "Auto", "All", or specific interface name (e.g. "eth0")
+interface_selection = "Auto" # "Auto", "All", or a specific interface name or address (e.g. "eth0")
 announce_interval_seconds = 30 # SSDP announcement interval
 mdns_enabled = true       # Also advertise over Bonjour / DNS-SD alongside SSDP
 multicast_ttl = 4         # Multicast time-to-live
 upnp_callback_allowed_networks = [] # Extra CIDRs allowed as UPnP event callbacks
 ```
+
+`interface_selection` chooses the interfaces SSDP joins the discovery group on and
+announces from, and each announcement names that interface's own address. `Auto` uses
+the primary interface, which is what a machine with one network wants; `All` covers
+every interface that is up and can carry multicast, which is what a host with a second
+NIC or a container bridge beside the LAN needs for the televisions on both to find the
+server. An explicitly configured `server.ip` (or `VUIO_IP`) still wins over the
+per-interface address, since that is what a host-networked container relies on.
 
 ### `[web_ui]`
 
