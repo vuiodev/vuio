@@ -174,4 +174,49 @@ mod tests {
             assert_eq!(std::fs::read(&moved).unwrap(), b"sidecar");
         }
     }
+
+    /// Backups written before `create_backup` made them owner-only — and every
+    /// pre-repair backup, which nothing else revisits — stayed readable by every
+    /// local user. Each is a copy of the `secrets` table. The next lifecycle
+    /// backup narrows whatever it finds beside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lifecycle_backup_narrows_the_backups_beside_it() {
+        use std::os::unix::fs::PermissionsExt;
+        type Backend = database::ActiveDatabase;
+
+        let temp = tempdir().unwrap();
+        let mut config = AppConfig::default_for_platform();
+        config.database.path = Some(
+            temp.path()
+                .join(format!("vuio.{}", Backend::file_extension()))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let database = Arc::new(
+            Backend::new(database_path_for::<Backend>(&config))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+
+        let backups = temp.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let legacy = backups.join(format!(
+            "pre-repair-20260101T000000Z-legacy.{}",
+            Backend::file_extension()
+        ));
+        std::fs::write(&legacy, b"an old backup").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let fresh = runner::create_lifecycle_backup(&database, &config)
+            .await
+            .unwrap();
+
+        let mode = |path: &std::path::Path| {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&fresh) & 0o077, 0, "the new backup");
+        assert_eq!(mode(&legacy) & 0o077, 0, "the one already there");
+    }
 }

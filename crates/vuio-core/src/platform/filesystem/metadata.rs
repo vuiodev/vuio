@@ -124,8 +124,12 @@ pub(crate) fn extract_embedded_cover(
     path: &Path,
     max_bytes: usize,
 ) -> Option<(String, Vec<u8>)> {
-    // Apply the limit while the untrusted metadata is decoded. Checking only
-    // after probing is too late: the parser has already allocated the picture.
+    // Handed to the parser, but not enforced by it: symphonia 0.6 declares
+    // `limit_visual_bytes` and none of its readers consult it, so the picture is
+    // allocated whole regardless. It is passed so a release that honours it
+    // bounds the allocation too. What bounds it today is the check below, which
+    // keeps an oversized picture from being served, and the concurrency cap in
+    // `serve_cover`, which bounds how many are held at once.
     let options = MetadataOptions::default().limit_visual_bytes(Limit::Maximum(max_bytes));
     let mut format = open_format_with_metadata_options(path, options).ok()?;
     let mut log = format.metadata();
@@ -615,5 +619,91 @@ pub(crate) fn fallback_parse_filename(media_file: &mut MediaFile) {
         }
 
         media_file.title = Some(title_part.trim().to_string());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An AIFF whose ID3v2.3 tag carries one front-cover picture of `len` bytes.
+    ///
+    /// Built by hand because symphonia only reads, and AIFF is the container a
+    /// test can write an ID3 tag into without a tagging library.
+    fn aiff_with_cover(len: usize) -> Vec<u8> {
+        fn chunk(id: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+            let mut out = Vec::with_capacity(8 + payload.len() + 1);
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            out.extend_from_slice(payload);
+            if payload.len() % 2 == 1 {
+                out.push(0); // IFF chunks are word aligned
+            }
+            out
+        }
+
+        let mut apic = vec![0u8]; // ISO-8859-1 encoding marker
+        apic.extend_from_slice(b"image/png\0");
+        apic.push(3); // front cover
+        apic.push(0); // empty description
+        apic.extend(std::iter::repeat_n(0xab_u8, len));
+        let mut frames = b"APIC".to_vec();
+        // v2.3 frame sizes are plain big-endian, unlike the synchsafe header.
+        frames.extend_from_slice(&(apic.len() as u32).to_be_bytes());
+        frames.extend_from_slice(&[0, 0]); // flags
+        frames.extend_from_slice(&apic);
+        let size = frames.len();
+        let mut tag = b"ID3".to_vec();
+        tag.extend_from_slice(&[3, 0, 0]); // version 2.3, no flags
+        tag.extend_from_slice(&[
+            ((size >> 21) & 0x7f) as u8,
+            ((size >> 14) & 0x7f) as u8,
+            ((size >> 7) & 0x7f) as u8,
+            (size & 0x7f) as u8,
+        ]);
+        tag.extend_from_slice(&frames);
+
+        // A tenth of a second of 16-bit stereo silence at 44.1 kHz.
+        let frame_count = 4_410u32;
+        let mut comm = Vec::new();
+        comm.extend_from_slice(&2i16.to_be_bytes());
+        comm.extend_from_slice(&frame_count.to_be_bytes());
+        comm.extend_from_slice(&16i16.to_be_bytes());
+        comm.extend_from_slice(&[0x40, 0x0e, 0xac, 0x44, 0, 0, 0, 0, 0, 0]);
+        let mut ssnd = vec![0u8; 8]; // offset and block size
+        ssnd.extend(std::iter::repeat_n(0u8, frame_count as usize * 4));
+
+        let mut body = b"AIFF".to_vec();
+        body.extend(chunk(b"COMM", &comm));
+        body.extend(chunk(b"ID3 ", &tag));
+        body.extend(chunk(b"SSND", &ssnd));
+        let mut file = b"FORM".to_vec();
+        file.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        file.extend_from_slice(&body);
+        file
+    }
+
+    /// The limit `extract_embedded_cover` is given is the one that holds, and it
+    /// holds because of the check after parsing: symphonia is handed it as
+    /// `limit_visual_bytes` and does not enforce it, so a picture past it comes
+    /// back from the parser whole. Without that check it would be served.
+    #[test]
+    fn an_embedded_cover_past_the_limit_is_not_served() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let limit = 4 * 1024;
+
+        let small = temp.path().join("small.aiff");
+        std::fs::write(&small, aiff_with_cover(1024)).expect("write");
+        let (content_type, data) =
+            extract_embedded_cover(&small, limit).expect("a cover under the limit is served");
+        assert_eq!(content_type, "image/png");
+        assert_eq!(data.len(), 1024);
+
+        let large = temp.path().join("large.aiff");
+        std::fs::write(&large, aiff_with_cover(limit + 1)).expect("write");
+        assert!(
+            extract_embedded_cover(&large, limit).is_none(),
+            "a cover past the limit is not cover art"
+        );
     }
 }

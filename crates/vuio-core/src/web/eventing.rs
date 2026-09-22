@@ -402,13 +402,22 @@ pub async fn notify_content_change<D: DatabaseManager>(
     use futures_util::{stream, StreamExt};
 
     loop {
-        let now = std::time::Instant::now();
-        let update_id = state.content_update_id.load(Ordering::SeqCst);
-        let (notifications, retry_after) = claim_notifications(
-            &mut *state.upnp_subscriptions.lock().await,
-            now,
-            worker,
-        );
+        // The revision is read under the same lock the pending flags are claimed
+        // under, not before taking it. A publisher bumps the revision and only then
+        // takes this lock to mark its change owed, so once the lock is held every
+        // mark about to be consumed has its revision already counted. Read first,
+        // and a change landing between the read and the lock had its mark consumed
+        // by a notification carrying the revision before it — the last change of a
+        // burst was never announced, which is the bug the pending flag exists for.
+        let (update_id, (notifications, retry_after)) = {
+            let mut subscriptions = state.upnp_subscriptions.lock().await;
+            // After the wait for the lock, so the throttle measures from now.
+            let now = std::time::Instant::now();
+            (
+                state.content_update_id.load(Ordering::SeqCst),
+                claim_notifications(&mut subscriptions, now, worker),
+            )
+        };
         let sent_any = !notifications.is_empty();
 
         let results = stream::iter(notifications.into_iter().map(

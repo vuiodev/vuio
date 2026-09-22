@@ -240,7 +240,25 @@ fn record_from(
 /// Returns as soon as the run is set up; the work happens on `background_tasks`
 /// so the HTTP request that started it does not have to stay open for what may be
 /// hours.
+///
+/// The setup runs on a task of its own, and the caller only waits for its answer.
+/// The job is claimed before the query that finds the work, and the caller is an
+/// HTTP handler's future — dropped when the client goes away or a proxy gives up.
+/// Dropped between the claim and the start, nothing released the claim: the job
+/// reported a run with no worker behind it, every later run was refused as already
+/// running, and cancel had no token to cancel, so only a restart cleared it. A
+/// spawned task is not cancelled by dropping its handle, so the setup always either
+/// starts the run or gives the claim back.
 pub async fn run_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>) -> Result<usize> {
+    // On the tracker, like the run itself, so shutdown waits for a setup in flight.
+    let tracker = state.background_tasks.clone();
+    tracker
+        .spawn(set_up_library_fetch(state))
+        .await
+        .map_err(|error| anyhow::anyhow!("media info fetch setup failed: {error}"))?
+}
+
+async fn set_up_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>) -> Result<usize> {
     let config = state.current_config();
     let settings = config.mediainfo.clone();
     if !settings.enabled {

@@ -571,20 +571,25 @@ pub async fn serve_cover<D: DatabaseManager>(
     // directory search above still serves cover art without the feature.
     #[cfg(feature = "metadata")]
     if local_sources_apply {
-        // Tag readers materialize an embedded image while parsing it. Keep the
-        // parser's own byte limit below and also cap concurrent parses, so a
-        // request burst cannot multiply that temporary allocation without
-        // bound.
+        // The tag reader materialises an embedded image whole while parsing it,
+        // whatever size it is — symphonia does not enforce the visual limit it
+        // is handed (see `extract_embedded_cover`) — so the bound on that memory
+        // is how many parses run at once.
+        //
+        // The permit travels into the blocking task. Held here instead, it was
+        // released when this request was dropped — a client that disconnects
+        // mid-parse — while the parse carried on without it, so a stream of
+        // requests abandoned as soon as they were sent ran any number at once.
         let permit = EMBEDDED_COVER_READS
             .acquire()
             .await
             .map_err(|_| AppError::NotFound)?;
         let path = file_info.path.clone();
         let cover = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
             crate::platform::filesystem::extract_embedded_cover(&path, MAX_COVER_BYTES as usize)
         })
         .await;
-        drop(permit);
 
         if let Ok(Some((content_type, data))) = cover {
             return Response::builder()

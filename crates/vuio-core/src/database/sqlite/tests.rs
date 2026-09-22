@@ -647,3 +647,31 @@ async fn an_existing_database_is_narrowed_when_it_is_opened() {
     assert_eq!(mode & 0o077, 0, "reopening narrows what it finds");
     assert_eq!(mode & 0o700, 0o600, "and keeps the owner's own bits");
 }
+
+/// A backup is a copy of the `secrets` table, so it has to be as private as the
+/// database it came from. `VACUUM INTO` creates its target at the process umask, and
+/// only the rotating lifecycle backup was narrowed afterwards — the pre-repair backup
+/// taken at every start with backups on went straight through `create_backup` and was
+/// left readable by every local user.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_backup_is_readable_only_by_its_owner() {
+    use crate::database::{HealthRepository, SecretStore};
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let database = database_at(&temp.path().join("vuio.db")).await;
+    database.set_secret("tmdb", b"an-api-key").await.unwrap();
+
+    let backup = temp.path().join("backups").join("pre-repair.db");
+    database.create_backup(&backup).await.unwrap();
+
+    let mode = std::fs::metadata(&backup).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode & 0o077, 0, "the backup is mode {mode:o}");
+    // And it is a real backup, not an empty file left where one should be.
+    let restored = database_at(&backup).await;
+    assert_eq!(
+        restored.get_secret("tmdb").await.unwrap().as_deref(),
+        Some(&b"an-api-key"[..])
+    );
+}

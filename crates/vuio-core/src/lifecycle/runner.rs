@@ -18,15 +18,19 @@ pub(super) async fn create_lifecycle_backup<B: DatabaseBackend>(
     );
     let destination = backup_dir.join(filename);
     database.create_backup(&destination).await?;
-    // A backup is a copy of the `secrets` table like any other. See
-    // `crate::database::restrict_to_owner`.
-    crate::database::restrict_database_to_owner::<B>(&destination)?;
 
     let mut entries = tokio::fs::read_dir(&backup_dir).await?;
     let mut backups = Vec::new();
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) == Some(extension) {
+            // Every backup is a copy of the `secrets` table. `create_backup` writes
+            // new ones owner-only; this catches those written before it did, and the
+            // pre-repair ones beside them, which nothing else ever revisits. See
+            // `crate::database::restrict_to_owner`.
+            if let Err(error) = crate::database::restrict_database_to_owner::<B>(&path) {
+                warn!("Could not restrict backup {} to its owner: {error}", path.display());
+            }
             backups.push(path);
         }
     }

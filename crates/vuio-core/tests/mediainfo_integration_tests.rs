@@ -519,6 +519,57 @@ async fn running_with_the_feature_turned_off_is_refused() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+/// A run request dropped part-way through setting up must not strand the job.
+///
+/// The job is claimed before the query that finds the work, and what claims it is
+/// the HTTP handler's future — which hyper drops when the client goes away, and a
+/// proxy drops when it gives up waiting. Dropped between the claim and the start,
+/// nothing released the claim: the job reported a run with no worker behind it,
+/// every later run was refused as already running, and cancel had no token to
+/// cancel, so only a restart cleared it.
+#[tokio::test]
+async fn a_run_request_dropped_mid_setup_does_not_strand_the_job() {
+    use std::future::Future;
+
+    // An empty library, so a run that really starts has nothing to do and ends at once.
+    let temp = tempdir().unwrap();
+    let database = Arc::new(
+        SqliteDatabase::new(temp.path().join("empty.db"))
+            .await
+            .unwrap(),
+    );
+    database.initialize().await.unwrap();
+    let state = state_with(database, &temp).await;
+
+    // One poll takes it as far as claiming the job and handing the query to the
+    // blocking pool; then it is dropped, as a disconnected client's request is.
+    let mut request = Box::pin(vuio_core::mediainfo::run_library_fetch(state.clone()));
+    let first = std::future::poll_fn(|cx| std::task::Poll::Ready(request.as_mut().poll(cx))).await;
+    assert!(first.is_pending(), "dropped while it is still setting up");
+    drop(request);
+
+    // The request that was dropped either started its run, which over an empty
+    // library finishes at once, or gave the claim back. Either way the job ends up
+    // settled; what it must not do is stay claimed with nothing running it.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let settled = {
+            let job = state.mediainfo_job.lock().await;
+            !job.running && job.finished_at.is_some()
+        };
+        if settled {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the job is still claimed with nothing running it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let next = vuio_core::mediainfo::run_library_fetch(state.clone()).await;
+    assert!(next.is_ok(), "the next run is refused: {next:?}");
+}
+
 // Drives the dashboard API, which carries these endpoints.
 #[cfg(feature = "dashboard")]
 #[tokio::test]
