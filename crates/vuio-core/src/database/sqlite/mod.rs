@@ -200,6 +200,17 @@ impl DatabaseBackend for SqliteDatabase {
         &["db-wal", "db-shm"]
     }
 
+    fn sidecar_paths(path: &Path) -> Vec<PathBuf> {
+        ["-wal", "-shm"]
+            .into_iter()
+            .map(|suffix| {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(suffix);
+                PathBuf::from(name)
+            })
+            .collect()
+    }
+
     async fn restore_backup_file(backup: &Path, destination: &Path) -> Result<()> {
         Self::install_backup(backup.to_path_buf(), destination.to_path_buf()).await
     }

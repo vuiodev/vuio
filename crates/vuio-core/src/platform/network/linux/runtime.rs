@@ -57,12 +57,34 @@ impl NetworkManager for LinuxNetworkManager {
         // Create receive socket bound to INADDR_ANY:1900
         let receive_socket = self.create_receive_socket(config.primary_port).await?;
 
-        // Get all available network interfaces
-        let interfaces = self.get_local_interfaces().await?;
-        let suitable_interfaces: Vec<_> = interfaces
-            .into_iter()
-            .filter(|iface| !iface.is_loopback && iface.is_up && iface.supports_multicast)
-            .collect();
+        // A non-empty list is the operator's resolved Auto/All/Specific
+        // selection. Linux joins during socket creation, so ignoring it here
+        // cannot be repaired by a later join: `multicast_enabled` is already
+        // true by then and the socket keeps receiving on every interface.
+        let suitable_interfaces: Vec<_> = if config.interfaces.is_empty() {
+            self.get_local_interfaces()
+                .await?
+                .into_iter()
+                .filter(|iface| {
+                    !iface.is_loopback
+                        && iface.is_up
+                        && iface.supports_multicast
+                        && iface.ip_address.is_ipv4()
+                })
+                .collect()
+        } else {
+            config
+                .interfaces
+                .iter()
+                .filter(|iface| {
+                    !iface.is_loopback
+                        && iface.is_up
+                        && iface.supports_multicast
+                        && iface.ip_address.is_ipv4()
+                })
+                .cloned()
+                .collect()
+        };
 
         if suitable_interfaces.is_empty() {
             return Err(PlatformError::NetworkConfig(

@@ -26,13 +26,36 @@ pub async fn publish_content_change<D: DatabaseManager + 'static>(state: &AppSta
     invalidate_browse_responses(state).await;
     info!(old_id, new_id, "ContentDirectory revision published");
 
+    // Mark the latest revision as owed before deciding whether to launch a
+    // worker. A subscription has at most one owner, so a burst wakes one retry
+    // loop rather than creating one loop per mutation.
+    let worker = {
+        let now = std::time::Instant::now();
+        let mut subscriptions = state.upnp_subscriptions.lock().await;
+        subscriptions.retain(|_, subscription| subscription.expires_at > now);
+        for subscription in subscriptions.values_mut() {
+            subscription.pending_notification = true;
+        }
+
+        let worker = uuid::Uuid::new_v4();
+        let mut assigned = false;
+        for subscription in subscriptions.values_mut().filter(|subscription| {
+            subscription.pending_notification && subscription.notification_worker.is_none()
+        }) {
+            subscription.notification_worker = Some(worker);
+            assigned = true;
+        }
+        assigned.then_some(worker)
+    };
+    let Some(worker) = worker else { return };
+
     let state = state.clone();
     let cancellation = state.cancellation.clone();
     let tracker = state.background_tasks.clone();
     tracker.spawn(async move {
         tokio::select! {
             _ = cancellation.cancelled() => {}
-            _ = notify_content_change(&state, new_id) => {}
+            _ = notify_content_change(&state, worker) => {}
         }
     });
 }
@@ -43,7 +66,7 @@ pub async fn invalidate_browse_responses<D: DatabaseManager>(state: &AppState<D>
 }
 
 /// Handle UPnP eventing subscription requests for ContentDirectory service
-pub async fn content_directory_subscribe<D: DatabaseManager>(
+pub async fn content_directory_subscribe<D: DatabaseManager + 'static>(
     State(state): State<AppState<D>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -113,6 +136,8 @@ pub async fn content_directory_subscribe<D: DatabaseManager>(
         return StatusCode::BAD_REQUEST.into_response();
     };
     let sid = format!("uuid:{}", uuid::Uuid::new_v4());
+    let generation = uuid::Uuid::new_v4();
+    let initial_worker = uuid::Uuid::new_v4();
     let mut subscriptions = state.upnp_subscriptions.lock().await;
     let now = std::time::Instant::now();
     subscriptions.retain(|_, subscription| subscription.expires_at > now);
@@ -129,22 +154,58 @@ pub async fn content_directory_subscribe<D: DatabaseManager>(
         crate::state::UpnpSubscription {
             callback_url: callback_url.clone(),
             peer: peer_ip,
-            generation: uuid::Uuid::new_v4(),
+            generation,
             expires_at: std::time::Instant::now() + std::time::Duration::from_secs(timeout_seconds),
             next_sequence: 1,
             consecutive_failures: 0,
             last_notification_at: now,
             pending_notification: false,
+            // Sequence zero is an event too. Keep ownership until its HTTP
+            // request completes so a content change cannot deliver sequence one
+            // first merely because the callback answered the second request
+            // faster.
+            notification_worker: Some(initial_worker),
         },
     );
     drop(subscriptions);
     let update_id = state.content_update_id.load(Ordering::SeqCst);
     let initial_sid = sid.clone();
     let cancellation = state.cancellation.clone();
-    state.background_tasks.spawn(async move {
+    let notification_state = state.clone();
+    let tracker = state.background_tasks.clone();
+    tracker.spawn(async move {
         tokio::select! {
             _ = cancellation.cancelled() => {}
-            _ = send_event_notification(&callback_url, &initial_sid, 0, update_id) => {}
+            success = send_event_notification(&callback_url, &initial_sid, 0, update_id) => {
+                let continue_with_pending = {
+                    let mut subscriptions = notification_state.upnp_subscriptions.lock().await;
+                    let Some(subscription) = subscriptions.get_mut(&initial_sid).filter(|subscription| {
+                        subscription.generation == generation
+                            && subscription.notification_worker == Some(initial_worker)
+                    }) else {
+                        return;
+                    };
+                    if success {
+                        subscription.consecutive_failures = 0;
+                    } else {
+                        subscription.consecutive_failures =
+                            subscription.consecutive_failures.saturating_add(1);
+                    }
+                    if subscription.consecutive_failures >= 3 {
+                        subscriptions.remove(&initial_sid);
+                        return;
+                    }
+                    if subscription.pending_notification {
+                        true
+                    } else {
+                        subscription.notification_worker = None;
+                        false
+                    }
+                };
+                if continue_with_pending {
+                    notify_content_change(&notification_state, initial_worker).await;
+                }
+            }
         }
     });
     (
@@ -304,15 +365,18 @@ type ClaimedNotification = (String, String, u32, uuid::Uuid);
 fn claim_notifications(
     subscriptions: &mut std::collections::HashMap<String, crate::state::UpnpSubscription>,
     now: std::time::Instant,
+    worker: uuid::Uuid,
 ) -> (Vec<ClaimedNotification>, Option<std::time::Duration>) {
     let mut claimed = Vec::new();
     let mut soonest: Option<std::time::Duration> = None;
 
     subscriptions.retain(|_, subscription| subscription.expires_at > now);
     for (sid, subscription) in subscriptions.iter_mut() {
+        if subscription.notification_worker != Some(worker) || !subscription.pending_notification {
+            continue;
+        }
         let since = now.duration_since(subscription.last_notification_at);
         if since < MIN_NOTIFICATION_INTERVAL {
-            subscription.pending_notification = true;
             let remaining = MIN_NOTIFICATION_INTERVAL - since;
             soonest = Some(soonest.map_or(remaining, |current| current.min(remaining)));
             continue;
@@ -333,18 +397,19 @@ fn claim_notifications(
 
 pub async fn notify_content_change<D: DatabaseManager>(
     state: &AppState<D>,
-    _published_update_id: u32,
+    worker: uuid::Uuid,
 ) {
     use futures_util::{stream, StreamExt};
 
     loop {
         let now = std::time::Instant::now();
-        // Keep notification batches serialized so subscribers observe
-        // monotonically increasing SEQ values even when content changes are
-        // published concurrently.
         let update_id = state.content_update_id.load(Ordering::SeqCst);
-        let (notifications, retry_after) =
-            claim_notifications(&mut *state.upnp_subscriptions.lock().await, now);
+        let (notifications, retry_after) = claim_notifications(
+            &mut *state.upnp_subscriptions.lock().await,
+            now,
+            worker,
+        );
+        let sent_any = !notifications.is_empty();
 
         let results = stream::iter(notifications.into_iter().map(
             |(sid, url, sequence, generation)| async move {
@@ -373,22 +438,35 @@ pub async fn notify_content_change<D: DatabaseManager>(
             }
             subscriptions.retain(|_, subscription| subscription.consecutive_failures < 3);
 
-            // Nothing is owed once every throttled subscription has been served
-            // — by this task or by another round that got there first.
-            if !subscriptions
+            let still_pending = subscriptions
                 .values()
-                .any(|subscription| subscription.pending_notification)
-            {
+                .any(|subscription| {
+                    subscription.notification_worker == Some(worker)
+                        && subscription.pending_notification
+                });
+            if !still_pending {
+                // Clear ownership while holding the same lock publishers use to
+                // mark work. A publisher either sees this cleared state and
+                // starts the next worker, or marks pending before this check and
+                // this worker keeps ownership; there is no lost-wakeup window.
+                for subscription in subscriptions.values_mut().filter(|subscription| {
+                    subscription.notification_worker == Some(worker)
+                }) {
+                    subscription.notification_worker = None;
+                }
                 return;
             }
         }
 
-        // Something was held back. Wait out its window and go round again; the
-        // revision it carries will be whatever is current by then, which is
-        // what a subscriber wants. The caller runs this inside a select against
-        // cancellation, so shutdown does not wait on the sleep.
-        let Some(wait) = retry_after else { return };
-        tokio::time::sleep(wait).await;
+        // A batch may have spent longer in HTTP than the remaining throttle
+        // interval, so recalculate immediately after a send. With no send there
+        // is nothing useful to do until the earliest window closes.
+        if !sent_any {
+            // `still_pending` normally guarantees a throttle deadline. Keep
+            // the owner alive even if a future subscription state adds another
+            // pending reason without one, rather than abandoning owed work.
+            tokio::time::sleep(retry_after.unwrap_or(MIN_NOTIFICATION_INTERVAL)).await;
+        }
     }
 }
 
@@ -453,6 +531,7 @@ mod tests {
             consecutive_failures: 0,
             last_notification_at,
             pending_notification: false,
+            notification_worker: None,
         }
     }
 
@@ -465,28 +544,34 @@ mod tests {
         let start = std::time::Instant::now();
         let mut subscriptions = std::collections::HashMap::new();
         subscriptions.insert("uuid:one".to_owned(), subscription(start));
+        let worker = uuid::Uuid::new_v4();
+        subscriptions.get_mut("uuid:one").unwrap().pending_notification = true;
+        subscriptions.get_mut("uuid:one").unwrap().notification_worker = Some(worker);
 
         // First change, a moment after the subscribe: inside the window.
         let (claimed, retry_after) = claim_notifications(
             &mut subscriptions,
             start + std::time::Duration::from_millis(10),
+            worker,
         );
         assert!(claimed.is_empty(), "the throttle holds this one back");
         assert_eq!(retry_after, Some(std::time::Duration::from_millis(240)));
         assert!(subscriptions["uuid:one"].pending_notification);
 
-        // A second change lands before the window closes. The two coalesce:
-        // still one notification owed, not two.
+        // A second change lands before the window closes. It stays with the
+        // existing owner: still one notification owed, not a second retry loop.
+        subscriptions.get_mut("uuid:one").unwrap().pending_notification = true;
         let (claimed, retry_after) = claim_notifications(
             &mut subscriptions,
             start + std::time::Duration::from_millis(100),
+            worker,
         );
         assert!(claimed.is_empty());
         assert_eq!(retry_after, Some(std::time::Duration::from_millis(150)));
 
         // Once the window closes it goes out, and nothing is owed after that.
         let (claimed, retry_after) =
-            claim_notifications(&mut subscriptions, start + MIN_NOTIFICATION_INTERVAL);
+            claim_notifications(&mut subscriptions, start + MIN_NOTIFICATION_INTERVAL, worker);
         assert_eq!(claimed.len(), 1, "the coalesced change is delivered");
         assert_eq!(claimed[0].2, 1, "with the sequence it was waiting on");
         assert_eq!(retry_after, None);
@@ -504,10 +589,16 @@ mod tests {
             "uuid:late".to_owned(),
             subscription(start + std::time::Duration::from_millis(100)),
         );
+        let worker = uuid::Uuid::new_v4();
+        for subscription in subscriptions.values_mut() {
+            subscription.pending_notification = true;
+            subscription.notification_worker = Some(worker);
+        }
 
         let (claimed, retry_after) = claim_notifications(
             &mut subscriptions,
             start + std::time::Duration::from_millis(150),
+            worker,
         );
         assert!(claimed.is_empty());
         assert_eq!(retry_after, Some(std::time::Duration::from_millis(100)));
@@ -520,10 +611,25 @@ mod tests {
         let start = std::time::Instant::now();
         let mut subscriptions = std::collections::HashMap::new();
         subscriptions.insert("uuid:one".to_owned(), subscription(start));
+        let worker = uuid::Uuid::new_v4();
+        subscriptions.get_mut("uuid:one").unwrap().pending_notification = true;
+        subscriptions.get_mut("uuid:one").unwrap().notification_worker = Some(worker);
 
-        let (claimed, retry_after) =
-            claim_notifications(&mut subscriptions, start + std::time::Duration::from_secs(1));
+        let (claimed, retry_after) = claim_notifications(
+            &mut subscriptions,
+            start + std::time::Duration::from_secs(1),
+            worker,
+        );
         assert_eq!(claimed.len(), 1);
         assert_eq!(retry_after, None);
+
+        // A second task cannot claim the same sequence while the first owns it.
+        subscriptions.get_mut("uuid:one").unwrap().pending_notification = true;
+        let (claimed, _) = claim_notifications(
+            &mut subscriptions,
+            start + std::time::Duration::from_secs(2),
+            uuid::Uuid::new_v4(),
+        );
+        assert!(claimed.is_empty());
     }
 }

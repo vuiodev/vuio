@@ -906,6 +906,99 @@ mod tests {
         );
     }
 
+    /// Replacing an existing destination is still a rename of the source. The
+    /// destination row describes bytes the filesystem just removed, so it must
+    /// not win merely because path lookup happens before identifier lookup.
+    #[tokio::test]
+    async fn renaming_over_an_indexed_file_keeps_the_source_identity() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+        let state = state_watching(&root).await;
+
+        let source = root.join("source.aiff");
+        let destination = root.join("destination.aiff");
+        std::fs::write(&source, tagged_audio("Source", "kept", 44_100)).expect("source");
+        std::fs::write(
+            &destination,
+            tagged_audio("Destination", "displaced", 44_100),
+        )
+        .expect("destination");
+        handle_file_system_event(FileSystemEvent::Created(source.clone()), &state)
+            .await
+            .expect("index source");
+        handle_file_system_event(FileSystemEvent::Created(destination.clone()), &state)
+            .await
+            .expect("index destination");
+
+        let source_id = state
+            .database
+            .get_file_by_path(&source)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+            .unwrap();
+        let destination_id = state
+            .database
+            .get_file_by_path(&destination)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+            .unwrap();
+        let playlist = state
+            .database
+            .create_playlist("Source list", None)
+            .await
+            .unwrap();
+        state
+            .database
+            .add_to_playlist(playlist, source_id, None)
+            .await
+            .unwrap();
+
+        // Removing first makes overwrite-rename semantics portable to Windows
+        // while deliberately leaving the old destination row in the database,
+        // exactly as it is when the watcher handles the combined rename event.
+        std::fs::remove_file(&destination).expect("remove destination bytes");
+        std::fs::rename(&source, &destination).expect("replace destination");
+        handle_file_system_event(
+            FileSystemEvent::Renamed {
+                from: source.clone(),
+                to: destination.clone(),
+            },
+            &state,
+        )
+        .await
+        .expect("rename event");
+
+        let indexed = state
+            .database
+            .get_file_by_path(&destination)
+            .await
+            .unwrap()
+            .expect("destination remains indexed");
+        assert_eq!(indexed.id, Some(source_id));
+        assert!(state.database.get_file_by_path(&source).await.unwrap().is_none());
+        assert!(state
+            .database
+            .get_file_location_by_id(destination_id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            state
+                .database
+                .get_playlist_tracks(playlist)
+                .await
+                .unwrap()
+                .iter()
+                .filter_map(|file| file.id)
+                .collect::<Vec<_>>(),
+            vec![source_id]
+        );
+    }
+
     /// The same for a whole folder: every row moves with it, keeping its
     /// identifier and everything hanging off it.
     #[tokio::test]

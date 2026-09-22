@@ -150,8 +150,12 @@ fn optional_integer(value: Option<u32>) -> Value {
 
 /// Insert or replace one record, accumulating the directory counts it changes.
 ///
-/// A record is matched by path first and by identifier second, which is what
-/// lets a rename move an existing row instead of duplicating it.
+/// An explicit identifier is matched first, because it means the caller is
+/// moving that record. If another row already occupies the destination path,
+/// that row describes the file the filesystem rename replaced and is removed
+/// before the source moves into place. Matching the path first would update the
+/// overwritten row and leave the real source behind at a path that no longer
+/// exists, losing the source's playlist membership when cleanup later found it.
 pub(in crate::database::sqlite) fn upsert_media_file(
     transaction: &Transaction<'_>,
     file: &MediaFile,
@@ -160,32 +164,49 @@ pub(in crate::database::sqlite) fn upsert_media_file(
     let path = file.path.to_string_lossy().into_owned();
     let family = SqliteDatabase::mime_family(&file.mime_type).to_owned();
 
-    let existing = transaction
-        .prepare_cached("SELECT id, path, mime_family FROM media_files WHERE path = ?")?
-        .query_row([&path], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .optional()?;
+    let by_id = match file.id {
+        Some(id) => transaction
+            .prepare_cached("SELECT id, path, mime_family FROM media_files WHERE id = ?")?
+            .query_row([id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .optional()?,
+        None => None,
+    };
 
-    let existing = match existing {
-        Some(found) => Some(found),
-        None => match file.id {
-            Some(id) => transaction
-                .prepare_cached("SELECT id, path, mime_family FROM media_files WHERE id = ?")?
-                .query_row([id], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                })
-                .optional()?,
-            None => None,
-        },
+    let existing = if let Some(source) = by_id {
+        let displaced = transaction
+            .prepare_cached(
+                "SELECT id, path, mime_family FROM media_files WHERE path = ?1 AND id != ?2",
+            )?
+            .query_row(rusqlite::params![&path, source.0], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .optional()?;
+        if let Some((id, displaced_path, displaced_family)) = displaced {
+            transaction.execute("DELETE FROM media_files WHERE id = ?", [id])?;
+            delta.record(&displaced_path, &displaced_family, -1);
+        }
+        Some(source)
+    } else {
+        transaction
+            .prepare_cached("SELECT id, path, mime_family FROM media_files WHERE path = ?")?
+            .query_row([&path], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .optional()?
     };
 
     let mut params = bind_media_file(file);
@@ -301,8 +322,9 @@ impl SqliteDatabase {
     /// the destination afterwards: the rows are already at the new paths, so
     /// the scan updates them in place.
     ///
-    /// Returns how many rows moved. A move whose destination is already taken
-    /// by another record is skipped rather than failing the batch.
+    /// Returns how many rows moved. If a destination is occupied, the filesystem
+    /// rename has replaced that file: its old row is removed and the moving
+    /// source keeps its identifier at the destination.
     pub(in crate::database::sqlite) async fn relocate_media_files_impl(
         &self,
         moves: &[(i64, PathBuf)],
@@ -320,8 +342,11 @@ impl SqliteDatabase {
             let mut delta = DirectoryDelta::new();
             let mut moved = 0usize;
             {
-                let mut taken = transaction
-                    .prepare_cached("SELECT 1 FROM media_files WHERE path = ? AND id != ?")?;
+                let mut displaced = transaction.prepare_cached(
+                    "SELECT id, path, mime_family FROM media_files WHERE path = ?1 AND id != ?2",
+                )?;
+                let mut remove_displaced =
+                    transaction.prepare_cached("DELETE FROM media_files WHERE id = ?")?;
                 let mut relocate = transaction.prepare_cached(
                     "UPDATE media_files                      SET path = ?1, parent_path = ?2, filename = ?3, updated_at_secs = ?4                      WHERE id = ?5                      RETURNING mime_family",
                 )?;
@@ -329,8 +354,18 @@ impl SqliteDatabase {
                     .prepare_cached("SELECT path, mime_family FROM media_files WHERE id = ?")?;
 
                 for (id, path) in &moves {
-                    if taken.exists(rusqlite::params![path, id])? {
-                        continue;
+                    if let Some((displaced_id, displaced_path, displaced_family)) = displaced
+                        .query_row(rusqlite::params![path, id], |row| {
+                            Ok((
+                                row.get::<_, i64>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                            ))
+                        })
+                        .optional()?
+                    {
+                        remove_displaced.execute([displaced_id])?;
+                        delta.record(&displaced_path, &displaced_family, -1);
                     }
                     let Some((old_path, family)) = previous
                         .query_row([id], |row| {

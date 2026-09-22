@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::{directory, schema, SqliteDatabase};
-use crate::database::{DatabaseHealth, DatabaseIssue, IssueSeverity};
+use crate::database::{DatabaseBackend, DatabaseHealth, DatabaseIssue, IssueSeverity};
 
 fn healthy() -> DatabaseHealth {
     DatabaseHealth {
@@ -242,8 +242,7 @@ impl SqliteDatabase {
 
             // The replaced database's write-ahead log describes pages that no
             // longer exist. Leaving it would corrupt the restored file.
-            for sidecar in ["db-wal", "db-shm"] {
-                let stale = database_path.with_extension(sidecar);
+            for stale in SqliteDatabase::sidecar_paths(&database_path) {
                 if stale.exists() {
                     std::fs::remove_file(stale)?;
                 }

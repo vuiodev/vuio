@@ -164,18 +164,10 @@ async fn load_file_info<D: DatabaseManager>(
 /// `None` when it cannot be read, which simply leaves the URLs unversioned:
 /// better an unversioned playlist than one claiming a version it did not check.
 async fn file_version(id: &str, path: &std::path::Path) -> Option<String> {
-    let file_id = crate::web::streaming::media_id_from_path_segment(id)?;
-    #[cfg(feature = "transcode")]
-    {
-        crate::media::transcode::IndexKey::for_file(file_id, path)
-            .await
-            .map(|key| key.version())
-    }
-    #[cfg(not(feature = "transcode"))]
-    {
-        let _ = (file_id, path);
-        None
-    }
+    crate::web::streaming::media_id_from_path_segment(id)?;
+    crate::media::ContentVersion::for_file(path)
+        .await
+        .map(crate::media::ContentVersion::token)
 }
 
 pub async fn serve_hls_master<D: DatabaseManager>(

@@ -61,8 +61,8 @@ pub(crate) fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
 /// [`restrict_to_owner`] for a database and every sidecar its backend may have written.
 pub(crate) fn restrict_database_to_owner<B: DatabaseBackend>(path: &Path) -> std::io::Result<()> {
     restrict_to_owner(path)?;
-    for sidecar in B::sidecar_extensions() {
-        restrict_to_owner(&path.with_extension(sidecar))?;
+    for sidecar in B::sidecar_paths(path) {
+        restrict_to_owner(&sidecar)?;
     }
     Ok(())
 }
@@ -1355,6 +1355,19 @@ pub trait DatabaseBackend: DatabaseManager + Sized + 'static {
     /// something each call site is expected to remember.
     fn sidecar_extensions() -> &'static [&'static str] {
         &[]
+    }
+
+    /// Concrete sidecar paths for `path`.
+    ///
+    /// The default keeps the historical replacement-extension convention.
+    /// Backends such as SQLite whose sidecars append to the complete filename
+    /// override it; `library.sqlite-wal` cannot be represented by replacing
+    /// `library.sqlite`'s extension with a fixed string.
+    fn sidecar_paths(path: &Path) -> Vec<PathBuf> {
+        Self::sidecar_extensions()
+            .iter()
+            .map(|extension| path.with_extension(extension))
+            .collect()
     }
 
     /// Validate a backup file and install it at `destination`.

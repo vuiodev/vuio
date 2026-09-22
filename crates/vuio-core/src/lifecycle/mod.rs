@@ -157,10 +157,7 @@ mod tests {
 
         // Sidecars must be quarantined with the file they describe, not left
         // behind to be adopted by the replacement database.
-        let sidecars = Backend::sidecar_extensions()
-            .iter()
-            .map(|sidecar| path.with_extension(sidecar))
-            .collect::<Vec<_>>();
+        let sidecars = Backend::sidecar_paths(&path);
         for sidecar in &sidecars {
             std::fs::write(sidecar, b"sidecar").unwrap();
         }
@@ -172,11 +169,7 @@ mod tests {
         let name = quarantine.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("media.failed-"));
         assert!(name.ends_with(&format!(".{extension}")));
-        for (sidecar, moved) in sidecars.iter().zip(
-            Backend::sidecar_extensions()
-                .iter()
-                .map(|extension| quarantine.with_extension(extension)),
-        ) {
+        for (sidecar, moved) in sidecars.iter().zip(Backend::sidecar_paths(&quarantine)) {
             assert!(!sidecar.exists(), "{} was left behind", sidecar.display());
             assert_eq!(std::fs::read(&moved).unwrap(), b"sidecar");
         }

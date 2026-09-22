@@ -598,11 +598,34 @@ async fn a_new_database_is_readable_only_by_its_owner() {
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     };
     assert_eq!(mode(&path) & 0o077, 0, "the database itself");
-    for sidecar in SqliteDatabase::sidecar_extensions() {
-        let path = path.with_extension(sidecar);
+    for path in SqliteDatabase::sidecar_paths(&path) {
         if path.exists() {
             assert_eq!(mode(&path) & 0o077, 0, "{}", path.display());
         }
+    }
+}
+
+/// SQLite appends `-wal` and `-shm` to the complete database filename. Replacing
+/// an assumed `.db` extension only works for the default path and left custom
+/// paths such as `library.sqlite-wal` at their old permissions.
+#[cfg(unix)]
+#[test]
+fn custom_database_sidecars_are_narrowed_by_their_real_names() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("library.sqlite");
+    std::fs::write(&path, b"database").unwrap();
+    let sidecars = SqliteDatabase::sidecar_paths(&path);
+    for sidecar in &sidecars {
+        std::fs::write(sidecar, b"sidecar").unwrap();
+        std::fs::set_permissions(sidecar, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    crate::database::restrict_database_to_owner::<SqliteDatabase>(&path).unwrap();
+    for sidecar in sidecars {
+        let mode = std::fs::metadata(&sidecar).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "{}", sidecar.display());
     }
 }
 

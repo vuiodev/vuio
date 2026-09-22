@@ -87,15 +87,15 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
 
 /// The SHA-256 an asset is expected to hash to, as lowercase hex.
 ///
-/// Nothing about the download used to be checked beyond the HTTP status: whatever
-/// answered for the asset URL was extracted, made executable and renamed over the
-/// running binary. A release that was replaced, an account that was taken, a proxy
-/// with a certificate the machine trusts — any of them was code execution on a host
-/// that had only asked for an update.
+/// Nothing about the download used to be checked beyond the HTTP status. This
+/// binds the downloaded bytes to GitHub's release metadata, detecting a
+/// truncated, corrupted, or substituted asset while that metadata remains
+/// trusted. It is an integrity check, not a signature: control of the release
+/// can publish a new asset and its matching digest together.
 ///
 /// Preferred source is the digest GitHub computes for every asset it stores, because
-/// it needs no second request and is not something a mirror can restate. The manifest
-/// is the fallback, for assets uploaded before that field existed.
+/// it needs no second request. The manifest is the fallback, for assets uploaded
+/// before that field existed.
 async fn expected_digest(
     client: &reqwest::Client,
     release: &GithubRelease,

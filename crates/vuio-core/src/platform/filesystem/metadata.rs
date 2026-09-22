@@ -21,6 +21,7 @@
 use super::*;
 use crate::database::{AudioTags, MediaFile, StreamInfo};
 use std::time::Duration;
+use symphonia::core::common::Limit;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
@@ -115,11 +116,18 @@ pub(crate) async fn extract_audio_metadata(
     Ok(())
 }
 
-/// Read the first embedded picture from a file, if it has one.
+/// Read the first embedded picture from a file, if it has one and it fits the
+/// caller's response budget.
 ///
 /// Used to serve cover art for tracks with no image file beside them.
-pub(crate) fn extract_embedded_cover(path: &Path) -> Option<(String, Vec<u8>)> {
-    let mut format = open_format(path).ok()?;
+pub(crate) fn extract_embedded_cover(
+    path: &Path,
+    max_bytes: usize,
+) -> Option<(String, Vec<u8>)> {
+    // Apply the limit while the untrusted metadata is decoded. Checking only
+    // after probing is too late: the parser has already allocated the picture.
+    let options = MetadataOptions::default().limit_visual_bytes(Limit::Maximum(max_bytes));
+    let mut format = open_format_with_metadata_options(path, options).ok()?;
     let mut log = format.metadata();
     let mut cover = None;
 
@@ -127,13 +135,15 @@ pub(crate) fn extract_embedded_cover(path: &Path) -> Option<(String, Vec<u8>)> {
     // oldest to newest.
     let mut absorb = |revision: &MetadataRevision| {
         if let Some(visual) = revision.media.visuals.first() {
-            cover = Some((
-                visual
-                    .media_type
-                    .clone()
-                    .unwrap_or_else(|| "image/jpeg".to_owned()),
-                visual.data.to_vec(),
-            ));
+            cover = (visual.data.len() <= max_bytes).then(|| {
+                (
+                    visual
+                        .media_type
+                        .clone()
+                        .unwrap_or_else(|| "image/jpeg".to_owned()),
+                    visual.data.to_vec(),
+                )
+            });
         }
     };
     while let Some(revision) = log.pop() {
@@ -217,6 +227,13 @@ impl ProbedMetadata {
 fn open_format(
     path: &Path,
 ) -> anyhow::Result<Box<dyn symphonia::core::formats::FormatReader + 'static>> {
+    open_format_with_metadata_options(path, MetadataOptions::default())
+}
+
+fn open_format_with_metadata_options(
+    path: &Path,
+    metadata_options: MetadataOptions,
+) -> anyhow::Result<Box<dyn symphonia::core::formats::FormatReader + 'static>> {
     let file = std::fs::File::open(path)?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -227,7 +244,7 @@ fn open_format(
         &hint,
         stream,
         FormatOptions::default(),
-        MetadataOptions::default(),
+        metadata_options,
     )?;
     Ok(format)
 }

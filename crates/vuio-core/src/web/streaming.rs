@@ -391,6 +391,8 @@ const MAX_SUBTITLE_BYTES: u64 = 8 * 1024 * 1024;
 /// needs no credential. A file past this is not cover art; the search moves on to the
 /// next candidate, and to the embedded and fetched artwork behind it.
 const MAX_COVER_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(feature = "metadata")]
+static EMBEDDED_COVER_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Resolve a media id to its sidecar `.srt`, shared by the raw and WebVTT handlers.
 async fn resolve_srt_path<D: DatabaseManager>(
@@ -569,11 +571,20 @@ pub async fn serve_cover<D: DatabaseManager>(
     // directory search above still serves cover art without the feature.
     #[cfg(feature = "metadata")]
     if local_sources_apply {
+        // Tag readers materialize an embedded image while parsing it. Keep the
+        // parser's own byte limit below and also cap concurrent parses, so a
+        // request burst cannot multiply that temporary allocation without
+        // bound.
+        let permit = EMBEDDED_COVER_READS
+            .acquire()
+            .await
+            .map_err(|_| AppError::NotFound)?;
         let path = file_info.path.clone();
         let cover = tokio::task::spawn_blocking(move || {
-            crate::platform::filesystem::extract_embedded_cover(&path)
+            crate::platform::filesystem::extract_embedded_cover(&path, MAX_COVER_BYTES as usize)
         })
         .await;
+        drop(permit);
 
         if let Ok(Some((content_type, data))) = cover {
             return Response::builder()
@@ -617,12 +628,8 @@ async fn serve_cached_artwork<D: DatabaseManager>(
 
     let cache = crate::mediainfo::ArtworkCache::new(root);
     let path = cache.lookup(&key)?;
-    let content_type = crate::mediainfo::artwork_content_type(&path);
-    let data = tokio::fs::read(&path).await.ok()?;
-    Response::builder()
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from(data))
-        .ok()
+    let extension = path.extension()?.to_str()?;
+    serve_cover_file(&path, extension).await
 }
 
 #[cfg(test)]

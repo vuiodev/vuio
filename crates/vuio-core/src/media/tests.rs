@@ -342,3 +342,41 @@ fn case_policy_compares_path_components_without_changing_boundaries() {
     ));
     assert_eq!(swap_one_ascii_case("Movies"), Some("movies".to_string()));
 }
+
+#[tokio::test]
+async fn content_version_changes_for_a_same_size_quick_replacement() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("film.mkv");
+    std::fs::write(&path, b"old-film").unwrap();
+    let first = ContentVersion::for_file(&path).await.unwrap();
+
+    // Whole-second mtime plus size considered these identical on filesystems
+    // that can perform both writes inside one second.
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    std::fs::write(&path, b"new-film").unwrap();
+    let second = ContentVersion::for_file(&path).await.unwrap();
+    assert_eq!(first.size, second.size);
+    assert_ne!(first, second);
+    assert_ne!(first.token(), second.token());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn content_version_changes_when_a_copy_restores_the_mtime() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("film.mkv");
+    std::fs::write(&path, b"old-film").unwrap();
+    let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let first = ContentVersion::for_file(&path).await.unwrap();
+
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    std::fs::write(&path, b"new-film").unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(original_mtime)
+        .unwrap();
+    let second = ContentVersion::for_file(&path).await.unwrap();
+    assert_ne!(first, second, "Unix change time must invalidate the cache");
+}

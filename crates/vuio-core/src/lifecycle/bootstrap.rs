@@ -388,10 +388,11 @@ pub(super) fn preserve_failed_database<B: DatabaseBackend>(
     })?;
     // Sidecars must follow the file they belong to. A write-ahead log left
     // beside a replacement database describes rows the replacement never had.
-    for sidecar in B::sidecar_extensions() {
-        let source = db_path.with_extension(sidecar);
+    for (source, destination) in B::sidecar_paths(db_path)
+        .into_iter()
+        .zip(B::sidecar_paths(&backup_path))
+    {
         if source.exists() {
-            let destination = backup_path.with_extension(sidecar);
             std::fs::rename(&source, &destination).with_context(|| {
                 format!(
                     "Failed to preserve database sidecar {}",
@@ -575,4 +576,3 @@ pub struct ApplicationContext<D: DatabaseManager = database::ActiveDatabase> {
     pub platform_info: Arc<PlatformInfo>,
     pub app_state: AppState<D>,
 }
-

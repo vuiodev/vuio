@@ -205,12 +205,21 @@ fn advertise_interfaces(
         interfaces
             .iter()
             .filter(|interface| {
-                interface.is_up && !interface.is_loopback && interface.supports_multicast
+                interface.is_up
+                    && !interface.is_loopback
+                    && interface.supports_multicast
+                    && interface.ip_address.is_ipv4()
             })
             .cloned()
             .collect::<Vec<_>>()
     };
-    let primary_only = || primary.into_iter().cloned().collect::<Vec<_>>();
+    let primary_only = || {
+        primary
+            .into_iter()
+            .filter(|interface| interface.ip_address.is_ipv4())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
 
     match selection {
         NetworkInterfaceConfig::All => {
@@ -353,7 +362,12 @@ impl UnifiedSsdpService {
         info!("SSDP service using server IP: {}", server_ip);
 
         // Create SSDP socket with platform-specific configuration
-        let ssdp_config = self.platform_adapter.get_ssdp_config(&self.config);
+        let mut ssdp_config = self.platform_adapter.get_ssdp_config(&self.config);
+        // Linux establishes membership while creating the socket. Passing the
+        // resolved selection here is therefore essential: trying to narrow it
+        // afterwards is too late, and Linux's join method quite reasonably
+        // returns once the socket says multicast is already enabled.
+        ssdp_config.interfaces = self.advertised.interfaces.clone();
         let mut socket = self
             .network_manager
             .create_ssdp_socket_with_config(&ssdp_config)
@@ -957,6 +971,10 @@ mod tests {
         vec![
             interface("eth0", "192.168.1.10"),
             interface("eth1", "10.10.0.5"),
+            // Interface discovery can report one record per address. SSDP uses
+            // the IPv4 group, so the IPv6 record for the same NIC is not a
+            // second announcement pass or membership attempt.
+            interface("eth0", "fe80::1"),
             NetworkInterface {
                 is_up: false,
                 ..interface("eth2", "172.16.0.9")

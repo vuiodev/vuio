@@ -520,17 +520,7 @@ fn track_signature(audio: &[TrackInfo]) -> u64 {
 
 /// The file's identity, as the caches key on it.
 async fn file_key(file_id: i64, path: &std::path::Path) -> Option<IndexKey> {
-    let metadata = tokio::fs::metadata(path).await.ok()?;
-    Some(IndexKey {
-        id: file_id,
-        size: metadata.len(),
-        modified: metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    })
+    IndexKey::for_file(file_id, path).await
 }
 
 fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {

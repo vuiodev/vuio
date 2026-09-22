@@ -22,16 +22,16 @@ use super::TrackRates;
 /// this is single-digit megabytes for a household's worth of open streams.
 const MAX_CACHED_INDEXES: usize = 8;
 
-/// Identifies a cached index. The file's size and modification time are part of
-/// the key so replacing a file in place invalidates its index rather than
-/// serving byte offsets into a file that no longer has them.
+/// Identifies a cached index. The file's size and high-resolution metadata
+/// marker are part of the key so replacing a file in place invalidates its
+/// index rather than serving byte offsets into a file that no longer has them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IndexKey {
     /// Database id of the file.
     pub id: i64,
     /// Size in bytes at the time the index was built.
     pub size: u64,
-    /// Modification time, as seconds since the epoch.
+    /// High-resolution, platform-specific metadata marker for the contents.
     pub modified: i64,
 }
 
@@ -64,16 +64,11 @@ impl IndexKey {
     /// `None` when the file cannot be stat'd, which callers treat as "do not
     /// cache" rather than inventing a fingerprint.
     pub async fn for_file(id: i64, path: &std::path::Path) -> Option<Self> {
-        let metadata = tokio::fs::metadata(path).await.ok()?;
+        let version = crate::media::ContentVersion::for_file(path).await?;
         Some(Self {
             id,
-            size: metadata.len(),
-            modified: metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|since| since.as_secs() as i64)
-                .unwrap_or(0),
+            size: version.size,
+            modified: version.marker,
         })
     }
 
@@ -83,7 +78,11 @@ impl IndexKey {
     /// keys on the URL and was told these are good for an hour — cannot serve
     /// the replaced film's segments either.
     pub fn version(&self) -> String {
-        format!("{:x}-{:x}", self.size, self.modified)
+        crate::media::ContentVersion {
+            size: self.size,
+            marker: self.modified,
+        }
+        .token()
     }
 }
 

@@ -200,6 +200,15 @@ pub struct UpnpSubscription {
     /// latest, so a run of changes coalesces into one notification carrying
     /// whatever the revision is by the time it goes out.
     pub pending_notification: bool,
+    /// The one worker allowed to advance this subscription's sequence and send
+    /// its notifications.
+    ///
+    /// Content changes can be published concurrently. Giving each change its
+    /// own retry loop lets two loops alternately re-arm the throttle, producing
+    /// duplicate callbacks, and it lets a later sequence overtake an earlier
+    /// HTTP request. Ownership stays on the subscription so unrelated
+    /// subscribers can still be delivered in parallel.
+    pub notification_worker: Option<uuid::Uuid>,
 }
 
 pub struct AppState<D: DatabaseManager = crate::database::ActiveDatabase> {
