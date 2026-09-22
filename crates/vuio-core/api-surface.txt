@@ -6,10 +6,10 @@ pub vuio_core::ErrorKind::Media
 pub vuio_core::ErrorKind::Network
 pub vuio_core::ErrorKind::Runtime
 impl core::clone::Clone for vuio_core::ErrorKind
-pub fn vuio_core::ErrorKind::clone(&self) -> vuio_core::ErrorKind
+pub fn vuio_core::ErrorKind::clone(&self) -> Self
 impl core::cmp::Eq for vuio_core::ErrorKind
 impl core::cmp::PartialEq for vuio_core::ErrorKind
-pub fn vuio_core::ErrorKind::eq(&self, &vuio_core::ErrorKind) -> bool
+pub fn vuio_core::ErrorKind::eq(&self, &Self) -> bool
 impl core::fmt::Debug for vuio_core::ErrorKind
 pub fn vuio_core::ErrorKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::hash::Hash for vuio_core::ErrorKind
@@ -22,10 +22,10 @@ pub vuio_core::RuntimeStatus::Running
 pub vuio_core::RuntimeStatus::Stopped
 pub vuio_core::RuntimeStatus::Stopping
 impl core::clone::Clone for vuio_core::RuntimeStatus
-pub fn vuio_core::RuntimeStatus::clone(&self) -> vuio_core::RuntimeStatus
+pub fn vuio_core::RuntimeStatus::clone(&self) -> Self
 impl core::cmp::Eq for vuio_core::RuntimeStatus
 impl core::cmp::PartialEq for vuio_core::RuntimeStatus
-pub fn vuio_core::RuntimeStatus::eq(&self, &vuio_core::RuntimeStatus) -> bool
+pub fn vuio_core::RuntimeStatus::eq(&self, &Self) -> bool
 impl core::fmt::Debug for vuio_core::RuntimeStatus
 pub fn vuio_core::RuntimeStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::StructuralPartialEq for vuio_core::RuntimeStatus
@@ -62,9 +62,9 @@ pub fn vuio_core::RuntimeOptions::port(self, u16) -> Self
 pub fn vuio_core::RuntimeOptions::restore_backup(self, impl core::convert::Into<std::path::PathBuf>) -> Self
 pub fn vuio_core::RuntimeOptions::server_name(self, impl core::convert::Into<alloc::string::String>) -> Self
 impl core::clone::Clone for vuio_core::RuntimeOptions
-pub fn vuio_core::RuntimeOptions::clone(&self) -> vuio_core::RuntimeOptions
+pub fn vuio_core::RuntimeOptions::clone(&self) -> Self
 impl core::default::Default for vuio_core::RuntimeOptions
-pub fn vuio_core::RuntimeOptions::default() -> vuio_core::RuntimeOptions
+pub fn vuio_core::RuntimeOptions::default() -> Self
 impl core::fmt::Debug for vuio_core::RuntimeOptions
 pub fn vuio_core::RuntimeOptions::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 pub type vuio_core::Result<T> = core::result::Result<T, vuio_core::Error>
