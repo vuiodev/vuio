@@ -22,16 +22,16 @@ use super::TrackRates;
 /// this is single-digit megabytes for a household's worth of open streams.
 const MAX_CACHED_INDEXES: usize = 8;
 
-/// Identifies a cached index. The file's size and modification time are part of
-/// the key so replacing a file in place invalidates its index rather than
-/// serving byte offsets into a file that no longer has them.
+/// Identifies a cached index. The file's size and high-resolution metadata
+/// marker are part of the key so replacing a file in place invalidates its
+/// index rather than serving byte offsets into a file that no longer has them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct IndexKey {
     /// Database id of the file.
     pub id: i64,
     /// Size in bytes at the time the index was built.
     pub size: u64,
-    /// Modification time, as seconds since the epoch.
+    /// High-resolution, platform-specific metadata marker for the contents.
     pub modified: i64,
 }
 
@@ -42,14 +42,48 @@ pub struct IndexKey {
 /// seeking or re-buffering asks for the same segment again and again. Keyed on
 /// the track as well as the file because a film's renditions are built
 /// independently and a browser may be pulling two of them at once.
+///
+/// The file is an [`IndexKey`] rather than a bare id, for the same reason that
+/// one is: replacing a film's contents while it keeps its database row left
+/// matching track and segment numbers answering out of the cache with the old
+/// film's pictures, possibly alongside the new one's init segment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SegmentKey {
-    /// Database id of the file.
-    pub id: i64,
+    /// The file, with the fingerprint that tells a replacement apart.
+    pub file: IndexKey,
     /// Container track id.
     pub track: u32,
     /// Segment index within the rendition.
     pub seq: u32,
+}
+
+impl IndexKey {
+    /// The file's identity as every cache here keys on it: which record it is,
+    /// and whether its contents are still the ones that were read.
+    ///
+    /// `None` when the file cannot be stat'd, which callers treat as "do not
+    /// cache" rather than inventing a fingerprint.
+    pub async fn for_file(id: i64, path: &std::path::Path) -> Option<Self> {
+        let version = crate::media::ContentVersion::for_file(path).await?;
+        Some(Self {
+            id,
+            size: version.size,
+            modified: version.marker,
+        })
+    }
+
+    /// A short token that changes when the file's contents do.
+    ///
+    /// Goes in the URLs a playlist hands out, so a browser's own cache — which
+    /// keys on the URL and was told these are good for an hour — cannot serve
+    /// the replaced film's segments either.
+    pub fn version(&self) -> String {
+        crate::media::ContentVersion {
+            size: self.size,
+            marker: self.modified,
+        }
+        .token()
+    }
 }
 
 /// How many segments to keep, and how much memory they may occupy between them.
@@ -340,7 +374,7 @@ mod tests {
     async fn segments_are_evicted_once_they_outgrow_their_memory_ceiling() {
         let state = TranscodeState::new(1);
         let key = |seq| SegmentKey {
-            id: 1,
+            file: key(1),
             track: 2,
             seq,
         };
@@ -358,22 +392,54 @@ mod tests {
     #[tokio::test]
     async fn a_segment_is_found_again_under_the_key_that_stored_it() {
         let state = TranscodeState::new(1);
-        let key = SegmentKey {
-            id: 7,
+        let segment = SegmentKey {
+            file: key(7),
             track: 2,
             seq: 3,
         };
         state
-            .remember_segment(key, bytes::Bytes::from_static(b"segment"))
+            .remember_segment(segment, bytes::Bytes::from_static(b"segment"))
             .await;
         assert_eq!(
-            state.cached_segment(&key).await.as_deref(),
+            state.cached_segment(&segment).await.as_deref(),
             Some(&b"segment"[..])
         );
         // A different rendition of the same file is a different segment.
         assert!(state
-            .cached_segment(&SegmentKey { track: 3, ..key })
+            .cached_segment(&SegmentKey { track: 3, ..segment })
             .await
             .is_none());
+    }
+
+    /// Replacing a film's contents while it keeps its database row must not
+    /// leave the old film's pictures answering for the new one's segments.
+    ///
+    /// The key used to be id, track and sequence — nothing about the file — so
+    /// every matching segment number came back out of the cache, potentially
+    /// alongside an init segment built from the new file.
+    #[tokio::test]
+    async fn a_file_replaced_in_place_does_not_reuse_its_segments() {
+        let state = TranscodeState::new(1);
+        let segment = SegmentKey {
+            file: key(7),
+            track: 2,
+            seq: 3,
+        };
+        state
+            .remember_segment(segment, bytes::Bytes::from_static(b"old film"))
+            .await;
+
+        let rewritten = SegmentKey {
+            file: IndexKey {
+                id: 7,
+                size: 999,
+                modified: 2,
+            },
+            ..segment
+        };
+        assert!(state.cached_segment(&rewritten).await.is_none());
+        // And the version a playlist hands out changes with it, so a browser
+        // that was told these are good for an hour asks for new URLs.
+        assert_ne!(rewritten.file.version(), segment.file.version());
     }
 }

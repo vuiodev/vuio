@@ -108,6 +108,7 @@ async fn test_metrics_endpoints_data() {
         )),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
@@ -147,10 +148,16 @@ async fn test_metrics_endpoints_data() {
     let runtime = &json_val["runtime_diagnostics"];
     assert_eq!(runtime["monitored_directory_count"], 1);
     assert_eq!(runtime["accessible_directory_count"], 1);
-    assert!(runtime["snapshot"]["system"]["cpu_count"]
-        .as_u64()
-        .is_some_and(|count| count > 0));
-    assert_eq!(runtime["snapshot"]["process"]["pid"], std::process::id());
+    // The system and process figures come from sysinfo, which is the
+    // `diagnostics` feature. Without it the snapshot is reported empty, and
+    // that is the correct answer rather than a missing one.
+    #[cfg(feature = "diagnostics")]
+    {
+        assert!(runtime["snapshot"]["system"]["cpu_count"]
+            .as_u64()
+            .is_some_and(|count| count > 0));
+        assert_eq!(runtime["snapshot"]["process"]["pid"], std::process::id());
+    }
     assert!(!body_str.contains(private_media_path.to_string_lossy().as_ref()));
 
     // 4. Test get_prometheus_metrics handler (exposition text format)
@@ -172,7 +179,11 @@ async fn test_metrics_endpoints_data() {
     assert!(prom_str.contains("vuio_web_browse_requests_total 2"));
     assert!(prom_str.contains("vuio_monitored_directories 1"));
     assert!(prom_str.contains("vuio_accessible_directories 1"));
-    assert!(prom_str.contains("vuio_system_uptime_seconds"));
-    assert!(prom_str.contains("vuio_process_memory_bytes"));
+    // Also sysinfo's, so also the `diagnostics` feature.
+    #[cfg(feature = "diagnostics")]
+    {
+        assert!(prom_str.contains("vuio_system_uptime_seconds"));
+        assert!(prom_str.contains("vuio_process_memory_bytes"));
+    }
     assert!(!prom_str.contains(private_media_path.to_string_lossy().as_ref()));
 }

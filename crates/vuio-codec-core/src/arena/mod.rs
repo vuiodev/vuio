@@ -296,6 +296,19 @@ impl ArenaPool {
     /// [`Error::ResourceExhausted`] if every arena slot is already
     /// checked out by an [`Arena`] (or a [`Frame`] holding one).
     pub fn lease(self: &Arc<Self>) -> Result<Arena> {
+        // A non-zero `cap_per_arena` with no valid `Layout` (too large
+        // for the allocator) makes `Buffer::new_zeroed` fall back to
+        // the zero-byte sentinel. Handing that out while `Arena::cap`
+        // advertised the unchecked requested size would let `alloc`
+        // return slices over storage that was never allocated, so
+        // refuse the lease instead.
+        if self.cap_per_arena != 0 && buffer_layout(self.cap_per_arena).is_none() {
+            return Err(Error::resource_exhausted(format!(
+                "ArenaPool cap_per_arena of {} bytes is not allocatable",
+                self.cap_per_arena
+            )));
+        }
+
         let buffer = {
             let mut inner = self.inner.lock().expect("ArenaPool mutex poisoned");
             if let Some(buf) = inner.idle.pop() {
@@ -312,12 +325,16 @@ impl ArenaPool {
         };
 
         let base = buffer.ptr;
+        // Cap comes from the buffer we actually hold, never from the
+        // requested figure — the two only differ for a request the
+        // allocator could not honour, which the check above rejects.
+        let cap = buffer.cap;
         Ok(Arena {
             buffer: Cell::new(Some(buffer)),
             base,
             cursor: Cell::new(0),
             alloc_count: Cell::new(0),
-            cap: self.cap_per_arena,
+            cap,
             alloc_count_cap: self.max_alloc_count_per_arena,
             pool: Arc::downgrade(self),
         })
@@ -542,6 +559,20 @@ impl Arena {
     /// is still in use — Rust's borrow checker enforces this, since
     /// `reset` takes `&mut self`.
     pub fn reset(&mut self) {
+        // `alloc` hands out `&mut [T]` over these bytes without
+        // initialising them, which is only sound because the bytes are
+        // zero and `T: Zeroable`. A pool buffer is zeroed on release,
+        // so `reset` — which reuses the buffer in place — has to do the
+        // same, or the next `alloc` would build a `T` out of whatever
+        // the previous round wrote (an invalid `bool`, say).
+        let used = self.cursor.get();
+        if used > 0 {
+            // SAFETY: `base` points at `self.cap` bytes we own, and
+            // `used <= self.cap` because `alloc` never advances the
+            // cursor past the cap. `&mut self` proves no slice handed
+            // out earlier is still borrowing from `base`.
+            unsafe { ptr::write_bytes(self.base.as_ptr(), 0, used) };
+        }
         self.cursor.set(0);
         self.alloc_count.set(0);
     }
@@ -934,5 +965,43 @@ mod tests {
         arena.reset();
         // After reset we can allocate again.
         let _: &mut [u8] = arena.alloc::<u8>(32).unwrap();
+    }
+    #[test]
+    fn arena_reset_zeroes_reused_storage() {
+        // `alloc` promises zeroed bytes, and `Zeroable` is only a
+        // sufficient bound because of that promise. Reusing a buffer
+        // in place must therefore scrub it, exactly as returning it
+        // to the pool does.
+        let pool = small_pool(1, 64);
+        let mut arena = pool.lease().unwrap();
+        arena.alloc::<u8>(64).unwrap().fill(0xff);
+        arena.reset();
+        assert!(arena.alloc::<u8>(64).unwrap().iter().all(|&b| b == 0));
+
+        // The same bytes handed back as a type with a restricted
+        // representation: a leftover 0xff would be an invalid `bool`.
+        arena.reset();
+        assert!(arena.alloc::<bool>(64).unwrap().iter().all(|&b| !b));
+    }
+
+    #[test]
+    fn pool_rejects_unallocatable_cap() {
+        // `usize::MAX` has no valid `Layout`, so the buffer would fall
+        // back to the zero-byte sentinel while the arena advertised
+        // `usize::MAX` of capacity — `alloc` would then slice storage
+        // that does not exist.
+        let pool = ArenaPool::new(1, usize::MAX);
+        assert!(matches!(pool.lease(), Err(Error::ResourceExhausted(_))));
+    }
+
+    #[test]
+    fn arena_capacity_matches_backing_storage() {
+        let pool = small_pool(1, 0);
+        let arena = pool.lease().unwrap();
+        assert_eq!(arena.capacity(), 0);
+        assert!(matches!(
+            arena.alloc::<u8>(1),
+            Err(Error::ResourceExhausted(_))
+        ));
     }
 }

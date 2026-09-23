@@ -152,6 +152,25 @@ impl std::fmt::Debug for SqliteDatabase {
     }
 }
 
+/// Create an empty file that only its owner can read.
+///
+/// `create_new`, so two processes racing to open the same database cannot have one of
+/// them truncate the other's; the loser finds the file already there and opens it.
+fn create_private_file(path: &Path) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 /// Readers to keep open. Browsing is bursty and shallow, so a handful of
 /// connections saturates the disk long before the CPU.
 fn reader_pool_size() -> usize {
@@ -181,6 +200,17 @@ impl DatabaseBackend for SqliteDatabase {
         &["db-wal", "db-shm"]
     }
 
+    fn sidecar_paths(path: &Path) -> Vec<PathBuf> {
+        ["-wal", "-shm"]
+            .into_iter()
+            .map(|suffix| {
+                let mut name = path.as_os_str().to_os_string();
+                name.push(suffix);
+                PathBuf::from(name)
+            })
+            .collect()
+    }
+
     async fn restore_backup_file(backup: &Path, destination: &Path) -> Result<()> {
         Self::install_backup(backup.to_path_buf(), destination.to_path_buf()).await
     }
@@ -197,6 +227,20 @@ impl SqliteDatabase {
             }
         }
 
+        // Before the engine opens it, not after: SQLite gives the write-ahead log and
+        // the shared-memory index the permissions of the database file they belong to,
+        // so the mode has to be right by the time they are created. An absent database
+        // is created here as an empty file — which is what SQLite treats a new one as —
+        // purely so that it starts out owner-only rather than at the process umask.
+        // See `crate::database::restrict_to_owner`: this file holds the `secrets` table.
+        if !path.exists() {
+            create_private_file(&path).with_context(|| {
+                format!("Failed to create database file {}", path.display())
+            })?;
+        }
+        crate::database::restrict_database_to_owner::<Self>(&path)
+            .with_context(|| format!("Failed to restrict {} to its owner", path.display()))?;
+
         let open_path = path.clone();
         let write = tokio::task::spawn_blocking(move || -> Result<Connection> {
             let connection = schema::open_connection(&open_path, cache_mb)?;
@@ -211,6 +255,10 @@ impl SqliteDatabase {
         })
         .await
         .context("SQLite open task failed")??;
+
+        // Again, for the sidecars the connection above has just brought into being.
+        crate::database::restrict_database_to_owner::<Self>(&path)
+            .with_context(|| format!("Failed to restrict {} to its owner", path.display()))?;
 
         info!("Opened SQLite database at {}", path.display());
         Ok(Self {

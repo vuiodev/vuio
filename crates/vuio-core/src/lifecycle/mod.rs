@@ -113,14 +113,18 @@ mod tests {
         ];
 
         let database_path = temp.path().join("media.db");
-        let database = database::sqlite::SqliteDatabase::new(database_path.clone())
-            .await
-            .unwrap();
+        let database = std::sync::Arc::new(
+            database::sqlite::SqliteDatabase::new(database_path.clone())
+                .await
+                .unwrap(),
+        );
         database.initialize().await.unwrap();
         for (filename, _) in downloads {
             let completed = temp.path().join(filename);
             tokio::fs::write(&completed, b"media").await.unwrap();
-            index_media_file_path(&database, &completed).await.unwrap();
+            index_media_file_path(&database, &completed, None)
+                .await
+                .unwrap();
         }
         drop(database);
 
@@ -153,10 +157,7 @@ mod tests {
 
         // Sidecars must be quarantined with the file they describe, not left
         // behind to be adopted by the replacement database.
-        let sidecars = Backend::sidecar_extensions()
-            .iter()
-            .map(|sidecar| path.with_extension(sidecar))
-            .collect::<Vec<_>>();
+        let sidecars = Backend::sidecar_paths(&path);
         for sidecar in &sidecars {
             std::fs::write(sidecar, b"sidecar").unwrap();
         }
@@ -168,13 +169,91 @@ mod tests {
         let name = quarantine.file_name().unwrap().to_string_lossy();
         assert!(name.starts_with("media.failed-"));
         assert!(name.ends_with(&format!(".{extension}")));
-        for (sidecar, moved) in sidecars.iter().zip(
-            Backend::sidecar_extensions()
-                .iter()
-                .map(|extension| quarantine.with_extension(extension)),
-        ) {
+        for (sidecar, moved) in sidecars.iter().zip(Backend::sidecar_paths(&quarantine)) {
             assert!(!sidecar.exists(), "{} was left behind", sidecar.display());
             assert_eq!(std::fs::read(&moved).unwrap(), b"sidecar");
         }
+    }
+
+    /// Backups written before `create_backup` made them owner-only — and every
+    /// pre-repair backup, which nothing else revisits — stayed readable by every
+    /// local user. Each is a copy of the `secrets` table. The next lifecycle
+    /// backup narrows whatever it finds beside it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_lifecycle_backup_narrows_the_backups_beside_it() {
+        use std::os::unix::fs::PermissionsExt;
+        type Backend = database::ActiveDatabase;
+
+        let temp = tempdir().unwrap();
+        let mut config = AppConfig::default_for_platform();
+        config.database.path = Some(
+            temp.path()
+                .join(format!("vuio.{}", Backend::file_extension()))
+                .to_string_lossy()
+                .into_owned(),
+        );
+        let database = Arc::new(
+            Backend::new(database_path_for::<Backend>(&config))
+                .await
+                .unwrap(),
+        );
+        database.initialize().await.unwrap();
+
+        let backups = temp.path().join("backups");
+        std::fs::create_dir_all(&backups).unwrap();
+        let legacy = backups.join(format!(
+            "pre-repair-20260101T000000Z-legacy.{}",
+            Backend::file_extension()
+        ));
+        std::fs::write(&legacy, b"an old backup").unwrap();
+        std::fs::set_permissions(&legacy, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let fresh = runner::create_lifecycle_backup(&database, &config)
+            .await
+            .unwrap();
+
+        let mode = |path: &std::path::Path| {
+            std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+        };
+        assert_eq!(mode(&fresh) & 0o077, 0, "the new backup");
+        assert_eq!(mode(&legacy) & 0o077, 0, "the one already there");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_restricts_legacy_backups_even_when_backups_are_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+        type Backend = database::ActiveDatabase;
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("vuio.db");
+        let mut config = AppConfig::default_for_platform();
+        config.database.path = Some(path.to_string_lossy().into_owned());
+        config.database.backup_enabled = false;
+        let backups = temp.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let mut files = Vec::new();
+        // More than the retention count: permission repair must not rotate or
+        // remove files when backups have been disabled.
+        for index in 0..4 {
+            let backup = backups.join(format!("pre-repair-{index}.db"));
+            files.extend(Backend::sidecar_paths(&backup));
+            files.push(backup);
+        }
+        for file in &files {
+            std::fs::write(file, b"old credentials").unwrap();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        initialize_database::<Backend>(&config).await.unwrap();
+        for file in &files {
+            assert_eq!(
+                std::fs::metadata(file).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_eq!(std::fs::read(file).unwrap(), b"old credentials");
+        }
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), files.len());
     }
 }

@@ -86,6 +86,16 @@ allowed_networks = ["127.0.0.1/32", "::1/128", "192.168.1.0/24"]
 
 When `allowed_networks` is left empty, VuIO permits loopback and standard RFC1918 private/link-local addresses by default.
 
+The list is enforced whether or not a token is required. On a server left in the default open mode it is the only access control there is, so `allowed_networks` on its own is a usable way to keep the dashboard and the management API on one subnet:
+
+```toml
+[management]
+# No token, but administration is reachable only from this subnet (and loopback).
+allowed_networks = ["192.168.1.0/24"]
+```
+
+Rotating the token is a matter of writing a new one into the token file: the next configuration reload picks it up, and every session bought with the replaced token is revoked with it.
+
 ---
 
 ## Related Documentation

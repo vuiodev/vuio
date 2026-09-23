@@ -6,6 +6,7 @@ pub(super) async fn create_lifecycle_backup<B: DatabaseBackend>(
 ) -> anyhow::Result<PathBuf> {
     let extension = B::file_extension();
     let database_path = database_path_for::<B>(config);
+    restrict_existing_backups::<B>(&database_path).await?;
     let backup_dir = database_path
         .parent()
         .unwrap_or_else(|| Path::new("."))

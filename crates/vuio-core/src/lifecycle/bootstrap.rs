@@ -388,10 +388,11 @@ pub(super) fn preserve_failed_database<B: DatabaseBackend>(
     })?;
     // Sidecars must follow the file they belong to. A write-ahead log left
     // beside a replacement database describes rows the replacement never had.
-    for sidecar in B::sidecar_extensions() {
-        let source = db_path.with_extension(sidecar);
+    for (source, destination) in B::sidecar_paths(db_path)
+        .into_iter()
+        .zip(B::sidecar_paths(&backup_path))
+    {
         if source.exists() {
-            let destination = backup_path.with_extension(sidecar);
             std::fs::rename(&source, &destination).with_context(|| {
                 format!(
                     "Failed to preserve database sidecar {}",
@@ -412,6 +413,9 @@ pub(super) async fn initialize_database<B: DatabaseBackend>(
     info!("Initializing {backend} database...");
 
     let db_path = database_path_for::<B>(config);
+    // Old copies still contain credentials even if new backups are disabled or
+    // database initialization fails. Repair them before either operation.
+    restrict_existing_backups::<B>(&db_path).await?;
     let settings = database::DatabaseSettings::new(db_path.clone(), config.database.cache_mb);
     info!("Database path: {}", db_path.display());
 
@@ -524,6 +528,31 @@ pub(super) async fn initialize_database<B: DatabaseBackend>(
     Ok(database)
 }
 
+pub(super) async fn restrict_existing_backups<B: DatabaseBackend>(
+    db_path: &Path,
+) -> anyhow::Result<()> {
+    let backup_dir = db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("backups");
+    let mut entries = match tokio::fs::read_dir(&backup_dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).context("Failed to inspect existing database backups"),
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some(B::file_extension())
+            && entry.file_type().await?.is_file()
+        {
+            database::restrict_database_to_owner::<B>(&path).with_context(|| {
+                format!("Failed to restrict backup {} to its owner", path.display())
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Initialize file system watcher for real-time media monitoring
 pub(super) async fn initialize_file_watcher(
     config: &AppConfig,
@@ -575,4 +604,3 @@ pub struct ApplicationContext<D: DatabaseManager = database::ActiveDatabase> {
     pub platform_info: Arc<PlatformInfo>,
     pub app_state: AppState<D>,
 }
-

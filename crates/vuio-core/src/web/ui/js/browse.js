@@ -78,8 +78,12 @@ function render() {
         return;
     }
 
-    // Build directory tree
-    const tree = { folders: {}, files: [] };
+    // Build directory tree. Folder dictionaries are prototype-less: a directory
+    // legitimately named "constructor", "toString" or "__proto__" would
+    // otherwise be found as an inherited property of a plain {}, so no node
+    // gets created and the walk lands on Object.prototype instead.
+    const newNode = () => ({ folders: Object.create(null), files: [] });
+    const tree = newNode();
     
     filteredFiles.forEach(file => {
         const components = getRelativeComponents(file.path);
@@ -88,7 +92,7 @@ function render() {
         for (let i = 0; i < components.length - 1; i++) {
             const folderName = components[i];
             if (!curr.folders[folderName]) {
-                curr.folders[folderName] = { folders: {}, files: [] };
+                curr.folders[folderName] = newNode();
             }
             curr = curr.folders[folderName];
         }

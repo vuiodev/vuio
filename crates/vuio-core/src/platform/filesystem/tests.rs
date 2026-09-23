@@ -68,6 +68,8 @@ fn test_extension_matching() {
     assert!(case_insensitive.matches_extension(path, &extensions));
 }
 
+// `fallback_parse_filename` is part of the tag reader, so these two go with it.
+#[cfg(feature = "metadata")]
 #[test]
 fn test_fallback_parse_filename() {
     use std::path::PathBuf;
@@ -420,6 +422,7 @@ mod path_normalizer_tests {
 /// `fallback_parse_filename` splits on " - " and on the first space, then indexes
 /// what it finds. Every sample is run as a bare stem, as an "artist - title" pair
 /// and behind a track number, because each shape takes a different branch.
+#[cfg(feature = "metadata")]
 #[test]
 fn filename_fallback_survives_every_script_and_alignment() {
     use std::path::PathBuf;

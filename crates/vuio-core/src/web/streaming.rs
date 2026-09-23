@@ -382,6 +382,18 @@ pub(crate) fn parse_range_header(range_str: &str, file_size: u64) -> Result<(u64
 /// tracks run to a few hundred kilobytes; past this it is not a subtitle.
 const MAX_SUBTITLE_BYTES: u64 = 8 * 1024 * 1024;
 
+/// Largest sidecar image `/media/{id}/cover` will serve.
+///
+/// Cover art is a few hundred kilobytes and a generous one is a couple of megabytes.
+/// The names searched for are ordinary ones — `cover`, `folder`, `album`, `artwork`,
+/// the track's own stem — so whatever happens to sit under one of them in a music
+/// folder was being read whole into memory, once per request, on an endpoint that
+/// needs no credential. A file past this is not cover art; the search moves on to the
+/// next candidate, and to the embedded and fetched artwork behind it.
+const MAX_COVER_BYTES: u64 = 16 * 1024 * 1024;
+#[cfg(feature = "metadata")]
+static EMBEDDED_COVER_READS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
 /// Resolve a media id to its sidecar `.srt`, shared by the raw and WebVTT handlers.
 async fn resolve_srt_path<D: DatabaseManager>(
     state: &AppState<D>,
@@ -463,6 +475,43 @@ pub async fn serve_subtitle_vtt<D: DatabaseManager>(
         .map_err(|_| AppError::NotFound)
 }
 
+/// Stream one candidate sidecar image, or `None` if it is not one to serve.
+///
+/// Streamed rather than buffered, and refused past [`MAX_COVER_BYTES`]: this used to
+/// read the file whole into memory before answering, so N concurrent requests for a
+/// folder holding a large image under one of the searched names cost N copies of it.
+async fn serve_cover_file(path: &std::path::Path, extension: &str) -> Option<Response> {
+    let file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(false)
+        .open(path)
+        .await
+        .ok()?;
+    let metadata = file.metadata().await.ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let length = metadata.len();
+    if length > MAX_COVER_BYTES {
+        debug!(
+            "Ignoring {} as cover art: {} bytes is past the limit",
+            path.display(),
+            length
+        );
+        return None;
+    }
+
+    let content_type = crate::platform::filesystem::get_mime_type_for_extension(extension);
+    Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CONTENT_LENGTH, length)
+        .body(Body::from_stream(ReaderStream::with_capacity(
+            file,
+            64 * 1024,
+        )))
+        .ok()
+}
+
 pub async fn serve_cover<D: DatabaseManager>(
     State(state): State<AppState<D>>,
     Path(id): Path<String>,
@@ -510,15 +559,8 @@ pub async fn serve_cover<D: DatabaseManager>(
         for name in &cover_filenames {
             for ext in &extensions {
                 let img_path = parent.join(format!("{}.{}", name, ext));
-                if img_path.exists() && img_path.is_file() {
-                    if let Ok(data) = tokio::fs::read(&img_path).await {
-                        let content_type =
-                            crate::platform::filesystem::get_mime_type_for_extension(ext);
-                        return Response::builder()
-                            .header(header::CONTENT_TYPE, content_type)
-                            .body(Body::from(data))
-                            .map_err(|_| AppError::NotFound);
-                    }
+                if let Some(response) = serve_cover_file(&img_path, ext).await {
+                    return Ok(response);
                 }
             }
         }
@@ -529,9 +571,21 @@ pub async fn serve_cover<D: DatabaseManager>(
     // directory search above still serves cover art without the feature.
     #[cfg(feature = "metadata")]
     if local_sources_apply {
+        // The cover reader bounds metadata buffers before allocation. Also cap
+        // concurrent reads so requests cannot multiply that working memory.
+        //
+        // The permit travels into the blocking task. Held here instead, it was
+        // released when this request was dropped — a client that disconnects
+        // mid-parse — while the parse carried on without it, so a stream of
+        // requests abandoned as soon as they were sent ran any number at once.
+        let permit = EMBEDDED_COVER_READS
+            .acquire()
+            .await
+            .map_err(|_| AppError::NotFound)?;
         let path = file_info.path.clone();
         let cover = tokio::task::spawn_blocking(move || {
-            crate::platform::filesystem::extract_embedded_cover(&path)
+            let _permit = permit;
+            crate::platform::filesystem::extract_embedded_cover(&path, MAX_COVER_BYTES as usize)
         })
         .await;
 
@@ -577,12 +631,8 @@ async fn serve_cached_artwork<D: DatabaseManager>(
 
     let cache = crate::mediainfo::ArtworkCache::new(root);
     let path = cache.lookup(&key)?;
-    let content_type = crate::mediainfo::artwork_content_type(&path);
-    let data = tokio::fs::read(&path).await.ok()?;
-    Response::builder()
-        .header(header::CONTENT_TYPE, content_type)
-        .body(Body::from(data))
-        .ok()
+    let extension = path.extension()?.to_str()?;
+    serve_cover_file(&path, extension).await
 }
 
 #[cfg(test)]
@@ -635,5 +685,51 @@ mod range_tests {
             parse_range_header("bytes=8-3", 10),
             Err(AppError::InvalidRange)
         ));
+    }
+
+    /// Cover art used to be read whole into memory before it was answered, on an
+    /// endpoint that needs no credential and searches for ordinary filenames — so
+    /// whatever happened to be called `cover.jpg` in a music folder was a copy of
+    /// itself in the server's heap per concurrent request.
+    #[tokio::test]
+    async fn oversized_cover_art_is_passed_over() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+
+        let small = temp.path().join("cover.jpg");
+        std::fs::write(&small, vec![0_u8; 4096]).expect("write");
+        let response = serve_cover_file(&small, "jpg")
+            .await
+            .expect("a real cover is served");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("4096"),
+            "and its length is stated rather than accumulated"
+        );
+
+        let huge = temp.path().join("folder.jpg");
+        let file = std::fs::File::create(&huge).expect("create");
+        file.set_len(MAX_COVER_BYTES + 1).expect("grow");
+        drop(file);
+        assert!(
+            serve_cover_file(&huge, "jpg").await.is_none(),
+            "a file past the limit is not cover art"
+        );
+
+        assert!(
+            serve_cover_file(&temp.path().join("absent.jpg"), "jpg")
+                .await
+                .is_none()
+        );
+        std::fs::create_dir(temp.path().join("album.png")).expect("mkdir");
+        assert!(
+            serve_cover_file(&temp.path().join("album.png"), "png")
+                .await
+                .is_none(),
+            "a directory with a cover's name is not one"
+        );
     }
 }

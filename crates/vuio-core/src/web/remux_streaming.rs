@@ -159,6 +159,17 @@ async fn load_file_info<D: DatabaseManager>(
     Ok((file_info.path, info))
 }
 
+/// A token for the file's current contents, for the URLs a playlist hands out.
+///
+/// `None` when it cannot be read, which simply leaves the URLs unversioned:
+/// better an unversioned playlist than one claiming a version it did not check.
+async fn file_version(id: &str, path: &std::path::Path) -> Option<String> {
+    crate::web::streaming::media_id_from_path_segment(id)?;
+    crate::media::ContentVersion::for_file(path)
+        .await
+        .map(crate::media::ContentVersion::token)
+}
+
 pub async fn serve_hls_master<D: DatabaseManager>(
     State(state): State<AppState<D>>,
     Path(id): Path<String>,
@@ -184,7 +195,10 @@ pub async fn serve_hls_video_playlist<D: DatabaseManager>(
     let (path, info) = load_file_info(&state, &id).await?;
     browser_video_track(&info.tracks).ok_or(AppError::NotFound)?;
 
-    let playlist = HlsGenerator::build_media_playlist(&segmentation(&path, &info).boundaries);
+    let playlist = HlsGenerator::build_media_playlist(
+        &segmentation(&path, &info).boundaries,
+        file_version(&id, &path).await.as_deref(),
+    );
 
     Ok((
         [
@@ -207,7 +221,10 @@ pub async fn serve_hls_audio_playlist<D: DatabaseManager>(
 
     // Every rendition of the same file is cut at the same places, so that the
     // player's audio and video timelines describe the same film.
-    let playlist = HlsGenerator::build_media_playlist(&segmentation(&path, &info).boundaries);
+    let playlist = HlsGenerator::build_media_playlist(
+        &segmentation(&path, &info).boundaries,
+        file_version(&id, &path).await.as_deref(),
+    );
 
     Ok((
         [
@@ -442,15 +459,25 @@ async fn segment_response<D: DatabaseManager>(
         (header::CACHE_CONTROL, "public, max-age=3600"),
     ];
 
+    // Keyed on what the file *is*, not just which row it is. Without the
+    // fingerprint, replacing a film's contents under the same database id left
+    // every matching segment number answering out of this cache with the old
+    // film's pictures. `None` means the file could not be stat'd, in which case
+    // nothing is cached rather than something being cached under a fingerprint
+    // that was made up.
     #[cfg(feature = "transcode")]
-    let key = crate::media::transcode::SegmentKey {
-        id: file_id,
-        track: track.id,
-        seq,
-    };
+    let key = crate::media::transcode::IndexKey::for_file(file_id, path)
+        .await
+        .map(|file| crate::media::transcode::SegmentKey {
+            file,
+            track: track.id,
+            seq,
+        });
     #[cfg(feature = "transcode")]
-    if let Some(cached) = state.transcode.cached_segment(&key).await {
-        return Ok((headers, cached).into_response());
+    if let Some(key) = key {
+        if let Some(cached) = state.transcode.cached_segment(&key).await {
+            return Ok((headers, cached).into_response());
+        }
     }
 
     // Only a decoded rendition is rationed. A passthrough copy is file I/O, and
@@ -484,7 +511,9 @@ async fn segment_response<D: DatabaseManager>(
     let bytes = bytes::Bytes::from(bytes);
 
     #[cfg(feature = "transcode")]
-    state.transcode.remember_segment(key, bytes.clone()).await;
+    if let Some(key) = key {
+        state.transcode.remember_segment(key, bytes.clone()).await;
+    }
     #[cfg(not(feature = "transcode"))]
     let _ = file_id;
 
@@ -597,7 +626,7 @@ mod tests {
 
         std::fs::write(
             "/tmp/mkv-playback-playlist.m3u8",
-            HlsGenerator::build_media_playlist(&layout.boundaries),
+            HlsGenerator::build_media_playlist(&layout.boundaries, None),
         )
         .expect("write playlist");
 

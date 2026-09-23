@@ -70,7 +70,7 @@ casting = [
 dashboard = []
 diagnostics = ["dep:sysinfo"]
 mcp = []
-metadata = ["demux"]
+metadata = ["demux", "dep:base64"]
 
 # Internal, and not meant to be selected on its own: "symphonia is in this
 # build, so a container can be demuxed". Both `metadata` and `casting` need
@@ -161,6 +161,7 @@ http-body-util = "0.1"
 hyper = { version = "1.11", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 bytes = "1.12"
+base64 = { version = "0.23", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 quick-xml = "0.42"
 percent-encoding = "2.3"
@@ -210,7 +211,14 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
-vuio-core = { path = ".", version = "0.0.50", features = ["unstable-internals"] }
+# `default-features = false` is load-bearing. Cargo unifies a package's own
+# dev-dependency on itself back into the package, so without it every test
+# build turned the default features back on — `--no-default-features` compiled
+# the web UI and every decoder regardless, and the feature matrix could not
+# check the minimal builds it exists to check.
+vuio-core = { path = ".", version = "0.0.50", default-features = false, features = [
+    "unstable-internals",
+] }
 # Symphonia reads tags but cannot write them, and the audio tests build their
 # fixtures by tagging generated files. Test-only, so it ships with nothing.
 audiotags = "0.5"

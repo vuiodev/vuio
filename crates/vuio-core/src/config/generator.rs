@@ -41,6 +41,10 @@ impl ConfigGenerator {
 
         self.update_mcp_config(config)?;
 
+        self.update_mediainfo_config(config)?;
+
+        self.update_transcode_config(config)?;
+
         // Replace platform-specific placeholders
         let mut content = self.template_doc.to_string();
         content = self.replace_platform_placeholders(content, &platform_config)?;
@@ -146,9 +150,11 @@ impl ConfigGenerator {
     ) -> Result<()> {
         let mut dir_table = Table::new();
 
-        // Escape backslashes in Windows paths for TOML compatibility
-        let escaped_path = dir_config.path.replace("\\", "\\\\");
-        dir_table["path"] = value(&escaped_path);
+        // The original string: `toml_edit` escapes what it writes, so doubling
+        // the backslashes here would double them again in the file and the
+        // reload would come back with twice as many as the path really has —
+        // compounding on every save.
+        dir_table["path"] = value(&dir_config.path);
         dir_table["recursive"] = value(dir_config.recursive);
 
         // Only an explicit override is written. Omitting the key is meaningful: it
@@ -220,9 +226,8 @@ impl ConfigGenerator {
             .context("Database section not found in template")?;
 
         if let Some(path) = &config.database.path {
-            // Escape backslashes in Windows paths for TOML compatibility
-            let escaped_path = path.replace("\\", "\\\\");
-            database_table["path"] = value(&escaped_path);
+            // Unescaped: see `add_directory_config`.
+            database_table["path"] = value(path);
         } else {
             // `path = ""` would not round-trip: it reloads as Some("") and validation
             // rejects an empty path. Omitting the key is what `None` actually means.
@@ -271,6 +276,53 @@ impl ConfigGenerator {
         table["enabled"] = value(config.mcp.enabled);
         table["read_only"] = value(config.mcp.read_only);
         table["require_auth"] = value(config.mcp.require_auth);
+        Ok(())
+    }
+
+    /// Write `[mediainfo]` in full.
+    ///
+    /// Every field, not just the ones the template happens to name: this
+    /// generator is what `AppConfig::save_to_file` writes through, so a field it
+    /// skips is a setting that silently reverts to its template default on the
+    /// next load. Under Docker that meant `VUIO_MEDIAINFO_ENABLED=true` was
+    /// constructed from the environment, serialised without it, and reloaded
+    /// disabled.
+    fn update_mediainfo_config(&mut self, config: &AppConfig) -> Result<()> {
+        let table = self.template_doc["mediainfo"]
+            .as_table_mut()
+            .context("Mediainfo section not found in template")?;
+        table["enabled"] = value(config.mediainfo.enabled);
+        let mut providers = Array::new();
+        for provider in &config.mediainfo.providers {
+            providers.push(provider);
+        }
+        table["providers"] = value(providers);
+        table["artwork_enabled"] = value(config.mediainfo.artwork_enabled);
+        // Absent means "beside the database", which `apply_platform_defaults`
+        // fills in. Writing "" instead would reload as Some("").
+        if let Some(path) = &config.mediainfo.artwork_path {
+            table["artwork_path"] = value(path);
+        } else {
+            table.remove("artwork_path");
+        }
+        table["min_confidence"] = value(i64::from(config.mediainfo.min_confidence));
+        table["prefer_online_titles"] = value(config.mediainfo.prefer_online_titles);
+        table["request_timeout_seconds"] =
+            value(config.mediainfo.request_timeout_seconds as i64);
+        Ok(())
+    }
+
+    /// Write `[transcode]` in full. See [`Self::update_mediainfo_config`] for
+    /// why a skipped field is a setting that does not survive a save.
+    fn update_transcode_config(&mut self, config: &AppConfig) -> Result<()> {
+        let table = self.template_doc["transcode"]
+            .as_table_mut()
+            .context("Transcode section not found in template")?;
+        table["enabled"] = value(config.transcode.enabled);
+        // `as_str` is the spelling the parser accepts, so the two cannot drift.
+        table["mode"] = value(config.transcode.mode.as_str());
+        table["audio_format"] = value(config.transcode.audio_format.as_str());
+        table["max_concurrent"] = value(config.transcode.max_concurrent as i64);
         Ok(())
     }
 
@@ -685,5 +737,77 @@ mod tests {
         assert!(!toml_content.contains("case_sensitive ="));
         let reloaded: AppConfig = toml::from_str(&toml_content).expect("parse");
         assert_eq!(reloaded.media.directories[0].case_sensitive, None);
+    }
+    /// Every field of `[transcode]` and `[mediainfo]` has to survive a save.
+    ///
+    /// The generator updated seven sections and not these two, and the template
+    /// supplies their defaults — so a save dropped them and the reload put the
+    /// defaults back. Under Docker that is the whole configuration path:
+    /// `from_env` builds the settings, `save_to_file` writes them, and a
+    /// `ConfigManager` reads them back, so `VUIO_TRANSCODE_ENABLED=false` left
+    /// transcoding on and `VUIO_MEDIAINFO_ENABLED=true` left metadata off.
+    #[test]
+    fn transcode_and_mediainfo_survive_a_save() {
+        let mut config = AppConfig::default_for_platform();
+        config.transcode = TranscodeConfig {
+            enabled: false,
+            mode: crate::config::TranscodeMode::Forced,
+            audio_format: crate::config::TranscodeAudioFormat::Lpcm,
+            max_concurrent: 7,
+        };
+        config.mediainfo = MediaInfoConfig {
+            enabled: true,
+            providers: vec!["tmdb".to_owned(), "musicbrainz".to_owned()],
+            artwork_enabled: false,
+            artwork_path: Some("/var/lib/vuio/artwork".to_owned()),
+            min_confidence: 91,
+            prefer_online_titles: false,
+            request_timeout_seconds: 42,
+        };
+        // Nothing here is a default, so a section that is skipped cannot pass
+        // by accident.
+        assert_ne!(config.transcode, TranscodeConfig::default());
+        assert_ne!(config.mediainfo, MediaInfoConfig::default());
+
+        let toml_content = ConfigGenerator::new()
+            .expect("generator")
+            .generate_config(&config)
+            .expect("generate");
+        let reloaded: AppConfig = toml::from_str(&toml_content).expect("parse");
+
+        assert_eq!(reloaded.transcode, config.transcode);
+        assert_eq!(reloaded.mediainfo, config.mediainfo);
+    }
+
+    /// A path keeps its backslashes, however many times it is saved.
+    ///
+    /// They used to be doubled before being handed to `toml_edit`, whose
+    /// serializer escapes what it is given — so every save doubled them again
+    /// in the file and the reload came back with twice as many as the path
+    /// really has. That breaks exact path matching, and compounds.
+    #[test]
+    fn backslashes_in_paths_survive_repeated_saves() {
+        let mut config = AppConfig::default_for_platform();
+        let media = r"C:\Users\alex\Media";
+        let database = r"\\nas\share\vuio.db";
+        config.media.directories[0].path = media.to_owned();
+        config.database.path = Some(database.to_owned());
+
+        for round in 0..3 {
+            let toml_content = ConfigGenerator::new()
+                .expect("generator")
+                .generate_config(&config)
+                .expect("generate");
+            config = toml::from_str(&toml_content).expect("parse");
+            assert_eq!(
+                config.media.directories[0].path, media,
+                "media path changed on save {round}"
+            );
+            assert_eq!(
+                config.database.path.as_deref(),
+                Some(database),
+                "database path changed on save {round}"
+            );
+        }
     }
 }

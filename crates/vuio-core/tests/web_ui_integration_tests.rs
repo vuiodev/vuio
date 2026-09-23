@@ -121,6 +121,7 @@ async fn library() -> (TempDir, AppState, PathBuf) {
         )),
         #[cfg(feature = "mediainfo")]
         mediainfo_job: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        #[cfg(feature = "casting")]
         discovered_tvs: Arc::new(vuio_core::runtime_state::RendererCache::new()),
         upnp_subscriptions: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         radio: Arc::new(Default::default()),
@@ -174,6 +175,8 @@ async fn get(state: &AppState, surface: Surface, uri: &str) -> (StatusCode, Vec<
     (status, body, content_type)
 }
 
+// `/api/browse` belongs to the built-in dashboard's API.
+#[cfg(feature = "dashboard")]
 async fn browse(state: &AppState, query: &str) -> Value {
     let (status, body, content_type) =
         get(state, Surface::Primary, &format!("/api/browse?{query}")).await;
@@ -201,6 +204,7 @@ fn encode(path: &Path) -> String {
         .replace('#', "%23")
 }
 
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn browse_without_a_path_lists_the_media_roots() {
     let (_temp, state, root) = library().await;
@@ -217,6 +221,7 @@ async fn browse_without_a_path_lists_the_media_roots() {
     assert_eq!(page["total"], 1);
 }
 
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn browse_lists_subfolders_then_files() {
     let (_temp, state, root) = library().await;
@@ -244,6 +249,7 @@ async fn browse_lists_subfolders_then_files() {
     );
 }
 
+#[cfg(feature = "dashboard")]
 /// The count a folder card shows. Recursive, because a folder whose media all
 /// sits in grandchildren is not empty and must not read as though it were.
 #[tokio::test]
@@ -261,6 +267,7 @@ async fn a_folder_reports_how_much_its_whole_subtree_holds() {
     assert_eq!(counts, vec![3, 1]);
 }
 
+#[cfg(feature = "dashboard")]
 /// One offset walks the folders and then continues into the files, so a client
 /// pages the listing exactly as it is displayed.
 #[tokio::test]
@@ -288,6 +295,7 @@ async fn offset_paging_crosses_the_folder_to_file_boundary() {
     assert_eq!(names(&straddle, "files"), vec!["loose.mp4"]);
 }
 
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn a_category_narrows_folders_and_files_together() {
     let (_temp, state, root) = library().await;
@@ -499,6 +507,9 @@ fn field<'a>(value: &'a Value, path: &str) -> &'a Value {
     current
 }
 
+// Reads the metrics through the second listener, which only exists with the
+// browser app compiled in.
+#[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn metrics_carry_every_field_the_interface_reads() {
     let (_temp, state, _root) = library().await;
@@ -542,6 +553,7 @@ async fn metrics_carry_every_field_the_interface_reads() {
     }
 }
 
+#[cfg(feature = "web-ui")]
 #[tokio::test]
 async fn the_config_schema_is_shaped_the_way_the_editor_expects() {
     let (_temp, state, _root) = library().await;
@@ -625,7 +637,7 @@ async fn the_config_schema_is_shaped_the_way_the_editor_expects() {
     assert!(seen.contains("bool") && seen.contains("int") && seen.contains("text"));
 }
 
-#[cfg(feature = "mediainfo")]
+#[cfg(all(feature = "mediainfo", feature = "web-ui"))]
 #[tokio::test]
 async fn provider_status_says_where_each_credential_comes_from() {
     let (_temp, state, _root) = library().await;
@@ -734,11 +746,16 @@ async fn radio_listening_is_public_and_running_a_station_is_not() {
     }
 
     // Both listeners serve the radio API: the browser app lives on the second
-    // one and calls exactly these endpoints.
-    let (status, _, _) = get(&state, Surface::WebUi, "/api/radio/admin/stations").await;
-    assert_eq!(status, StatusCode::OK);
+    // one and calls exactly these endpoints. That listener only exists when the
+    // app is compiled in.
+    #[cfg(feature = "web-ui")]
+    {
+        let (status, _, _) = get(&state, Surface::WebUi, "/api/radio/admin/stations").await;
+        assert_eq!(status, StatusCode::OK);
+    }
 }
 
+#[cfg(feature = "dashboard")]
 /// A station is created stopped, starts, and comes back enabled — which is what
 /// makes a restart resume it.
 #[tokio::test]

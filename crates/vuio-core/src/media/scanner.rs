@@ -682,8 +682,13 @@ impl<D: DatabaseManager> MediaScanner<D> {
         Ok(result)
     }
 
-    /// Create a MediaFile from a path by reading file metadata
-    async fn create_media_file_from_path(&self, path: &Path) -> Result<MediaFile> {
+    /// Create a MediaFile from a path by reading file metadata.
+    ///
+    /// Public because the file watcher indexes single files too, and a record
+    /// it builds by hand is a record with no tags, no duration, no codec and no
+    /// subtitle flag — which a later scan then takes for up to date, because
+    /// the fingerprint it committed says the file has already been read.
+    pub async fn create_media_file_from_path(&self, path: &Path) -> Result<MediaFile> {
         let metadata = tokio::fs::metadata(path).await?;
         let filename = path
             .file_name()

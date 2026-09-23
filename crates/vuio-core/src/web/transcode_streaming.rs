@@ -478,17 +478,9 @@ pub(crate) async fn plan_for<D: DatabaseManager>(
     state: &AppState<D>,
     file: &Resolved,
 ) -> Result<Arc<AudioPlan>, AppError> {
-    let metadata = tokio::fs::metadata(&file.path).await?;
-    let key = IndexKey {
-        id: file.id,
-        size: metadata.len(),
-        modified: metadata
-            .modified()
-            .ok()
-            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0),
-    };
+    let key = IndexKey::for_file(file.id, &file.path)
+        .await
+        .ok_or(AppError::NotFound)?;
 
     if let Some(plan) = state.transcode.cached(&key).await {
         return Ok(plan);

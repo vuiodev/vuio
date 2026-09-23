@@ -521,6 +521,9 @@ mod tests {
         assert!(cache.get(&current_key).is_none());
     }
 
+    // `RendererDevice` and the cache that holds them are part of casting, so
+    // these belong to that feature exactly as the code they exercise does.
+    #[cfg(feature = "casting")]
     fn renderer(id: &str, name: &str, model: &str, ip: &str) -> RendererDevice {
         let control_url = format!("http://{ip}:1400/control");
         let location_url = format!("http://{ip}:1400/description.xml");
@@ -550,6 +553,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "casting")]
     #[tokio::test]
     async fn renderer_cache_deduplicates_physical_tvs_and_sorts_by_name() {
         let cache = RendererCache::new();

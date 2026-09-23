@@ -67,6 +67,7 @@ docker run -d \
   --network host \
   -v /path/to/media:/media:ro \
   -v ./vuio-config:/config \
+  -v ./vuio-data:/data \
   -e VUIO_IP=192.168.1.100 \
   ghcr.io/vuiodev/vuio:latest
 ```

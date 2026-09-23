@@ -323,6 +323,8 @@ fn authed(method: &str, uri: &str, body: Option<&str>) -> Request<Body> {
         .unwrap()
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn the_status_endpoint_lists_every_provider() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -366,6 +368,8 @@ async fn the_status_endpoint_lists_every_provider() {
     assert_eq!(body["stats"]["total"], 0);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn a_saved_credential_is_never_returned_by_the_api() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -407,6 +411,8 @@ async fn a_saved_credential_is_never_returned_by_the_api() {
     assert_eq!(tmdb["has_credential"], true);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn an_empty_token_clears_the_stored_one() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -449,6 +455,8 @@ async fn an_empty_token_clears_the_stored_one() {
     assert_eq!(omdb["has_credential"], false);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn a_credential_for_an_unknown_or_keyless_provider_is_rejected() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -478,6 +486,8 @@ async fn a_credential_for_an_unknown_or_keyless_provider_is_rejected() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn cancelling_when_nothing_is_running_is_a_conflict() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -490,6 +500,8 @@ async fn cancelling_when_nothing_is_running_is_a_conflict() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn running_with_the_feature_turned_off_is_refused() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -507,6 +519,59 @@ async fn running_with_the_feature_turned_off_is_refused() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
 
+/// A run request dropped part-way through setting up must not strand the job.
+///
+/// The job is claimed before the query that finds the work, and what claims it is
+/// the HTTP handler's future — which hyper drops when the client goes away, and a
+/// proxy drops when it gives up waiting. Dropped between the claim and the start,
+/// nothing released the claim: the job reported a run with no worker behind it,
+/// every later run was refused as already running, and cancel had no token to
+/// cancel, so only a restart cleared it.
+#[tokio::test]
+async fn a_run_request_dropped_mid_setup_does_not_strand_the_job() {
+    use std::future::Future;
+
+    // An empty library, so a run that really starts has nothing to do and ends at once.
+    let temp = tempdir().unwrap();
+    let database = Arc::new(
+        SqliteDatabase::new(temp.path().join("empty.db"))
+            .await
+            .unwrap(),
+    );
+    database.initialize().await.unwrap();
+    let state = state_with(database, &temp).await;
+
+    // One poll takes it as far as claiming the job and handing the query to the
+    // blocking pool; then it is dropped, as a disconnected client's request is.
+    let mut request = Box::pin(vuio_core::mediainfo::run_library_fetch(state.clone()));
+    let first = std::future::poll_fn(|cx| std::task::Poll::Ready(request.as_mut().poll(cx))).await;
+    assert!(first.is_pending(), "dropped while it is still setting up");
+    drop(request);
+
+    // The request that was dropped either started its run, which over an empty
+    // library finishes at once, or gave the claim back. Either way the job ends up
+    // settled; what it must not do is stay claimed with nothing running it.
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let settled = {
+            let job = state.mediainfo_job.lock().await;
+            !job.running && job.finished_at.is_some()
+        };
+        if settled {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the job is still claimed with nothing running it"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let next = vuio_core::mediainfo::run_library_fetch(state.clone()).await;
+    assert!(next.is_ok(), "the next run is refused: {next:?}");
+}
+
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn the_endpoints_require_management_auth() {
     let (database, _id, temp) = database_with_one_file().await;
@@ -526,6 +591,8 @@ async fn the_endpoints_require_management_auth() {
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn browse_json_carries_the_fetched_title_and_synopsis() {
     let (database, id, temp) = database_with_one_file().await;
@@ -548,6 +615,8 @@ async fn browse_json_carries_the_fetched_title_and_synopsis() {
     assert_eq!(file["info_art"], true);
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn an_uncertain_match_is_stored_but_never_shown() {
     // Searching TVmaze for "Arrival" returns the series "Dead on Arrival". It is
@@ -597,6 +666,8 @@ async fn an_uncertain_match_is_stored_but_never_shown() {
     assert_eq!(status["flagged"][0]["matched_title"], "Dead on Arrival");
 }
 
+// Drives the dashboard API, which carries these endpoints.
+#[cfg(feature = "dashboard")]
 #[tokio::test]
 async fn browse_json_reports_no_media_info_when_none_was_fetched() {
     let (database, _id, temp) = database_with_one_file().await;

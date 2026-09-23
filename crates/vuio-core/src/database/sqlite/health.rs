@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use super::{directory, schema, SqliteDatabase};
-use crate::database::{DatabaseHealth, DatabaseIssue, IssueSeverity};
+use crate::database::{DatabaseBackend, DatabaseHealth, DatabaseIssue, IssueSeverity};
 
 fn healthy() -> DatabaseHealth {
     DatabaseHealth {
@@ -188,6 +188,14 @@ impl SqliteDatabase {
             })?;
         }
 
+        // Created owner-only before SQLite writes a byte into it. A backup is a copy
+        // of the `secrets` table, and `VACUUM INTO` creates its target at the process
+        // umask — 0644 on a normal system — so every caller that did not remember to
+        // narrow it afterwards left one world-readable, the pre-repair backup taken
+        // at startup among them. `VACUUM INTO` accepts an empty file that already
+        // exists. See `crate::database::restrict_to_owner`.
+        super::create_private_file(&destination)
+            .with_context(|| format!("Failed to create backup {}", destination.display()))?;
         let target = destination.clone();
         self.execute_read(move |connection| {
             connection
@@ -242,8 +250,7 @@ impl SqliteDatabase {
 
             // The replaced database's write-ahead log describes pages that no
             // longer exist. Leaving it would corrupt the restored file.
-            for sidecar in ["db-wal", "db-shm"] {
-                let stale = database_path.with_extension(sidecar);
+            for stale in SqliteDatabase::sidecar_paths(&database_path) {
                 if stale.exists() {
                     std::fs::remove_file(stale)?;
                 }

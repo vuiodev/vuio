@@ -196,10 +196,12 @@ docker run -d \
   --network host \
   -v /path/to/media:/media:ro \
   -v ./vuio-config:/config \
+  -v ./vuio-data:/data \
   -e VUIO_IP=192.168.1.100 \
   -e VUIO_PORT=8080 \
   -e VUIO_WEB_PORT=8090 \
   -e VUIO_MEDIA_DIRS=/media \
+  -e VUIO_DB_PATH=/data/vuio.db \
   ghcr.io/vuiodev/vuio:latest
 ```
 
@@ -222,8 +224,10 @@ services:
       - VUIO_WEB_PORT=8090
       - VUIO_SERVER_NAME=VuIO Media Server
       - VUIO_MEDIA_DIRS=/media/movies,/media/music,/media/pictures
+      - VUIO_DB_PATH=/data/vuio.db
     volumes:
       - ./vuio-config:/config
+      - ./vuio-data:/data
       - /path/to/movies:/media/movies:ro
       - /path/to/music:/media/music:ro
       - /path/to/pictures:/media/pictures:ro
@@ -321,3 +325,8 @@ VuIO features a built-in self-updater. To update an existing installed binary to
 ```bash
 vuio --update
 ```
+
+What it downloads is checked against the SHA-256 the release publishes for it — the
+digest GitHub records for every asset, or the `SHA256SUMS` file beside them — before
+anything is written into the installation. A release that publishes neither, or an
+asset that does not match, is refused and the installed binary is left alone.

@@ -177,6 +177,14 @@ impl MediaRepository for SqliteDatabase {
         SqliteDatabase::bulk_update_media_files_impl(self, files, true).await
     }
 
+    async fn set_subtitle_available(&self, ids: &[i64], available: bool) -> Result<usize> {
+        SqliteDatabase::set_subtitle_available_impl(self, ids, available).await
+    }
+
+    async fn relocate_media_files(&self, moves: &[(i64, PathBuf)]) -> Result<usize> {
+        SqliteDatabase::relocate_media_files_impl(self, moves).await
+    }
+
     async fn bulk_remove_media_files(&self, paths: &[PathBuf]) -> Result<usize> {
         SqliteDatabase::bulk_remove_media_files_impl(self, paths).await
     }

@@ -753,12 +753,30 @@ jobs:
         with:
           path: release-artifacts
 
+      # `--update` verifies what it downloads against this before it installs it,
+      # so a release without it is one the updater will refuse. Flat names, one
+      # per line, as sha256sum -c expects.
+      - name: Publish checksums for the release assets
+        run: |
+          set -euo pipefail
+          cd release-artifacts
+          # Basenames, because that is what the assets are called once GitHub
+          # has them; the directories here are one per build job.
+          : > SHA256SUMS
+          find . -type f ! -name SHA256SUMS -print0 | while IFS= read -r -d '' path; do
+            printf '%s  %s\n' "$(sha256sum "$path" | cut -d' ' -f1)" "$(basename "$path")" >> SHA256SUMS
+          done
+          sort -k2 -o SHA256SUMS SHA256SUMS
+          cat SHA256SUMS
+
       - name: Create GitHub Release and Upload Artifacts
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.tag_name || github.ref_name }}
           draft: true
-          files: release-artifacts/*/*
+          files: |
+            release-artifacts/*/*
+            release-artifacts/SHA256SUMS
           
   # ===================================================================
   # Job 4: Build and Push Docker Image
