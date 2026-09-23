@@ -578,6 +578,189 @@ async fn a_legacy_database_has_its_text_folded_by_the_migration() {
     assert_eq!(search_ids(&db, NFD).await, vec![Some(11)]);
 }
 
+/// The full-text index's own storage, row by row.
+///
+/// FTS5 writes a new segment at every commit that changed the index, so two
+/// equal snapshots mean nothing between them rewrote an entry.
+async fn fts_segments(db: &SqliteDatabase) -> Vec<(i64, Vec<u8>)> {
+    db.execute_read(|connection| {
+        let mut statement = connection.prepare("SELECT id, block FROM media_fts_data ORDER BY id")?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    })
+    .await
+    .unwrap()
+}
+
+/// FTS5's own check, against `media_files` as well as internally: an external
+/// content index that has drifted from its table fails here.
+async fn assert_index_matches_media_files(db: &SqliteDatabase) {
+    db.execute_write(|connection| {
+        connection
+            .execute_batch("INSERT INTO media_fts(media_fts, rank) VALUES('integrity-check', 1);")?;
+        Ok(())
+    })
+    .await
+    .expect("media_fts no longer matches media_files");
+}
+
+/// Flagging a subtitle, or a rescan writing back the tags a record already has,
+/// changes nothing the index holds. It used to delete and re-add the record's
+/// entry anyway — most of the cost of both writes.
+#[tokio::test]
+async fn an_update_that_leaves_indexed_text_alone_does_not_touch_the_index() {
+    let temp = tempdir().unwrap();
+    let db = database(&temp, "fts-untouched").await;
+    let mut file = MediaFile::new(
+        std::path::PathBuf::from("/media/01.flac"),
+        10,
+        "audio/flac".to_string(),
+    );
+    file.title = Some("Moonlight Sonata".to_string());
+    file.artist = Some("Beethoven".to_string());
+    let id = db.store_media_file(&file).await.unwrap();
+    let before = fts_segments(&db).await;
+
+    // A column the trigger does not name at all.
+    assert_eq!(db.set_subtitle_available(&[id], true).await.unwrap(), 1);
+    assert_eq!(fts_segments(&db).await, before, "set_subtitle_available");
+
+    // The whole-record rewrite, which names every column: the rescan path.
+    let mut rescanned = db.get_file_by_id(id).await.unwrap().unwrap();
+    rescanned.size = 20;
+    rescanned.duration = Some(std::time::Duration::from_secs(180));
+    db.update_media_file(&rescanned).await.unwrap();
+    assert_eq!(fts_segments(&db).await, before, "rewrite with unchanged text");
+    assert_index_matches_media_files(&db).await;
+
+    // A change the index does hold still reaches it.
+    let mut retitled = rescanned.clone();
+    retitled.title = Some("Breakfast".to_string());
+    db.update_media_file(&retitled).await.unwrap();
+    assert_ne!(fts_segments(&db).await, before, "a retitle has to reach the index");
+    assert_index_matches_media_files(&db).await;
+    assert_eq!(search_ids(&db, "breakfast").await, vec![Some(id)]);
+    assert_eq!(search_ids(&db, "beethoven").await, vec![Some(id)]);
+    assert!(search_ids(&db, "sonata").await.is_empty(), "the old title is gone");
+}
+
+/// The trigger lists what it watches, twice, so a column added to the index and
+/// forgotten in either list would leave the index stale for exactly that column.
+/// Each indexed column is changed on its own, and FTS5 compares the index with
+/// the table after every one.
+#[tokio::test]
+async fn a_change_to_any_indexed_column_alone_reaches_the_index() {
+    const INDEXED: [&str; 8] = [
+        "filename",
+        "title",
+        "artist",
+        "album",
+        "album_artist",
+        "genre",
+        "composer",
+        "comment",
+    ];
+    let temp = tempdir().unwrap();
+    let db = database(&temp, "fts-columns").await;
+    let mut file = MediaFile::new(
+        std::path::PathBuf::from("/media/one.flac"),
+        10,
+        "audio/flac".to_string(),
+    );
+    file.title = Some("before".to_string());
+    let id = db.store_media_file(&file).await.unwrap();
+
+    for column in INDEXED {
+        db.execute_write(move |connection| {
+            connection.execute(
+                &format!("UPDATE media_files SET {column} = ?1 WHERE id = ?2"),
+                rusqlite::params![format!("changed{column}"), id],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        assert_index_matches_media_files(&db).await;
+        assert_eq!(
+            search_ids(&db, &format!("changed{column}")).await,
+            vec![Some(id)],
+            "{column}"
+        );
+    }
+}
+
+/// `media_fts_update` as v8 declared it, frozen: it fired on every UPDATE.
+/// Must never be edited to track later changes.
+const MEDIA_FTS_UPDATE_V8: &str = r#"
+CREATE TRIGGER media_fts_update AFTER UPDATE ON media_files BEGIN
+    INSERT INTO media_fts(media_fts, rowid, filename, title, artist, album,
+                          album_artist, genre, composer, comment)
+    VALUES ('delete', old.id, old.filename, old.title, old.artist, old.album,
+            old.album_artist, old.genre, old.composer, old.comment);
+    INSERT INTO media_fts(rowid, filename, title, artist, album, album_artist,
+                          genre, composer, comment)
+    VALUES (new.id, new.filename, new.title, new.artist, new.album,
+            new.album_artist, new.genre, new.composer, new.comment);
+END;
+"#;
+
+/// `CREATE TRIGGER IF NOT EXISTS` would leave a v8 file's trigger as it was, so
+/// the migration has to replace it — and must not disturb the index it guards.
+#[tokio::test]
+async fn a_v8_database_gets_the_narrowed_update_trigger() {
+    let temp = tempdir().unwrap();
+    let path = temp.path().join("v8.db");
+    let id = {
+        let db = database_at(&path).await;
+        let mut file = MediaFile::new(
+            std::path::PathBuf::from("/media/Moon River.flac"),
+            10,
+            "audio/flac".to_string(),
+        );
+        file.title = Some("Moon River".to_string());
+        let id = db.store_media_file(&file).await.unwrap();
+        // Back to how a v8 build left the file.
+        db.execute_write(|connection| {
+            connection.execute_batch(&format!(
+                "DROP TRIGGER media_fts_update;\n{MEDIA_FTS_UPDATE_V8}\nPRAGMA user_version = 8;"
+            ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        id
+    };
+
+    let db = database_at(&path).await;
+    let (version, trigger): (i64, String) = db
+        .execute_read(|connection| {
+            Ok((
+                connection.query_row("PRAGMA user_version", [], |row| row.get(0))?,
+                connection.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'media_fts_update'",
+                    [],
+                    |row| row.get(0),
+                )?,
+            ))
+        })
+        .await
+        .unwrap();
+    assert_eq!(version, super::schema::SCHEMA_VERSION);
+    assert!(
+        trigger.contains("AFTER UPDATE OF") && trigger.contains("WHEN"),
+        "the v8 trigger survived the migration: {trigger}"
+    );
+
+    // The record is still found, and the replaced trigger does its job.
+    assert_index_matches_media_files(&db).await;
+    let before = fts_segments(&db).await;
+    assert_eq!(db.set_subtitle_available(&[id], true).await.unwrap(), 1);
+    assert_eq!(fts_segments(&db).await, before);
+    assert_eq!(search_ids(&db, "moon").await, vec![Some(id)]);
+}
+
 /// The database holds the `secrets` table — provider API keys, and the pairing secret
 /// an AirPlay receiver hands over once. It was created at the process umask, so on a
 /// normal system any local user could read them out of it, while the admin token beside
