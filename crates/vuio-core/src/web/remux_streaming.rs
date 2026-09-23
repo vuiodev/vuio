@@ -40,9 +40,31 @@ use tracing::error;
 /// a keyframe every ten seconds has ten-second segments.
 const SEGMENT_DURATION_SECS: u32 = 4;
 
-// Passthrough video also buffers a whole segment. Bound those builds even when
-// no audio decoder is enabled, including work whose HTTP request was dropped.
+/// Segments being built at once, passthrough included.
+///
+/// A build holds its segment twice over — the packets it read and the fragment
+/// written from them — and a 4K remux's segment runs to tens of megabytes, so
+/// this count is what bounds the path's memory. A build keeps its slot until it
+/// finishes, even once the request that asked for it has gone.
 static SEGMENT_BUILDS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
+/// How long a request waits for a build slot before it is turned away.
+///
+/// Waiting rather than refusing on the spot: a passthrough build is file I/O,
+/// so a slot is rarely far off, and a seek leaves the builds it abandoned
+/// holding theirs until they finish — which a player that scrubs met as a run
+/// of 503s. Five seconds sits inside a player's own first-byte timeout (hls.js
+/// allows ten), so a request still turned away gets a 503 it retries rather
+/// than a timeout it gives up on.
+const SEGMENT_BUILD_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// A build slot from `limit`, queueing for at most `wait`.
+async fn segment_build_slot(
+    limit: &'static tokio::sync::Semaphore,
+    wait: std::time::Duration,
+) -> Option<tokio::sync::SemaphorePermit<'static>> {
+    tokio::time::timeout(wait, limit.acquire()).await.ok()?.ok()
+}
 
 /// How one film's segments are laid out on its timeline.
 struct Segmentation {
@@ -484,7 +506,7 @@ async fn segment_response<D: DatabaseManager>(
         }
     }
 
-    let Ok(build_permit) = SEGMENT_BUILDS.try_acquire() else {
+    let Some(build_permit) = segment_build_slot(&SEGMENT_BUILDS, SEGMENT_BUILD_WAIT).await else {
         return Ok((
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
@@ -626,6 +648,37 @@ mod tests {
             boundaries,
             vec![0.0, 4.0, 8.0, 12.0, 16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0, 60.0]
         );
+    }
+
+    /// A request that finds every builder busy queues for the next one to come
+    /// free. Those a seek abandoned finish within moments, and a player that
+    /// scrubs must not meet them as a run of 503s.
+    #[tokio::test]
+    async fn a_busy_builder_is_waited_for_rather_than_refused() {
+        static LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let held = LIMIT.try_acquire().unwrap();
+        let waiting = tokio::spawn(segment_build_slot(
+            &LIMIT,
+            std::time::Duration::from_secs(5),
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "queued, not refused");
+
+        drop(held);
+        let slot = tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .expect("the freed slot is handed on")
+            .unwrap();
+        assert!(slot.is_some());
+    }
+
+    /// The wait is bounded: a builder that never frees still ends in a 503.
+    #[tokio::test]
+    async fn a_builder_that_never_frees_turns_the_request_away() {
+        static LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let _held = LIMIT.try_acquire().unwrap();
+        let slot = segment_build_slot(&LIMIT, std::time::Duration::from_millis(20)).await;
+        assert!(slot.is_none());
     }
 
     #[test]
