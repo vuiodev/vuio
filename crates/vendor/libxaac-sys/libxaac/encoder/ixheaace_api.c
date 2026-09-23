@@ -1581,8 +1581,16 @@ static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_
     if (NULL == ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count]) {
       return IA_EXHEAACE_API_FATAL_MEM_ALLOC;
     }
+/* IXHEAACE_ZEROED_ALLOC: every malloc_xheaace callback this encoder is built
+ * for returns memory that is already zero (xaac-rs maps fresh pages for the
+ * large blocks). Clearing it again is not merely redundant: the state carries a
+ * full USAC encoder by value, which an AAC-LC encoder never touches, and the
+ * memset made all of it resident: about 55 MB per encoder instead of under
+ * one. Defined through LIBXAAC_ZEROED_ALLOC in cmake/utils.cmake. */
+#ifndef IXHEAACE_ZEROED_ALLOC
     memset(ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count], 0,
            ptr_out_cfg->mem_info_table[i_idx].ui_size);
+#endif
     if ((i_idx == IA_ENHAACPLUSENC_PERSIST_IDX) || (i_idx == IA_ENHAACPLUSENC_SCRATCH_IDX)) {
       ptr_out_cfg->ui_rem =
           (SIZE_T)((SIZE_T)ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count] %
@@ -1597,7 +1605,9 @@ static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_
     }
 
     pstr_api_struct->pp_mem[i_idx] = ptr_out_cfg->mem_info_table[i_idx].mem_ptr;
+#ifndef IXHEAACE_ZEROED_ALLOC
     memset(pstr_api_struct->pp_mem[i_idx], 0, pstr_api_struct->pstr_mem_info[i_idx].ui_size);
+#endif
 
     pstr_api_struct->pp_mem[i_idx] = pv_value;
 
@@ -1749,7 +1759,9 @@ static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_
       } else {
         WORD32 num_aac_chan;
         ixheaace_state_struct *pstr_state = pstr_api_struct->pstr_state;
+#ifndef IXHEAACE_ZEROED_ALLOC
         memset(pstr_api_struct->pstr_state, 0, sizeof(*(pstr_api_struct->pstr_state)));
+#endif
 
         pstr_api_struct->pstr_state->inp_delay = (FLOAT32 *)((WORD8 *)pstr_state + offset_size);
         offset_size = ia_enhaacplus_enc_sizeof_delay_buffer(
@@ -3570,7 +3582,9 @@ IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output) {
   if (NULL == pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count]) {
     return IA_EXHEAACE_API_FATAL_MEM_ALLOC;
   }
+#ifndef IXHEAACE_ZEROED_ALLOC
   memset(pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count], 0, ui_api_size);
+#endif
 
   pstr_output_config->ui_rem =
       (SIZE_T)((SIZE_T)pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count] %
@@ -3582,7 +3596,9 @@ IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output) {
   pstr_output_config->malloc_count++;
 
   pstr_api_struct = (ixheaace_api_struct *)pstr_output_config->pv_ia_process_api_obj;
+#ifndef IXHEAACE_ZEROED_ALLOC
   memset(pstr_api_struct, 0, sizeof(*pstr_api_struct));
+#endif
 
   ixheaace_set_default_config(pstr_api_struct, pstr_input_config);
 

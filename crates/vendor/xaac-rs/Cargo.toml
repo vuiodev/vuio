@@ -75,6 +75,11 @@ path = "tests/codec.rs"
 version = "0.1.0"
 path = "../libxaac-sys"
 
+# Maps the encoder's two large blocks directly, so its untouched pages stay
+# unallocated. See `MAP_THRESHOLD` in src/util.rs.
+[target.'cfg(unix)'.dependencies.libc]
+version = "0.2"
+
 [dependencies.pyo3]
 version = "0.29"
 features = ["extension-module"]
