@@ -21,7 +21,7 @@ use crate::database::{
 /// [`migrations`]; only a *newer* file — one written by a build that knows
 /// something this one does not — is refused, because there is no way to
 /// downgrade a schema without guessing at what to discard.
-pub(super) const SCHEMA_VERSION: i64 = 8;
+pub(super) const SCHEMA_VERSION: i64 = 9;
 
 /// Name of the collation that carries the application's natural ordering into
 /// SQL. Registered on every connection; see [`register_collations`].
@@ -282,7 +282,26 @@ CREATE TRIGGER IF NOT EXISTS media_fts_delete AFTER DELETE ON media_files BEGIN
             old.album_artist, old.genre, old.composer, old.comment);
 END;
 
-CREATE TRIGGER IF NOT EXISTS media_fts_update AFTER UPDATE ON media_files BEGIN
+-- Only when indexed text actually changed. `OF` keeps the trigger out of writes
+-- that never name an indexed column, such as flagging a subtitle; `WHEN` catches
+-- the rest, because the scanner and the watcher rewrite every column of a record
+-- and most rewrites leave its text as it was. Skipping is exact either way: the
+-- index already holds these values. `IS NOT` compares bytes, so a change of case
+-- or normalization form still counts. `id` is listed although nothing renumbers
+-- a record today, so that anything that ever does keeps the index in step.
+CREATE TRIGGER IF NOT EXISTS media_fts_update
+AFTER UPDATE OF id, filename, title, artist, album, album_artist, genre, composer, comment
+ON media_files
+WHEN old.id           IS NOT new.id
+  OR old.filename     IS NOT new.filename
+  OR old.title        IS NOT new.title
+  OR old.artist       IS NOT new.artist
+  OR old.album        IS NOT new.album
+  OR old.album_artist IS NOT new.album_artist
+  OR old.genre        IS NOT new.genre
+  OR old.composer     IS NOT new.composer
+  OR old.comment      IS NOT new.comment
+BEGIN
     INSERT INTO media_fts(media_fts, rowid, filename, title, artist, album,
                           album_artist, genre, composer, comment)
     VALUES ('delete', old.id, old.filename, old.title, old.artist, old.album,
@@ -340,8 +359,8 @@ INSERT INTO mediainfo_fts(mediainfo_fts) VALUES('rebuild');
 /// AirPlay pairings, imported playlists, and the record ids that DIDL hands out
 /// as object ids, none of which survive a rebuild.
 ///
-/// Owned rather than borrowed because v4 is assembled from the shared FTS
-/// definitions rather than written out a second time.
+/// Owned rather than borrowed because v4 and v9 are assembled from the shared
+/// FTS definitions rather than written out a second time.
 fn migrations() -> Vec<(i64, String)> {
     vec![
         (2, MIGRATION_V2.to_owned()),
@@ -351,6 +370,7 @@ fn migrations() -> Vec<(i64, String)> {
         (6, MIGRATION_V6.to_owned()),
         (7, MIGRATION_V7.to_owned()),
         (8, MIGRATION_V8.to_owned()),
+        (9, migration_v9()),
     ]
 }
 
@@ -533,6 +553,21 @@ WHERE title          IS NOT nfc(title)
    OR overview       IS NOT nfc(overview)
    OR genres         IS NOT nfc(genres);
 "#;
+
+/// v8 → v9: the full-text update trigger fires only when indexed text changes.
+///
+/// `media_fts_update` used to fire on every UPDATE of `media_files` and rewrite
+/// the record's index entry whether or not anything it indexes had changed:
+/// flagging a subtitle, or a rescan writing back the tags a record already had.
+/// `CREATE TRIGGER IF NOT EXISTS` will not redefine a trigger that exists, so
+/// this drops it and runs the shared FTS definitions again, which recreate it in
+/// its current form and leave everything else as it is.
+///
+/// Nothing is rebuilt. The old trigger kept the index exact, so it already holds
+/// what the new one would have written.
+fn migration_v9() -> String {
+    format!("DROP TRIGGER IF EXISTS media_fts_update;\n{FTS_DDL}")
+}
 
 /// Positions within [`MEDIA_COLUMNS`], shared by the owned decoder and the
 /// borrowed views so the two can never drift apart.
