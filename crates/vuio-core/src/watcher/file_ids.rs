@@ -42,13 +42,76 @@ pub const DEFAULT_CAPACITY: usize = 25_000;
 /// becomes `previous` and a fresh one takes over, so the oldest half is dropped
 /// wholesale rather than tracked with per-entry LRU bookkeeping. Lookups check
 /// both. See the module docs for what this trades away.
+///
+/// A path under a watched root is stored relative to that root, boxed rather
+/// than as an owned `PathBuf`. Every entry used to repeat its root's prefix,
+/// and at the cap there are 50,000 of them, so this saves the root's length
+/// plus eight bytes fifty thousand times: 2.4 MB for a 40-byte root.
 #[derive(Debug)]
 pub struct BoundedFileIdCache {
-    live: HashMap<PathBuf, FileId>,
-    previous: HashMap<PathBuf, FileId>,
+    /// Directories seeded as watch roots, in the order they were added. A
+    /// directory under one of them is part of it, not another root, which is
+    /// what keeps the folders a watcher sees created from accumulating here.
+    roots: Vec<PathBuf>,
+    live: Generation,
+    previous: Generation,
     capacity: usize,
     /// Set once the seed walk has been cut short, so it is logged only the once.
     truncated: bool,
+}
+
+/// Where a path is stored: under which root, and by what key.
+#[derive(Clone, Copy)]
+struct Slot<'p> {
+    /// Index into `roots`, or `None` for a path under no root.
+    root: Option<usize>,
+    key: &'p Path,
+}
+
+/// One generation of entries: for each root, the paths below it; and, for
+/// anything under no root, the absolute path.
+#[derive(Debug, Default)]
+struct Generation {
+    below: Vec<HashMap<Box<Path>, FileId>>,
+    outside: HashMap<Box<Path>, FileId>,
+    len: usize,
+}
+
+impl Generation {
+    fn get(&self, slot: Slot<'_>) -> Option<&FileId> {
+        match slot.root {
+            Some(index) => self.below.get(index)?.get(slot.key),
+            None => self.outside.get(slot.key),
+        }
+    }
+
+    fn insert(&mut self, slot: Slot<'_>, id: FileId) {
+        let map = match slot.root {
+            Some(index) => {
+                if self.below.len() <= index {
+                    self.below.resize_with(index + 1, HashMap::new);
+                }
+                &mut self.below[index]
+            }
+            None => &mut self.outside,
+        };
+        if map.insert(slot.key.into(), id).is_none() {
+            self.len += 1;
+        }
+    }
+
+    /// Drop `prefix` and everything under it.
+    fn remove_under(&mut self, roots: &[PathBuf], prefix: &Path) {
+        for (map, root) in self.below.iter_mut().zip(roots) {
+            if root.starts_with(prefix) {
+                map.clear();
+            } else if let Ok(relative) = prefix.strip_prefix(root) {
+                map.retain(|key, _| !key.starts_with(relative));
+            }
+        }
+        self.outside.retain(|key, _| !key.starts_with(prefix));
+        self.len = self.below.iter().map(HashMap::len).sum::<usize>() + self.outside.len();
+    }
 }
 
 impl BoundedFileIdCache {
@@ -58,8 +121,9 @@ impl BoundedFileIdCache {
 
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            live: HashMap::new(),
-            previous: HashMap::new(),
+            roots: Vec::new(),
+            live: Generation::default(),
+            previous: Generation::default(),
             capacity: capacity.max(1),
             truncated: false,
         }
@@ -67,19 +131,34 @@ impl BoundedFileIdCache {
 
     /// Entries across both generations.
     pub fn len(&self) -> usize {
-        self.live.len() + self.previous.len()
+        self.live.len + self.previous.len
     }
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
+    /// The root `path` belongs to — the innermost, should roots nest — and its
+    /// key there.
+    fn slot<'p>(&self, path: &'p Path) -> Slot<'p> {
+        self.roots
+            .iter()
+            .enumerate()
+            .filter_map(|(index, root)| Some((index, root, path.strip_prefix(root).ok()?)))
+            .max_by_key(|(_, root, _)| root.as_os_str().len())
+            .map_or(Slot { root: None, key: path }, |(index, _, key)| Slot {
+                root: Some(index),
+                key,
+            })
+    }
+
     /// Insert one path, rotating the generations if `live` is full.
-    fn remember(&mut self, path: PathBuf, id: FileId) {
-        if self.live.len() >= self.capacity && !self.live.contains_key(&path) {
+    fn remember(&mut self, path: &Path, id: FileId) {
+        let slot = self.slot(path);
+        if self.live.len >= self.capacity && self.live.get(slot).is_none() {
             self.previous = std::mem::take(&mut self.live);
         }
-        self.live.insert(path, id);
+        self.live.insert(slot, id);
     }
 
     /// Seed ids for a tree that already exists, stopping at the cap.
@@ -87,6 +166,9 @@ impl BoundedFileIdCache {
     /// Unlike `remember` this never rotates: rotating mid-walk would let a large
     /// library evict its own entries and walk to the end for nothing.
     fn seed(&mut self, root: &Path, recursive: bool) {
+        if self.slot(root).root.is_none() {
+            self.roots.push(root.to_path_buf());
+        }
         let mut pending = vec![root.to_path_buf()];
         while let Some(dir) = pending.pop() {
             let entries = match std::fs::read_dir(&dir) {
@@ -108,7 +190,8 @@ impl BoundedFileIdCache {
                 }
                 let path = entry.path();
                 if let Ok(id) = get_file_id(&path) {
-                    self.live.insert(path.clone(), id);
+                    let slot = self.slot(&path);
+                    self.live.insert(slot, id);
                 }
                 if recursive && entry.file_type().is_ok_and(|kind| kind.is_dir()) {
                     pending.push(path);
@@ -126,7 +209,8 @@ impl Default for BoundedFileIdCache {
 
 impl FileIdCache for BoundedFileIdCache {
     fn cached_file_id(&self, path: &Path) -> Option<impl AsRef<FileId>> {
-        self.live.get(path).or_else(|| self.previous.get(path))
+        let slot = self.slot(path);
+        self.live.get(slot).or_else(|| self.previous.get(slot))
     }
 
     fn add_path(&mut self, path: &Path, recursive_mode: RecursiveMode) {
@@ -135,13 +219,13 @@ impl FileIdCache for BoundedFileIdCache {
             return;
         }
         if let Ok(id) = get_file_id(path) {
-            self.remember(path.to_path_buf(), id);
+            self.remember(path, id);
         }
     }
 
     fn remove_path(&mut self, path: &Path) {
-        self.live.retain(|cached, _| !cached.starts_with(path));
-        self.previous.retain(|cached, _| !cached.starts_with(path));
+        self.live.remove_under(&self.roots, path);
+        self.previous.remove_under(&self.roots, path);
     }
 
     /// Deliberately does nothing.
@@ -240,6 +324,39 @@ mod tests {
 
         cache.remove_path(&nested);
         assert_eq!(cache.len(), 0);
+    }
+
+    #[test]
+    fn a_root_holds_its_paths_and_the_folders_created_under_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let album = temp.path().join("Album");
+        fs::create_dir(&album).unwrap();
+        write_files(&album, 3);
+        write_files(temp.path(), 2);
+
+        let mut cache = BoundedFileIdCache::with_capacity(100);
+        cache.add_path(temp.path(), RecursiveMode::Recursive);
+
+        // A folder the watcher sees created is part of the root it appeared in,
+        // not a root of its own — or every new folder would add one.
+        let created = temp.path().join("New");
+        fs::create_dir(&created).unwrap();
+        write_files(&created, 2);
+        cache.add_path(&created, RecursiveMode::Recursive);
+        assert_eq!(cache.roots.len(), 1);
+        assert!(cache.cached_file_id(&created.join("file_1.mp3")).is_some());
+
+        // The album and its three files go; the rest of the root stays.
+        let before = cache.len();
+        cache.remove_path(&album);
+        assert_eq!(cache.len(), before - 4);
+        assert!(cache.cached_file_id(&album.join("file_0.mp3")).is_none());
+        assert!(cache
+            .cached_file_id(&temp.path().join("file_0.mp3"))
+            .is_some());
+
+        cache.remove_path(temp.path());
+        assert!(cache.is_empty());
     }
 
     #[test]
