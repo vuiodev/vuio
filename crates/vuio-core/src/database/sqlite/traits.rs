@@ -72,8 +72,16 @@ impl MediaRepository for SqliteDatabase {
     async fn load_file_fingerprints_under(
         &self,
         canonical_prefix: &str,
+        after: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<FileFingerprint>> {
-        SqliteDatabase::load_file_fingerprints_under_impl(self, canonical_prefix.to_owned()).await
+        SqliteDatabase::load_file_fingerprints_under_impl(
+            self,
+            canonical_prefix.to_owned(),
+            after.map(str::to_owned),
+            limit,
+        )
+        .await
     }
 
     async fn load_file_fingerprints_after(

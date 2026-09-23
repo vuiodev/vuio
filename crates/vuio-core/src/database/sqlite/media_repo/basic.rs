@@ -166,17 +166,31 @@ impl SqliteDatabase {
     pub(in crate::database::sqlite) async fn load_file_fingerprints_under_impl(
         &self,
         canonical_prefix: String,
+        after: Option<String>,
+        limit: usize,
     ) -> Result<Vec<FileFingerprint>> {
         self.execute_read(move |connection| {
-            // A range on `path` rather than a `LIKE`, so the primary key index
+            // A range on `path` rather than a `LIKE`, so the index on `path`
             // serves it. `subtree_range` stops at a component boundary, which is
             // what keeps `/media/Film` from matching `/media/Films`.
             let (start, end) = SqliteDatabase::subtree_range(&canonical_prefix);
+            // The cursor replaces the lower bound rather than adding a second
+            // one, so each page is a seek to where the last one stopped instead
+            // of a walk from the start of the subtree. A cursor below the range
+            // would widen it, so that one is ignored.
+            let (comparison, lower) = match after {
+                Some(after) if after >= start => (">", after),
+                _ => (">=", start),
+            };
             let mut statement = connection.prepare_cached(&format!(
-                "SELECT {FINGERPRINT_COLUMNS} FROM media_files WHERE path >= ? AND path < ?"
+                "SELECT {FINGERPRINT_COLUMNS} FROM media_files \
+                 WHERE path {comparison} ? AND path < ? ORDER BY path LIMIT ?"
             ))?;
             let fingerprints = statement
-                .query_map([&start, &end], schema::fingerprint_from_row)?
+                .query_map(
+                    rusqlite::params![lower, end, limit as i64],
+                    schema::fingerprint_from_row,
+                )?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             Ok(fingerprints)
         })
