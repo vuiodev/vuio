@@ -503,8 +503,9 @@ impl AirplayProvider {
                 b"Events-Write-Encryption-Key",
             )?,
         });
-        let (event_sender, _event_replies) = tokio::sync::mpsc::unbounded_channel();
-        let (command_sender, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        let (event_sender, event_replies) = tokio::sync::mpsc::channel(16);
+        drop(event_replies); // Audio mode has no data-stream reply consumer.
+        let (command_sender, mut commands) = tokio::sync::mpsc::channel(16);
         let mut event_task = AbortOnDrop(Some(tokio::spawn(async move {
             if let Err(error) = event_connection
                 .serve_events_with_commands(event_sender, Some(command_sender))
@@ -770,7 +771,7 @@ impl AirplayProvider {
         });
         // Serve events and timing before RECORD/play. Leaving the reverse event
         // TCP idle during session setup can stall third-party receivers.
-        let (event_reply_sender, mut event_replies) = tokio::sync::mpsc::unbounded_channel();
+        let (event_reply_sender, mut event_replies) = tokio::sync::mpsc::channel(16);
         let mut event_task = AbortOnDrop(Some(tokio::spawn(async move {
             if let Err(error) = event_connection.serve_events(event_reply_sender).await {
                 tracing::debug!(%error, "AirPlay event channel closed");

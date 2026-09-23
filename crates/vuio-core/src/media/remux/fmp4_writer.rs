@@ -615,11 +615,12 @@ impl Fmp4Writer {
     pub fn build_mdat(packets: &[MediaPacket]) -> Vec<u8> {
         let total_size: usize = packets.iter().map(|p| p.data.len()).sum();
         let mut mdat = Vec::with_capacity(8 + total_size);
+        mdat.extend_from_slice(&((8 + total_size) as u32).to_be_bytes());
         mdat.extend_from_slice(b"mdat");
         for p in packets {
             mdat.extend_from_slice(&p.data);
         }
-        Self::wrap_box(&mdat)
+        mdat
     }
 
     /// Build a complete fMP4 segment (moof + mdat) from a list of media packets.
@@ -661,11 +662,17 @@ impl Fmp4Writer {
             samples: &samples,
         };
         let moof = Self::build_moof_multi(sequence_number, &[run], &[data_offset]);
-        let mdat = Self::build_mdat(packets);
-
-        let mut segment = Vec::with_capacity(moof.len() + mdat.len());
+        let payload: usize = packets.iter().map(|packet| packet.data.len()).sum();
+        // Write directly into the response. A UHD segment can be tens of MB;
+        // separately building, wrapping and then copying mdat multiplied that
+        // payload's peak allocation for every concurrent viewer.
+        let mut segment = Vec::with_capacity(moof.len() + 8 + payload);
         segment.extend_from_slice(&moof);
-        segment.extend_from_slice(&mdat);
+        segment.extend_from_slice(&((8 + payload) as u32).to_be_bytes());
+        segment.extend_from_slice(b"mdat");
+        for packet in packets {
+            segment.extend_from_slice(&packet.data);
+        }
         segment
     }
 
@@ -741,18 +748,15 @@ impl Fmp4Writer {
             .iter()
             .map(|(_, packets)| packets.iter().map(|p| p.data.len()).sum::<usize>())
             .sum();
-        let mut mdat = Vec::with_capacity(8 + payload);
-        mdat.extend_from_slice(b"mdat");
+        let mut segment = Vec::with_capacity(moof.len() + 8 + payload);
+        segment.extend_from_slice(&moof);
+        segment.extend_from_slice(&((8 + payload) as u32).to_be_bytes());
+        segment.extend_from_slice(b"mdat");
         for (_, packets) in tracks {
             for packet in *packets {
-                mdat.extend_from_slice(&packet.data);
+                segment.extend_from_slice(&packet.data);
             }
         }
-        let mdat = Self::wrap_box(&mdat);
-
-        let mut segment = Vec::with_capacity(moof.len() + mdat.len());
-        segment.extend_from_slice(&moof);
-        segment.extend_from_slice(&mdat);
         segment
     }
 
@@ -965,7 +969,7 @@ mod tests {
             data: vec![1, 2, 3, 4],
         };
         let mdat = Fmp4Writer::build_mdat(&[pkt]);
-        assert_eq!(&mdat[4..8], b"mdat");
+        assert_eq!(&mdat, b"\0\0\0\x0cmdat\x01\x02\x03\x04");
     }
 
     #[test]
@@ -1035,6 +1039,102 @@ mod tests {
         assert!(segment.len() > 108); // moof + mdat header + 100 bytes of data
         // Verify moof magic at offset 4
         assert_eq!(&segment[4..8], b"moof");
+        let moof_len = u32::from_be_bytes(segment[..4].try_into().unwrap()) as usize;
+        assert_eq!(&segment[moof_len..moof_len + 4], &108u32.to_be_bytes());
+        assert_eq!(&segment[moof_len + 4..moof_len + 8], b"mdat");
+        assert_eq!(&segment[moof_len + 8..], &packets[0].data);
+        assert_eq!(
+            segment,
+            Fmp4Writer::build_multi_track_segment(1, &[(&track, &packets)], &[0])
+        );
+    }
+
+    #[test]
+    fn multi_track_payloads_follow_their_trun_offsets() {
+        let video = track_of(1, TrackKind::Video);
+        let audio = track_of(2, TrackKind::Audio);
+        let make_packet = |track_id, byte, size| MediaPacket {
+            track_id,
+            pts: 0,
+            dts: 0,
+            duration: 1024,
+            is_keyframe: true,
+            data: vec![byte; size],
+        };
+        let video_packets = [make_packet(1, 0x11, 31), make_packet(1, 0x22, 43)];
+        let audio_packets = [make_packet(2, 0x33, 17)];
+        let segment = Fmp4Writer::build_multi_track_segment(
+            1,
+            &[(&video, &video_packets), (&audio, &audio_packets)],
+            &[0, 0],
+        );
+        let moof_len = u32::from_be_bytes(segment[..4].try_into().unwrap()) as usize;
+        let offsets: Vec<_> = segment[..moof_len]
+            .windows(4)
+            .enumerate()
+            .filter(|(_, magic)| *magic == b"trun")
+            .map(|(pos, _)| {
+                u32::from_be_bytes(segment[pos + 12..pos + 16].try_into().unwrap()) as usize
+            })
+            .collect();
+        assert_eq!(offsets, [moof_len + 8, moof_len + 8 + 74]);
+        assert_eq!(
+            &segment[offsets[0]..offsets[1]],
+            &[vec![0x11; 31], vec![0x22; 43]].concat()
+        );
+        assert_eq!(&segment[offsets[1]..], &[0x33; 17]);
+        assert_eq!(
+            u32::from_be_bytes(segment[moof_len..moof_len + 4].try_into().unwrap()),
+            99
+        );
+    }
+
+    /// Run the test binary directly under /usr/bin/time -l, in separate
+    /// processes with and without VUIO_LEGACY_FRAGMENT=1, to compare peak RSS.
+    #[test]
+    #[ignore = "isolated 64 MiB allocation probe"]
+    fn fragment_rss_probe() {
+        let track = track_of(1, TrackKind::Video);
+        let packets = vec![MediaPacket {
+            track_id: 1,
+            pts: 0,
+            dts: 0,
+            duration: 90_000,
+            is_keyframe: true,
+            data: vec![0x5a; 64 * 1024 * 1024],
+        }];
+        let segment = if std::env::var_os("VUIO_LEGACY_FRAGMENT").is_some() {
+            let samples = Fmp4Writer::samples_for(&track, &packets);
+            let run = TrackRun {
+                track_id: 1,
+                base_decode_time: 0,
+                samples: &samples,
+            };
+            let size = Fmp4Writer::build_moof_multi(1, &[run], &[0]).len();
+            let run = TrackRun {
+                track_id: 1,
+                base_decode_time: 0,
+                samples: &samples,
+            };
+            let moof = Fmp4Writer::build_moof_multi(1, &[run], &[size as u32 + 8]);
+            // The former multi-track builder kept all three copies live.
+            let mut body = Vec::with_capacity(8 + packets[0].data.len());
+            body.extend_from_slice(b"mdat");
+            body.extend_from_slice(&packets[0].data);
+            let mdat = Fmp4Writer::wrap_box(&body);
+            let mut segment = Vec::with_capacity(moof.len() + mdat.len());
+            segment.extend_from_slice(&moof);
+            segment.extend_from_slice(&mdat);
+            std::hint::black_box((&body, &mdat));
+            segment
+        } else {
+            Fmp4Writer::build_multi_track_segment(1, &[(&track, &packets)], &[0])
+        };
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        segment.hash(&mut hash);
+        println!("fragment: {} bytes, hash {}", segment.len(), hash.finish());
+        std::hint::black_box((&segment, &packets));
     }
 
     #[test]

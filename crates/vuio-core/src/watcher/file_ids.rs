@@ -112,6 +112,16 @@ impl Generation {
         self.outside.retain(|key, _| !key.starts_with(prefix));
         self.len = self.below.iter().map(HashMap::len).sum::<usize>() + self.outside.len();
     }
+
+    /// Forget a deregistered watch root, including the hash table's retained
+    /// bucket allocation. Removing from the vector also keeps later root slots
+    /// aligned with their maps.
+    fn remove_root(&mut self, index: usize) {
+        if index < self.below.len() {
+            self.below.remove(index);
+        }
+        self.len = self.below.iter().map(HashMap::len).sum::<usize>() + self.outside.len();
+    }
 }
 
 impl BoundedFileIdCache {
@@ -226,6 +236,18 @@ impl FileIdCache for BoundedFileIdCache {
     fn remove_path(&mut self, path: &Path) {
         self.live.remove_under(&self.roots, path);
         self.previous.remove_under(&self.roots, path);
+        // `unwatch` calls this for a root, while ordinary delete events call it
+        // for files or subdirectories. Keeping a removed root here would leave
+        // its now-empty HashMap's bucket allocation alive indefinitely. It also
+        // made every later lookup walk all roots ever configured, not just the
+        // roots still watched.
+        for index in (0..self.roots.len()).rev() {
+            if self.roots[index].starts_with(path) {
+                self.roots.remove(index);
+                self.live.remove_root(index);
+                self.previous.remove_root(index);
+            }
+        }
     }
 
     /// Deliberately does nothing.
@@ -357,6 +379,68 @@ mod tests {
 
         cache.remove_path(temp.path());
         assert!(cache.is_empty());
+        assert!(cache.roots.is_empty());
+        assert!(cache.live.below.is_empty());
+    }
+
+    #[test]
+    fn replacing_watch_roots_releases_old_tables_and_preserves_other_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots: Vec<_> = (0..3)
+            .map(|index| temp.path().join(format!("root_{index}")))
+            .collect();
+        for root in &roots {
+            fs::create_dir(root).unwrap();
+            write_files(root, 8);
+        }
+
+        let mut cache = BoundedFileIdCache::with_capacity(24);
+        cache.add_path(&roots[0], RecursiveMode::Recursive);
+        cache.add_path(&roots[1], RecursiveMode::Recursive);
+        assert_eq!(cache.len(), 16);
+
+        cache.remove_path(&roots[0]);
+        assert_eq!(cache.roots, vec![roots[1].clone()]);
+        assert_eq!(cache.live.below.len(), 1);
+        assert_eq!(cache.len(), 8);
+        assert!(cache.cached_file_id(&roots[1].join("file_0.mp3")).is_some());
+
+        cache.add_path(&roots[2], RecursiveMode::Recursive);
+        assert_eq!(cache.roots, vec![roots[1].clone(), roots[2].clone()]);
+        assert_eq!(cache.live.below.len(), 2);
+        assert_eq!(cache.len(), 16);
+        assert!(cache.cached_file_id(&roots[2].join("file_0.mp3")).is_some());
+
+        cache.remove_path(temp.path());
+        assert!(cache.roots.is_empty());
+        assert!(cache.live.below.is_empty());
+        assert!(cache.is_empty());
+    }
+
+    #[test]
+    fn removing_a_root_reindexes_both_generations() {
+        let temp = tempfile::tempdir().unwrap();
+        let first = temp.path().join("first");
+        let second = temp.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        write_files(&first, 2);
+        write_files(&second, 2);
+
+        let mut cache = BoundedFileIdCache::with_capacity(2);
+        cache.add_path(&first, RecursiveMode::Recursive);
+        // Register the second root without seeding it: the first filled the
+        // cap. A later event rotates the first root's table to `previous`.
+        cache.add_path(&second, RecursiveMode::Recursive);
+        cache.add_path(&second.join("file_0.mp3"), RecursiveMode::NonRecursive);
+        assert!(cache.cached_file_id(&first.join("file_0.mp3")).is_some());
+        assert!(cache.cached_file_id(&second.join("file_0.mp3")).is_some());
+
+        cache.remove_path(&first);
+        assert_eq!(cache.roots, vec![second.clone()]);
+        assert!(cache.cached_file_id(&second.join("file_0.mp3")).is_some());
+        assert!(cache.cached_file_id(&first.join("file_0.mp3")).is_none());
+        assert_eq!(cache.len(), 1);
     }
 
     #[test]

@@ -51,7 +51,7 @@ pub async fn serve_transcoded_aac<D: DatabaseManager>(
     let Some(permit) = state.transcode.try_acquire() else {
         return Ok(busy(&state, &file.filename));
     };
-    let plan = plan_for(&state, &file).await?;
+    let (plan, permit) = plan_for(&state, &file, permit).await?;
 
     let response = Response::builder()
         .status(StatusCode::OK)
@@ -139,7 +139,7 @@ pub async fn serve_transcoded_ac3<D: DatabaseManager>(
     let Some(permit) = state.transcode.try_acquire() else {
         return Ok(busy(&state, &file.filename));
     };
-    let plan = plan_for(&state, &file).await?;
+    let (plan, permit) = plan_for(&state, &file, permit).await?;
 
     let Some(total) = plan.ac3_size() else {
         let response = Response::builder()
@@ -320,7 +320,7 @@ pub async fn serve_transcoded_wav<D: DatabaseManager>(
         return Ok(busy(&state, &file.filename));
     };
 
-    let plan = plan_for(&state, &file).await?;
+    let (plan, permit) = plan_for(&state, &file, permit).await?;
 
     // A source that will not say how long it is gets a chunked body: no length,
     // no ranges, `DLNA.ORG_OP=00`. That loses the scrub bar; a guessed length
@@ -477,29 +477,34 @@ fn busy<D: DatabaseManager>(state: &AppState<D>, filename: &str) -> Response {
 pub(crate) async fn plan_for<D: DatabaseManager>(
     state: &AppState<D>,
     file: &Resolved,
-) -> Result<Arc<AudioPlan>, AppError> {
+    permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(Arc<AudioPlan>, tokio::sync::OwnedSemaphorePermit), AppError> {
     let key = IndexKey::for_file(file.id, &file.path)
         .await
         .ok_or(AppError::NotFound)?;
 
     if let Some(plan) = state.transcode.cached(&key).await {
-        return Ok(plan);
+        return Ok((plan, permit));
     }
 
     let owned = file.path.clone();
     let codec = file.codec;
     let kind = file.kind;
-    let plan = tokio::task::spawn_blocking(move || match kind {
-        SourceKind::Elementary => AudioPlan::elementary(&owned, codec),
-        #[cfg(feature = "demux")]
-        SourceKind::Container => AudioPlan::container(&owned),
+    let (plan, permit) = tokio::task::spawn_blocking(move || {
+        // Planning can index an entire recording. Keep its slot even if the
+        // waiting HTTP handler is cancelled; return it for the streaming phase.
+        let plan = match kind {
+            SourceKind::Elementary => AudioPlan::elementary(&owned, codec),
+            #[cfg(feature = "demux")]
+            SourceKind::Container => AudioPlan::container(&owned),
+        };
+        (plan, permit)
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("transcode planner panicked: {e}")))?
-    .map_err(AppError::Internal)?;
-    let plan = Arc::new(plan);
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("transcode planner panicked: {e}")))?;
+    let plan = Arc::new(plan.map_err(AppError::Internal)?);
     state.transcode.remember(key, plan.clone()).await;
-    Ok(plan)
+    Ok((plan, permit))
 }
 
 /// Build the response body: the WAV header, then decoded PCM, clipped to the

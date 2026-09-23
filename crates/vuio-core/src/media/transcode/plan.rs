@@ -58,6 +58,17 @@ impl std::fmt::Debug for AudioPlan {
 pub(crate) const TARGET_CHANNELS: u16 = 2;
 
 impl AudioPlan {
+    /// Owned heap storage plus the plan itself, for the cache's byte ceiling.
+    pub(crate) fn retained_bytes(&self) -> usize {
+        std::mem::size_of::<Self>()
+            + self.source_path.capacity()
+            + match &self.source {
+                PacketSource::Elementary(index) => std::mem::size_of_val(index.frames.as_ref()),
+                #[cfg(feature = "demux")]
+                PacketSource::Container(_) => 0,
+            }
+    }
+
     /// Index a raw `.ac3`/`.eac3`/`.dts` file and probe its decoded shape.
     ///
     /// Blocking: it reads the whole file's headers and decodes one frame, so

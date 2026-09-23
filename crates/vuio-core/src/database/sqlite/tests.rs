@@ -464,6 +464,21 @@ async fn rebuilding_the_directory_tree_reproduces_incremental_maintenance() {
         .unwrap()
     };
 
+    // More distinct directory counters than one repair batch, with shared
+    // ancestors whose counts must add up across every flush.
+    for batch in 0..5 {
+        let files: Vec<_> = (0..1000)
+            .map(|i| {
+                MediaFile::new(
+                    PathBuf::from(format!("/media/large/{}/song.mp3", batch * 1000 + i)),
+                    1,
+                    "audio/mpeg".to_owned(),
+                )
+            })
+            .collect();
+        db.bulk_store_media_files(&files).await.unwrap();
+    }
+
     let incremental = snapshot(db.clone()).await;
     assert!(!incremental.is_empty());
 

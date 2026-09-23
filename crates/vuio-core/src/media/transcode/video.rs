@@ -418,7 +418,10 @@ impl AudioDecode {
     /// Take one frame's decoded PCM: note where the packet says the run starts,
     /// widen the samples to the output's channel count, and encode them.
     fn take(&mut self, sink: &mut TrackSink, ticks: u64, pcm: Vec<u8>) -> Result<()> {
-        self.anchors.push(ticks as i64 - self.decoded as i64);
+        // Once anchored, no later estimate is consulted or needs retaining.
+        if self.next_dts.is_none() {
+            self.anchors.push(ticks as i64 - self.decoded as i64);
+        }
         self.decoded += (pcm.len() / (self.decoded_channels as usize * 2)) as u64;
         let pcm = super::fit_channels(&pcm, self.decoded_channels, DECODED_CHANNELS);
         let adts = self.encoder.push(&pcm)?;
@@ -496,6 +499,7 @@ type PrimedPacket = (u32, i64, Vec<u8>);
 /// than that, and small enough that a file with a track that never appears
 /// costs nothing much to give up on.
 const PRIME_PACKETS: usize = 512;
+const PRIME_BYTES: usize = 16 * 1024 * 1024;
 
 /// Read far enough ahead to describe every Dolby track being passed through.
 ///
@@ -526,11 +530,16 @@ fn prime_dolby_tracks(
         return (primed, first_frames);
     }
 
+    let mut bytes = 0;
     for _ in 0..PRIME_PACKETS {
+        if bytes >= PRIME_BYTES {
+            break;
+        }
         let Ok(Some(packet)) = format.next_packet() else {
             break;
         };
         let (id, pts, data) = (packet.track_id, packet.pts.get(), packet.data.to_vec());
+        bytes += data.len();
         if wanted.contains(&id) {
             first_frames.entry(id).or_insert_with(|| data.clone());
         }
@@ -644,4 +653,51 @@ fn track_time_base(
         .iter()
         .find(|t| t.id == track_id)
         .and_then(|t| t.time_base)
+}
+
+#[cfg(all(test, feature = "transcode-ac3"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timing_estimates_stop_accumulating_after_the_run_is_placed() {
+        let ac3 = include_bytes!("../../../../vuio-codec-ac3/tests/fixtures/sine440_stereo.ac3");
+        let (decoder, _) =
+            PcmDecoder::open(TranscodeCodec::Ac3, 48_000, Some(2), &ac3[..768]).unwrap();
+        let mut decode = AudioDecode {
+            codec: TranscodeCodec::Ac3,
+            decoder,
+            encoder: AacEncoder::new(48_000, 2).unwrap(),
+            decoded_channels: 2,
+            next_dts: None,
+            anchors: Vec::new(),
+            decoded: 0,
+            held: Vec::new(),
+        };
+        let track = TrackInfo {
+            id: 1,
+            track_kind: TrackKind::Audio,
+            codec: "AAC".into(),
+            codec_kind: TrackCodec::Aac,
+            language: None,
+            name: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            width: None,
+            height: None,
+            is_default: true,
+            extra_data: vec![0x11, 0x90],
+        };
+        let mut sink = TrackSink::new(track, None);
+        for frame in 0..ANCHOR_PACKETS * 2 {
+            decode
+                .take(&mut sink, frame as u64 * 1024, vec![0; 4096])
+                .unwrap();
+            sink.pending.clear();
+        }
+        assert!(decode.next_dts.is_some());
+        assert!(decode.anchors.is_empty());
+        assert_eq!(decode.anchors.capacity(), 0);
+        assert!(decode.held.is_empty());
+    }
 }

@@ -157,7 +157,10 @@ async fn work_is_whatever_is_missing_stale_or_not_good_enough() {
 
     // Never looked up.
     assert_eq!(
-        database.media_ids_missing_mediainfo(1, 60).await.unwrap(),
+        database
+            .media_ids_missing_mediainfo(1, 60, 0, i64::MAX, 10)
+            .await
+            .unwrap(),
         vec![id]
     );
 
@@ -167,22 +170,82 @@ async fn work_is_whatever_is_missing_stale_or_not_good_enough() {
         .await
         .unwrap();
     assert!(database
-        .media_ids_missing_mediainfo(1, 60)
+        .media_ids_missing_mediainfo(1, 60, 0, i64::MAX, 10)
         .await
         .unwrap()
         .is_empty());
 
     // Raising the threshold past it puts it back in the queue.
     assert_eq!(
-        database.media_ids_missing_mediainfo(1, 95).await.unwrap(),
+        database
+            .media_ids_missing_mediainfo(1, 95, 0, i64::MAX, 10)
+            .await
+            .unwrap(),
         vec![id]
     );
 
     // So does bumping the reader version, which is the whole point of storing it.
     assert_eq!(
-        database.media_ids_missing_mediainfo(2, 60).await.unwrap(),
+        database
+            .media_ids_missing_mediainfo(2, 60, 0, i64::MAX, 10)
+            .await
+            .unwrap(),
         vec![id]
     );
+}
+
+#[tokio::test]
+async fn pending_work_pages_advance_past_misses_and_exclude_later_insertions() {
+    let (database, first_id, _temp) = database_with_one_file().await;
+    let mut expected = vec![first_id];
+    for i in 0..10 {
+        expected.push(
+            database
+                .store_media_file(&MediaFile::new(
+                    PathBuf::from(format!("/media/page-{i}.mp4")),
+                    1,
+                    "video/mp4".into(),
+                ))
+                .await
+                .unwrap(),
+        );
+    }
+    let (count, through) = database.missing_mediainfo_summary(1, 60).await.unwrap();
+    assert_eq!(count, expected.len());
+    assert_eq!(through, *expected.last().unwrap());
+    let later = database
+        .store_media_file(&MediaFile::new(
+            PathBuf::from("/media/later.mp4"),
+            1,
+            "video/mp4".into(),
+        ))
+        .await
+        .unwrap();
+    let mut cursor = 0;
+    let mut seen = Vec::new();
+    loop {
+        let page = database
+            .media_ids_missing_mediainfo(1, 60, cursor, through, 3)
+            .await
+            .unwrap();
+        assert!(page.len() <= 3);
+        let Some(last) = page.last() else { break };
+        cursor = *last;
+        // Successful lookups disappear from the query; misses remain eligible.
+        // Neither may shift the next page or make this run retry a miss.
+        database
+            .bulk_store_mediainfo(&[record_for(page[0], 90)])
+            .await
+            .unwrap();
+        seen.extend(page);
+    }
+    assert_eq!(seen, expected);
+    assert!(!seen.contains(&later));
+    assert!(database
+        .media_ids_missing_mediainfo(1, 60, 0, through, 0)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]

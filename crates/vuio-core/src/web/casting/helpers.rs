@@ -544,19 +544,19 @@ pub(crate) async fn tool_cast_folder_to_renderer<D: DatabaseManager + 'static>(
     let canonical = crate::web::mcp::canonical_media_path(state, path).await?;
     let files = state
         .database
-        .get_files_with_path_prefix(&canonical)
+        .get_file_locations_with_path_prefix(&canonical)
         .await
         .map_err(|error| format!("Database error: {error}"))?;
 
     let mut tracks: Vec<(String, FileLocation)> = files
         .into_iter()
         .filter(|file| {
-            crate::web::casting::is_castable_mime(file.mime_type())
-                && crate::web::casting::matches_media_kind(file.mime_type(), media)
+            crate::web::casting::is_castable_mime(&file.mime_type)
+                && crate::web::casting::matches_media_kind(&file.mime_type, media)
         })
-        .filter_map(|file| {
+        .map(|file| {
             let name = file.path.to_string_lossy().into_owned();
-            file.to_file_location().map(|location| (name, location))
+            (name, file)
         })
         .collect();
     if tracks.is_empty() {

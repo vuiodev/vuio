@@ -22,9 +22,10 @@ use super::TrackRates;
 ///
 /// An index earns its place across the handful of requests a renderer makes
 /// while it opens and scrubs one file, so the count only has to cover the files
-/// being opened at the same time. Four is a household's worth and holds 12 MB
-/// at most; eight held 24 MB for streams long since settled.
+/// being opened at the same time. The byte ceiling also covers long recordings
+/// and codecs with many more frames per second than AC-3.
 const MAX_CACHED_INDEXES: usize = 4;
+const MAX_CACHED_INDEX_BYTES: usize = 12 * 1024 * 1024;
 
 /// Identifies a cached index. The file's size and high-resolution metadata
 /// marker are part of the key so replacing a file in place invalidates its
@@ -186,9 +187,10 @@ struct SegmentCache {
 struct Cache {
     entries: HashMap<IndexKey, Arc<AudioPlan>>,
     /// Insertion order, oldest first. A plain queue rather than a true LRU: with
-    /// a cap of eight the difference is not measurable, and this needs no
+    /// a cap of four the difference is not measurable, and this needs no
     /// bookkeeping on the read path.
     order: Vec<IndexKey>,
+    bytes: usize,
 }
 
 impl Default for TranscodeState {
@@ -231,11 +233,21 @@ impl TranscodeState {
     /// Remember `index` under `key`, evicting the oldest entry if full.
     pub async fn remember(&self, key: IndexKey, index: Arc<AudioPlan>) {
         let mut cache = self.cache.lock().await;
-        if cache.entries.insert(key, index).is_none() {
-            cache.order.push(key);
-            while cache.order.len() > MAX_CACHED_INDEXES {
-                let oldest = cache.order.remove(0);
-                cache.entries.remove(&oldest);
+        if let Some(old) = cache.entries.remove(&key) {
+            cache.bytes -= old.retained_bytes();
+            cache.order.retain(|stored| *stored != key);
+        }
+        let bytes = index.retained_bytes();
+        if bytes > MAX_CACHED_INDEX_BYTES {
+            return;
+        }
+        cache.bytes += bytes;
+        cache.entries.insert(key, index);
+        cache.order.push(key);
+        while cache.order.len() > MAX_CACHED_INDEXES || cache.bytes > MAX_CACHED_INDEX_BYTES {
+            let oldest = cache.order.remove(0);
+            if let Some(old) = cache.entries.remove(&oldest) {
+                cache.bytes -= old.retained_bytes();
             }
         }
     }
@@ -275,16 +287,22 @@ impl TranscodeState {
         };
         let len = chunk.len();
         if len > MAX_CACHED_CHUNK_BYTES {
+            if let Some(old) = cache.entries.remove(&key) {
+                cache.bytes -= old.len();
+                cache.order.retain(|stored| *stored != key);
+            }
             return;
         }
-        if cache.entries.insert(key, chunk).is_none() {
+        if let Some(old) = cache.entries.insert(key, chunk) {
+            cache.bytes -= old.len();
+        } else {
             cache.order.push(key);
-            cache.bytes += len;
-            while cache.order.len() > MAX_CACHED_CHUNKS || cache.bytes > MAX_CACHED_CHUNK_BYTES {
-                let oldest = cache.order.remove(0);
-                if let Some(gone) = cache.entries.remove(&oldest) {
-                    cache.bytes = cache.bytes.saturating_sub(gone.len());
-                }
+        }
+        cache.bytes += len;
+        while cache.order.len() > MAX_CACHED_CHUNKS || cache.bytes > MAX_CACHED_CHUNK_BYTES {
+            let oldest = cache.order.remove(0);
+            if let Some(gone) = cache.entries.remove(&oldest) {
+                cache.bytes -= gone.len();
             }
         }
     }
@@ -298,17 +316,26 @@ impl TranscodeState {
     pub async fn remember_segment(&self, key: SegmentKey, segment: bytes::Bytes) {
         let mut cache = self.segments.lock().await;
         let len = segment.len();
-        if cache.entries.insert(key, segment).is_none() {
-            cache.order.push(key);
-            cache.bytes += len;
+        if len > MAX_CACHED_SEGMENT_BYTES {
+            if let Some(old) = cache.entries.remove(&key) {
+                cache.bytes -= old.len();
+                cache.order.retain(|stored| *stored != key);
+            }
+            return;
         }
+        if let Some(old) = cache.entries.insert(key, segment) {
+            cache.bytes -= old.len();
+        } else {
+            cache.order.push(key);
+        }
+        cache.bytes += len;
         while cache.order.len() > MAX_CACHED_SEGMENTS || cache.bytes > MAX_CACHED_SEGMENT_BYTES {
             let Some(oldest) = cache.order.first().copied() else {
                 break;
             };
             cache.order.remove(0);
             if let Some(evicted) = cache.entries.remove(&oldest) {
-                cache.bytes = cache.bytes.saturating_sub(evicted.len());
+                cache.bytes -= evicted.len();
             }
         }
     }
@@ -328,7 +355,7 @@ mod tests {
                 crate::media::transcode::FrameIndex {
                     codec: TranscodeCodec::Ac3,
                     sample_rate: 48_000,
-                    frames: Vec::new(),
+                    frames: Arc::from([]),
                     total_samples: 0,
                 },
             ),
@@ -354,6 +381,41 @@ mod tests {
         }
         assert!(state.cached(&key(1)).await.is_none(), "oldest is evicted");
         assert!(state.cached(&key(2)).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn large_indexes_are_bounded_by_bytes_including_replacements() {
+        fn large_index(bytes: usize) -> Arc<AudioPlan> {
+            let mut plan = index();
+            let frames = match &mut Arc::get_mut(&mut plan).unwrap().source {
+                super::super::PacketSource::Elementary(frames) => frames,
+                #[cfg(feature = "demux")]
+                super::super::PacketSource::Container(_) => unreachable!(),
+            };
+            frames.frames = vec![
+                super::super::IndexedFrame {
+                    offset: 0,
+                    len: 768,
+                    samples: 1536
+                };
+                bytes / std::mem::size_of::<super::super::IndexedFrame>()
+            ]
+            .into();
+            plan
+        }
+        let state = TranscodeState::new(1);
+        let large = large_index(MAX_CACHED_INDEX_BYTES / 2);
+        state.remember(key(1), large.clone()).await;
+        state.remember(key(2), index()).await;
+        state.remember(key(2), large).await;
+        assert!(state.cached(&key(1)).await.is_none());
+        assert!(state.cached(&key(2)).await.is_some());
+        assert!(state.cache.lock().await.bytes <= MAX_CACHED_INDEX_BYTES);
+        state
+            .remember(key(2), large_index(MAX_CACHED_INDEX_BYTES + 1024))
+            .await;
+        assert!(state.cached(&key(2)).await.is_none());
+        assert_eq!(state.cache.lock().await.bytes, 0);
     }
 
     #[tokio::test]
@@ -401,6 +463,98 @@ mod tests {
         }
         assert!(state.cached_segment(&key(0)).await.is_none());
         assert!(state.cached_segment(&key(3)).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn replacing_a_segment_recounts_bytes_and_keeps_the_ceiling() {
+        let state = TranscodeState::new(1);
+        let key = |seq| SegmentKey {
+            file: key(1),
+            track: 2,
+            seq,
+        };
+        state
+            .remember_segment(key(0), bytes::Bytes::from_static(b"x"))
+            .await;
+        state
+            .remember_segment(key(0), bytes::Bytes::from(vec![0; 20 * 1024 * 1024]))
+            .await;
+        state
+            .remember_segment(key(1), bytes::Bytes::from(vec![0; 10 * 1024 * 1024]))
+            .await;
+
+        let cache = state.segments.lock().await;
+        assert!(cache.bytes <= MAX_CACHED_SEGMENT_BYTES);
+        assert_eq!(
+            cache.bytes,
+            cache.entries.values().map(bytes::Bytes::len).sum::<usize>()
+        );
+        assert!(
+            !cache.entries.contains_key(&key(0)),
+            "the older large segment is evicted"
+        );
+        assert!(cache.entries.contains_key(&key(1)));
+    }
+
+    #[test]
+    fn replacing_a_chunk_recounts_bytes_and_keeps_the_ceiling() {
+        let state = TranscodeState::new(1);
+        let key = |origin| ChunkKey {
+            file: key(1),
+            origin,
+            tracks: 1,
+        };
+        state.remember_chunk(key(0), Arc::new(vec![0]));
+        state.remember_chunk(key(0), Arc::new(vec![0; 20 * 1024 * 1024]));
+        state.remember_chunk(key(1), Arc::new(vec![0; 10 * 1024 * 1024]));
+
+        let cache = state.chunks.lock().unwrap();
+        assert!(cache.bytes <= MAX_CACHED_CHUNK_BYTES);
+        assert_eq!(
+            cache.bytes,
+            cache
+                .entries
+                .values()
+                .map(|chunk| chunk.len())
+                .sum::<usize>()
+        );
+        assert!(
+            !cache.entries.contains_key(&key(0)),
+            "the older large chunk is evicted"
+        );
+        assert!(cache.entries.contains_key(&key(1)));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_replacement_is_not_retained() {
+        let state = TranscodeState::new(1);
+        let segment = SegmentKey {
+            file: key(1),
+            track: 2,
+            seq: 0,
+        };
+        let chunk = ChunkKey {
+            file: key(1),
+            origin: 0,
+            tracks: 1,
+        };
+
+        state
+            .remember_segment(segment, bytes::Bytes::from_static(b"old"))
+            .await;
+        state.remember_chunk(chunk, Arc::new(b"old".to_vec()));
+        state
+            .remember_segment(
+                segment,
+                bytes::Bytes::from(vec![0; MAX_CACHED_SEGMENT_BYTES + 1]),
+            )
+            .await;
+        state.remember_chunk(chunk, Arc::new(vec![0; MAX_CACHED_CHUNK_BYTES + 1]));
+
+        assert!(state.cached_segment(&segment).await.is_none());
+        assert!(state.cached_chunk(&chunk).is_none());
+        assert_eq!(state.segments.lock().await.bytes, 0);
+        assert_eq!(state.chunks.lock().unwrap().bytes, 0);
     }
 
     #[tokio::test]

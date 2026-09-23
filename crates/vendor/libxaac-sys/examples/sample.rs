@@ -2,6 +2,7 @@ use std::alloc::{Layout, alloc_zeroed, dealloc};
 use std::ffi::{CStr, c_void};
 use std::mem::{align_of, size_of, zeroed};
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use libxaac_sys::{
     AOT_AAC_LC, DEFAULT_MEM_ALIGN_8, IA_API_CMD_GET_API_SIZE, IA_MEMTYPE_INPUT, IA_MEMTYPE_OUTPUT,
@@ -9,17 +10,32 @@ use libxaac_sys::{
     ixheaace_get_lib_id_strings, ixheaace_process, ixheaace_user_config_struct, ixheaace_version,
 };
 
+static POISON_ALLOC: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     print_library_versions();
     print_decoder_api_size();
 
     let (mut config, pcm_input_size) = build_encoder_config();
 
-    let create_status = unsafe {
-        libxaac_sys::ixheaace_create(
-            (&mut config.input_config as *mut _) as *mut c_void,
-            (&mut config.output_config as *mut _) as *mut c_void,
-        )
+    // Both paths use this example's zeroed allocator. Run once normally and
+    // once with `--zeroed-alloc` to compare peak RSS without changing input.
+    // The ordinary entry point must also work with an allocator that returns
+    // nonzero bytes; `--poison-alloc` verifies that separate contract.
+    let args: Vec<_> = std::env::args().collect();
+    let zeroed_alloc = args.iter().any(|arg| arg == "--zeroed-alloc");
+    let poison_alloc = args.iter().any(|arg| arg == "--poison-alloc");
+    assert!(
+        !(zeroed_alloc && poison_alloc),
+        "zeroed entry point needs zeroed memory"
+    );
+    POISON_ALLOC.store(poison_alloc, Ordering::Relaxed);
+    let input = (&mut config.input_config as *mut _) as *mut c_void;
+    let output = (&mut config.output_config as *mut _) as *mut c_void;
+    let create_status = if zeroed_alloc {
+        unsafe { libxaac_sys::ixheaace_create_zeroed(input, output) }
+    } else {
+        unsafe { libxaac_sys::ixheaace_create(input, output) }
     };
     assert_eq!(create_status, 0, "ixheaace_create failed: {create_status}");
 
@@ -155,6 +171,9 @@ unsafe extern "C" fn xaac_alloc(size: u32, alignment: u32) -> *mut c_void {
     let base = unsafe { alloc_zeroed(layout) };
     if base.is_null() {
         return ptr::null_mut();
+    }
+    if POISON_ALLOC.load(Ordering::Relaxed) {
+        unsafe { ptr::write_bytes(base, 0xa5, total_size) };
     }
 
     let aligned_addr =

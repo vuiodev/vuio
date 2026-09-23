@@ -1554,7 +1554,8 @@ static WORD32 get_drc_config_size(ixheaace_api_struct *pstr_api_struct,
 
 static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_struct,
                                                   ixheaace_output_config *ptr_out_cfg,
-                                                  ixheaace_input_config *ptr_in_cfg) {
+                                                  ixheaace_input_config *ptr_in_cfg,
+                                                  WORD32 zeroed_alloc) {
   IA_ERRORCODE err_code = IA_NO_ERROR;
   UWORD32 i_idx;
   pVOID pv_value;
@@ -1581,16 +1582,10 @@ static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_
     if (NULL == ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count]) {
       return IA_EXHEAACE_API_FATAL_MEM_ALLOC;
     }
-/* IXHEAACE_ZEROED_ALLOC: every malloc_xheaace callback this encoder is built
- * for returns memory that is already zero (xaac-rs maps fresh pages for the
- * large blocks). Clearing it again is not merely redundant: the state carries a
- * full USAC encoder by value, which an AAC-LC encoder never touches, and the
- * memset made all of it resident: about 55 MB per encoder instead of under
- * one. Defined through LIBXAAC_ZEROED_ALLOC in cmake/utils.cmake. */
-#ifndef IXHEAACE_ZEROED_ALLOC
-    memset(ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count], 0,
-           ptr_out_cfg->mem_info_table[i_idx].ui_size);
-#endif
+    if (!zeroed_alloc) {
+      memset(ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count], 0,
+             ptr_out_cfg->mem_info_table[i_idx].ui_size);
+    }
     if ((i_idx == IA_ENHAACPLUSENC_PERSIST_IDX) || (i_idx == IA_ENHAACPLUSENC_SCRATCH_IDX)) {
       ptr_out_cfg->ui_rem =
           (SIZE_T)((SIZE_T)ptr_out_cfg->arr_alloc_memory[ptr_out_cfg->malloc_count] %
@@ -1605,9 +1600,9 @@ static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_
     }
 
     pstr_api_struct->pp_mem[i_idx] = ptr_out_cfg->mem_info_table[i_idx].mem_ptr;
-#ifndef IXHEAACE_ZEROED_ALLOC
-    memset(pstr_api_struct->pp_mem[i_idx], 0, pstr_api_struct->pstr_mem_info[i_idx].ui_size);
-#endif
+    if (!zeroed_alloc) {
+      memset(pstr_api_struct->pp_mem[i_idx], 0, pstr_api_struct->pstr_mem_info[i_idx].ui_size);
+    }
 
     pstr_api_struct->pp_mem[i_idx] = pv_value;
 
@@ -1759,9 +1754,9 @@ static IA_ERRORCODE ixheaace_alloc_and_assign_mem(ixheaace_api_struct *pstr_api_
       } else {
         WORD32 num_aac_chan;
         ixheaace_state_struct *pstr_state = pstr_api_struct->pstr_state;
-#ifndef IXHEAACE_ZEROED_ALLOC
-        memset(pstr_api_struct->pstr_state, 0, sizeof(*(pstr_api_struct->pstr_state)));
-#endif
+        if (!zeroed_alloc) {
+          memset(pstr_api_struct->pstr_state, 0, sizeof(*(pstr_api_struct->pstr_state)));
+        }
 
         pstr_api_struct->pstr_state->inp_delay = (FLOAT32 *)((WORD8 *)pstr_state + offset_size);
         offset_size = ia_enhaacplus_enc_sizeof_delay_buffer(
@@ -3561,7 +3556,7 @@ static void ixheaace_get_measured_loudness_info(ixheaace_api_struct *pstr_api_st
   }
 }
 
-IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output) {
+static IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output, WORD32 zeroed_alloc) {
   IA_ERRORCODE err_code = IA_NO_ERROR;
   WORD32 ui_api_size;
   pVOID pv_value;
@@ -3582,9 +3577,9 @@ IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output) {
   if (NULL == pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count]) {
     return IA_EXHEAACE_API_FATAL_MEM_ALLOC;
   }
-#ifndef IXHEAACE_ZEROED_ALLOC
-  memset(pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count], 0, ui_api_size);
-#endif
+  if (!zeroed_alloc) {
+    memset(pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count], 0, ui_api_size);
+  }
 
   pstr_output_config->ui_rem =
       (SIZE_T)((SIZE_T)pstr_output_config->arr_alloc_memory[pstr_output_config->malloc_count] %
@@ -3596,9 +3591,9 @@ IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output) {
   pstr_output_config->malloc_count++;
 
   pstr_api_struct = (ixheaace_api_struct *)pstr_output_config->pv_ia_process_api_obj;
-#ifndef IXHEAACE_ZEROED_ALLOC
-  memset(pstr_api_struct, 0, sizeof(*pstr_api_struct));
-#endif
+  if (!zeroed_alloc) {
+    memset(pstr_api_struct, 0, sizeof(*pstr_api_struct));
+  }
 
   ixheaace_set_default_config(pstr_api_struct, pstr_input_config);
 
@@ -3646,7 +3641,8 @@ IA_ERRORCODE ixheaace_allocate(pVOID pv_input, pVOID pv_output) {
   ixheaace_fill_mem_tabs(pstr_api_struct, pstr_input_config->aot);
 
   err_code =
-      ixheaace_alloc_and_assign_mem(pstr_api_struct, pstr_output_config, pstr_input_config);
+      ixheaace_alloc_and_assign_mem(pstr_api_struct, pstr_output_config, pstr_input_config,
+                                   zeroed_alloc);
   if (err_code) {
     return err_code;
   }
@@ -3853,10 +3849,11 @@ IA_ERRORCODE ixheaace_init(pVOID pstr_obj_ixheaace, pVOID pv_input, pVOID pv_out
   return error;
 }
 
-IA_ERRORCODE ixheaace_create(pVOID pv_input, pVOID pv_output) {
+static IA_ERRORCODE ixheaace_create_impl(pVOID pv_input, pVOID pv_output,
+                                         WORD32 zeroed_alloc) {
   IA_ERRORCODE err_code = IA_NO_ERROR;
   ixheaace_output_config *pstr_out_cfg = (ixheaace_output_config *)pv_output;
-  err_code = ixheaace_allocate(pv_input, pv_output);
+  err_code = ixheaace_allocate(pv_input, pv_output, zeroed_alloc);
   if (!err_code) {
     err_code = ixheaace_init(pstr_out_cfg->pv_ia_process_api_obj, pv_input, pv_output);
   }
@@ -3864,6 +3861,16 @@ IA_ERRORCODE ixheaace_create(pVOID pv_input, pVOID pv_output) {
     IXHEAACE_MEM_FREE(pv_output);
   }
   return err_code;
+}
+
+IA_ERRORCODE ixheaace_create(pVOID pv_input, pVOID pv_output) {
+  return ixheaace_create_impl(pv_input, pv_output, 0);
+}
+
+IA_ERRORCODE ixheaace_create_zeroed(pVOID pv_input, pVOID pv_output) {
+  /* The caller promises every malloc_xheaace result is already zero-filled.
+   * Skipping the redundant clears leaves AAC-LC's unused USAC pages untouched. */
+  return ixheaace_create_impl(pv_input, pv_output, 1);
 }
 
 IA_ERRORCODE ixheaace_process(pVOID pstr_obj_ixheaace, pVOID pv_input, pVOID pv_output) {

@@ -116,8 +116,7 @@ pub enum Framing {
 }
 
 /// A track being read out frame by frame.
-pub enum TrackReader {
-    /// A file that is already a run of frames, cut from a rolling buffer.
+pub enum TrackReader {    /// A file that is already a run of frames, cut from a rolling buffer.
     Framed {
         file: tokio::fs::File,
         buffer: BytesMut,
@@ -127,9 +126,11 @@ pub enum TrackReader {
         /// no audio and must not be broadcast.
         first_frame: bool,
     },
-    /// A container that had to be demuxed up front.
-    Prepared {
-        frames: std::vec::IntoIter<Frame>,
+    /// A synchronous container reader feeding a small, bounded queue.
+    #[cfg(feature = "metadata")]
+    Demuxed {
+        frames: tokio::sync::mpsc::Receiver<Result<Frame>>,
+        first: Option<Frame>,
     },
 }
 
@@ -149,11 +150,17 @@ impl TrackReader {
             #[cfg(feature = "metadata")]
             (Codec::Aac, "m4a" | "m4b" | "mp4") => {
                 let owned = path.to_path_buf();
-                let frames =
-                    tokio::task::spawn_blocking(move || demux_mp4_aac(&owned)).await??;
-                Ok(Self::Prepared {
-                    frames: frames.into_iter(),
-                })
+                // At most 32 ADTS frames (under 256 KiB), regardless of track
+                // length. Dropping the receiver wakes a blocked producer, so
+                // skipping an audiobook also stops its demuxer.
+                let (sender, mut frames) = tokio::sync::mpsc::channel(32);
+                tokio::task::spawn_blocking(move || {
+                    if let Err(error) = demux_mp4_aac(&owned, &sender) {
+                        let _ = sender.blocking_send(Err(error));
+                    }
+                });
+                let first = frames.recv().await.context("container yielded no AAC frames")??;
+                Ok(Self::Demuxed { frames, first: Some(first) })
             }
             _ => bail!(
                 "{} cannot be broadcast on a {} station",
@@ -195,7 +202,11 @@ impl TrackReader {
     /// The next frame, or `None` at the end of the track.
     pub async fn next_frame(&mut self) -> Result<Option<Frame>> {
         match self {
-            Self::Prepared { frames } => Ok(frames.next()),
+            #[cfg(feature = "metadata")]
+            Self::Demuxed { frames, first } => match first.take() {
+                Some(frame) => Ok(Some(frame)),
+                None => frames.recv().await.transpose(),
+            },
             Self::Framed {
                 file,
                 buffer,
@@ -622,11 +633,10 @@ impl<'a> BitReader<'a> {
 
 /// Demux an MP4 into the ADTS frames an AAC stream is made of.
 ///
-/// Blocking, and done in one pass when the track is opened rather than
-/// incrementally: symphonia's reader is synchronous, and one track's worth of
-/// frames is the same order of memory as the file itself.
+/// Blocking, with backpressure from the playout clock. The receiver closing is
+/// normal cancellation and must stop the read before another packet is parsed.
 #[cfg(feature = "metadata")]
-fn demux_mp4_aac(path: &Path) -> Result<Vec<Frame>> {
+fn demux_mp4_aac(path: &Path, sender: &tokio::sync::mpsc::Sender<Result<Frame>>) -> Result<()> {
     use symphonia::core::codecs::audio::well_known::CODEC_ID_AAC;
     use symphonia::core::formats::probe::Hint;
     use symphonia::core::formats::{FormatOptions, TrackType};
@@ -687,8 +697,10 @@ fn demux_mp4_aac(path: &Path) -> Result<Vec<Frame>> {
         })?;
 
     let fallback = Duration::from_secs_f64(1024.0 / f64::from(config.sample_rate()));
-    let mut frames = Vec::new();
-    while let Some(packet) = format.next_packet()? {
+    while !sender.is_closed() {
+        let Some(packet) = format.next_packet()? else {
+            break;
+        };
         if packet.track_id != track_id || packet.data.is_empty() {
             continue;
         }
@@ -700,24 +712,127 @@ fn demux_mp4_aac(path: &Path) -> Result<Vec<Frame>> {
             .filter(|value| !value.is_zero())
             .unwrap_or(fallback);
 
+        if packet.data.len() > 0x1fff - 7 {
+            bail!("AAC packet is too large for an ADTS frame");
+        }
         let mut bytes = BytesMut::with_capacity(7 + packet.data.len());
         bytes.extend_from_slice(&config.header(packet.data.len()));
         bytes.extend_from_slice(&packet.data);
-        frames.push(Frame {
+        if sender.blocking_send(Ok(Frame {
             bytes: bytes.freeze(),
             duration,
-        });
+        })).is_err() {
+            break;
+        }
     }
-
-    if frames.is_empty() {
-        bail!("{} yielded no AAC frames", path.display());
-    }
-    Ok(frames)
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "metadata")]
+    fn aac_container() -> tempfile::NamedTempFile {
+        use crate::media::remux::{Fmp4Writer, MediaPacket, TrackCodec, TrackInfo, TrackKind};
+        use std::io::Write;
+        let track = TrackInfo {
+            id: 1,
+            track_kind: TrackKind::Audio,
+            codec: "AAC".into(),
+            codec_kind: TrackCodec::Aac,
+            language: None,
+            name: None,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            width: None,
+            height: None,
+            is_default: true,
+            extra_data: vec![0x11, 0x90],
+        };
+        let packets: Vec<_> = (0..512)
+            .map(|i| MediaPacket {
+                track_id: 1,
+                pts: i * 1024,
+                dts: i * 1024,
+                duration: 1024,
+                is_keyframe: true,
+                data: vec![(i % 251) as u8; 128],
+            })
+            .collect();
+        let mut file = tempfile::Builder::new().suffix(".m4a").tempfile().unwrap();
+        file.write_all(&Fmp4Writer::build_ftyp()).unwrap();
+        file.write_all(&Fmp4Writer::build_moov(&track)).unwrap();
+        file.write_all(&Fmp4Writer::build_segment(1, &track, 0, &packets))
+            .unwrap();
+        file
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn aac_container_streams_every_frame_in_order() {
+        let file = aac_container();
+        let mut reader = TrackReader::open(file.path(), Codec::Aac).await.unwrap();
+        let mut count = 0;
+        while let Some(frame) = reader.next_frame().await.unwrap() {
+            assert_eq!(&frame.bytes[7..], &[(count % 251) as u8; 128]);
+            assert_eq!(frame.bytes.len(), 135);
+            assert!((frame.duration.as_secs_f64() - 1024.0 / 48_000.0).abs() < 1e-8);
+            count += 1;
+        }
+        assert_eq!(count, 512);
+    }
+
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    async fn dropping_the_radio_reader_unblocks_the_demuxer() {
+        let file = aac_container();
+        let path = file.path().to_path_buf();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let worker = tokio::task::spawn_blocking(move || demux_mp4_aac(&path, &sender));
+        receiver.recv().await.unwrap().unwrap();
+        assert!(
+            !worker.is_finished(),
+            "a bounded producer cannot read the whole file ahead"
+        );
+        drop(receiver);
+        tokio::time::timeout(Duration::from_secs(5), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+    }
+
+    /// Supply VUIO_MEMORY_AUDIO=/path/to/long.m4a. VUIO_RETAIN_RADIO=1
+    /// reproduces the former whole-track retention for a separate RSS run.
+    #[cfg(feature = "metadata")]
+    #[tokio::test]
+    #[ignore = "isolated audiobook allocation probe"]
+    async fn radio_rss_probe() {
+        use std::hash::{Hash, Hasher};
+        let path = std::env::var_os("VUIO_MEMORY_AUDIO").expect("set VUIO_MEMORY_AUDIO");
+        let mut reader = TrackReader::open(Path::new(&path), Codec::Aac)
+            .await
+            .unwrap();
+        let mut held = Vec::new();
+        let retain = std::env::var_os("VUIO_RETAIN_RADIO").is_some();
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        let mut bytes = 0;
+        let mut frames = 0;
+        while let Some(frame) = reader.next_frame().await.unwrap() {
+            bytes += frame.bytes.len();
+            frames += 1;
+            frame.bytes.hash(&mut hash);
+            if retain {
+                held.push(frame);
+            }
+        }
+        println!(
+            "radio: {frames} frames, {bytes} bytes, hash {}",
+            hash.finish()
+        );
+        std::hint::black_box(held);
+    }
 
     /// A 128 kbit/s, 44.1 kHz MPEG-1 Layer III frame header.
     fn mpeg1_layer3_header() -> [u8; 4] {
