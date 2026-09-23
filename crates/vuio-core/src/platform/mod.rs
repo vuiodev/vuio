@@ -24,6 +24,39 @@ pub use error::{
     PlatformResult, WindowsError,
 };
 
+/// Hand memory the allocator is holding, but no longer using, back to the
+/// system.
+///
+/// A scan of a large library peaks well above what the server holds once it
+/// is done, and both the macOS and the glibc allocator keep the pages that peak
+/// freed mapped for reuse. Nothing the server does next needs them back soon,
+/// so after such a scan they are returned rather than counted against it for
+/// the rest of its run. A no-op where the allocator has no call for this.
+pub fn release_free_memory() {
+    #[cfg(target_os = "macos")]
+    {
+        unsafe extern "C" {
+            fn malloc_zone_pressure_relief(
+                zone: *mut libc::malloc_zone_t,
+                goal: libc::size_t,
+            ) -> libc::size_t;
+        }
+        // SAFETY: a null zone means every zone and a zero goal means as much as
+        // each can give back; the call only releases pages that are free.
+        unsafe {
+            malloc_zone_pressure_relief(std::ptr::null_mut(), 0);
+        }
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        // SAFETY: `malloc_trim` has no preconditions; it only releases free
+        // memory from the top of the heap and from each arena.
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+}
+
 /// Operating system types supported by the platform abstraction layer
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OsType {

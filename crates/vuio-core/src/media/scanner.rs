@@ -28,6 +28,10 @@ const READ_WINDOW: usize = BATCH_SIZE;
 /// library is what the load costs on top of the map it builds.
 const FINGERPRINT_PAGE: usize = 4096;
 
+/// How large a scan has to be before the memory it freed is handed back to the
+/// system. See [`crate::platform::release_free_memory`].
+const RELEASE_AFTER_FILES: usize = 10_000;
+
 /// What a scan needs to know about a file it may already have indexed.
 ///
 /// Deliberately not [`FileFingerprint`]: that carries the path, and this lives
@@ -784,6 +788,15 @@ impl<D: DatabaseManager> MediaScanner<D> {
             result.unchanged,
             result.files_read
         );
+
+        // The index of the root is the scan's largest allocation and is gone
+        // now. After a large scan the allocator would otherwise keep the pages
+        // it freed for the rest of the run; a watcher's rescan of one folder
+        // leaves too little behind to be worth the call.
+        drop(indexed);
+        if total_files.max(existing_in_root) >= RELEASE_AFTER_FILES {
+            tokio::task::spawn_blocking(crate::platform::release_free_memory);
+        }
 
         Ok(result)
     }
