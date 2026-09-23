@@ -1,4 +1,4 @@
-//! Reading tags, stream properties and cover art with symphonia.
+//! Reading tags and stream properties with symphonia.
 //!
 //! One reader covers every container symphonia can demux, so a library of OGG,
 //! Opus, FLAC, AIFF or MP4 files categorizes the same way an MP3 library does.
@@ -21,7 +21,6 @@
 use super::*;
 use crate::database::{AudioTags, MediaFile, StreamInfo};
 use std::time::Duration;
-use symphonia::core::common::Limit;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
 use symphonia::core::io::MediaSourceStream;
@@ -116,49 +115,6 @@ pub(crate) async fn extract_audio_metadata(
     Ok(())
 }
 
-/// Read the first embedded picture from a file, if it has one and it fits the
-/// caller's response budget.
-///
-/// Used to serve cover art for tracks with no image file beside them.
-pub(crate) fn extract_embedded_cover(
-    path: &Path,
-    max_bytes: usize,
-) -> Option<(String, Vec<u8>)> {
-    // Handed to the parser, but not enforced by it: symphonia 0.6 declares
-    // `limit_visual_bytes` and none of its readers consult it, so the picture is
-    // allocated whole regardless. It is passed so a release that honours it
-    // bounds the allocation too. What bounds it today is the check below, which
-    // keeps an oversized picture from being served, and the concurrency cap in
-    // `serve_cover`, which bounds how many are held at once.
-    let options = MetadataOptions::default().limit_visual_bytes(Limit::Maximum(max_bytes));
-    let mut format = open_format_with_metadata_options(path, options).ok()?;
-    let mut log = format.metadata();
-    let mut cover = None;
-
-    // The newest revision wins, so keep overwriting as the log is drained from
-    // oldest to newest.
-    let mut absorb = |revision: &MetadataRevision| {
-        if let Some(visual) = revision.media.visuals.first() {
-            cover = (visual.data.len() <= max_bytes).then(|| {
-                (
-                    visual
-                        .media_type
-                        .clone()
-                        .unwrap_or_else(|| "image/jpeg".to_owned()),
-                    visual.data.to_vec(),
-                )
-            });
-        }
-    };
-    while let Some(revision) = log.pop() {
-        absorb(&revision);
-    }
-    if let Some(revision) = log.current() {
-        absorb(revision);
-    }
-    cover
-}
-
 /// Everything one probe of a file yields.
 #[derive(Default)]
 struct ProbedMetadata {
@@ -231,13 +187,6 @@ impl ProbedMetadata {
 fn open_format(
     path: &Path,
 ) -> anyhow::Result<Box<dyn symphonia::core::formats::FormatReader + 'static>> {
-    open_format_with_metadata_options(path, MetadataOptions::default())
-}
-
-fn open_format_with_metadata_options(
-    path: &Path,
-    metadata_options: MetadataOptions,
-) -> anyhow::Result<Box<dyn symphonia::core::formats::FormatReader + 'static>> {
     let file = std::fs::File::open(path)?;
     let stream = MediaSourceStream::new(Box::new(file), Default::default());
     let mut hint = Hint::new();
@@ -248,7 +197,7 @@ fn open_format_with_metadata_options(
         &hint,
         stream,
         FormatOptions::default(),
-        metadata_options,
+        MetadataOptions::default(),
     )?;
     Ok(format)
 }
@@ -683,10 +632,7 @@ mod tests {
         file
     }
 
-    /// The limit `extract_embedded_cover` is given is the one that holds, and it
-    /// holds because of the check after parsing: symphonia is handed it as
-    /// `limit_visual_bytes` and does not enforce it, so a picture past it comes
-    /// back from the parser whole. Without that check it would be served.
+    /// Cover extraction accepts small pictures and rejects oversized pictures.
     #[test]
     fn an_embedded_cover_past_the_limit_is_not_served() {
         let temp = tempfile::tempdir().expect("temp dir");

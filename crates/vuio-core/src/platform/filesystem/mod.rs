@@ -10,12 +10,16 @@ use crate::database::MediaFile;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(feature = "metadata")]
+mod cover;
 /// Path normalization trait for consistent path handling across platforms
 mod manager;
 #[cfg(feature = "metadata")]
 mod metadata;
 mod normalization;
 
+#[cfg(feature = "metadata")]
+pub(crate) use cover::extract_embedded_cover;
 pub use manager::*;
 #[cfg(feature = "metadata")]
 pub(crate) use metadata::*;

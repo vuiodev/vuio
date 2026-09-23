@@ -839,15 +839,16 @@ pub async fn require_management<D: DatabaseManager>(
     if !state.auth.management_peer_allowed(peer.ip()) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    if !state.auth.enabled() {
-        return next.run(request).await;
-    }
     if !state.auth.rate_limit_management(peer.ip()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let Ok(_permit) = state.auth.concurrency.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    // Resource limits apply to management traffic even when no token is required.
+    if !state.auth.enabled() {
+        return next.run(request).await;
+    }
     let bearer = state.auth.bearer_valid(request.headers());
     let cookie = state
         .auth

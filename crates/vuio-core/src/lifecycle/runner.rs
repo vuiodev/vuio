@@ -6,6 +6,7 @@ pub(super) async fn create_lifecycle_backup<B: DatabaseBackend>(
 ) -> anyhow::Result<PathBuf> {
     let extension = B::file_extension();
     let database_path = database_path_for::<B>(config);
+    restrict_existing_backups::<B>(&database_path).await?;
     let backup_dir = database_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -24,13 +25,6 @@ pub(super) async fn create_lifecycle_backup<B: DatabaseBackend>(
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
         if path.extension().and_then(|value| value.to_str()) == Some(extension) {
-            // Every backup is a copy of the `secrets` table. `create_backup` writes
-            // new ones owner-only; this catches those written before it did, and the
-            // pre-repair ones beside them, which nothing else ever revisits. See
-            // `crate::database::restrict_to_owner`.
-            if let Err(error) = crate::database::restrict_database_to_owner::<B>(&path) {
-                warn!("Could not restrict backup {} to its owner: {error}", path.display());
-            }
             backups.push(path);
         }
     }

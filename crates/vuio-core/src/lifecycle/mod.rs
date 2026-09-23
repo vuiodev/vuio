@@ -219,4 +219,41 @@ mod tests {
         assert_eq!(mode(&fresh) & 0o077, 0, "the new backup");
         assert_eq!(mode(&legacy) & 0o077, 0, "the one already there");
     }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn startup_restricts_legacy_backups_even_when_backups_are_disabled() {
+        use std::os::unix::fs::PermissionsExt;
+        type Backend = database::ActiveDatabase;
+
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("vuio.db");
+        let mut config = AppConfig::default_for_platform();
+        config.database.path = Some(path.to_string_lossy().into_owned());
+        config.database.backup_enabled = false;
+        let backups = temp.path().join("backups");
+        std::fs::create_dir(&backups).unwrap();
+        let mut files = Vec::new();
+        // More than the retention count: permission repair must not rotate or
+        // remove files when backups have been disabled.
+        for index in 0..4 {
+            let backup = backups.join(format!("pre-repair-{index}.db"));
+            files.extend(Backend::sidecar_paths(&backup));
+            files.push(backup);
+        }
+        for file in &files {
+            std::fs::write(file, b"old credentials").unwrap();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        initialize_database::<Backend>(&config).await.unwrap();
+        for file in &files {
+            assert_eq!(
+                std::fs::metadata(file).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_eq!(std::fs::read(file).unwrap(), b"old credentials");
+        }
+        assert_eq!(std::fs::read_dir(backups).unwrap().count(), files.len());
+    }
 }

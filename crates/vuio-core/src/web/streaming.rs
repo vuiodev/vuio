@@ -571,10 +571,8 @@ pub async fn serve_cover<D: DatabaseManager>(
     // directory search above still serves cover art without the feature.
     #[cfg(feature = "metadata")]
     if local_sources_apply {
-        // The tag reader materialises an embedded image whole while parsing it,
-        // whatever size it is — symphonia does not enforce the visual limit it
-        // is handed (see `extract_embedded_cover`) — so the bound on that memory
-        // is how many parses run at once.
+        // The cover reader bounds metadata buffers before allocation. Also cap
+        // concurrent reads so requests cannot multiply that working memory.
         //
         // The permit travels into the blocking task. Held here instead, it was
         // released when this request was dropped — a client that disconnects

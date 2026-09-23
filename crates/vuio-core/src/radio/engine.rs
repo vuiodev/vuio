@@ -501,13 +501,15 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
             let queue = std::mem::take(&mut self.tracks);
             let quiet_so_far = self.station.silent_passes() > 0;
-            let mut broadcast_something = false;
+            // The clock advances at emission, including audio sent before a later
+            // read fails. A track's final Result cannot tell us whether it was silent.
+            let audio_before_pass = clock.audio;
             for track in &queue {
                 if self.station.cancel.is_cancelled() {
                     return;
                 }
                 match self.play(track, &mut clock).await {
-                    Ok(chunks) => broadcast_something |= chunks > 0,
+                    Ok(()) => {}
                     // A track that has been moved or is not what its extension
                     // claims should cost one track, not the station. Once a whole
                     // pass has failed this drops to debug: a station whose share
@@ -525,9 +527,7 @@ impl<D: DatabaseManager + 'static> Playout<D> {
                     ),
                 }
             }
-            if broadcast_something {
-                self.station.silent_passes.store(0, Ordering::Relaxed);
-            }
+            let broadcast_something = self.station.finish_pass(audio_before_pass, &clock);
 
             match self.row.mode {
                 BroadcastMode::Linear => {
@@ -617,8 +617,8 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
     /// Play one track, in real time, to everyone listening. `clock` is the
     /// station's, not this track's — see [`PlayoutClock`].
-    async fn play(&self, track: &Track, clock: &mut PlayoutClock) -> Result<usize> {
-        let mut reader = TrackReader::open(&track.path, self.station.codec).await?;
+    async fn play(&self, track: &Track, clock: &mut PlayoutClock) -> Result<()> {
+        let reader = TrackReader::open(&track.path, self.station.codec).await?;
 
         // `send_replace` rather than `send`: what is playing is state the studio
         // reads whether or not anyone is listening, and `send` refuses to store
@@ -635,10 +635,35 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         });
         self.record_cursor(&track.path).await;
 
-        let skips_at_start = self.station.skip_requests.load(Ordering::Relaxed);
+        self.station.play_reader(reader, clock).await
+    }
+
+    async fn record_cursor(&self, path: &Path) {
+        let cursor = path.to_string_lossy().into_owned();
+        if let Err(error) = self
+            .state
+            .database
+            .set_radio_station_cursor(self.row.id, Some(&cursor))
+            .await
+        {
+            tracing::debug!("Could not record the station cursor: {error:#}");
+        }
+    }
+}
+
+impl Station {
+    fn finish_pass(&self, audio_before_pass: Duration, clock: &PlayoutClock) -> bool {
+        let broadcast_something = clock.audio > audio_before_pass;
+        if broadcast_something {
+            self.silent_passes.store(0, Ordering::Relaxed);
+        }
+        broadcast_something
+    }
+
+    async fn play_reader(&self, mut reader: TrackReader, clock: &mut PlayoutClock) -> Result<()> {
+        let skips_at_start = self.skip_requests.load(Ordering::Relaxed);
         let mut chunk = BytesMut::with_capacity(CHUNK_BYTES + 2048);
         let mut chunk_time = Duration::ZERO;
-        let mut emitted = 0usize;
 
         loop {
             let frame = match reader.next_frame().await? {
@@ -649,19 +674,17 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
             if chunk.len() >= CHUNK_BYTES {
                 self.emit(&mut chunk, &mut chunk_time, clock);
-                emitted += 1;
                 if !self.wait(clock, skips_at_start).await {
-                    return Ok(emitted);
+                    return Ok(());
                 }
             }
         }
 
         if !chunk.is_empty() {
             self.emit(&mut chunk, &mut chunk_time, clock);
-            emitted += 1;
             self.wait(clock, skips_at_start).await;
         }
-        Ok(emitted)
+        Ok(())
     }
 
     fn accumulate(&self, chunk: &mut BytesMut, chunk_time: &mut Duration, frame: Frame) {
@@ -676,12 +699,12 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         clock.audio += *chunk_time;
         *chunk_time = Duration::ZERO;
 
-        self.station.publish(bytes);
+        self.publish(bytes);
     }
 
     /// Hold the stream to real time. Returns false if the track should end now.
     async fn wait(&self, clock: &mut PlayoutClock, skips_at_start: u64) -> bool {
-        if self.station.skip_requests.load(Ordering::Relaxed) != skips_at_start {
+        if self.skip_requests.load(Ordering::Relaxed) != skips_at_start {
             return false;
         }
 
@@ -690,27 +713,15 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         if target > now {
             tokio::select! {
                 _ = tokio::time::sleep(target - now) => {}
-                _ = self.station.cancel.cancelled() => return false,
+                _ = self.cancel.cancelled() => return false,
             }
         } else {
-            if self.station.cancel.is_cancelled() {
+            if self.cancel.is_cancelled() {
                 return false;
             }
             clock.resynchronise(now);
         }
         true
-    }
-
-    async fn record_cursor(&self, path: &Path) {
-        let cursor = path.to_string_lossy().into_owned();
-        if let Err(error) = self
-            .state
-            .database
-            .set_radio_station_cursor(self.row.id, Some(&cursor))
-            .await
-        {
-            tracing::debug!("Could not record the station cursor: {error:#}");
-        }
     }
 }
 
@@ -881,6 +892,48 @@ mod tests {
             silent_passes: Arc::new(AtomicU32::new(0)),
             cancel: CancellationToken::new(),
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_read_failure_after_broadcasting_does_not_count_as_a_silent_pass() {
+        use super::super::frames::Framing;
+
+        let station = silent_station();
+        station.silent_passes.store(3, Ordering::Relaxed);
+        let mut listener = station.attach();
+        let mut frame = vec![0u8; 417]; // MPEG-1 Layer III, 128 kbps, 44.1 kHz
+        frame[..4].copy_from_slice(&[0xff, 0xfb, 0x90, 0]);
+        let mut buffer = BytesMut::new();
+        for _ in 0..30 {
+            buffer.extend_from_slice(&frame);
+        }
+        // Buffered audio is valid. Once exhausted, reading a directory produces
+        // an actual I/O error, like a source becoming unreadable mid-track.
+        let temp = tempfile::tempdir().unwrap();
+        let reader = TrackReader::Framed {
+            file: tokio::fs::File::open(temp.path()).await.unwrap(),
+            buffer,
+            framing: Framing::Mpeg,
+            eof: false,
+            first_frame: false,
+        };
+        let mut clock = PlayoutClock::new();
+        let before = clock.audio;
+        assert!(station.play_reader(reader, &mut clock).await.is_err());
+        assert!(
+            listener.audio.try_recv().is_ok(),
+            "audio reached the listener"
+        );
+        assert!(
+            station.finish_pass(before, &clock),
+            "partial playback must prevent backoff"
+        );
+        assert_eq!(
+            station.silent_passes(),
+            0,
+            "partial playback resets prior failures"
+        );
     }
 
     /// Whatever order a join and a chunk happen in, the listener hears that

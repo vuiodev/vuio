@@ -70,7 +70,7 @@ casting = [
 dashboard = []
 diagnostics = ["dep:sysinfo"]
 mcp = []
-metadata = ["demux"]
+metadata = ["demux", "dep:base64"]
 
 # Internal, and not meant to be selected on its own: "symphonia is in this
 # build, so a container can be demuxed". Both `metadata` and `casting` need
@@ -161,6 +161,7 @@ http-body-util = "0.1"
 hyper = { version = "1.11", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 bytes = "1.12"
+base64 = { version = "0.23", optional = true }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 quick-xml = "0.42"
 percent-encoding = "2.3"
