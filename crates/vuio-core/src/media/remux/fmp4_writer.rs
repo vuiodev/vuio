@@ -1091,6 +1091,8 @@ mod tests {
 
     /// Run the test binary directly under /usr/bin/time -l, in separate
     /// processes with and without VUIO_LEGACY_FRAGMENT=1, to compare peak RSS.
+    /// VUIO_FRAGMENT_SHAPE=single measures the single-track builder HLS
+    /// segments use instead of the multi-track one.
     #[test]
     #[ignore = "isolated 64 MiB allocation probe"]
     fn fragment_rss_probe() {
@@ -1103,6 +1105,7 @@ mod tests {
             is_keyframe: true,
             data: vec![0x5a; 64 * 1024 * 1024],
         }];
+        let single = std::env::var("VUIO_FRAGMENT_SHAPE").as_deref() == Ok("single");
         let segment = if std::env::var_os("VUIO_LEGACY_FRAGMENT").is_some() {
             let samples = Fmp4Writer::samples_for(&track, &packets);
             let run = TrackRun {
@@ -1117,16 +1120,26 @@ mod tests {
                 samples: &samples,
             };
             let moof = Fmp4Writer::build_moof_multi(1, &[run], &[size as u32 + 8]);
-            // The former multi-track builder kept all three copies live.
             let mut body = Vec::with_capacity(8 + packets[0].data.len());
             body.extend_from_slice(b"mdat");
             body.extend_from_slice(&packets[0].data);
             let mdat = Fmp4Writer::wrap_box(&body);
+            // The former single-track builder dropped the unwrapped body before
+            // the final copy. The multi-track one shadowed it, so all three
+            // copies were live at once.
+            let body = if single {
+                drop(body);
+                None
+            } else {
+                Some(body)
+            };
             let mut segment = Vec::with_capacity(moof.len() + mdat.len());
             segment.extend_from_slice(&moof);
             segment.extend_from_slice(&mdat);
             std::hint::black_box((&body, &mdat));
             segment
+        } else if single {
+            Fmp4Writer::build_segment(1, &track, 0, &packets)
         } else {
             Fmp4Writer::build_multi_track_segment(1, &[(&track, &packets)], &[0])
         };
