@@ -21,6 +21,13 @@ const WALK_QUEUE: usize = 4096;
 /// write.
 const READ_WINDOW: usize = BATCH_SIZE;
 
+/// How many indexed records to load at a time.
+///
+/// Each page is converted into the scan's own compact form before the next is
+/// read, so this — about a megabyte of rows — rather than the size of the
+/// library is what the load costs on top of the map it builds.
+const FINGERPRINT_PAGE: usize = 4096;
+
 /// What a scan needs to know about a file it may already have indexed.
 ///
 /// Deliberately not [`FileFingerprint`]: that carries the path, and this lives
@@ -60,8 +67,16 @@ struct IndexedTree<'a> {
 }
 
 impl<'a> IndexedTree<'a> {
-    /// Key the loaded records, moving each path rather than copying it.
-    fn new(root: &'a Path, fingerprints: Vec<FileFingerprint>) -> Self {
+    fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            files: HashMap::new(),
+        }
+    }
+
+    /// Key one page of loaded records, moving each path rather than copying it.
+    fn extend(&mut self, fingerprints: Vec<FileFingerprint>) {
+        let root = self.root;
         let files = fingerprints
             .into_iter()
             .map(|fingerprint| {
@@ -86,9 +101,8 @@ impl<'a> IndexedTree<'a> {
                     seen: false,
                 };
                 (key, file)
-            })
-            .collect();
-        Self { root, files }
+            });
+        self.files.extend(files);
     }
 
     fn key<'p>(&self, path: &'p Path) -> &'p Path {
@@ -542,12 +556,22 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // watcher event that rescans a single folder used to load every row.
         debug!("Loading existing files from database...");
         let canonical_root_str = canonical_root.to_string_lossy().into_owned();
-        let mut indexed = IndexedTree::new(
-            &canonical_root,
-            self.database_manager
-                .load_file_fingerprints_under(&canonical_root_str)
-                .await?,
-        );
+        let mut indexed = IndexedTree::new(&canonical_root);
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .database_manager
+                .load_file_fingerprints_under(&canonical_root_str, after.as_deref(), FINGERPRINT_PAGE)
+                .await?;
+            let last_page = page.len() < FINGERPRINT_PAGE;
+            after = page
+                .last()
+                .map(|fingerprint| fingerprint.path.to_string_lossy().into_owned());
+            indexed.extend(page);
+            if last_page {
+                break;
+            }
+        }
         let existing_in_root = indexed.len();
         debug!("Loaded {existing_in_root} existing files from database");
 
