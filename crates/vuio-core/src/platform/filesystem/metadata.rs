@@ -41,10 +41,26 @@ pub(crate) const TAGS_VERSION: u32 = 2;
 /// dominate the table.
 const MAX_TAG_VALUE_LEN: usize = 4096;
 
-// Probes also read pictures and container indexes even though a scan only
-// keeps text and stream properties. Bound this independently of the number of
-// CPUs and of concurrent scans/watch events. The blocking job owns the permit.
-static METADATA_PROBES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// Probes that may parse at once, across every scan and watch event.
+///
+/// A probe also reads pictures and container indexes a scan does not keep —
+/// symphonia declares a limit on picture bytes but no reader enforces it — so
+/// the count is shared rather than per scan, and the blocking job owns its
+/// permit. It follows the core count because a scan spreads its reads across
+/// the cores (see `read_window` in the scanner): two slots halved the probe
+/// rate on an eight-core machine with the files already cached, and on a
+/// network share a probe spends most of its time waiting on round trips.
+/// Eight is the ceiling, so a many-core server does not multiply the parser's
+/// peak by its core count.
+static METADATA_PROBES: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| tokio::sync::Semaphore::new(metadata_probe_slots()));
+
+fn metadata_probe_slots() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .clamp(2, 8)
+}
 
 async fn limited_probe<T: Send + 'static>(
     limit: &'static tokio::sync::Semaphore,
