@@ -21,6 +21,8 @@ use tokio_util::sync::CancellationToken;
 /// Records are written in batches: one transaction per file would make the write
 /// lock the bottleneck in a job that is otherwise waiting on the network.
 const WRITE_BATCH: usize = 25;
+/// A provider-limited run can take days. Keep only the next page of ids in RAM.
+const WORK_PAGE: usize = 256;
 
 /// What the dashboard polls while a run is in progress.
 #[derive(Clone, Debug, Default)]
@@ -272,9 +274,9 @@ async fn set_up_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>) 
     };
 
     let threshold = settings.min_confidence.min(100);
-    let pending = match state
+    let (total, through_id) = match state
         .database
-        .media_ids_missing_mediainfo(MEDIAINFO_VERSION, threshold)
+        .missing_mediainfo_summary(MEDIAINFO_VERSION, threshold)
         .await
     {
         Ok(pending) => pending,
@@ -288,7 +290,6 @@ async fn set_up_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>) 
             return Err(error);
         }
     };
-    let total = pending.len();
 
     // A child of the application token, so shutdown stops the run without the
     // caller having to remember to cancel it.
@@ -304,7 +305,7 @@ async fn set_up_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>) 
 
     let tracker = state.background_tasks.clone();
     tracker.spawn(async move {
-        let outcome = fetch_all(&state, generation, pending, cancel.clone()).await;
+        let outcome = fetch_all(&state, generation, through_id, cancel.clone()).await;
         let cancelled = cancel.is_cancelled();
         let error = outcome.err().map(|error| error.to_string());
         if let Some(error) = error.as_deref() {
@@ -326,7 +327,7 @@ async fn set_up_library_fetch<D: DatabaseManager + 'static>(state: AppState<D>) 
 async fn fetch_all<D: DatabaseManager + 'static>(
     state: &AppState<D>,
     generation: u64,
-    pending: Vec<i64>,
+    through_id: i64,
     cancel: CancellationToken,
 ) -> Result<()> {
     let config = state.current_config();
@@ -349,67 +350,84 @@ async fn fetch_all<D: DatabaseManager + 'static>(
 
     let mut batch: Vec<MediaInfoRecord> = Vec::with_capacity(WRITE_BATCH);
 
-    for media_file_id in pending {
-        if cancel.is_cancelled() {
+    let mut after_id = 0;
+    while !cancel.is_cancelled() {
+        let pending = state
+            .database
+            .media_ids_missing_mediainfo(
+                MEDIAINFO_VERSION,
+                threshold,
+                after_id,
+                through_id,
+                WORK_PAGE,
+            )
+            .await?;
+        if pending.is_empty() {
             break;
         }
+        for media_file_id in pending {
+            after_id = media_file_id;
+            if cancel.is_cancelled() {
+                break;
+            }
 
-        let Some(file) = state.database.get_file_by_id(media_file_id).await? else {
-            continue;
-        };
-        {
+            let Some(file) = state.database.get_file_by_id(media_file_id).await? else {
+                continue;
+            };
+            {
+                let mut job = state.mediainfo_job.lock().await;
+                if job.generation != generation {
+                    // Superseded. Its progress is not ours to write.
+                    return Ok(());
+                }
+                job.current = Some(file.filename.clone());
+            }
+
+            let outcome = match query_for(&file) {
+                Some((kind, query)) => {
+                    fetch_one(
+                        &http,
+                        &providers,
+                        &credentials,
+                        artwork.as_ref(),
+                        kind,
+                        &query,
+                        media_file_id,
+                    )
+                    .await
+                }
+                // Nothing worth asking about is not a failure, it is a file this
+                // feature does not apply to.
+                None => Ok(None),
+            };
+
             let mut job = state.mediainfo_job.lock().await;
             if job.generation != generation {
-                // Superseded. Its progress is not ours to write.
                 return Ok(());
             }
-            job.current = Some(file.filename.clone());
-        }
-
-        let outcome = match query_for(&file) {
-            Some((kind, query)) => {
-                fetch_one(
-                    &http,
-                    &providers,
-                    &credentials,
-                    artwork.as_ref(),
-                    kind,
-                    &query,
-                    media_file_id,
-                )
-                .await
-            }
-            // Nothing worth asking about is not a failure, it is a file this
-            // feature does not apply to.
-            None => Ok(None),
-        };
-
-        let mut job = state.mediainfo_job.lock().await;
-        if job.generation != generation {
-            return Ok(());
-        }
-        job.processed += 1;
-        match outcome {
-            Ok(Some(record)) => {
-                if record.confidence >= threshold {
-                    job.matched += 1;
-                } else {
-                    job.low_confidence += 1;
+            job.processed += 1;
+            match outcome {
+                Ok(Some(record)) => {
+                    if record.confidence >= threshold {
+                        job.matched += 1;
+                    } else {
+                        job.low_confidence += 1;
+                    }
+                    batch.push(record);
                 }
-                batch.push(record);
+                Ok(None) => {}
+                Err(error) => {
+                    job.failed += 1;
+                    job.last_error = Some(error.to_string());
+                    tracing::debug!(file = %file.filename, %error, "Media info lookup failed");
+                }
             }
-            Ok(None) => {}
-            Err(error) => {
-                job.failed += 1;
-                job.last_error = Some(error.to_string());
-                tracing::debug!(file = %file.filename, %error, "Media info lookup failed");
-            }
-        }
-        drop(job);
+            drop(job);
 
-        if batch.len() >= WRITE_BATCH {
-            state.database.bulk_store_mediainfo(&batch).await?;
-            batch.clear();
+            if batch.len() >= WRITE_BATCH {
+                state.database.bulk_store_mediainfo(&batch).await?;
+                batch.clear();
+            }
         }
     }
 

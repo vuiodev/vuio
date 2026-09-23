@@ -92,15 +92,6 @@ fn main() {
             cmake_cmd.arg(format!("-DLIBXAAC_ARM_FLOAT_ABI={abi}"));
         }
 
-        // The encoder clears every block it is given, and one of those blocks
-        // holds a complete USAC encoder even when the profile is AAC-LC — so the
-        // clear alone made about 55 MB resident per encoder, none of it ever
-        // used. xaac-rs, the only caller, hands over memory that is already zero
-        // (freshly mapped for the large blocks), which lets the encoder skip it
-        // and leaves the untouched pages unallocated. Any other caller of this
-        // crate's encoder must keep that promise.
-        cmake_cmd.arg("-DLIBXAAC_ZEROED_ALLOC=ON");
-
         run(&mut cmake_cmd);
         // Never `Debug`. MSVC's Debug configuration adds /RTC1, which it will
         // not accept beside the /O2 this library's cmake asks for, and it links

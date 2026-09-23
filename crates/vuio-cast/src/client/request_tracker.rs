@@ -40,7 +40,11 @@ impl RequestTracker {
             id = self.counter.fetch_add(1, Ordering::Relaxed).wrapping_add(1);
         }
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, tx);
+        let mut pending = self.pending.lock().await;
+        // A caller can be dropped while sending or awaiting its request. Its
+        // wait_for cleanup will never run, but its receiver is now closed.
+        pending.retain(|_, sender| !sender.is_closed());
+        pending.insert(id, tx);
         (id, rx)
     }
 
@@ -100,6 +104,20 @@ mod tests {
 
         let value = rx.await.unwrap();
         assert_eq!(value["type"], "RECEIVER_STATUS");
+    }
+
+    #[tokio::test]
+    async fn abandoned_requests_do_not_accumulate() {
+        let tracker = RequestTracker::new(Duration::from_secs(5));
+        let (live_id, live) = tracker.register().await;
+        for _ in 0..1000 {
+            let (_, abandoned) = tracker.register().await;
+            drop(abandoned);
+        }
+        let (_id, _receiver) = tracker.register().await;
+        assert_eq!(tracker.pending.lock().await.len(), 2);
+        assert!(tracker.resolve(live_id, json!("alive")).await);
+        assert_eq!(live.await.unwrap(), json!("alive"));
     }
 
     #[tokio::test]

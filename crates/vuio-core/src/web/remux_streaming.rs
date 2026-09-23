@@ -40,6 +40,10 @@ use tracing::error;
 /// a keyframe every ten seconds has ten-second segments.
 const SEGMENT_DURATION_SECS: u32 = 4;
 
+// Passthrough video also buffers a whole segment. Bound those builds even when
+// no audio decoder is enabled, including work whose HTTP request was dropped.
+static SEGMENT_BUILDS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 /// How one film's segments are laid out on its timeline.
 struct Segmentation {
     /// Where each segment starts, followed by where the last one ends: one more
@@ -480,9 +484,16 @@ async fn segment_response<D: DatabaseManager>(
         }
     }
 
-    // Only a decoded rendition is rationed. A passthrough copy is file I/O, and
-    // refusing it under load would stop a browser from playing a film the CPU
-    // was never being asked to work on.
+    let Ok(build_permit) = SEGMENT_BUILDS.try_acquire() else {
+        return Ok((
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            "All segment builders are in use.",
+        )
+            .into_response());
+    };
+
+    // Decoded renditions also share the CPU ceiling with progressive streams.
     #[cfg(feature = "transcode")]
     let _permit = if track.codec_kind.transcode_codec().is_some() {
         match state.transcode.try_acquire() {
@@ -504,6 +515,9 @@ async fn segment_response<D: DatabaseManager>(
     let owned_track = track.clone();
     let (start_secs, end_secs) = range;
     let bytes = tokio::task::spawn_blocking(move || {
+        let _build_permit = build_permit;
+        #[cfg(feature = "transcode")]
+        let _transcode_permit = _permit;
         build_segment_bytes(&owned_path, &owned_track, seq, start_secs, end_secs)
     })
     .await

@@ -4,7 +4,7 @@ pub(crate) mod helpers;
 pub use helpers::{cast_file_helper, cast_tracks_helper};
 
 use crate::{
-    database::{DatabaseManager, FileLocation, MediaFileView},
+    database::{DatabaseManager, FileLocation},
     state::AppState,
 };
 use axum::{extract::State, http::StatusCode, response::IntoResponse};
@@ -281,24 +281,21 @@ async fn resolve_castable_folder<D: DatabaseManager>(
             .fold(root.clone(), |path, component| path.join(component));
         let files = state
             .database
-            .get_files_with_path_prefix(folder.to_string_lossy().as_ref())
+            .get_file_locations_with_path_prefix(folder.to_string_lossy().as_ref())
             .await
             .map_err(|error| format!("Database error: {error}"))?;
         for file in files {
-            if !is_castable_mime(file.mime_type()) || !matches_media_kind(file.mime_type(), media) {
+            if !is_castable_mime(&file.mime_type) || !matches_media_kind(&file.mime_type, media) {
                 continue;
             }
-            let Some(location) = file.to_file_location() else {
-                continue;
-            };
-            if seen.insert(location.id) {
+            if seen.insert(file.id) {
                 let relative = file
                     .path
                     .strip_prefix(&root)
                     .unwrap_or(&file.path)
                     .to_string_lossy()
                     .into_owned();
-                videos.push((relative, location));
+                videos.push((relative, file));
             }
         }
     }

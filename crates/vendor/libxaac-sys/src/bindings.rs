@@ -672,6 +672,11 @@ unsafe extern "C" {
 unsafe extern "C" {
     pub fn ixheaace_create(pv_input: pVOID, pv_output: pVOID) -> IA_ERRORCODE;
 }
+#[cfg(feature = "bundled")]
+unsafe extern "C" {
+    /// Requires `malloc_xheaace` to return a fully zeroed block on every call.
+    pub fn ixheaace_create_zeroed(pv_input: pVOID, pv_output: pVOID) -> IA_ERRORCODE;
+}
 unsafe extern "C" {
     pub fn ixheaace_process(
         pv_ia_process_api_obj: pVOID,

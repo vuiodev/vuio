@@ -4,12 +4,37 @@ use anyhow::Result;
 use std::path::PathBuf;
 
 use crate::database::sqlite::query::{self, MimeFilter};
-use crate::database::sqlite::schema::{self, MEDIA_COLUMNS};
+use crate::database::sqlite::schema::{self, FILE_LOCATION_COLUMNS, MEDIA_COLUMNS};
 use crate::database::sqlite::session::directory_listing_sql;
 use crate::database::sqlite::SqliteDatabase;
-use crate::database::{MediaDirectory, MediaFile};
+use crate::database::{FileLocation, MediaDirectory, MediaFile};
 
 impl SqliteDatabase {
+    pub(in crate::database::sqlite) async fn get_file_locations_with_path_prefix_impl(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileLocation>> {
+        let prefix = canonical_prefix.to_owned();
+        self.execute_read(move |connection| {
+            let (predicate, params) = query::subtree_params(&prefix);
+            let mut statement = connection.prepare_cached(&format!(
+                "SELECT {FILE_LOCATION_COLUMNS} FROM media_files \
+                 WHERE media_files.path = ? OR ({predicate}) \
+                 ORDER BY media_files.path"
+            ))?;
+            let mut bound = vec![rusqlite::types::Value::Text(prefix)];
+            bound.extend(params);
+            let files = statement
+                .query_map(
+                    rusqlite::params_from_iter(bound.iter()),
+                    schema::file_location_from_row,
+                )?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            Ok(files)
+        })
+        .await
+    }
+
     pub(in crate::database::sqlite) async fn get_direct_subdirectories_impl(
         &self,
         canonical_parent: &str,

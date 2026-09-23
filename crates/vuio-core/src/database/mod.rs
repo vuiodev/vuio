@@ -1074,6 +1074,12 @@ pub trait MediaRepository: Send + Sync {
     /// Get files with a specific canonical path prefix.
     async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>>;
 
+    /// Playback fields only, without the library's full tag/stream records.
+    async fn get_file_locations_with_path_prefix(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileLocation>>;
+
     /// Get direct subdirectories using canonical paths.
     async fn get_direct_subdirectories(
         &self,
@@ -1279,11 +1285,22 @@ pub trait MediaInfoRepository: Send + Sync {
     async fn mediainfo_stats(&self, threshold: u8) -> Result<MediaInfoStats>;
     /// Forget everything, so the next run starts over.
     async fn clear_mediainfo(&self) -> Result<u64>;
-    /// Ids of files that have no usable row yet, oldest first.
+    /// Number of pending files and the largest pending id at the start of a run.
+    async fn missing_mediainfo_summary(&self, version: u32, threshold: u8) -> Result<(usize, i64)>;
+    /// One bounded page of files that have no usable row yet, oldest first.
     ///
     /// `version` is the current reader version: rows written by an older one are
     /// treated as absent so a bumped version re-fetches.
-    async fn media_ids_missing_mediainfo(&self, version: u32, threshold: u8) -> Result<Vec<i64>>;
+    /// The exclusive cursor advances even for failed lookups. The inclusive
+    /// upper bound keeps files added during the run for the next run.
+    async fn media_ids_missing_mediainfo(
+        &self,
+        version: u32,
+        threshold: u8,
+        after_id: i64,
+        through_id: i64,
+        limit: usize,
+    ) -> Result<Vec<i64>>;
 }
 
 /// Aggregate database capability used by the application.

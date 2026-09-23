@@ -232,7 +232,8 @@ async fn read_last_log_lines(
     let start = length.saturating_sub(MAX_TAIL_BYTES);
     file.seek(std::io::SeekFrom::Start(start)).await?;
     let mut bytes = Vec::with_capacity((length - start) as usize);
-    file.read_to_end(&mut bytes).await?;
+    // A busy log can grow after metadata() and while it is being read.
+    file.take(MAX_TAIL_BYTES).read_to_end(&mut bytes).await?;
     let text = String::from_utf8_lossy(&bytes);
     let lines = text.lines().rev().take(limit).collect::<Vec<_>>();
     let mut result = lines.into_iter().rev().collect::<Vec<_>>().join("\n");

@@ -61,7 +61,7 @@ impl DirectoryDelta {
         let directories = self
             .counts
             .keys()
-            .map(|(path, _)| path.clone())
+            .map(|(path, _)| path.as_str())
             .collect::<std::collections::HashSet<_>>();
 
         {
@@ -136,6 +136,12 @@ pub(super) fn rebuild(transaction: &Transaction<'_>) -> Result<()> {
             let path: String = row.get(0)?;
             let family: String = row.get(1)?;
             delta.record(&path, &family, 1);
+            // Repair may cover millions of directories. Apply bounded batches
+            // inside the same transaction instead of retaining the whole tree
+            // (and a second collection of its paths) until the scan ends.
+            if delta.counts.len() >= 4096 {
+                std::mem::take(&mut delta).apply(transaction)?;
+            }
         }
     }
     delta.apply(transaction)

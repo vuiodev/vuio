@@ -75,12 +75,12 @@ impl NowPlaying {
     }
 }
 
-/// One track in a station's queue.
+/// Paths are needed only while sorting and resuming a queue. Playout retains
+/// just the ids and loads one track's current metadata when it reaches it.
 #[derive(Clone, Debug)]
 struct Track {
+    id: i64,
     path: PathBuf,
-    title: String,
-    artist: Option<String>,
 }
 
 /// A station that is on the air.
@@ -269,7 +269,7 @@ impl Station {
 
 /// The queue a station will play, and what had to be left out of it.
 struct QueuePlan {
-    tracks: Vec<Track>,
+    tracks: Vec<i64>,
     codec: Codec,
     skipped: usize,
 }
@@ -317,20 +317,13 @@ async fn build_queue<D: DatabaseManager + 'static>(
                 if !folders.iter().any(|folder| is_within(path, folder)) {
                     return Ok(());
                 }
-                let track = Track {
-                    path: PathBuf::from(path),
-                    title: file
-                        .title()
-                        .filter(|title| !title.is_empty())
-                        .unwrap_or_else(|| file.filename())
-                        .to_owned(),
-                    artist: file.artist().filter(|a| !a.is_empty()).map(str::to_owned),
+                let Some(id) = file.id() else { return Ok(()) };
+                let destination = match crate::radio::frames::codec_for_path(Path::new(path)) {
+                    Some(Codec::Mp3) => &mut mp3,
+                    Some(Codec::Aac) => &mut aac,
+                    None => { skipped += 1; return Ok(()) }
                 };
-                match crate::radio::frames::codec_for_path(&track.path) {
-                    Some(Codec::Mp3) => mp3.push(track),
-                    Some(Codec::Aac) => aac.push(track),
-                    None => skipped += 1,
-                }
+                destination.push(Track { id, path: PathBuf::from(path) });
                 Ok(())
             })?;
 
@@ -366,15 +359,18 @@ async fn build_queue<D: DatabaseManager + 'static>(
         (aac, Codec::Aac)
     };
 
-    tracks.sort_by(|left, right| left.path.cmp(&right.path));
+    tracks.sort_unstable_by(|left, right| left.path.cmp(&right.path));
     if row.mode == BroadcastMode::Shuffle {
         SplitMix64::new(row.seed).shuffle(&mut tracks);
     }
 
     resume_after(&mut tracks, row.cursor_path.as_deref());
 
+    let mut ids: Vec<_> = tracks.into_iter().map(|track| track.id).collect();
+    // collect may reuse the larger Track allocation in place.
+    ids.shrink_to_fit();
     Ok(QueuePlan {
-        tracks,
+        tracks: ids,
         codec,
         skipped,
     })
@@ -422,7 +418,7 @@ struct Playout<D: DatabaseManager + 'static> {
     station: Arc<Station>,
     state: AppState<D>,
     row: RadioStation,
-    tracks: Vec<Track>,
+    tracks: Vec<i64>,
     random: SplitMix64,
 }
 
@@ -504,11 +500,11 @@ impl<D: DatabaseManager + 'static> Playout<D> {
             // The clock advances at emission, including audio sent before a later
             // read fails. A track's final Result cannot tell us whether it was silent.
             let audio_before_pass = clock.audio;
-            for track in &queue {
+            for &track_id in &queue {
                 if self.station.cancel.is_cancelled() {
                     return;
                 }
-                match self.play(track, &mut clock).await {
+                match self.play(track_id, &mut clock).await {
                     Ok(()) => {}
                     // A track that has been moved or is not what its extension
                     // claims should cost one track, not the station. Once a whole
@@ -517,12 +513,12 @@ impl<D: DatabaseManager + 'static> Playout<D> {
                     // pass, for as long as it stays gone.
                     Err(error) if !quiet_so_far => tracing::warn!(
                         station = %self.row.name,
-                        path = %track.path.display(),
+                        track_id,
                         "Skipping a track that could not be broadcast: {error:#}"
                     ),
                     Err(error) => tracing::debug!(
                         station = %self.row.name,
-                        path = %track.path.display(),
+                        track_id,
                         "Skipping a track that could not be broadcast: {error:#}"
                     ),
                 }
@@ -617,7 +613,13 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
     /// Play one track, in real time, to everyone listening. `clock` is the
     /// station's, not this track's — see [`PlayoutClock`].
-    async fn play(&self, track: &Track, clock: &mut PlayoutClock) -> Result<()> {
+    async fn play(&self, track_id: i64, clock: &mut PlayoutClock) -> Result<()> {
+        let track = self
+            .state
+            .database
+            .get_file_by_id(track_id)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("track {track_id} is no longer in the library"))?;
         let reader = TrackReader::open(&track.path, self.station.codec).await?;
 
         // `send_replace` rather than `send`: what is playing is state the studio
@@ -625,8 +627,9 @@ impl<D: DatabaseManager + 'static> Playout<D> {
         // a value while the channel has no receivers — which is exactly the
         // case for a station nobody has tuned into yet.
         self.station.now_playing.send_replace(NowPlaying {
-            title: track.title.clone(),
-            artist: track.artist.clone(),
+            title: track.title.as_deref().filter(|title| !title.is_empty())
+                .unwrap_or(&track.filename).to_owned(),
+            artist: track.artist.as_ref().filter(|artist| !artist.is_empty()).cloned(),
             path: Some(track.path.to_string_lossy().into_owned()),
             started_at_epoch_secs: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -634,6 +637,7 @@ impl<D: DatabaseManager + 'static> Playout<D> {
                 .unwrap_or_default(),
         });
         self.record_cursor(&track.path).await;
+        drop(track);
 
         self.station.play_reader(reader, clock).await
     }
@@ -795,16 +799,26 @@ mod tests {
     fn queue(names: &[&str]) -> Vec<Track> {
         names
             .iter()
-            .map(|name| Track {
+            .enumerate()
+            .map(|(id, name)| Track {
+                id: id as i64,
                 path: PathBuf::from(format!("/music/{name}.mp3")),
-                title: (*name).to_owned(),
-                artist: None,
             })
             .collect()
     }
 
     fn order(tracks: &[Track]) -> Vec<String> {
-        tracks.iter().map(|track| track.title.clone()).collect()
+        tracks
+            .iter()
+            .map(|track| {
+                track
+                    .path
+                    .file_stem()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect()
     }
 
     #[test]

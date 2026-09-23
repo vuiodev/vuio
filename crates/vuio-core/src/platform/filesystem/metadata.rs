@@ -41,6 +41,23 @@ pub(crate) const TAGS_VERSION: u32 = 2;
 /// dominate the table.
 const MAX_TAG_VALUE_LEN: usize = 4096;
 
+// Probes also read pictures and container indexes even though a scan only
+// keeps text and stream properties. Bound this independently of the number of
+// CPUs and of concurrent scans/watch events. The blocking job owns the permit.
+static METADATA_PROBES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+async fn limited_probe<T: Send + 'static>(
+    limit: &'static tokio::sync::Semaphore,
+    probe: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, tokio::task::JoinError> {
+    let permit = limit.acquire().await.expect("probe semaphore stays open");
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        probe()
+    })
+    .await
+}
+
 /// Tags whose values are large enough to be worth storing nowhere.
 const OVERSIZED_TAGS: &[&str] = &["Lyrics", "AcoustIdFingerprint", "CdToc"];
 
@@ -59,7 +76,7 @@ pub(crate) async fn extract_stream_info(
     media_file: &mut MediaFile,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = media_file.path.clone();
-    match tokio::task::spawn_blocking(move || probe_metadata(&path)).await {
+    match limited_probe(&METADATA_PROBES, move || probe_metadata(&path)).await {
         Ok(Ok(probed)) => {
             media_file.stream = probed.stream;
             if media_file.duration.is_none() {
@@ -91,7 +108,7 @@ pub(crate) async fn extract_audio_metadata(
 
     // Probing is synchronous file I/O and parsing, so it stays off the async
     // runtime the same way the previous reader did.
-    match tokio::task::spawn_blocking(move || probe_metadata(&path)).await {
+    match limited_probe(&METADATA_PROBES, move || probe_metadata(&path)).await {
         Ok(Ok(probed)) => probed.apply(media_file),
         Ok(Err(error)) => {
             tracing::debug!(
@@ -574,6 +591,30 @@ pub(crate) fn fallback_parse_filename(media_file: &mut MediaFile) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_probe_keeps_its_slot_until_blocking_work_finishes() {
+        static LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let (started, running) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let request = tokio::spawn(limited_probe(&LIMIT, move || {
+            started.send(()).unwrap();
+            blocked.recv_timeout(Duration::from_secs(5)).unwrap();
+        }));
+        running.await.unwrap();
+        request.abort();
+        assert!(request.await.unwrap_err().is_cancelled());
+        assert!(
+            LIMIT.try_acquire().is_err(),
+            "the parser still owns its slot"
+        );
+        release.send(()).unwrap();
+        let permit = tokio::time::timeout(Duration::from_secs(5), LIMIT.acquire())
+            .await
+            .unwrap()
+            .unwrap();
+        drop(permit);
+    }
 
     /// An AIFF whose ID3v2.3 tag carries one front-cover picture of `len` bytes.
     ///

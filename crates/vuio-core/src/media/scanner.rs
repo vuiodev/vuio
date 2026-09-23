@@ -726,36 +726,33 @@ impl<D: DatabaseManager> MediaScanner<D> {
         result.errors.extend(traversal.errors);
         result.complete = traversal.root_complete && traversal.uncertain_prefixes.is_empty();
 
-        // Whatever the walk never produced is gone from disk.
-        let reconcile_deletions =
-            traversal.root_complete && traversal.uncertain_prefixes.is_empty();
-        let files_to_remove: Vec<PathBuf> = if reconcile_deletions {
-            indexed.unseen().collect()
-        } else {
-            // A partial walk cannot tell "absent" from "unreadable". Where only
-            // some prefixes are in doubt, everything outside them is still
-            // decidable.
-            indexed
-                .unseen()
-                .filter(|_| traversal.root_complete)
-                .filter(|path| {
-                    !traversal
-                        .uncertain_prefixes
-                        .iter()
-                        .any(|prefix| path.starts_with(prefix))
-                })
-                .collect()
-        };
+        // A partial walk cannot tell "absent" from "unreadable". Delete only
+        // outside uncertain prefixes, and keep at most one batch of absolute
+        // paths: removing a large subtree must not duplicate the scan's index.
+        if traversal.root_complete {
+            let mut files_to_remove = Vec::new();
+            for path in indexed.unseen().filter(|path| {
+                !traversal
+                    .uncertain_prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix))
+            }) {
+                files_to_remove.push(path);
+                if files_to_remove.len() == BATCH_SIZE {
+                    self.database_manager
+                        .bulk_remove_media_files(&files_to_remove)
+                        .await?;
+                    result.removed += files_to_remove.len();
+                    files_to_remove.clear();
+                }
+            }
+            if !files_to_remove.is_empty() {
+                self.database_manager
+                    .bulk_remove_media_files(&files_to_remove)
+                    .await?;
+                result.removed += files_to_remove.len();
+            }
 
-        if !files_to_remove.is_empty() {
-            info!(
-                "Removing {} deleted files from database",
-                files_to_remove.len()
-            );
-            self.database_manager
-                .bulk_remove_media_files(&files_to_remove)
-                .await?;
-            result.removed += files_to_remove.len();
         }
 
         result.total_scanned = total_files;
