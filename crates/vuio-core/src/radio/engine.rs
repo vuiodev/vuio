@@ -25,7 +25,7 @@
 //!   starting it again.
 
 use crate::database::{
-    BroadcastMode, DatabaseManager, DatabaseReadSession, MediaFileQuery, MediaFileView,
+    BroadcastMode, DatabaseManager, DatabaseReadSession, MediaFile, MediaFileQuery, MediaFileView,
     RadioStation,
 };
 use crate::radio::frames::{Codec, Frame, TrackReader};
@@ -399,6 +399,31 @@ fn resume_after(tracks: &mut [Track], cursor: Option<&str>) {
     }
 }
 
+/// What remains of a pass when its queue is read again part way through.
+///
+/// `fresh` is the queue as rebuilt, and `attempted` what the pass has tried so
+/// far, in order. The pass carries on after the latest attempted track the new
+/// queue still holds, and leaves out everything already attempted: what is left
+/// is the tracks it had not reached, plus any indexed again under a new id.
+fn rest_of_pass(mut fresh: Vec<i64>, attempted: &[i64]) -> Vec<i64> {
+    let tried: std::collections::HashMap<i64, usize> = attempted
+        .iter()
+        .enumerate()
+        .map(|(order, &id)| (id, order))
+        .collect();
+    let resume_at = fresh
+        .iter()
+        .enumerate()
+        .filter_map(|(position, id)| tried.get(id).map(|&order| (order, position)))
+        .max()
+        .map(|(_, position)| position + 1);
+    if let Some(resume_at) = resume_at {
+        fresh.rotate_left(resume_at);
+    }
+    fresh.retain(|id| !tried.contains_key(id));
+    fresh
+}
+
 /// Whether `path` sits inside `folder`. Both are compared case-insensitively
 /// with separators normalised, because a folder arrives as an operator typed it.
 fn is_within(path: &str, folder: &str) -> bool {
@@ -495,16 +520,49 @@ impl<D: DatabaseManager + 'static> Playout<D> {
                 break;
             }
 
-            let queue = std::mem::take(&mut self.tracks);
+            let mut queue = std::mem::take(&mut self.tracks);
             let quiet_so_far = self.station.silent_passes() > 0;
             // The clock advances at emission, including audio sent before a later
             // read fails. A track's final Result cannot tell us whether it was silent.
             let audio_before_pass = clock.audio;
-            for &track_id in &queue {
+            let mut next = 0;
+            // At most one re-read per run of missing tracks; see below.
+            let mut may_requeue = true;
+            while let Some(&track_id) = queue.get(next) {
+                next += 1;
                 if self.station.cancel.is_cancelled() {
                     return;
                 }
-                match self.play(track_id, &mut clock).await {
+                let outcome = match self.state.database.get_file_by_id(track_id).await {
+                    Ok(Some(track)) => self.play(track, &mut clock).await,
+                    // The queue holds ids, and a row that has gone may be back
+                    // under a new one: a file deleted and indexed again, or
+                    // saved by an editor that writes a copy and renames it over
+                    // the original. A queue of paths played it regardless. Read
+                    // the queue again and carry on from here, rather than lose
+                    // the track for the rest of the pass — for a linear
+                    // station, the rest of its broadcast.
+                    Ok(None) if may_requeue => {
+                        may_requeue = false;
+                        match build_queue(&self.state, &self.row).await {
+                            Ok(plan) => {
+                                queue = rest_of_pass(plan.tracks, &queue[..next]);
+                                next = 0;
+                                continue;
+                            }
+                            Err(error) => Err(error
+                                .context(format!("track {track_id} is no longer in the library"))),
+                        }
+                    }
+                    Ok(None) => Err(anyhow::anyhow!(
+                        "track {track_id} is no longer in the library"
+                    )),
+                    Err(error) => Err(error),
+                };
+                if outcome.is_ok() {
+                    may_requeue = true;
+                }
+                match outcome {
                     Ok(()) => {}
                     // A track that has been moved or is not what its extension
                     // claims should cost one track, not the station. Once a whole
@@ -613,13 +671,7 @@ impl<D: DatabaseManager + 'static> Playout<D> {
 
     /// Play one track, in real time, to everyone listening. `clock` is the
     /// station's, not this track's — see [`PlayoutClock`].
-    async fn play(&self, track_id: i64, clock: &mut PlayoutClock) -> Result<()> {
-        let track = self
-            .state
-            .database
-            .get_file_by_id(track_id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("track {track_id} is no longer in the library"))?;
+    async fn play(&self, track: MediaFile, clock: &mut PlayoutClock) -> Result<()> {
         let reader = TrackReader::open(&track.path, self.station.codec).await?;
 
         // `send_replace` rather than `send`: what is playing is state the studio
@@ -851,6 +903,26 @@ mod tests {
         let mut empty: Vec<Track> = Vec::new();
         resume_after(&mut empty, Some("/music/a.mp3"));
         assert!(empty.is_empty(), "an empty queue must not panic");
+    }
+
+    /// Track 2 went missing and came back as 9, sorting where it always did.
+    /// The pass picks up at 9 and plays nothing it has already tried.
+    #[test]
+    fn a_requeued_pass_carries_on_with_a_track_indexed_again() {
+        assert_eq!(rest_of_pass(vec![1, 9, 3, 4], &[1, 2]), [9, 3, 4]);
+        // Resumed mid-queue, the pass wraps round to what came before it.
+        assert_eq!(rest_of_pass(vec![1, 9, 3, 4], &[3, 4, 2]), [1, 9]);
+        // New tracks are part of what remains; ones already tried are not.
+        assert_eq!(rest_of_pass(vec![5, 1, 3, 7], &[1, 3, 2]), [7, 5]);
+    }
+
+    /// With none of the tried tracks left there is nothing to carry on after,
+    /// and the whole new queue is what remains.
+    #[test]
+    fn a_requeued_pass_with_nothing_left_to_anchor_on_keeps_the_new_order() {
+        assert_eq!(rest_of_pass(vec![7, 8], &[1, 2]), [7, 8]);
+        assert_eq!(rest_of_pass(Vec::new(), &[1, 2]), Vec::<i64>::new());
+        assert_eq!(rest_of_pass(vec![1, 2], &[1, 2]), Vec::<i64>::new());
     }
 
     #[test]
