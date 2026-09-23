@@ -32,7 +32,7 @@ const READ_WINDOW: usize = BATCH_SIZE;
 /// match. Times are whole seconds since the epoch because that is all the index
 /// stores — a `SystemTime` spent sixteen bytes carrying nanoseconds that were
 /// always zero — and the key is a boxed path below the root rather than an
-/// owned path from it (see [`RootRelative`]). At 100,000 files that took the
+/// owned path from it (see [`IndexedTree`]). At 100,000 files that took the
 /// table from 10.1 MB to 7.1 MB, and every key is shorter by the root.
 struct IndexedFile {
     id: i64,
@@ -46,31 +46,74 @@ struct IndexedFile {
     seen: bool,
 }
 
-/// A path as the scan's map keys it: relative to the root being scanned.
+/// Everything indexed under the root being scanned, keyed by the path below
+/// that root.
 ///
 /// Every file under one root repeats that root's prefix, and there is one key
 /// per file. Stripping it is free — the walk only ever produces paths under the
 /// root, and a deletion puts it back with a `join`. A record that somehow lies
 /// outside the root keeps its absolute path, which cannot collide with a
 /// relative one.
-struct RootRelative<'a> {
+struct IndexedTree<'a> {
     root: &'a Path,
+    files: HashMap<Box<Path>, IndexedFile>,
 }
 
-impl<'a> RootRelative<'a> {
-    fn of<'p>(&self, path: &'p Path) -> &'p Path {
+impl<'a> IndexedTree<'a> {
+    /// Key the loaded records, moving each path rather than copying it.
+    fn new(root: &'a Path, fingerprints: Vec<FileFingerprint>) -> Self {
+        let files = fingerprints
+            .into_iter()
+            .map(|fingerprint| {
+                let FileFingerprint {
+                    id,
+                    path,
+                    size,
+                    modified,
+                    created_at,
+                    tags_version,
+                } = fingerprint;
+                let key = match path.strip_prefix(root) {
+                    Ok(relative) => relative.into(),
+                    Err(_) => path.into_boxed_path(),
+                };
+                let file = IndexedFile {
+                    id,
+                    size,
+                    modified_secs: epoch_secs(modified),
+                    created_at_secs: epoch_secs(created_at),
+                    tags_version,
+                    seen: false,
+                };
+                (key, file)
+            })
+            .collect();
+        Self { root, files }
+    }
+
+    fn key<'p>(&self, path: &'p Path) -> &'p Path {
         path.strip_prefix(self.root).unwrap_or(path)
     }
 
-    fn owned(&self, path: PathBuf) -> Box<Path> {
-        match path.strip_prefix(self.root) {
-            Ok(relative) => relative.into(),
-            Err(_) => path.into_boxed_path(),
-        }
+    fn get(&self, path: &Path) -> Option<&IndexedFile> {
+        self.files.get(self.key(path))
     }
 
-    fn absolute(&self, key: &Path) -> PathBuf {
-        self.root.join(key)
+    fn get_mut(&mut self, path: &Path) -> Option<&mut IndexedFile> {
+        let key = self.key(path);
+        self.files.get_mut(key)
+    }
+
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Every record the walk did not produce, as absolute paths.
+    fn unseen(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.files
+            .iter()
+            .filter(|(_, indexed)| !indexed.seen)
+            .map(|(key, _)| self.root.join(key))
     }
 }
 
@@ -84,30 +127,6 @@ fn from_epoch_secs(secs: u64) -> SystemTime {
 }
 
 impl IndexedFile {
-    /// Split a loaded record into the map's key and value, moving the path
-    /// rather than copying it into both halves.
-    fn split(fingerprint: FileFingerprint, key: &RootRelative<'_>) -> (Box<Path>, Self) {
-        let FileFingerprint {
-            id,
-            path,
-            size,
-            modified,
-            created_at,
-            tags_version,
-        } = fingerprint;
-        (
-            key.owned(path),
-            Self {
-                id,
-                size,
-                modified_secs: epoch_secs(modified),
-                created_at_secs: epoch_secs(created_at),
-                tags_version,
-                seen: false,
-            },
-        )
-    }
-
     fn modified(&self) -> SystemTime {
         from_epoch_secs(self.modified_secs)
     }
@@ -127,8 +146,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
     async fn read_window(
         &self,
         paths: &mut Vec<PathBuf>,
-        existing_files_map: &HashMap<Box<Path>, IndexedFile>,
-        key: &RootRelative<'_>,
+        indexed: &IndexedTree<'_>,
         files_to_insert: &mut Vec<MediaFile>,
         files_to_update: &mut Vec<MediaFile>,
         result: &mut ScanResult,
@@ -152,7 +170,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             };
             result.files_read += 1;
 
-            match existing_files_map.get(key.of(&path)) {
+            match indexed.get(&path) {
                 Some(existing) => {
                     if self.fingerprint_needs_update(existing, &current_file) {
                         let mut updated = current_file;
@@ -524,17 +542,13 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // watcher event that rescans a single folder used to load every row.
         debug!("Loading existing files from database...");
         let canonical_root_str = canonical_root.to_string_lossy().into_owned();
-        let key = RootRelative {
-            root: &canonical_root,
-        };
-        let mut existing_files_map: HashMap<Box<Path>, IndexedFile> = self
-            .database_manager
-            .load_file_fingerprints_under(&canonical_root_str)
-            .await?
-            .into_iter()
-            .map(|fingerprint| IndexedFile::split(fingerprint, &key))
-            .collect();
-        let existing_in_root = existing_files_map.len();
+        let mut indexed = IndexedTree::new(
+            &canonical_root,
+            self.database_manager
+                .load_file_fingerprints_under(&canonical_root_str)
+                .await?,
+        );
+        let existing_in_root = indexed.len();
         debug!("Loaded {existing_in_root} existing files from database");
 
         // Walk on a blocking thread, handing paths over as they are found rather
@@ -626,7 +640,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
                 // jwalk descendants inherit the already-canonical root. It does
                 // not follow file symlinks, so no syscall is needed here.
-                let unchanged = match (existing_files_map.get_mut(key.of(&path)), metadata) {
+                let unchanged = match (indexed.get_mut(&path), metadata) {
                     (Some(existing), Some(metadata)) => {
                         // Marking the record is what replaces a second set of every
                         // path on disk: whatever is left unmarked is what is gone.
@@ -650,8 +664,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     if pending_reads.len() >= READ_WINDOW {
                         self.read_window(
                             &mut pending_reads,
-                            &existing_files_map,
-                            &key,
+                            &indexed,
                             &mut files_to_insert,
                             &mut files_to_update,
                             &mut result,
@@ -676,8 +689,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         if !pending_reads.is_empty() {
             self.read_window(
                 &mut pending_reads,
-                &existing_files_map,
-                &key,
+                &indexed,
                 &mut files_to_insert,
                 &mut files_to_update,
                 &mut result,
@@ -710,20 +722,14 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let reconcile_deletions =
             traversal.root_complete && !suspect_empty_root && traversal.uncertain_prefixes.is_empty();
         let files_to_remove: Vec<PathBuf> = if reconcile_deletions {
-            existing_files_map
-                .iter()
-                .filter(|(_, indexed)| !indexed.seen)
-                .map(|(relative, _)| key.absolute(relative))
-                .collect()
+            indexed.unseen().collect()
         } else {
             // A partial walk cannot tell "absent" from "unreadable". Where only
             // some prefixes are in doubt, everything outside them is still
             // decidable.
-            existing_files_map
-                .iter()
-                .filter(|(_, indexed)| !indexed.seen)
+            indexed
+                .unseen()
                 .filter(|_| traversal.root_complete && !suspect_empty_root)
-                .map(|(relative, _)| key.absolute(relative))
                 .filter(|path| {
                     !traversal
                         .uncertain_prefixes
