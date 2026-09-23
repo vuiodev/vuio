@@ -18,9 +18,13 @@ use super::AudioPlan;
 #[cfg(all(feature = "transcode-aac", feature = "casting"))]
 use super::TrackRates;
 
-/// How many indexes to keep. A two-hour AC-3 track indexes to roughly 3 MB, so
-/// this is single-digit megabytes for a household's worth of open streams.
-const MAX_CACHED_INDEXES: usize = 8;
+/// How many indexes to keep. A two-hour AC-3 track indexes to roughly 3 MB.
+///
+/// An index earns its place across the handful of requests a renderer makes
+/// while it opens and scrubs one file, so the count only has to cover the files
+/// being opened at the same time. Four is a household's worth and holds 12 MB
+/// at most; eight held 24 MB for streams long since settled.
+const MAX_CACHED_INDEXES: usize = 4;
 
 /// Identifies a cached index. The file's size and high-resolution metadata
 /// marker are part of the key so replacing a file in place invalidates its
@@ -90,8 +94,13 @@ impl IndexKey {
 ///
 /// A segment of 1080p video is single-digit megabytes, so a count alone would
 /// bound the wrong thing on a large file and the wrong thing on a small one.
+///
+/// What gets asked for twice is a segment just played — a seek back, a stall
+/// that re-buffers — so the cache only needs the recent end of what is
+/// playing: 24 MB is several 1080p segments of each of a few browsers. It was
+/// 48 MB, held for the life of the process once anyone had watched a film.
 const MAX_CACHED_SEGMENTS: usize = 24;
-const MAX_CACHED_SEGMENT_BYTES: usize = 48 * 1024 * 1024;
+const MAX_CACHED_SEGMENT_BYTES: usize = 24 * 1024 * 1024;
 
 /// Identifies the first run of packets a seeked response opens with.
 ///
@@ -118,8 +127,13 @@ pub struct ChunkKey {
 ///
 /// One is a fraction of a second of film, so single-digit megabytes each on a
 /// high-bitrate feature — a count alone would bound the wrong thing.
+///
+/// Eviction is oldest-first, and the repeats come at the end of a seek, when
+/// the probes have narrowed to one group of pictures — so what a seek needs
+/// back is the few runs it produced last, not all of them. 24 MB keeps those
+/// for a high-bitrate film; it was 64 MB.
 const MAX_CACHED_CHUNKS: usize = 32;
-const MAX_CACHED_CHUNK_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CACHED_CHUNK_BYTES: usize = 24 * 1024 * 1024;
 
 /// How many films' soundtrack measurements to keep.
 ///
@@ -378,8 +392,8 @@ mod tests {
             track: 2,
             seq,
         };
-        // Four segments of 16 MB: the fourth must push the first out, because
-        // the byte ceiling binds long before the entry count does.
+        // Four segments of 16 MB: the first is pushed out, because the byte
+        // ceiling binds long before the entry count does.
         for seq in 0..4 {
             state
                 .remember_segment(key(seq), bytes::Bytes::from(vec![0u8; 16 * 1024 * 1024]))
