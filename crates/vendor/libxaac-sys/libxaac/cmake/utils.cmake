@@ -76,6 +76,12 @@ function(libxaac_add_definitions)
     add_definitions(-DX86_64 -D_X86_64_)
   endif()
   add_definitions(-DLOUDNESS_LEVELING_SUPPORT)
+  # libxaac-sys's build.rs passes -DLIBXAAC_ZEROED_ALLOC=ON because xaac-rs, the
+  # only caller, allocates the encoder's memory already zeroed. See
+  # IXHEAACE_ZEROED_ALLOC in encoder/ixheaace_api.c for what that saves.
+  if(LIBXAAC_ZEROED_ALLOC)
+    add_definitions(-DIXHEAACE_ZEROED_ALLOC)
+  endif()
 endfunction()
 
 # Adds libraries needed for executables
