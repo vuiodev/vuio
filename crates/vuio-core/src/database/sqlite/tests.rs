@@ -376,6 +376,60 @@ async fn directory_counts_return_to_zero_when_the_last_file_goes() {
     assert_eq!(remaining, 0, "empty directories must not linger");
 }
 
+/// A scan loads its root's records a page at a time. The pages have to tile the
+/// subtree exactly — every record once, in order, nothing from a sibling whose
+/// name merely starts the same way — and a cursor from outside the range must
+/// not widen it.
+#[tokio::test]
+async fn fingerprints_under_a_root_come_back_in_pages_that_tile_it() {
+    let temp = tempdir().unwrap();
+    let db = database(&temp, "pages").await;
+
+    let mut inside: Vec<String> = (0..7).map(|i| format!("/media/Film/{i:02}.mkv")).collect();
+    inside.push("/media/Film/nested/deep.mkv".to_owned());
+    // Either side of the range: '.' sorts just before '/', and "/media/Film0"
+    // is where the range ends.
+    let outside = [
+        "/media/A.mkv",
+        "/media/Film.mkv",
+        "/media/Film0.mkv",
+        "/media/Films/other.mkv",
+    ];
+    let files: Vec<MediaFile> = inside
+        .iter()
+        .map(String::as_str)
+        .chain(outside)
+        .map(|path| MediaFile::new(PathBuf::from(path), 1, "video/x-matroska".to_owned()))
+        .collect();
+    db.bulk_store_media_files(&files).await.unwrap();
+
+    let mut seen = Vec::new();
+    let mut pages = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = db
+            .load_file_fingerprints_under("/media/Film", after.as_deref(), 3)
+            .await
+            .unwrap();
+        pages.push(page.len());
+        after = page.last().map(|f| f.path.to_string_lossy().into_owned());
+        let last = page.len() < 3;
+        seen.extend(page.into_iter().map(|f| f.path.to_string_lossy().into_owned()));
+        if last {
+            break;
+        }
+    }
+    inside.sort();
+    assert_eq!(seen, inside);
+    assert_eq!(pages, [3, 3, 2]);
+
+    let widened = db
+        .load_file_fingerprints_under("/media/Film", Some("/a"), 100)
+        .await
+        .unwrap();
+    assert_eq!(widened.len(), inside.len(), "a cursor below the range is ignored");
+}
+
 #[tokio::test]
 async fn rebuilding_the_directory_tree_reproduces_incremental_maintenance() {
     let temp = tempdir().unwrap();
@@ -409,6 +463,21 @@ async fn rebuilding_the_directory_tree_reproduces_incremental_maintenance() {
         .await
         .unwrap()
     };
+
+    // More distinct directory counters than one repair batch, with shared
+    // ancestors whose counts must add up across every flush.
+    for batch in 0..5 {
+        let files: Vec<_> = (0..1000)
+            .map(|i| {
+                MediaFile::new(
+                    PathBuf::from(format!("/media/large/{}/song.mp3", batch * 1000 + i)),
+                    1,
+                    "audio/mpeg".to_owned(),
+                )
+            })
+            .collect();
+        db.bulk_store_media_files(&files).await.unwrap();
+    }
 
     let incremental = snapshot(db.clone()).await;
     assert!(!incremental.is_empty());

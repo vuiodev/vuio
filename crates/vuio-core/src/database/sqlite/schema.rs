@@ -676,13 +676,15 @@ fn apply_pragmas(connection: &Connection, cache_mb: usize) -> Result<()> {
     // A negative cache_size is a KiB budget rather than a page count, which is
     // what the configuration actually expresses.
     let cache_kib = (cache_mb.max(1) * 1024) as i64;
+    // Large sorts, index rebuilds and temporary tables must be able to spill
+    // to disk. MEMORY bypasses the main page-cache budget for all of them.
     connection
         .execute_batch(&format!(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
-             PRAGMA temp_store = MEMORY;
+             PRAGMA temp_store = FILE;
              PRAGMA cache_size = -{cache_kib};"
         ))
         .context("Failed to configure the SQLite connection")?;

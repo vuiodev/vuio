@@ -191,10 +191,34 @@ impl SqliteDatabase {
         .await
     }
 
+    pub(super) async fn missing_mediainfo_summary_impl(
+        &self,
+        version: u32,
+        threshold: u8,
+    ) -> Result<(usize, i64)> {
+        self.execute_read(move |connection| {
+            Ok(connection
+                .prepare_cached(
+                    "SELECT COUNT(*), COALESCE(MAX(media_files.id), 0) FROM media_files \
+                 LEFT JOIN mediainfo ON mediainfo.media_file_id = media_files.id \
+                 WHERE mediainfo.media_file_id IS NULL \
+                    OR mediainfo.mediainfo_version < ?1 \
+                    OR mediainfo.confidence < ?2",
+                )?
+                .query_row(rusqlite::params![version, threshold], |row| {
+                    Ok((row.get::<_, i64>(0)? as usize, row.get(1)?))
+                })?)
+        })
+        .await
+    }
+
     pub(super) async fn media_ids_missing_mediainfo_impl(
         &self,
         version: u32,
         threshold: u8,
+        after_id: i64,
+        through_id: i64,
+        limit: usize,
     ) -> Result<Vec<i64>> {
         self.execute_read(move |connection| {
             // Three cases count as "needs looking up": never tried, tried by an
@@ -204,13 +228,14 @@ impl SqliteDatabase {
             let mut statement = connection.prepare_cached(
                 "SELECT media_files.id FROM media_files \
                  LEFT JOIN mediainfo ON mediainfo.media_file_id = media_files.id \
-                 WHERE mediainfo.media_file_id IS NULL \
+                 WHERE media_files.id > ?3 AND media_files.id <= ?4 \
+                   AND (mediainfo.media_file_id IS NULL \
                     OR mediainfo.mediainfo_version < ?1 \
-                    OR mediainfo.confidence < ?2 \
-                 ORDER BY media_files.id",
+                    OR mediainfo.confidence < ?2) \
+                 ORDER BY media_files.id LIMIT ?5",
             )?;
             let rows = statement.query_map(
-                rusqlite::params![version as i64, threshold as i64],
+                rusqlite::params![version, threshold, after_id, through_id, limit.min(i64::MAX as usize) as i64],
                 |row| row.get::<_, i64>(0),
             )?;
             let mut ids = Vec::new();

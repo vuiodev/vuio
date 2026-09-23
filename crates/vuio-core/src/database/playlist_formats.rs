@@ -121,32 +121,26 @@ impl PlaylistFileManager {
 
         // Collect all track paths first
         let mut track_paths = Vec::new();
-        let lines: Vec<&str> = content.lines().collect();
-        let mut i = 0;
-
-        while i < lines.len() {
-            let line = lines[i].trim();
+        let mut lines = content.lines();
+        while let Some(line) = lines.next() {
+            let line = line.trim();
 
             // Skip empty lines and comments (except #EXTINF)
             if line.is_empty() || (line.starts_with('#') && !line.starts_with("#EXTINF")) {
-                i += 1;
                 continue;
             }
 
             // Handle extended M3U format
             if line.starts_with("#EXTINF") {
                 // Next line should be the file path
-                i += 1;
-                if i < lines.len() {
-                    let file_path_str = lines[i].trim();
+                if let Some(file_path_str) = lines.next() {
+                    let file_path_str = file_path_str.trim();
                     track_paths.push(resolve_playlist_entry(base_dir, file_path_str));
                 }
             } else if !line.starts_with('#') {
                 // Simple M3U format - just file paths
                 track_paths.push(resolve_playlist_entry(base_dir, line));
             }
-
-            i += 1;
         }
 
         // Create list of (path, position) pairs
@@ -318,56 +312,47 @@ impl PlaylistFileManager {
         file_paths_with_positions: &[(String, u32)],
         source_path: Option<&str>,
     ) -> Result<Vec<(i64, u32)>> {
-        if file_paths_with_positions.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Extract paths for batch query
-        let paths: Vec<PathBuf> = file_paths_with_positions
-            .iter()
-            .map(|(path_str, _)| PathBuf::from(path_str))
-            .collect();
-
-        // Get all media files in a single query
-        let media_files = database.get_files_by_paths(&paths).await?;
-
-        // Create a map from path to media file for quick lookup
-        let mut path_to_file = std::collections::HashMap::new();
-        for media_file in media_files {
-            if let Some(file_id) = media_file.id {
-                path_to_file.insert(media_file.path.clone(), file_id);
-            }
-        }
-
-        // Streams are valid playlist entries even though they are not present on
-        // the local filesystem. Materialize missing HTTP(S) entries as virtual
-        // radio files before building the playlist entry batch.
-        for (location, _) in file_paths_with_positions {
-            if !is_http_stream(location) {
-                continue;
-            }
-            let path = PathBuf::from(location);
-            if path_to_file.contains_key(&path) {
-                continue;
-            }
-
-            let mut stream = MediaFile::new(path.clone(), 0, "audio/radio".to_string());
-            stream.title = Some(location.clone());
-            stream.album = source_path.map(str::to_owned);
-            let file_id = database.store_media_file(&stream).await?;
-            path_to_file.insert(path, file_id);
-        }
-
-        // Build list of (media_file_id, position) pairs for files that exist in database
         let mut media_file_entries = Vec::new();
+        // Only IDs survive resolution. Do not retain the full metadata and
+        // duplicate paths for every entry of a library-sized playlist at once.
+        for entries in file_paths_with_positions.chunks(512) {
+            let paths: Vec<PathBuf> = entries
+                .iter()
+                .map(|(path_str, _)| PathBuf::from(path_str))
+                .collect();
+            let media_files = database.get_files_by_paths(&paths).await?;
+            let mut path_to_file = std::collections::HashMap::new();
+            for media_file in media_files {
+                if let Some(file_id) = media_file.id {
+                    path_to_file.insert(media_file.path, file_id);
+                }
+            }
 
-        for (file_path_str, position) in file_paths_with_positions {
-            let file_path = PathBuf::from(file_path_str);
+            // Streams need no local file. Previously materialized URLs are
+            // found by the next batch too, including duplicates across batches.
+            for (location, _) in entries {
+                if !is_http_stream(location) {
+                    continue;
+                }
+                let path = PathBuf::from(location);
+                if path_to_file.contains_key(&path) {
+                    continue;
+                }
 
-            if let Some(&file_id) = path_to_file.get(&file_path) {
-                media_file_entries.push((file_id, *position));
-            } else {
-                warn!("File not found in media database: {}", file_path.display());
+                let mut stream = MediaFile::new(path.clone(), 0, "audio/radio".to_string());
+                stream.title = Some(location.clone());
+                stream.album = source_path.map(str::to_owned);
+                let file_id = database.store_media_file(&stream).await?;
+                path_to_file.insert(path, file_id);
+            }
+
+            for (file_path_str, position) in entries {
+                let file_path = Path::new(file_path_str);
+                if let Some(&file_id) = path_to_file.get(file_path) {
+                    media_file_entries.push((file_id, *position));
+                } else {
+                    warn!("File not found in media database: {}", file_path.display());
+                }
             }
         }
 

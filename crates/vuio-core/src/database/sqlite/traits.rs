@@ -72,8 +72,16 @@ impl MediaRepository for SqliteDatabase {
     async fn load_file_fingerprints_under(
         &self,
         canonical_prefix: &str,
+        after: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<FileFingerprint>> {
-        SqliteDatabase::load_file_fingerprints_under_impl(self, canonical_prefix.to_owned()).await
+        SqliteDatabase::load_file_fingerprints_under_impl(
+            self,
+            canonical_prefix.to_owned(),
+            after.map(str::to_owned),
+            limit,
+        )
+        .await
     }
 
     async fn load_file_fingerprints_after(
@@ -195,6 +203,13 @@ impl MediaRepository for SqliteDatabase {
 
     async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>> {
         SqliteDatabase::get_files_with_path_prefix_impl(self, canonical_prefix).await
+    }
+
+    async fn get_file_locations_with_path_prefix(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileLocation>> {
+        SqliteDatabase::get_file_locations_with_path_prefix_impl(self, canonical_prefix).await
     }
 
     async fn get_direct_subdirectories(
@@ -420,7 +435,21 @@ impl MediaInfoRepository for SqliteDatabase {
         SqliteDatabase::clear_mediainfo_impl(self).await
     }
 
-    async fn media_ids_missing_mediainfo(&self, version: u32, threshold: u8) -> Result<Vec<i64>> {
-        SqliteDatabase::media_ids_missing_mediainfo_impl(self, version, threshold).await
+    async fn missing_mediainfo_summary(&self, version: u32, threshold: u8) -> Result<(usize, i64)> {
+        SqliteDatabase::missing_mediainfo_summary_impl(self, version, threshold).await
+    }
+
+    async fn media_ids_missing_mediainfo(
+        &self,
+        version: u32,
+        threshold: u8,
+        after_id: i64,
+        through_id: i64,
+        limit: usize,
+    ) -> Result<Vec<i64>> {
+        SqliteDatabase::media_ids_missing_mediainfo_impl(
+            self, version, threshold, after_id, through_id, limit,
+        )
+        .await
     }
 }

@@ -365,7 +365,10 @@ impl Encoder {
             i32::from(config.output_format == OutputFormat::Adts);
 
         let create_status = unsafe {
-            libxaac_sys::ixheaace_create(
+            // `encoder_alloc` returns zeroed memory, including the untouched
+            // pages of large anonymous mappings. Only this explicit entry
+            // point may skip libxaac's redundant full-block clears.
+            libxaac_sys::ixheaace_create_zeroed(
                 (&mut ffi.input_config as *mut _) as *mut c_void,
                 (&mut ffi.output_config as *mut _) as *mut c_void,
             )

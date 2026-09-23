@@ -14,6 +14,7 @@
 
 use anyhow::{bail, Context, Result};
 use std::io::Read;
+use std::sync::Arc;
 
 use super::TranscodeCodec;
 
@@ -46,8 +47,9 @@ pub struct FrameIndex {
     pub codec: TranscodeCodec,
     /// Sample rate declared by the first frame, in Hz.
     pub sample_rate: u32,
-    /// The frames, in stream order.
-    pub frames: Vec<IndexedFrame>,
+    /// Immutable offsets shared by the cached plan and every active stream.
+    /// Cloning an index must not copy several MB for each listener or seek.
+    pub frames: Arc<[IndexedFrame]>,
     /// Sum of every frame's `samples` — the exact decoded length.
     pub total_samples: u64,
 }
@@ -158,7 +160,7 @@ impl FrameIndex {
         Ok(Self {
             codec,
             sample_rate,
-            frames,
+            frames: frames.into(),
             total_samples,
         })
     }
@@ -341,7 +343,7 @@ mod tests {
         assert_eq!(idx.sample_rate, 48_000);
         // 48 kHz / 192 kbps → Table 5.18 frmsizecod 20 → 768-byte frames.
         assert!(idx.frames.len() >= 4, "got {} frames", idx.frames.len());
-        for f in &idx.frames {
+        for f in idx.frames.iter() {
             assert_eq!(f.len, 768);
             assert_eq!(f.samples, 1536, "base AC-3 is always six 256-sample blocks");
         }
@@ -393,9 +395,25 @@ mod tests {
     }
 
     #[test]
+    fn cloned_indexes_share_frame_storage() {
+        let index = FrameIndex {
+            codec: TranscodeCodec::Ac3,
+            sample_rate: 48_000,
+            frames: vec![IndexedFrame {
+                offset: 0,
+                len: 768,
+                samples: 1536,
+            }]
+            .into(),
+            total_samples: 1536,
+        };
+        let clone = index.clone();
+        assert!(Arc::ptr_eq(&index.frames, &clone.frames));
+    }
+
+    #[test]
     fn a_stream_that_is_not_this_codec_is_rejected() {
         let junk = vec![0u8; 4096];
         assert!(FrameIndex::build(TranscodeCodec::Ac3, &mut &junk[..]).is_err());
     }
 }
-

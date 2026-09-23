@@ -369,16 +369,22 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                 let path_normalizer = create_platform_path_normalizer();
                 let canonical_from_prefix = path_normalizer.to_canonical(&from)?;
                 let canonical_to_prefix = path_normalizer.to_canonical(&to)?;
-                let files_in_old_path = database
-                    .get_files_with_path_prefix(&canonical_from_prefix)
-                    .await?;
-
-                if !files_in_old_path.is_empty() {
-                    info!(
-                        "Updating {} media files for renamed directory using bulk operations",
-                        files_in_old_path.len()
-                    );
-
+                let mut after = None;
+                let mut moved = 0;
+                loop {
+                    // Only paths and ids are needed, one page at a time. A
+                    // renamed library must not load all its tags into RAM.
+                    let files = database
+                        .load_file_fingerprints_under(
+                            &canonical_from_prefix,
+                            after.as_deref(),
+                            1000,
+                        )
+                        .await?;
+                    let Some(last) = files.last() else {
+                        break;
+                    };
+                    after = Some(last.path.to_string_lossy().into_owned());
                     // Move the rows to their new paths, keeping their
                     // identifiers. Removing them and letting the rescan insert
                     // fresh rows would give every file a new identifier, and
@@ -386,15 +392,14 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                     // renaming a folder used to empty the playlists that
                     // referenced it. The rescan below then matches these rows
                     // by their new paths and refreshes them in place.
-                    let moves: Vec<(i64, PathBuf)> = files_in_old_path
+                    let moves: Vec<(i64, PathBuf)> = files
                         .iter()
                         .filter_map(|file| {
-                            let id = file.id?;
                             // Both sides canonical: the stored path is, and
                             // the event's is not — /var against /private/var
                             // would strip nothing at all.
                             Some((
-                                id,
+                                file.id,
                                 repoint(
                                     &file.path,
                                     Path::new(&canonical_from_prefix),
@@ -403,7 +408,9 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                             ))
                         })
                         .collect();
-                    let moved = database.relocate_media_files(&moves).await?;
+                    moved += database.relocate_media_files(&moves).await?;
+                }
+                if moved > 0 {
                     info!("Moved {moved} indexed files with the renamed directory");
 
                     // Scan the new directory location using bulk operations

@@ -182,6 +182,46 @@ async fn recursive_scan_removes_what_is_gone_from_disk() {
     assert_eq!(survivors[0].filename, "stays.mp4");
 }
 
+#[tokio::test]
+async fn recursive_scan_reconciles_deletions_across_batches() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().join("media");
+    std::fs::create_dir(&root).unwrap();
+    let root = std::fs::canonicalize(root).unwrap();
+    std::fs::write(root.join("keep.mp4"), b"a").unwrap();
+    let db = Arc::new(
+        SqliteDatabase::new(temp.path().join("delete-batches.db"))
+            .await
+            .unwrap(),
+    );
+    db.initialize().await.unwrap();
+    let scanner = MediaScanner::with_filesystem_manager(
+        Box::new(BaseFileSystemManager::new(true)),
+        db.clone(),
+    );
+    scanner.scan_directory_recursive(&root).await.unwrap();
+    let missing: Vec<_> = (0..2501)
+        .map(|i| {
+            MediaFile::new(
+                root.join(format!("gone/{i}.mp4")),
+                1,
+                "video/mp4".to_owned(),
+            )
+        })
+        .collect();
+    db.bulk_store_media_files(&missing).await.unwrap();
+    drop(missing);
+    let result = scanner.scan_directory_recursive(&root).await.unwrap();
+    assert_eq!(result.removed, 2501);
+    assert_eq!(result.unchanged, 1);
+    assert!(db
+        .get_file_by_path(&root.join("keep.mp4"))
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(db.load_file_fingerprints().await.unwrap().len(), 1);
+}
+
 /// A scan compares one root against one root. It loads only that subtree's
 /// records, and a sibling library — including one whose path is a string prefix
 /// of this one — must be neither examined nor deleted.

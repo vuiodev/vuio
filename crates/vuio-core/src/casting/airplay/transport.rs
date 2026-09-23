@@ -13,7 +13,7 @@ pub struct AirplayConnection {
     wire_buffer: Vec<u8>,
     plain_buffer: Vec<u8>,
     /// Where receiver-pushed media commands are delivered, when serving events.
-    commands: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    commands: Option<tokio::sync::mpsc::Sender<String>>,
 }
 
 struct SecureState {
@@ -134,7 +134,7 @@ impl AirplayConnection {
 
     pub async fn serve_events(
         self,
-        replies: tokio::sync::mpsc::UnboundedSender<(u64, Vec<u8>)>,
+        replies: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
     ) -> Result<()> {
         self.serve_events_with_commands(replies, None).await
     }
@@ -143,8 +143,8 @@ impl AirplayConnection {
     /// receiver pushes (its remote's transport buttons) to `commands`.
     pub async fn serve_events_with_commands(
         mut self,
-        replies: tokio::sync::mpsc::UnboundedSender<(u64, Vec<u8>)>,
-        commands: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+        replies: tokio::sync::mpsc::Sender<(u64, Vec<u8>)>,
+        commands: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<()> {
         self.commands = commands;
         loop {
@@ -162,7 +162,10 @@ impl AirplayConnection {
                     let reply = data_stream_frame(b"rply", b"\0\0\0\0", message.sequence, &[])?;
                     self.write_plain(&reply).await?;
                 } else if message.message_type.starts_with(b"rply") {
-                    let _ = replies.send((message.sequence, message.body));
+                    // Replies are diagnostic only. A slow logger (or no
+                    // consumer in audio mode) must not retain an endless queue
+                    // or stall the receiver's event acknowledgements.
+                    let _ = replies.try_send((message.sequence, message.body));
                 } else {
                     tracing::debug!(
                         sequence = message.sequence,
@@ -240,7 +243,7 @@ impl AirplayConnection {
                         .and_then(|dictionary| dictionary.get("value"))
                         .and_then(plist::Value::as_string)
                     {
-                        let _ = sender.send(command.to_string());
+                        let _ = sender.send(command.to_string()).await;
                     }
                 }
             }

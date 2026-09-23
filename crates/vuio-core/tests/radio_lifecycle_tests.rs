@@ -192,3 +192,109 @@ async fn a_station_whose_files_have_gone_waits_instead_of_spinning() {
     state.background_tasks.close();
     state.background_tasks.wait().await;
 }
+
+/// `seconds` of MPEG-1 Layer III frames at 128 kbit/s and 44.1 kHz. The
+/// station frames them without decoding, so zeros serve for the audio.
+fn silent_mp3(seconds: f64) -> Vec<u8> {
+    const FRAME_LEN: usize = 417;
+    let frames = (seconds * 44_100.0 / 1_152.0).ceil() as usize;
+    let mut bytes = Vec::with_capacity(frames * FRAME_LEN);
+    for _ in 0..frames {
+        bytes.extend_from_slice(&[0xFF, 0xFB, 0x90, 0x00]);
+        bytes.resize(bytes.len() + FRAME_LEN - 4, 0);
+    }
+    bytes
+}
+
+/// A track whose row is removed and indexed again comes back under a new id,
+/// which the queue of ids being played does not hold. It must still be played
+/// in the pass under way — for a linear station, the only pass there is.
+///
+/// The first track lasts long enough to still be on the air when the second is
+/// indexed again; the other two are short, so the broadcast ends in about a
+/// second and a half.
+#[tokio::test]
+async fn a_track_indexed_again_mid_pass_is_still_played() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let media = temp.path().join("media");
+    std::fs::create_dir_all(&media).expect("media dir");
+    let media = std::fs::canonicalize(&media).expect("canonical media dir");
+
+    let mut tracks = Vec::new();
+    for (name, seconds) in [("a", 3.0), ("b", 0.5), ("c", 0.5)] {
+        let track = media.join(format!("{name}.mp3"));
+        std::fs::write(&track, silent_mp3(seconds)).expect("write track");
+        tracks.push(track);
+    }
+
+    let state = common::state_over(temp.path(), &media).await;
+    for track in &tracks {
+        state
+            .database
+            .store_media_file(&MediaFile::new(track.clone(), 1, "audio/mpeg".to_owned()))
+            .await
+            .expect("index track");
+    }
+
+    let row = state
+        .database
+        .create_radio_station(&RadioStationInput {
+            name: "linear".to_owned(),
+            genre: String::new(),
+            folders: vec![media.to_string_lossy().into_owned()],
+            mode: BroadcastMode::Linear,
+        })
+        .await
+        .expect("create station");
+
+    // The queue is built by the time `start` returns, so it holds `b`'s old id.
+    let station = state.radio.start(&state, &row).await.expect("start");
+    let mut playing = station.attach().now_playing;
+
+    let old_id = state
+        .database
+        .get_file_by_path(&tracks[1])
+        .await
+        .expect("look up b")
+        .expect("b is indexed")
+        .id;
+    assert!(state
+        .database
+        .remove_media_file(&tracks[1])
+        .await
+        .expect("remove b"));
+    let new_id = state
+        .database
+        .store_media_file(&MediaFile::new(
+            tracks[1].clone(),
+            1,
+            "audio/mpeg".to_owned(),
+        ))
+        .await
+        .expect("index b again");
+    assert_ne!(old_id, Some(new_id), "b must come back under a new id");
+
+    let mut heard = vec![playing.borrow_and_update().path.clone()];
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !station.is_off_air() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the station never reached the end of its queue"
+        );
+        let wait = std::time::Duration::from_millis(50);
+        if let Ok(Ok(())) = tokio::time::timeout(wait, playing.changed()).await {
+            heard.push(playing.borrow_and_update().path.clone());
+        }
+    }
+
+    let heard: Vec<String> = heard.into_iter().flatten().collect();
+    let expected: Vec<String> = tracks
+        .iter()
+        .map(|track| track.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(heard, expected, "every track once, in order");
+
+    state.cancellation.cancel();
+    state.background_tasks.close();
+    state.background_tasks.wait().await;
+}

@@ -21,16 +21,35 @@ const WALK_QUEUE: usize = 4096;
 /// write.
 const READ_WINDOW: usize = BATCH_SIZE;
 
+/// How many indexed records to load at a time.
+///
+/// Each page is converted into the scan's own compact form before the next is
+/// read, so this — about a megabyte of rows — rather than the size of the
+/// library is what the load costs on top of the map it builds.
+const FINGERPRINT_PAGE: usize = 4096;
+
+/// How large a scan has to be before the memory it freed is handed back to the
+/// system. See [`crate::platform::release_free_memory`].
+const RELEASE_AFTER_FILES: usize = 10_000;
+
 /// What a scan needs to know about a file it may already have indexed.
 ///
 /// Deliberately not [`FileFingerprint`]: that carries the path, and this lives
 /// in a map keyed by the path, so storing it again doubled the largest
 /// allocation a scan makes.
+///
+/// The map holds one of these for every file under the root, so it is the one
+/// allocation a scan makes that grows with the library, and it is packed to
+/// match. Times are whole seconds since the epoch because that is all the index
+/// stores — a `SystemTime` spent sixteen bytes carrying nanoseconds that were
+/// always zero — and the key is a boxed path below the root rather than an
+/// owned path from it (see [`IndexedTree`]). At 100,000 files that took the
+/// table from 10.1 MB to 7.1 MB, and every key is shorter by the root.
 struct IndexedFile {
     id: i64,
     size: u64,
-    modified: SystemTime,
-    created_at: SystemTime,
+    modified_secs: u64,
+    created_at_secs: u64,
     tags_version: u32,
     /// Set when the walk produced this path. What is left unset is what has been
     /// deleted from disk — which is why the scan needs no second collection of
@@ -38,29 +57,100 @@ struct IndexedFile {
     seen: bool,
 }
 
+/// Everything indexed under the root being scanned, keyed by the path below
+/// that root.
+///
+/// Every file under one root repeats that root's prefix, and there is one key
+/// per file. Stripping it is free — the walk only ever produces paths under the
+/// root, and a deletion puts it back with a `join`. A record that somehow lies
+/// outside the root keeps its absolute path, which cannot collide with a
+/// relative one.
+struct IndexedTree<'a> {
+    root: &'a Path,
+    files: HashMap<Box<Path>, IndexedFile>,
+}
+
+impl<'a> IndexedTree<'a> {
+    fn new(root: &'a Path) -> Self {
+        Self {
+            root,
+            files: HashMap::new(),
+        }
+    }
+
+    /// Key one page of loaded records, moving each path rather than copying it.
+    fn extend(&mut self, fingerprints: Vec<FileFingerprint>) {
+        let root = self.root;
+        let files = fingerprints
+            .into_iter()
+            .map(|fingerprint| {
+                let FileFingerprint {
+                    id,
+                    path,
+                    size,
+                    modified,
+                    created_at,
+                    tags_version,
+                } = fingerprint;
+                let key = match path.strip_prefix(root) {
+                    Ok(relative) => relative.into(),
+                    Err(_) => path.into_boxed_path(),
+                };
+                let file = IndexedFile {
+                    id,
+                    size,
+                    modified_secs: epoch_secs(modified),
+                    created_at_secs: epoch_secs(created_at),
+                    tags_version,
+                    seen: false,
+                };
+                (key, file)
+            });
+        self.files.extend(files);
+    }
+
+    fn key<'p>(&self, path: &'p Path) -> &'p Path {
+        path.strip_prefix(self.root).unwrap_or(path)
+    }
+
+    fn get(&self, path: &Path) -> Option<&IndexedFile> {
+        self.files.get(self.key(path))
+    }
+
+    fn get_mut(&mut self, path: &Path) -> Option<&mut IndexedFile> {
+        let key = self.key(path);
+        self.files.get_mut(key)
+    }
+
+    fn len(&self) -> usize {
+        self.files.len()
+    }
+
+    /// Every record the walk did not produce, as absolute paths.
+    fn unseen(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.files
+            .iter()
+            .filter(|(_, indexed)| !indexed.seen)
+            .map(|(key, _)| self.root.join(key))
+    }
+}
+
+fn epoch_secs(time: SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs())
+}
+
+fn from_epoch_secs(secs: u64) -> SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+}
+
 impl IndexedFile {
-    /// Split a loaded record into the map's key and value, moving the path
-    /// rather than copying it into both halves.
-    fn split(fingerprint: FileFingerprint) -> (PathBuf, Self) {
-        let FileFingerprint {
-            id,
-            path,
-            size,
-            modified,
-            created_at,
-            tags_version,
-        } = fingerprint;
-        (
-            path,
-            Self {
-                id,
-                size,
-                modified,
-                created_at,
-                tags_version,
-                seen: false,
-            },
-        )
+    fn modified(&self) -> SystemTime {
+        from_epoch_secs(self.modified_secs)
+    }
+
+    fn created_at(&self) -> SystemTime {
+        from_epoch_secs(self.created_at_secs)
     }
 }
 
@@ -74,7 +164,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
     async fn read_window(
         &self,
         paths: &mut Vec<PathBuf>,
-        existing_files_map: &HashMap<PathBuf, IndexedFile>,
+        indexed: &IndexedTree<'_>,
         files_to_insert: &mut Vec<MediaFile>,
         files_to_update: &mut Vec<MediaFile>,
         result: &mut ScanResult,
@@ -98,12 +188,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
             };
             result.files_read += 1;
 
-            match existing_files_map.get(&path) {
+            match indexed.get(&path) {
                 Some(existing) => {
                     if self.fingerprint_needs_update(existing, &current_file) {
                         let mut updated = current_file;
                         updated.id = Some(existing.id);
-                        updated.created_at = existing.created_at;
+                        updated.created_at = existing.created_at();
                         updated.updated_at = SystemTime::now();
                         files_to_update.push(updated);
                     } else {
@@ -401,10 +491,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let Ok(modified) = metadata.modified() else {
             return true;
         };
-        let difference = if existing.modified > modified {
-            existing.modified.duration_since(modified)
+        let indexed = existing.modified();
+        let difference = if indexed > modified {
+            indexed.duration_since(modified)
         } else {
-            modified.duration_since(existing.modified)
+            modified.duration_since(indexed)
         };
         difference.map_or(true, |difference| difference.as_secs() > 10)
     }
@@ -419,10 +510,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
         if existing.tags_version < current.tags_version {
             return true;
         }
-        let time_diff = if existing.modified > current.modified {
-            existing.modified.duration_since(current.modified)
+        let indexed = existing.modified();
+        let time_diff = if indexed > current.modified {
+            indexed.duration_since(current.modified)
         } else {
-            current.modified.duration_since(existing.modified)
+            current.modified.duration_since(indexed)
         };
         time_diff.map_or(true, |difference| difference.as_secs() > 10)
     }
@@ -468,19 +560,37 @@ impl<D: DatabaseManager> MediaScanner<D> {
         // watcher event that rescans a single folder used to load every row.
         debug!("Loading existing files from database...");
         let canonical_root_str = canonical_root.to_string_lossy().into_owned();
-        let mut existing_files_map: HashMap<PathBuf, IndexedFile> = self
-            .database_manager
-            .load_file_fingerprints_under(&canonical_root_str)
-            .await?
-            .into_iter()
-            .map(IndexedFile::split)
-            .collect();
-        let existing_in_root = existing_files_map.len();
+        let mut indexed = IndexedTree::new(&canonical_root);
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .database_manager
+                .load_file_fingerprints_under(&canonical_root_str, after.as_deref(), FINGERPRINT_PAGE)
+                .await?;
+            let last_page = page.len() < FINGERPRINT_PAGE;
+            after = page
+                .last()
+                .map(|fingerprint| fingerprint.path.to_string_lossy().into_owned());
+            indexed.extend(page);
+            if last_page {
+                break;
+            }
+        }
+        let existing_in_root = indexed.len();
         debug!("Loaded {existing_in_root} existing files from database");
 
         // Walk on a blocking thread, handing paths over as they are found rather
         // than collecting the library into a `Vec` first. The channel is bounded,
         // so a slow consumer backs the walker up instead of buffering.
+        //
+        // Serially, because the channel is the only bound there is. jwalk's
+        // parallel mode reads directories on the rayon pool as fast as it can
+        // and holds each one's entries until the iterator reaches it, so a
+        // walker blocked on a full channel stopped nothing: at 100,000 files it
+        // was 25 MB of entries read ahead — nearly the whole tree — at the scan's
+        // peak, and that peak is what the allocator keeps afterwards. One
+        // directory at a time costs no measurable time, because every path it
+        // yields is then `stat`ed, and that stage is already concurrent.
         let root_clone = canonical_root.clone();
         let mut traversal_policy = policy.clone();
         traversal_policy.root = canonical_root.clone();
@@ -492,7 +602,10 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 errors: Vec::new(),
                 root_complete: true,
             };
-            for entry in WalkDir::new(&root_clone).skip_hidden(false) {
+            for entry in WalkDir::new(&root_clone)
+                .skip_hidden(false)
+                .parallelism(jwalk::Parallelism::Serial)
+            {
                 match entry {
                     Ok(entry) if entry.file_type().is_file() => {
                         let path = entry.path();
@@ -522,8 +635,11 @@ impl<D: DatabaseManager> MediaScanner<D> {
         });
 
         let mut result = ScanResult::new();
-        let mut files_to_insert: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
-        let mut files_to_update: Vec<MediaFile> = Vec::with_capacity(BATCH_SIZE);
+        // Empty until something changes: a `MediaFile` is over six hundred
+        // bytes, so reserving a batch of each up front held 1.3 MB through
+        // every scan of a library that turned out not to have changed.
+        let mut files_to_insert: Vec<MediaFile> = Vec::new();
+        let mut files_to_update: Vec<MediaFile> = Vec::new();
         let mut processed = 0_usize;
 
         // Classify each path with a single `stat`, several at a time.
@@ -552,7 +668,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
 
                 // jwalk descendants inherit the already-canonical root. It does
                 // not follow file symlinks, so no syscall is needed here.
-                let unchanged = match (existing_files_map.get_mut(&path), metadata) {
+                let unchanged = match (indexed.get_mut(&path), metadata) {
                     (Some(existing), Some(metadata)) => {
                         // Marking the record is what replaces a second set of every
                         // path on disk: whatever is left unmarked is what is gone.
@@ -576,7 +692,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
                     if pending_reads.len() >= READ_WINDOW {
                         self.read_window(
                             &mut pending_reads,
-                            &existing_files_map,
+                            &indexed,
                             &mut files_to_insert,
                             &mut files_to_update,
                             &mut result,
@@ -601,7 +717,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
         if !pending_reads.is_empty() {
             self.read_window(
                 &mut pending_reads,
-                &existing_files_map,
+                &indexed,
                 &mut files_to_insert,
                 &mut files_to_update,
                 &mut result,
@@ -630,42 +746,32 @@ impl<D: DatabaseManager> MediaScanner<D> {
             });
         }
 
-        // Whatever the walk never produced is gone from disk.
-        let reconcile_deletions =
-            traversal.root_complete && !suspect_empty_root && traversal.uncertain_prefixes.is_empty();
-        let files_to_remove: Vec<PathBuf> = if reconcile_deletions {
-            existing_files_map
-                .iter()
-                .filter(|(_, indexed)| !indexed.seen)
-                .map(|(path, _)| path.clone())
-                .collect()
-        } else {
-            // A partial walk cannot tell "absent" from "unreadable". Where only
-            // some prefixes are in doubt, everything outside them is still
-            // decidable.
-            existing_files_map
-                .iter()
-                .filter(|(_, indexed)| !indexed.seen)
-                .filter(|_| traversal.root_complete && !suspect_empty_root)
-                .filter(|(path, _)| {
-                    !traversal
-                        .uncertain_prefixes
-                        .iter()
-                        .any(|prefix| path.starts_with(prefix))
-                })
-                .map(|(path, _)| path.clone())
-                .collect()
-        };
-
-        if !files_to_remove.is_empty() {
-            info!(
-                "Removing {} deleted files from database",
-                files_to_remove.len()
-            );
-            self.database_manager
-                .bulk_remove_media_files(&files_to_remove)
-                .await?;
-            result.removed += files_to_remove.len();
+        // A partial walk cannot tell "absent" from "unreadable". Delete only
+        // outside uncertain prefixes, and keep at most one batch of absolute
+        // paths: removing a large subtree must not duplicate the scan's index.
+        if traversal.root_complete && !suspect_empty_root {
+            let mut files_to_remove = Vec::new();
+            for path in indexed.unseen().filter(|path| {
+                !traversal
+                    .uncertain_prefixes
+                    .iter()
+                    .any(|prefix| path.starts_with(prefix))
+            }) {
+                files_to_remove.push(path);
+                if files_to_remove.len() == BATCH_SIZE {
+                    self.database_manager
+                        .bulk_remove_media_files(&files_to_remove)
+                        .await?;
+                    result.removed += files_to_remove.len();
+                    files_to_remove.clear();
+                }
+            }
+            if !files_to_remove.is_empty() {
+                self.database_manager
+                    .bulk_remove_media_files(&files_to_remove)
+                    .await?;
+                result.removed += files_to_remove.len();
+            }
         }
 
         result.total_scanned = total_files;
@@ -678,6 +784,15 @@ impl<D: DatabaseManager> MediaScanner<D> {
             result.unchanged,
             result.files_read
         );
+
+        // The index of the root is the scan's largest allocation and is gone
+        // now. After a large scan the allocator would otherwise keep the pages
+        // it freed for the rest of the run; a watcher's rescan of one folder
+        // leaves too little behind to be worth the call.
+        drop(indexed);
+        if total_files.max(existing_in_root) >= RELEASE_AFTER_FILES {
+            tokio::task::spawn_blocking(crate::platform::release_free_memory);
+        }
 
         Ok(result)
     }
