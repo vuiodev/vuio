@@ -607,6 +607,185 @@ mod tests {
         }
     }
 
+    async fn browse_video(state: &AppState<SqliteDatabase>) -> String {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "soapaction",
+            axum::http::HeaderValue::from_static(
+                "\"urn:schemas-upnp-org:service:ContentDirectory:1#Browse\"",
+            ),
+        );
+        headers.insert(
+            "user-agent",
+            axum::http::HeaderValue::from_static("DLNADOC/1.50 SEC_HHP_[TV]UE40D7000/1.0"),
+        );
+        let response = crate::web::soap::content_directory_control(
+            axum::extract::State(state.clone()),
+            headers,
+            "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body>\
+             <u:Browse xmlns:u=\"urn:schemas-upnp-org:service:ContentDirectory:1\">\
+             <ObjectID>video</ObjectID><BrowseFlag>BrowseDirectChildren</BrowseFlag>\
+             <Filter>*</Filter><StartingIndex>0</StartingIndex><RequestedCount>0</RequestedCount>\
+             <SortCriteria></SortCriteria></u:Browse></s:Body></s:Envelope>"
+                .to_owned(),
+        )
+        .await;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 128 * 1024)
+                .await
+                .expect("response body")
+                .to_vec(),
+        )
+        .expect("UTF-8 response")
+    }
+
+    #[tokio::test]
+    async fn startup_cleanup_retires_tv_responses_served_before_the_scan() {
+        for scan_on_startup in [false, true] {
+            let temp = tempfile::TempDir::new().expect("temp dir");
+            let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+            let state = state_watching(&root).await;
+            let mut config = (*state.current_config()).clone();
+            config.media.scan_on_startup = scan_on_startup;
+            config.media.scan_playlists = false;
+            state.live_config.store(Arc::new(config));
+
+            let present = root.join("here.mp4");
+            let deleted = root.join("gone.mp4");
+            std::fs::write(&present, b"video").expect("present file");
+            std::fs::write(&deleted, b"video").expect("deleted file");
+            for path in [&present, &deleted] {
+                state
+                    .database
+                    .store_media_file(&database::MediaFile::new(
+                        path.clone(),
+                        5,
+                        "video/mp4".to_owned(),
+                    ))
+                    .await
+                    .expect("index file");
+            }
+            assert!(browse_video(&state).await.contains("gone.mp4"));
+            assert!(!state.browse_cache.lock().await.is_empty());
+            std::fs::remove_file(&deleted).expect("delete file while server is offline");
+
+            super::super::scanning::initialize_media_library(&state)
+                .await
+                .expect("startup scan");
+
+            assert!(state
+                .database
+                .get_file_by_path(&deleted)
+                .await
+                .expect("query")
+                .is_none());
+            assert!(state.browse_cache.lock().await.is_empty());
+            assert_eq!(state.content_update_id.load(Ordering::SeqCst), 2);
+            let after = browse_video(&state).await;
+            assert!(!after.contains("gone.mp4"));
+            assert!(after.contains("here.mp4"));
+            assert!(after.contains("<TotalMatches>1</TotalMatches>"));
+            assert!(after.contains("<UpdateID>2</UpdateID>"));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn missed_deletions_refresh_tv_browse_without_waiting_for_a_full_rescan() {
+        for full_rescan_interval_hours in [0, 24] {
+            let temp = tempfile::TempDir::new().expect("temp dir");
+            let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+            let state = state_watching(&root).await;
+            let mut config = (*state.current_config()).clone();
+            config.media.full_rescan_interval_hours = full_rescan_interval_hours;
+            config.media.cleanup_deleted_files = false;
+            state.live_config.store(Arc::new(config.clone()));
+
+            let present = root.join("here.mp4");
+            let deleted = root.join("gone.mp4");
+            let deleted_folder = root.join("deleted-folder");
+            std::fs::write(&present, b"video").expect("present file");
+            std::fs::write(&deleted, b"video").expect("deleted file");
+            std::fs::create_dir(&deleted_folder).expect("folder");
+            let nested = deleted_folder.join("nested.mp4");
+            std::fs::write(&nested, b"video").expect("nested file");
+            for path in [&present, &deleted, &nested] {
+                state
+                    .database
+                    .store_media_file(&database::MediaFile::new(
+                        path.clone(),
+                        5,
+                        "video/mp4".to_owned(),
+                    ))
+                    .await
+                    .expect("index file");
+            }
+            let before = browse_video(&state).await;
+            assert!(before.contains("gone.mp4"));
+            assert!(before.contains("deleted-folder"));
+            assert!(!state.browse_cache.lock().await.is_empty());
+
+            // Remove before the watcher starts: no deletion events or dirty roots
+            // can help the periodic check, just as on a NAS that drops events.
+            std::fs::remove_file(&deleted).expect("delete file");
+            std::fs::remove_dir_all(&deleted_folder).expect("delete folder");
+            let watcher = Arc::new(CrossPlatformWatcher::new());
+            let cancellation = CancellationToken::new();
+            let handle = super::super::monitoring::start_file_monitoring(
+                watcher.clone(),
+                state.clone(),
+                cancellation.clone(),
+            )
+            .await
+            .expect("monitoring")
+            .expect("enabled monitoring");
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_secs(300)).await;
+            assert!(state
+                .database
+                .get_file_by_path(&deleted)
+                .await
+                .expect("query")
+                .is_some());
+            assert_eq!(state.content_update_id.load(Ordering::SeqCst), 1);
+
+            // Honour the live cleanup setting, independently of full discovery.
+            config.media.cleanup_deleted_files = true;
+            state.live_config.store(Arc::new(config));
+            tokio::time::advance(std::time::Duration::from_secs(300)).await;
+            let reconciled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while state.content_update_id.load(Ordering::SeqCst) == 1 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            cancellation.cancel();
+            handle.await.expect("monitoring task");
+            watcher.stop_watching().await.expect("stop watcher");
+            reconciled.expect("missed deletions must be reconciled within one tick");
+
+            assert!(state
+                .database
+                .get_file_by_path(&deleted)
+                .await
+                .expect("query")
+                .is_none());
+            assert!(state
+                .database
+                .get_file_by_path(&nested)
+                .await
+                .expect("query")
+                .is_none());
+            assert!(state.browse_cache.lock().await.is_empty());
+            let after = browse_video(&state).await;
+            assert!(!after.contains("gone.mp4"));
+            assert!(!after.contains("deleted-folder"));
+            assert!(after.contains("here.mp4"));
+            assert!(after.contains("<TotalMatches>1</TotalMatches>"));
+            assert!(after.contains("<UpdateID>2</UpdateID>"));
+        }
+    }
+
     /// An AIFF carrying an ID3v2.3 tag: a title, one tag with no column of its
     /// own, and `frames` samples at 44.1 kHz.
     ///

@@ -211,6 +211,7 @@ windows = { version = "0.62", features = [
 ] }
 
 [dev-dependencies]
+tokio = { version = "1.53", features = ["test-util"] }
 # `default-features = false` is load-bearing. Cargo unifies a package's own
 # dev-dependency on itself back into the package, so without it every test
 # build turned the default features back on — `--no-default-features` compiled

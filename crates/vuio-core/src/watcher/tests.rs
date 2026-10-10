@@ -208,3 +208,38 @@ fn test_convert_watcher_events_handles_modify() {
         _ => panic!("Expected FileSystemEvent::Modified"),
     }
 }
+
+#[test]
+fn generic_events_report_missing_files_and_directories_as_deletions() {
+    let root = TempDir::new().unwrap();
+    let policies = vec![ScanPolicy::platform_default(root.path(), true)];
+    let missing_file = root.path().join("gone.mp4");
+    let missing_directory = root.path().join("deleted-folder");
+    let present = root.path().join("here.mp4");
+    let unrelated = root.path().join("notes.txt");
+    fs::write(&present, b"video").unwrap();
+    fs::write(&unrelated, b"notes").unwrap();
+
+    for kind in [notify::EventKind::Any, notify::EventKind::Other] {
+        let event = DebouncedEvent {
+            event: notify::Event::new(kind)
+                .add_path(missing_file.clone())
+                .add_path(missing_directory.clone())
+                .add_path(present.clone())
+                .add_path(unrelated.clone()),
+            time: std::time::Instant::now(),
+        };
+        let converted = convert_watcher_events(vec![event], &policies);
+        assert_eq!(converted.len(), 3, "event kind {kind:?}");
+        for (event, expected) in converted[..2]
+            .iter()
+            .zip([&missing_file, &missing_directory])
+        {
+            assert!(
+                matches!(event, FileSystemEvent::Deleted { path, is_directory: None } if path == expected),
+                "missing paths must reach index cleanup: {event:?}"
+            );
+        }
+        assert!(matches!(&converted[2], FileSystemEvent::Modified(path) if path == &present));
+    }
+}

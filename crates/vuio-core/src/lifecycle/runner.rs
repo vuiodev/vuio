@@ -166,7 +166,11 @@ where
         auth: auth.clone(),
         platform_info: platform_info.clone(),
         filesystem_manager,
-        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(1)),
+        // A TV may retain its last revision across a server restart. A fresh
+        // boot revision prevents it from mistaking this library for that cache.
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(
+            uuid::Uuid::new_v4().as_u128() as u32,
+        )),
         web_metrics: Arc::new(crate::web::diagnostics::WebHandlerMetrics::new()),
         runtime_diagnostics: Arc::new(crate::platform::diagnostics::SystemDiagnosticsSampler::new()),
         lifecycle_stats: lifecycle_stats.clone(),
@@ -343,16 +347,9 @@ where
     // Scan only after the watcher and listeners are active. This closes the startup blind
     // window: a download that lands while the scan is running is either found
     // by the scan or delivered by the watcher (and duplicate upserts are safe).
-    if let Err(e) = perform_initial_media_scan(&config, &database).await {
-        error!("Failed to perform initial media scan: {}", e);
+    if let Err(e) = initialize_media_library(&app_state).await {
+        error!("Failed to initialize media library: {}", e);
         return Err(e);
-    }
-    refresh_unavailable_roots(&app_state).await?;
-
-    // Perform initial playlist file scan after media scan so referenced files exist.
-    if let Err(e) = perform_initial_playlist_scan(&config, &database).await {
-        // Log warning but don't fail startup - playlists are not critical
-        warn!("Failed to scan playlist files: {}", e);
     }
 
     // Start runtime platform adaptation services
