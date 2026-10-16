@@ -252,10 +252,10 @@ pub(in crate::lifecycle) async fn reconcile_unavailable_media_roots<D: DatabaseM
         let indexed_count = previous.as_ref().map_or(0, |state| state.indexed_count);
         let probe = tokio::fs::read_dir(root).await;
         let reason = match probe {
-            Ok(mut entries) => {
-                if indexed_count > 0 && entries.next_entry().await?.is_none() {
-                    Some("previously populated root is unexpectedly empty".to_owned())
-                } else {
+            Ok(mut entries) => match entries.next_entry().await {
+                Ok(_) => {
+                    // An accessible empty root can be the result of deleting its
+                    // last file. Only a failed read establishes unavailability.
                     database
                         .set_root_availability(&database::RootAvailability {
                             path: root.clone(),
@@ -267,7 +267,8 @@ pub(in crate::lifecycle) async fn reconcile_unavailable_media_roots<D: DatabaseM
                         .await?;
                     None
                 }
-            }
+                Err(error) => Some(format!("{}: {error}", error.kind())),
+            },
             Err(error) => Some(format!("{}: {error}", error.kind())),
         };
         let Some(reason) = reason else {
@@ -591,6 +592,49 @@ mod tests {
             .collect::<Vec<_>>();
         paths.sort();
         paths
+    }
+
+    #[tokio::test]
+    async fn a_readable_empty_library_is_available_and_cleans_up() {
+        let root = tempfile::TempDir::new().unwrap();
+        let file = root.path().join("last.mp4");
+        std::fs::write(&file, b"video").unwrap();
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
+        database
+            .set_root_availability(&database::RootAvailability {
+                path: root.path().to_path_buf(),
+                last_seen_secs: unix_now_secs(),
+                unavailable_since_secs: Some(unix_now_secs()),
+                indexed_count: 1,
+                reason: "previously populated root is unexpectedly empty".to_owned(),
+            })
+            .await
+            .unwrap();
+        std::fs::remove_file(&file).unwrap();
+
+        let roots = [root.path().to_path_buf()];
+        assert_eq!(
+            reconcile_unavailable_media_roots(&database, &roots, 168, true)
+                .await
+                .unwrap(),
+            0
+        );
+        let availability = database
+            .get_root_availability(root.path())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            availability.unavailable_since_secs.is_none(),
+            "readable empty roots must recover from the old empty-root state"
+        );
+        assert_eq!(
+            validate_and_cleanup_deleted_files(database.clone(), &roots, true)
+                .await
+                .unwrap(),
+            1
+        );
+        assert!(indexed_paths(&database).await.is_empty());
     }
 
     /// Removing a library through the config watcher drops its content, but a library

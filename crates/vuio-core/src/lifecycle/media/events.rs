@@ -172,6 +172,38 @@ pub(in crate::lifecycle) async fn import_changed_playlist<D: DatabaseManager + ?
     }
 }
 
+async fn remove_indexed_path<D: DatabaseManager + 'static>(
+    path: &Path,
+    is_directory: Option<bool>,
+    app_state: &AppState<D>,
+) -> anyhow::Result<()> {
+    let derived_removed = app_state
+        .database
+        .remove_derived_content_by_source(path)
+        .await?;
+    let summary = app_state
+        .database
+        .remove_media_under_path(path)
+        .await
+        .inspect_err(|_| {
+            app_state.lifecycle_stats.record_error();
+        })?;
+    app_state
+        .lifecycle_stats
+        .record_files_processed(summary.removed_files as u64);
+    info!(
+        "Removed {} indexed files and {} derived items below deleted path {}",
+        summary.removed_files,
+        derived_removed,
+        path.display()
+    );
+    // Directory events also retire cached listings when the rows are already gone.
+    if is_directory != Some(false) || summary.removed_files > 0 || derived_removed > 0 {
+        increment_content_update_id(app_state).await;
+    }
+    Ok(())
+}
+
 pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 'static>(
     event: FileSystemEvent,
     app_state: &AppState<D>,
@@ -320,26 +352,7 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                 return Ok(());
             }
             info!("Path deleted: {}", path.display());
-            let derived_removed = database.remove_derived_content_by_source(&path).await?;
-            let summary = database
-                .remove_media_under_path(&path)
-                .await
-                .inspect_err(|_error| {
-                    stats.record_error();
-                })?;
-            stats.record_files_processed(summary.removed_files as u64);
-            info!(
-                "Removed {} indexed files and {} derived items below deleted path {}",
-                summary.removed_files,
-                derived_removed,
-                path.display()
-            );
-            // Publish empty/duplicate directory events because they can retire an
-            // older browse generation. Known unrelated file deletions do not churn
-            // the library revision unless they removed indexed/derived content.
-            if is_directory != Some(false) || summary.removed_files > 0 || derived_removed > 0 {
-                increment_content_update_id(app_state).await;
-            }
+            remove_indexed_path(&path, is_directory, app_state).await?;
         }
 
         FileSystemEvent::Renamed { from, to } => {
@@ -353,6 +366,16 @@ pub(in crate::lifecycle) async fn handle_file_system_event<D: DatabaseManager + 
                 return Ok(());
             }
             info!("Path renamed: {} -> {}", from.display(), to.display());
+
+            // File managers can report moving a folder to Trash as a paired
+            // rename. Its destination is outside the library, so the old subtree
+            // must be retired just like a deletion, including derived playlists.
+            if media::ScanPolicy::for_path(&policies, &from).is_some()
+                && media::ScanPolicy::for_path(&policies, &to).is_none()
+            {
+                remove_indexed_path(&from, None, app_state).await?;
+                return Ok(());
+            }
 
             // Check if the destination is a directory or file
             if to.is_dir() {
@@ -784,6 +807,108 @@ mod tests {
             assert!(after.contains("<TotalMatches>1</TotalMatches>"));
             assert!(after.contains("<UpdateID>2</UpdateID>"));
         }
+    }
+
+    #[tokio::test]
+    async fn moving_a_folder_out_of_the_library_removes_its_index_and_publishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("library");
+        let folder = root.join("films/series");
+        std::fs::create_dir_all(&folder).unwrap();
+        let state = state_watching(&root).await;
+        let file = folder.join("episode.mp4");
+        std::fs::write(&file, b"video").unwrap();
+        handle_file_system_event(FileSystemEvent::Created(file.clone()), &state)
+            .await
+            .unwrap();
+        let revision = state.content_update_id.load(Ordering::SeqCst);
+        let cache_key = crate::state::SoapCacheKey {
+            object_id: "2".to_owned(),
+            starting_index: 0,
+            requested_count: 100,
+            client_profile: crate::web::client::DlnaClientProfile::Standard,
+            content_update_id: revision,
+            browse_epoch: state.browse_cache.lock().await.epoch(),
+        };
+        state.browse_cache.lock().await.insert(
+            cache_key.clone(),
+            axum::body::Bytes::from_static(b"old folder listing"),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let now = std::time::Instant::now();
+        state.upnp_subscriptions.lock().await.insert(
+            "uuid:tv".to_owned(),
+            crate::state::UpnpSubscription {
+                callback_url: format!("http://{}/events", listener.local_addr().unwrap()),
+                peer: "127.0.0.1".parse().unwrap(),
+                generation: uuid::Uuid::new_v4(),
+                expires_at: now + std::time::Duration::from_secs(60),
+                next_sequence: 1,
+                consecutive_failures: 0,
+                last_notification_at: now.checked_sub(std::time::Duration::from_secs(1)).unwrap(),
+                pending_notification: false,
+                notification_worker: None,
+            },
+        );
+
+        let destination = temp.path().join("trash");
+        std::fs::rename(root.join("films"), &destination).unwrap();
+        handle_file_system_event(
+            FileSystemEvent::Renamed {
+                from: root.join("films"),
+                to: destination,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        assert!(state
+            .database
+            .get_file_by_path(&file)
+            .await
+            .unwrap()
+            .is_none());
+        let (directories, files) = state
+            .database
+            .get_directory_listing(&root, "video/")
+            .await
+            .unwrap();
+        assert!(
+            directories.is_empty(),
+            "the moved folder must leave the TV browse tree"
+        );
+        assert!(files.is_empty());
+        assert_eq!(
+            state.content_update_id.load(Ordering::SeqCst),
+            revision.wrapping_add(1)
+        );
+        assert!(state.browse_cache.lock().await.get(&cache_key).is_none());
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let notification = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while !String::from_utf8_lossy(&request).contains("</e:propertyset>") {
+                let read = stream.read(&mut buffer).await.unwrap();
+                assert!(read > 0, "the UPnP notification must have a complete body");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(request).unwrap()
+        })
+        .await
+        .expect("the subscribed TV must receive the deletion revision");
+        assert!(notification.starts_with("NOTIFY "));
+        assert!(notification.contains(&format!(
+            "<SystemUpdateID>{}</SystemUpdateID>",
+            revision.wrapping_add(1)
+        )));
     }
 
     /// An AIFF carrying an ID3v2.3 tag: a title, one tag with no column of its
