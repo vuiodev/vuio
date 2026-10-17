@@ -166,11 +166,7 @@ where
         auth: auth.clone(),
         platform_info: platform_info.clone(),
         filesystem_manager,
-        // A TV may retain its last revision across a server restart. A fresh
-        // boot revision prevents it from mistaking this library for that cache.
-        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(
-            uuid::Uuid::new_v4().as_u128() as u32,
-        )),
+        content_update_id: Arc::new(std::sync::atomic::AtomicU32::new(boot_content_revision())),
         web_metrics: Arc::new(crate::web::diagnostics::WebHandlerMetrics::new()),
         runtime_diagnostics: Arc::new(crate::platform::diagnostics::SystemDiagnosticsSampler::new()),
         lifecycle_stats: lifecycle_stats.clone(),
@@ -569,5 +565,34 @@ pub struct ApplicationRunner;
 impl ApplicationRunner {
     pub async fn run(options: RuntimeOptions) -> anyhow::Result<()> {
         run_application(options).await
+    }
+}
+
+/// The ContentDirectory revision a fresh boot starts from.
+///
+/// A TV may retain its last revision across a server restart. The revision
+/// used to restart at 1 on every boot: a TV that had recorded a revision of 1
+/// before a restart found nothing new about the rebooted server, however much
+/// the library had changed underneath it, and kept serving its own cached
+/// listing — with files that had been deleted since. A random per-boot value
+/// differs from the previous session's revision, so the TV refetches at least
+/// once per boot.
+fn boot_content_revision() -> u32 {
+    uuid::Uuid::new_v4().as_u128() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The revision used to restart at 1 on every boot, which is what let a TV
+    /// keep deleted files in its listing across a server restart. Reproducing
+    /// that crash needs an actual TV, but the step that enables it — a boot
+    /// revision equal to the one every previous session ended on — is checked
+    /// here. A random seed matches 1 with probability 2^-32, so in practice the
+    /// assert fires only if the seeding is deliberately replaced.
+    #[test]
+    fn a_fresh_boot_does_not_restart_the_revision_at_one() {
+        assert_ne!(boot_content_revision(), 1);
     }
 }
