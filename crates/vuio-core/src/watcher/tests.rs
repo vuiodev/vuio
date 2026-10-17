@@ -9,6 +9,41 @@ async fn test_watcher_creation() {
     assert!(!watcher.is_watching(Path::new("/nonexistent")).await);
 }
 
+#[test]
+fn a_backend_rescan_signal_marks_all_roots_dirty_even_without_paths() {
+    let watcher = CrossPlatformWatcher::new();
+    let roots = [PathBuf::from("/media/films"), PathBuf::from("/media/music")];
+    for root in &roots {
+        watcher.watched_paths.lock().unwrap().insert(
+            root.clone(),
+            WatchRegistration {
+                path: root.clone(),
+                recursive: true,
+            },
+        );
+    }
+    let rescan = DebouncedEvent::new(
+        notify::Event::new(notify::EventKind::Other).set_flag(notify::event::Flag::Rescan),
+        std::time::Instant::now(),
+    );
+    record_rescan_events(&[rescan], &watcher.watched_paths, &watcher.dirty_roots);
+    let mut dirty = watcher.take_dirty_roots();
+    dirty.sort();
+    assert_eq!(dirty, roots);
+    assert!(watcher.take_dirty_roots().is_empty());
+
+    let ordinary = DebouncedEvent::new(
+        notify::Event::new(notify::EventKind::Remove(notify::event::RemoveKind::File))
+            .add_path(roots[0].join("film.mp4")),
+        std::time::Instant::now(),
+    );
+    record_rescan_events(&[ordinary], &watcher.watched_paths, &watcher.dirty_roots);
+    assert!(
+        watcher.take_dirty_roots().is_empty(),
+        "ordinary deletions stay incremental"
+    );
+}
+
 #[tokio::test]
 async fn test_media_file_detection() {
     let watcher = CrossPlatformWatcher::new();

@@ -195,18 +195,8 @@ impl<D: DatabaseManager> MediaScanner<D> {
                 current_files.push(self.create_media_file_from_path(&path).await?);
             }
         }
-        if current_files.is_empty() && !existing_files.is_empty() {
-            let mut result = ScanResult::new();
-            result.complete = false;
-            result.total_scanned = 0;
-            result.errors.push(ScanError {
-                path: canonical_dir,
-                error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
-                    .to_owned(),
-            });
-            result.unchanged += existing_files.len();
-            return Ok(result);
-        }
+        // A successful directory read is authoritative even when the last media
+        // file was deleted. Read errors above leave the existing index intact.
         self.perform_incremental_update(&canonical_dir, existing_files, current_files)
             .await
     }
@@ -617,22 +607,12 @@ impl<D: DatabaseManager> MediaScanner<D> {
         let traversal = traversal_task.await?;
 
         let total_files = processed;
-        let suspect_empty_root = total_files == 0 && existing_in_root > 0;
         result.errors.extend(traversal.errors);
-        result.complete = traversal.root_complete
-            && traversal.uncertain_prefixes.is_empty()
-            && !suspect_empty_root;
-        if suspect_empty_root {
-            result.errors.push(ScanError {
-                path: canonical_root.clone(),
-                error: "previously populated root is unexpectedly empty; destructive reconciliation deferred"
-                    .to_owned(),
-            });
-        }
+        result.complete = traversal.root_complete && traversal.uncertain_prefixes.is_empty();
 
         // Whatever the walk never produced is gone from disk.
         let reconcile_deletions =
-            traversal.root_complete && !suspect_empty_root && traversal.uncertain_prefixes.is_empty();
+            traversal.root_complete && traversal.uncertain_prefixes.is_empty();
         let files_to_remove: Vec<PathBuf> = if reconcile_deletions {
             existing_files_map
                 .iter()
@@ -646,7 +626,7 @@ impl<D: DatabaseManager> MediaScanner<D> {
             existing_files_map
                 .iter()
                 .filter(|(_, indexed)| !indexed.seen)
-                .filter(|_| traversal.root_complete && !suspect_empty_root)
+                .filter(|_| traversal.root_complete)
                 .filter(|(path, _)| {
                     !traversal
                         .uncertain_prefixes

@@ -238,6 +238,28 @@ fn path_is_relevant(path: &Path, policies: &[ScanPolicy]) -> bool {
     ScanPolicy::for_path(policies, path).is_some_and(|policy| policy.allows_watched_path(path))
 }
 
+fn record_rescan_events(
+    events: &[DebouncedEvent],
+    watched_paths: &std::sync::Mutex<HashMap<PathBuf, WatchRegistration>>,
+    dirty_roots: &std::sync::Mutex<HashSet<PathBuf>>,
+) {
+    if events.iter().any(|event| event.need_rescan()) {
+        // Queue overflow is delivered as a successful event with no paths, not
+        // an error. Record it before path filtering discards that signal.
+        let watched = watched_paths
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        dirty_roots
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .extend(
+                watched
+                    .values()
+                    .map(|registration| registration.path.clone()),
+            );
+    }
+}
+
 /// Convert notify events to our FileSystemEvent enum (helper)
 fn convert_watcher_events(
     events: Vec<DebouncedEvent>,
@@ -388,6 +410,7 @@ impl CrossPlatformWatcher {
             move |result: DebounceEventResult| {
                 match result {
                     Ok(events) => {
+                        record_rescan_events(&events, &watched_paths, &dirty_roots);
                         if !events.is_empty() {
                             debug!("Watcher callback triggered with {} events", events.len());
                             for event in &events {

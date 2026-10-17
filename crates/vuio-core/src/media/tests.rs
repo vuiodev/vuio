@@ -182,6 +182,96 @@ async fn recursive_scan_removes_what_is_gone_from_disk() {
     assert_eq!(survivors[0].filename, "stays.mp4");
 }
 
+#[tokio::test]
+async fn scans_remove_the_last_media_from_a_readable_library() {
+    for recursive in [false, true] {
+        let temp = tempdir().unwrap();
+        let db = Arc::new(
+            SqliteDatabase::new(temp.path().join("empty.db"))
+                .await
+                .unwrap(),
+        );
+        db.initialize().await.unwrap();
+        let scanner = MediaScanner::with_database(db.clone());
+        let root = temp.path().join("library");
+        let parent = if recursive {
+            root.join("films/series")
+        } else {
+            root.clone()
+        };
+        std::fs::create_dir_all(&parent).unwrap();
+        let file = parent.join("last.mp4");
+        std::fs::write(&file, b"video").unwrap();
+        let policy = ScanPolicy::platform_default(&root, recursive);
+        let first = if recursive {
+            scanner
+                .scan_directory_recursive_with_policy(&policy)
+                .await
+                .unwrap()
+        } else {
+            scanner.scan_directory_with_policy(&policy).await.unwrap()
+        };
+        assert_eq!(first.new, 1);
+
+        if recursive {
+            std::fs::remove_dir_all(root.join("films")).unwrap();
+        } else {
+            std::fs::remove_file(&file).unwrap();
+        }
+        let rescan = if recursive {
+            scanner
+                .scan_directory_recursive_with_policy(&policy)
+                .await
+                .unwrap()
+        } else {
+            scanner.scan_directory_with_policy(&policy).await.unwrap()
+        };
+        assert!(
+            rescan.complete,
+            "an empty, readable library is a complete scan"
+        );
+        assert_eq!(rescan.removed, 1, "the last file must leave the index");
+        assert!(db.get_file_by_path(&file).await.unwrap().is_none());
+        let (directories, files) = db.get_directory_listing(&root, "video/").await.unwrap();
+        assert!(
+            directories.is_empty(),
+            "deleted folders must leave TV listings"
+        );
+        assert!(files.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn scans_keep_media_when_the_library_is_unreadable() {
+    for recursive in [false, true] {
+        let temp = tempdir().unwrap();
+        let db = Arc::new(
+            SqliteDatabase::new(temp.path().join("offline.db"))
+                .await
+                .unwrap(),
+        );
+        db.initialize().await.unwrap();
+        let scanner = MediaScanner::with_database(db.clone());
+        let root = temp.path().join("library");
+        std::fs::create_dir(&root).unwrap();
+        let file = root.join("keep.mp4");
+        std::fs::write(&file, b"video").unwrap();
+        scanner.scan_directory(&root).await.unwrap();
+
+        std::fs::rename(&root, temp.path().join("unmounted")).unwrap();
+        let result = if recursive {
+            scanner.scan_directory_recursive(&root).await
+        } else {
+            scanner.scan_directory(&root).await
+        };
+        if let Ok(result) = result {
+            assert!(!result.complete);
+            assert_eq!(result.removed, 0);
+        }
+        assert!(db.get_file_by_path(&file).await.unwrap().is_some());
+    }
+}
+
 /// A scan compares one root against one root. It loads only that subtree's
 /// records, and a sibling library — including one whose path is a string prefix
 /// of this one — must be neither examined nor deleted.
