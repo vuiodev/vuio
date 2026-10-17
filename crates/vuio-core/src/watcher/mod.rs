@@ -333,17 +333,21 @@ fn convert_watcher_events(
                 }
             }
             notify::EventKind::Other | notify::EventKind::Any => {
-                // Only process existing media files for generic/other events
-                let media_paths: Vec<_> = event
-                    .event
-                    .paths
-                    .iter()
-                    .filter(|path| path.is_file() && path_is_relevant(path, policies))
-                    .collect();
-
-                for path in media_paths {
-                    debug!("Media file other event: {}", path.display());
-                    fs_events.push(FileSystemEvent::Modified(path.clone()));
+                for path in &event.event.paths {
+                    // Some backends cannot classify the change. A missing path
+                    // still needs to remove indexed content, including a folder's
+                    // descendants. An I/O error does not establish a deletion.
+                    if matches!(path.try_exists(), Ok(false))
+                        && ScanPolicy::for_path(policies, path).is_some()
+                    {
+                        fs_events.push(FileSystemEvent::Deleted {
+                            path: path.clone(),
+                            is_directory: None,
+                        });
+                    } else if path.is_file() && path_is_relevant(path, policies) {
+                        debug!("Media file other event: {}", path.display());
+                        fs_events.push(FileSystemEvent::Modified(path.clone()));
+                    }
                 }
             }
         }

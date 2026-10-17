@@ -188,30 +188,23 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                     if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
                         error!("Failed to refresh unavailable-root visibility: {}", error);
                     }
-                    // Only alongside a sweep. This walks the whole index and asks
-                    // the filesystem about every path in it, which on a large
-                    // library is the most expensive thing the tick can do — and
-                    // a deletion inside a watched root already arrives as an
-                    // event and is handled per-path. Like the sweep above, this
-                    // is the backstop for what the watcher missed, so it runs on
-                    // the backstop's cadence rather than every five minutes.
-                    //
-                    // Gated on the setting, and read live so it can be changed
-                    // without a restart. Ungated, `cleanup_deleted_files = false`
-                    // did not prevent deletions at all — the startup scan honoured
-                    // it and this tick then removed the same files five minutes later.
-                    if full_sweep_due || !dirty_roots.is_empty() {
-                        match validate_and_cleanup_deleted_files(
-                            app_state_clone.database.clone(),
-                            &configured_directories,
-                            app_state_clone.current_config().media.cleanup_deleted_files,
-                        )
-                        .await
-                        {
-                            Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
-                            Ok(_) => {}
-                            Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
-                        }
+                    // A backend can silently miss a deletion without marking a
+                    // root dirty. Check indexed paths every tick, independently
+                    // of full discovery, so TVs do not retain missing files for
+                    // 24 hours (or forever when full rescans are disabled).
+                    // The check pages through fingerprints without re-walking
+                    // directories or reading media metadata, and honours the
+                    // live cleanup setting and unavailable-root grace period.
+                    match validate_and_cleanup_deleted_files(
+                        app_state_clone.database.clone(),
+                        &configured_directories,
+                        app_state_clone.current_config().media.cleanup_deleted_files,
+                    )
+                    .await
+                    {
+                        Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
+                        Ok(_) => {}
+                        Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
                     }
                 }
             }

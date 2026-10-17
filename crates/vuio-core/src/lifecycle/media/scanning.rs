@@ -112,6 +112,19 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
         for media_file in page {
             total_checked += 1;
 
+            // Radio URLs share this table with local files, but cannot be
+            // checked against the filesystem or assigned to a library root.
+            let location = media_file.path.to_string_lossy();
+            if location
+                .get(..7)
+                .is_some_and(|scheme| scheme.eq_ignore_ascii_case("http://"))
+                || location
+                    .get(..8)
+                    .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+            {
+                continue;
+            }
+
             let Some(root_index) =
                 owning_root_index(&media_file.path, monitored_roots, &canonical_roots)
             else {
@@ -134,11 +147,12 @@ pub(in crate::lifecycle) async fn validate_and_cleanup_deleted_files<D: Database
             }
         }
 
-        // `exists()` blocks. One hop to the blocking pool per page beats one per
+        // `try_exists()` blocks. One hop to the blocking pool per page beats one per
         // file on an async worker, which is what a library-sized index used to do.
         if !to_probe.is_empty() {
             let missing = tokio::task::spawn_blocking(move || {
-                to_probe.retain(|path| !path.exists());
+                // Permission and I/O errors mean unreachable, not deleted.
+                to_probe.retain(|path| matches!(path.try_exists(), Ok(false)));
                 to_probe
             })
             .await?;
@@ -340,6 +354,26 @@ pub(crate) async fn refresh_unavailable_roots<D: DatabaseManager>(
         .map(|state| state.path)
         .collect();
     *app_state.unavailable_roots.write().await = unavailable;
+    Ok(())
+}
+
+/// Refresh the startup library and retire responses served while it was loading.
+pub(in crate::lifecycle) async fn initialize_media_library<D: DatabaseManager + 'static>(
+    app_state: &AppState<D>,
+) -> anyhow::Result<()> {
+    let config = app_state.current_config();
+    perform_initial_media_scan(&config, &app_state.database).await?;
+    refresh_unavailable_roots(app_state).await?;
+
+    // Referenced media must be indexed before playlists are imported.
+    if let Err(error) = perform_initial_playlist_scan(&config, &app_state.database).await {
+        warn!("Failed to scan playlist files: {}", error);
+    }
+
+    // Listeners are already serving while the scan runs. A TV may have cached
+    // files from the previous session before cleanup removed them, so the
+    // completed scan must invalidate Browse and notify subscribed clients.
+    increment_content_update_id(app_state).await;
     Ok(())
 }
 
@@ -732,6 +766,67 @@ mod tests {
 
         assert_eq!(removed, 1);
         assert_eq!(indexed_paths(&database).await, vec![canonical_root(&present)]);
+    }
+
+    #[tokio::test]
+    async fn missing_file_cleanup_preserves_radio_stream_urls() {
+        let root = tempfile::TempDir::new().expect("root");
+        let present = root.path().join("here.mp4");
+        let deleted = root.path().join("gone.mp4");
+        let streams = [
+            PathBuf::from("HTTP://radio.example/live"),
+            PathBuf::from("https://radio.example/live"),
+        ];
+        std::fs::write(&present, b"x").expect("write");
+        let (database, _temp) = database_with(&[
+            present.clone(),
+            deleted,
+            streams[0].clone(),
+            streams[1].clone(),
+        ])
+        .await;
+
+        let removed = validate_and_cleanup_deleted_files(
+            database.clone(),
+            &[root.path().to_path_buf()],
+            true,
+        )
+        .await
+        .expect("cleanup");
+
+        assert_eq!(removed, 1);
+        let paths = indexed_paths(&database).await;
+        assert_eq!(paths.len(), 3);
+        assert!(paths.contains(&canonical_root(&present)));
+        for stream in streams {
+            assert!(paths.contains(&stream), "radio URLs are not missing files");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn inaccessible_files_are_not_treated_as_deleted() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::TempDir::new().expect("root");
+        let folder = root.path().join("restricted");
+        std::fs::create_dir(&folder).expect("folder");
+        let file = folder.join("keep.mp4");
+        std::fs::write(&file, b"x").expect("write");
+        let (database, _temp) = database_with(std::slice::from_ref(&file)).await;
+        let stored = canonical_root(&file);
+        let original_permissions = std::fs::metadata(&folder).expect("metadata").permissions();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o000)).expect("restrict");
+        let cleanup = validate_and_cleanup_deleted_files(
+            database.clone(),
+            &[root.path().to_path_buf()],
+            true,
+        )
+        .await;
+        std::fs::set_permissions(&folder, original_permissions).expect("restore permissions");
+
+        assert_eq!(cleanup.expect("cleanup"), 0);
+        assert_eq!(indexed_paths(&database).await, vec![stored]);
     }
 
     /// The cleanup reads the index a page at a time rather than holding all of it, so
