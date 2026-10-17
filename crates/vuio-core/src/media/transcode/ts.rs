@@ -1179,12 +1179,19 @@ fn open_chain(stream: &mut Stream, codec: TranscodeCodec, frame: &[u8]) -> Resul
 }
 
 /// Take one frame's decoded PCM and encode it.
-fn take_decoded(pending: &mut Vec<Unit>, decode: &mut Encode, ticks: u64, pcm: Vec<u8>) -> Result<()> {
-    // Where this run starts, if it is contiguous — asked of every packet, so
-    // that one rounded container timestamp cannot place the whole run.
-    let samples = (ticks as i128 * i64::from(decode.sample_rate) as i128
-        / TS_CLOCK_HZ as i128) as i64;
-    decode.anchors.push(samples - decode.decoded as i64);
+fn take_decoded(
+    pending: &mut Vec<Unit>,
+    decode: &mut Encode,
+    ticks: u64,
+    pcm: Vec<u8>,
+) -> Result<()> {
+    // Collect only until the run is placed. Later estimates are never used;
+    // retaining one per frame grew for the whole film on every soundtrack.
+    if decode.next_pts.is_none() {
+        let samples =
+            (ticks as i128 * i64::from(decode.sample_rate) as i128 / TS_CLOCK_HZ as i128) as i64;
+        decode.anchors.push(samples - decode.decoded as i64);
+    }
     decode.decoded += (pcm.len() / (decode.decoded_channels as usize * 2)) as u64;
     let pcm = super::fit_channels(&pcm, decode.decoded_channels, decode.target_channels);
     let frames = decode.encoder.push(&pcm)?;
@@ -1264,6 +1271,35 @@ fn track_time_base(
 mod tests {
     use super::*;
     use crate::media::remux::TrackKind;
+
+    #[test]
+    fn timing_estimates_stop_accumulating_after_the_run_is_placed() {
+        let mut decode = Encode {
+            encoder: Reencoder::Aac(Box::new(AacEncoder::new(48_000, 2).unwrap())),
+            target_channels: 2,
+            decoded_channels: 2,
+            sample_rate: 48_000,
+            next_pts: None,
+            anchors: Vec::new(),
+            decoded: 0,
+            held: Vec::new(),
+        };
+        let mut pending = Vec::new();
+        for frame in 0..ANCHOR_PACKETS * 2 {
+            take_decoded(
+                &mut pending,
+                &mut decode,
+                frame as u64 * 1920,
+                vec![0; 4096],
+            )
+            .unwrap();
+            pending.clear();
+        }
+        assert!(decode.next_pts.is_some());
+        assert!(decode.anchors.is_empty());
+        assert_eq!(decode.anchors.capacity(), 0);
+        assert!(decode.held.is_empty());
+    }
 
     fn track(id: u32, kind: TrackKind, codec: TrackCodec, channels: u8) -> TrackInfo {
         TrackInfo {

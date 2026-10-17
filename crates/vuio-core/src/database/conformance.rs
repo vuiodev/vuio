@@ -392,6 +392,22 @@ pub async fn path_prefix_query_is_bounded_by_the_prefix<B: DatabaseBackend>() {
         .get_files_with_path_prefix(&canonical(Path::new("/media/Film")))
         .await
         .unwrap();
+    let locations = database
+        .get_file_locations_with_path_prefix(&canonical(Path::new("/media/Film")))
+        .await
+        .unwrap();
+    assert_eq!(
+        locations,
+        matched
+            .iter()
+            .filter_map(MediaFileView::to_file_location)
+            .collect::<Vec<_>>()
+    );
+    let single = database
+        .get_file_locations_with_path_prefix(&canonical(Path::new("/media/Film/a.mkv")))
+        .await
+        .unwrap();
+    assert_eq!(single, locations[..1]);
     let names = matched
         .iter()
         .map(|file| file.filename.clone())

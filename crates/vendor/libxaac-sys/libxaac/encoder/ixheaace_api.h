@@ -159,6 +159,10 @@ IA_ERRORCODE ixheaace_get_lib_id_strings(pVOID pv_output);
 /* handles memory requirements and initialization*/
 IA_ERRORCODE ixheaace_create(pVOID pv_input, pVOID pv_output);
 
+/* As above, but every malloc_xheaace callback result must be zero-filled for
+ * the full requested size. This avoids touching unused encoder state pages. */
+IA_ERRORCODE ixheaace_create_zeroed(pVOID pv_input, pVOID pv_output);
+
 /* encodes the input frame data */
 IA_ERRORCODE ixheaace_process(pVOID pv_ia_process_api_obj, pVOID pstr_in_cfg, pVOID pstr_out_cfg);
 

@@ -109,6 +109,55 @@ async fn test_generic_playlist_import_materializes_http_stream() {
 }
 
 #[tokio::test]
+async fn playlist_resolution_preserves_positions_and_duplicates_across_batches() {
+    use crate::database::sqlite::SqliteDatabase;
+
+    let temp = tempfile::tempdir().unwrap();
+    let database = SqliteDatabase::new(temp.path().join("batched.db"))
+        .await
+        .unwrap();
+    database.initialize().await.unwrap();
+    let path = temp.path().canonicalize().unwrap().join("song.mp3");
+    let id = database
+        .store_media_file(&MediaFile::new(path.clone(), 1, "audio/mpeg".into()))
+        .await
+        .unwrap();
+    let url = "https://radio.example/stream";
+    let entries: Vec<_> = (0..1300)
+        .map(|position| {
+            let location = match position % 3 {
+                0 => path.to_string_lossy().into_owned(),
+                1 => url.to_owned(),
+                _ => temp
+                    .path()
+                    .join("missing.mp3")
+                    .to_string_lossy()
+                    .into_owned(),
+            };
+            (location, position)
+        })
+        .collect();
+    let resolved = PlaylistFileManager::resolve_playlist_tracks(&database, &entries, None)
+        .await
+        .unwrap();
+    let stream_id = database
+        .get_file_by_path(Path::new(url))
+        .await
+        .unwrap()
+        .unwrap()
+        .id
+        .unwrap();
+    let expected: Vec<_> = (0..1300)
+        .filter_map(|position| match position % 3 {
+            0 => Some((id, position)),
+            1 => Some((stream_id, position)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(resolved, expected);
+}
+
+#[tokio::test]
 async fn test_non_recursive_radio_root_uses_radio_importer() {
     use crate::database::sqlite::SqliteDatabase;
     use crate::database::DatabaseManager;

@@ -924,15 +924,25 @@ pub trait MediaRepository: Send + Sync {
     /// Load compact scanner comparison records instead of complete media metadata.
     async fn load_file_fingerprints(&self) -> Result<Vec<FileFingerprint>>;
 
-    /// The same, for one subtree.
+    /// The same, for one subtree, one page at a time: at most `limit` records
+    /// whose paths sort after `after` (from the start of the subtree when
+    /// `None`), in path order.
     ///
     /// A scan compares what is on disk against what is indexed, and it only ever
     /// scans one root — so loading the whole table means every other library's
     /// rows are held in memory for nothing. That is most of the cost when a
     /// watcher event rescans a single folder.
+    ///
+    /// Paged because the scan keeps its own compact copy of each record, and
+    /// receiving the subtree in one piece meant holding every absolute path twice
+    /// over while that copy was built: at 100,000 files, 28 MB of rows beside
+    /// the map made from them. The caller passes the last path of one page as
+    /// `after` for the next, and a page shorter than `limit` is the last.
     async fn load_file_fingerprints_under(
         &self,
         canonical_prefix: &str,
+        after: Option<&str>,
+        limit: usize,
     ) -> Result<Vec<FileFingerprint>>;
 
     /// One page of fingerprints, ordered by id, starting after `after_id`.
@@ -1063,6 +1073,12 @@ pub trait MediaRepository: Send + Sync {
 
     /// Get files with a specific canonical path prefix.
     async fn get_files_with_path_prefix(&self, canonical_prefix: &str) -> Result<Vec<MediaFile>>;
+
+    /// Playback fields only, without the library's full tag/stream records.
+    async fn get_file_locations_with_path_prefix(
+        &self,
+        canonical_prefix: &str,
+    ) -> Result<Vec<FileLocation>>;
 
     /// Get direct subdirectories using canonical paths.
     async fn get_direct_subdirectories(
@@ -1269,11 +1285,22 @@ pub trait MediaInfoRepository: Send + Sync {
     async fn mediainfo_stats(&self, threshold: u8) -> Result<MediaInfoStats>;
     /// Forget everything, so the next run starts over.
     async fn clear_mediainfo(&self) -> Result<u64>;
-    /// Ids of files that have no usable row yet, oldest first.
+    /// Number of pending files and the largest pending id at the start of a run.
+    async fn missing_mediainfo_summary(&self, version: u32, threshold: u8) -> Result<(usize, i64)>;
+    /// One bounded page of files that have no usable row yet, oldest first.
     ///
     /// `version` is the current reader version: rows written by an older one are
     /// treated as absent so a bumped version re-fetches.
-    async fn media_ids_missing_mediainfo(&self, version: u32, threshold: u8) -> Result<Vec<i64>>;
+    /// The exclusive cursor advances even for failed lookups. The inclusive
+    /// upper bound keeps files added during the run for the next run.
+    async fn media_ids_missing_mediainfo(
+        &self,
+        version: u32,
+        threshold: u8,
+        after_id: i64,
+        through_id: i64,
+        limit: usize,
+    ) -> Result<Vec<i64>>;
 }
 
 /// Aggregate database capability used by the application.
