@@ -188,23 +188,34 @@ pub(in crate::lifecycle) async fn start_file_monitoring<D: DatabaseManager + 'st
                     if let Err(error) = refresh_unavailable_roots(&app_state_clone).await {
                         error!("Failed to refresh unavailable-root visibility: {}", error);
                     }
-                    // A backend can silently miss a deletion without marking a
-                    // root dirty. Check indexed paths every tick, independently
-                    // of full discovery, so TVs do not retain missing files for
-                    // 24 hours (or forever when full rescans are disabled).
-                    // The check pages through fingerprints without re-walking
-                    // directories or reading media metadata, and honours the
-                    // live cleanup setting and unavailable-root grace period.
-                    match validate_and_cleanup_deleted_files(
-                        app_state_clone.database.clone(),
-                        &configured_directories,
-                        app_state_clone.current_config().media.cleanup_deleted_files,
-                    )
-                    .await
-                    {
-                        Ok(removed) if removed > 0 => increment_content_update_id(&app_state_clone).await,
-                        Ok(_) => {}
-                        Err(error) => error!("Periodic missing-file reconciliation failed: {}", error),
+                    // The tick schedules no scan of its own. The watcher is the
+                    // source of truth: an OS event that removes indexed content
+                    // updates the database and publishes the change straight to
+                    // subscribed TVs, and probing every indexed path on a
+                    // schedule used to wake slow disks and network mounts every
+                    // five minutes for, almost always, nothing. Reconcile the
+                    // index only when there is already a reason to: a root the
+                    // backend reported as having lost events, or the full-rescan
+                    // interval, which exists for mounts that cannot deliver
+                    // events at all (a network filesystem hosting changes on
+                    // another machine). With the interval at 0 and no signal,
+                    // a vanished file is caught by the next startup scan.
+                    if full_sweep_due || !dirty_roots.is_empty() {
+                        match validate_and_cleanup_deleted_files(
+                            app_state_clone.database.clone(),
+                            &configured_directories,
+                            app_state_clone.current_config().media.cleanup_deleted_files,
+                        )
+                        .await
+                        {
+                            Ok(removed) if removed > 0 => {
+                                increment_content_update_id(&app_state_clone).await
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                error!("Periodic missing-file reconciliation failed: {}", error)
+                            }
+                        }
                     }
                 }
             }
