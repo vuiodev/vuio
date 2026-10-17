@@ -222,6 +222,18 @@ impl CrossPlatformWatcher {
         let mut roots = self.dirty_roots.lock().unwrap_or_else(|e| e.into_inner());
         roots.drain().collect()
     }
+
+    /// Mark roots as having lost events since the watch began, for tests.
+    ///
+    /// Production sets these flags from a debouncer error or a pathless rescan
+    /// signal, neither of which a unit test can schedule on demand; the tick's
+    /// response to a reported-dirty root — sweep the root, reconcile the index,
+    /// publish the change — is the contract these tests verify.
+    #[cfg(test)]
+    pub fn mark_roots_dirty(&self, roots: impl IntoIterator<Item = PathBuf>) {
+        let mut dirty = self.dirty_roots.lock().unwrap_or_else(|e| e.into_inner());
+        dirty.extend(roots);
+    }
 }
 
 /// Check if a file is a supported media file based on its extension (helper)

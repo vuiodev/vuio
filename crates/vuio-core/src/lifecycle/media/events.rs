@@ -714,99 +714,183 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn missed_deletions_refresh_tv_browse_without_waiting_for_a_full_rescan() {
-        for full_rescan_interval_hours in [0, 24] {
-            let temp = tempfile::TempDir::new().expect("temp dir");
-            let root = std::fs::canonicalize(temp.path()).expect("canonical root");
-            let state = state_watching(&root).await;
-            let mut config = (*state.current_config()).clone();
-            config.media.full_rescan_interval_hours = full_rescan_interval_hours;
-            config.media.cleanup_deleted_files = false;
-            state.live_config.store(Arc::new(config.clone()));
+    async fn ticks_without_a_watcher_signal_do_not_scan_the_library() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+        let state = state_watching(&root).await;
+        let mut config = (*state.current_config()).clone();
+        config.media.full_rescan_interval_hours = 0;
+        config.media.cleanup_deleted_files = true;
+        state.live_config.store(Arc::new(config.clone()));
 
-            let present = root.join("here.mp4");
-            let deleted = root.join("gone.mp4");
-            let deleted_folder = root.join("deleted-folder");
-            std::fs::write(&present, b"video").expect("present file");
-            std::fs::write(&deleted, b"video").expect("deleted file");
-            std::fs::create_dir(&deleted_folder).expect("folder");
-            let nested = deleted_folder.join("nested.mp4");
-            std::fs::write(&nested, b"video").expect("nested file");
-            for path in [&present, &deleted, &nested] {
-                state
-                    .database
-                    .store_media_file(&database::MediaFile::new(
-                        path.clone(),
-                        5,
-                        "video/mp4".to_owned(),
-                    ))
-                    .await
-                    .expect("index file");
-            }
-            let before = browse_video(&state).await;
-            assert!(before.contains("gone.mp4"));
-            assert!(before.contains("deleted-folder"));
-            assert!(!state.browse_cache.lock().await.is_empty());
-
-            // Remove before the watcher starts: no deletion events or dirty roots
-            // can help the periodic check, just as on a NAS that drops events.
-            std::fs::remove_file(&deleted).expect("delete file");
-            std::fs::remove_dir_all(&deleted_folder).expect("delete folder");
-            let watcher = Arc::new(CrossPlatformWatcher::new());
-            let cancellation = CancellationToken::new();
-            let handle = super::super::monitoring::start_file_monitoring(
-                watcher.clone(),
-                state.clone(),
-                cancellation.clone(),
-            )
-            .await
-            .expect("monitoring")
-            .expect("enabled monitoring");
-            tokio::task::yield_now().await;
-            tokio::time::advance(std::time::Duration::from_secs(300)).await;
-            assert!(state
+        let present = root.join("here.mp4");
+        let deleted = root.join("gone.mp4");
+        std::fs::write(&present, b"video").expect("present file");
+        std::fs::write(&deleted, b"video").expect("deleted file");
+        for path in [&present, &deleted] {
+            state
                 .database
-                .get_file_by_path(&deleted)
+                .store_media_file(&database::MediaFile::new(
+                    path.clone(),
+                    5,
+                    "video/mp4".to_owned(),
+                ))
                 .await
-                .expect("query")
-                .is_some());
-            assert_eq!(state.content_update_id.load(Ordering::SeqCst), 1);
-
-            // Honour the live cleanup setting, independently of full discovery.
-            config.media.cleanup_deleted_files = true;
-            state.live_config.store(Arc::new(config));
-            tokio::time::advance(std::time::Duration::from_secs(300)).await;
-            let reconciled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                while state.content_update_id.load(Ordering::SeqCst) == 1 {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await;
-            cancellation.cancel();
-            handle.await.expect("monitoring task");
-            watcher.stop_watching().await.expect("stop watcher");
-            reconciled.expect("missed deletions must be reconciled within one tick");
-
-            assert!(state
-                .database
-                .get_file_by_path(&deleted)
-                .await
-                .expect("query")
-                .is_none());
-            assert!(state
-                .database
-                .get_file_by_path(&nested)
-                .await
-                .expect("query")
-                .is_none());
-            assert!(state.browse_cache.lock().await.is_empty());
-            let after = browse_video(&state).await;
-            assert!(!after.contains("gone.mp4"));
-            assert!(!after.contains("deleted-folder"));
-            assert!(after.contains("here.mp4"));
-            assert!(after.contains("<TotalMatches>1</TotalMatches>"));
-            assert!(after.contains("<UpdateID>2</UpdateID>"));
+                .expect("index file");
         }
+        assert!(browse_video(&state).await.contains("gone.mp4"));
+        assert!(!state.browse_cache.lock().await.is_empty());
+
+        // The backend never says the file is gone, the way it cannot on a
+        // mount whose changes happen on another machine. The watch started
+        // after the deletion, so no event can arrive either.
+        std::fs::remove_file(&deleted).expect("delete file");
+        let watcher = Arc::new(CrossPlatformWatcher::new());
+        let cancellation = CancellationToken::new();
+        let handle = super::super::monitoring::start_file_monitoring(
+            watcher.clone(),
+            state.clone(),
+            cancellation.clone(),
+        )
+        .await
+        .expect("monitoring")
+        .expect("enabled monitoring");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(600)).await;
+
+        // With no dirty root and no due sweep the tick left the index alone:
+        // the probe that validated every indexed path on a schedule kept slow
+        // disks awake and hammered network mounts every five minutes, for,
+        // almost always, nothing. No publication either, and the cache a TV is
+        // reading from stays warm.
+        assert!(state
+            .database
+            .get_file_by_path(&deleted)
+            .await
+            .expect("query")
+            .is_some());
+        assert_eq!(state.content_update_id.load(Ordering::SeqCst), 1);
+        assert!(!state.browse_cache.lock().await.is_empty());
+
+        // The interval is what schedules anything at all: turning it on
+        // reconciles the library at the next due tick, and the bump retires
+        // the stale listing a TV had been served.
+        config.media.full_rescan_interval_hours = 1;
+        state.live_config.store(Arc::new(config));
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        let reconciled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while state.content_update_id.load(Ordering::SeqCst) == 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        cancellation.cancel();
+        handle.await.expect("monitoring task");
+        watcher.stop_watching().await.expect("stop watcher");
+        reconciled.expect("a due sweep must reconcile the library");
+        assert_eq!(state.content_update_id.load(Ordering::SeqCst), 2);
+        assert!(
+            state.browse_cache.lock().await.is_empty(),
+            "the revision bump must have retired the cached listing"
+        );
+        let after = browse_video(&state).await;
+        assert!(!after.contains("gone.mp4"));
+        assert!(after.contains("here.mp4"));
+        assert!(after.contains("<TotalMatches>1</TotalMatches>"));
+        assert!(after.contains("<UpdateID>2</UpdateID>"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_watcher_signal_reconciles_missing_files_and_notifies_tvs() {
+        let temp = tempfile::TempDir::new().expect("temp dir");
+        let root = std::fs::canonicalize(temp.path()).expect("canonical root");
+        let state = state_watching(&root).await;
+        let mut config = (*state.current_config()).clone();
+        config.media.full_rescan_interval_hours = 0;
+        config.media.cleanup_deleted_files = true;
+        state.live_config.store(Arc::new(config));
+
+        let present = root.join("here.mp4");
+        let deleted = root.join("gone.mp4");
+        let deleted_folder = root.join("deleted-folder");
+        std::fs::write(&present, b"video").expect("present file");
+        std::fs::write(&deleted, b"video").expect("deleted file");
+        std::fs::create_dir(&deleted_folder).expect("folder");
+        let nested = deleted_folder.join("nested.mp4");
+        std::fs::write(&nested, b"video").expect("nested file");
+        for path in [&present, &deleted, &nested] {
+            state
+                .database
+                .store_media_file(&database::MediaFile::new(
+                    path.clone(),
+                    5,
+                    "video/mp4".to_owned(),
+                ))
+                .await
+                .expect("index file");
+        }
+        assert!(browse_video(&state).await.contains("gone.mp4"));
+
+        // Delete before the watcher starts, then make the watch itself report
+        // the loss — like a rescan signal or an overflowing queue does. The
+        // tick's response is the entire reconciliation story: sweep the root,
+        // reconcile the index, and the published change retires every listing
+        // a TV holds from before the deletion.
+        std::fs::remove_file(&deleted).expect("delete file");
+        std::fs::remove_dir_all(&deleted_folder).expect("delete folder");
+        let watcher = Arc::new(CrossPlatformWatcher::new());
+        watcher.mark_roots_dirty([root.clone()]);
+        let cancellation = CancellationToken::new();
+        let handle = super::super::monitoring::start_file_monitoring(
+            watcher.clone(),
+            state.clone(),
+            cancellation.clone(),
+        )
+        .await
+        .expect("monitoring")
+        .expect("enabled monitoring");
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(300)).await;
+        let reconciled = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while state.content_update_id.load(Ordering::SeqCst) == 1 {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+        cancellation.cancel();
+        handle.await.expect("monitoring task");
+        watcher.stop_watching().await.expect("stop watcher");
+        reconciled.expect("a dirty root must reconcile the library within a tick");
+        assert_eq!(state.content_update_id.load(Ordering::SeqCst), 2);
+        assert!(
+            state.browse_cache.lock().await.is_empty(),
+            "the revision bump must have retired the cached listing"
+        );
+
+        assert!(state
+            .database
+            .get_file_by_path(&deleted)
+            .await
+            .expect("query")
+            .is_none());
+        assert!(state
+            .database
+            .get_file_by_path(&nested)
+            .await
+            .expect("query")
+            .is_none());
+        assert!(state
+            .database
+            .get_file_by_path(&present)
+            .await
+            .expect("query")
+            .is_some());
+        let after = browse_video(&state).await;
+        assert!(!after.contains("gone.mp4"));
+        assert!(!after.contains("deleted-folder"));
+        assert!(after.contains("here.mp4"));
+        assert!(after.contains("<TotalMatches>1</TotalMatches>"));
+        assert!(after.contains("<UpdateID>2</UpdateID>"));
     }
 
     #[tokio::test]

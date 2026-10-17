@@ -26,12 +26,15 @@ pub(super) fn default_scan_playlists() -> bool {
 
 /// How often to sweep every root regardless of what the watcher reported.
 ///
-/// The watcher is authoritative almost all of the time; this exists for the
-/// cases where it is not — a network filesystem that drops events, or a backend
-/// queue that overflowed. Daily, because the cost is a full re-walk and the
-/// thing it guards against is rare.
+/// Off by default (0): the watcher is authoritative, and a scheduled re-walk
+/// of every library is exactly the idle cost a NAS or a slow spinning disk
+/// should not pay every five minutes either. Enable an interval only on a mount that
+/// cannot deliver filesystem events — a network filesystem whose changes
+/// happen on another machine never will. Roots the watcher reports as having
+/// lost events (a queue overflow or a rescan signal) are swept and reconciled
+/// at the next reconciliation tick no matter what this is.
 pub(super) fn default_full_rescan_interval_hours() -> u64 {
-    24
+    0
 }
 
 pub(super) fn default_unavailable_root_grace_hours() -> u64 {
