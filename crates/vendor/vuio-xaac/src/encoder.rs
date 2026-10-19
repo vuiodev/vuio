@@ -34,12 +34,12 @@ pub enum Profile {
 impl Profile {
     fn aot(self) -> i32 {
         match self {
-            Self::AacLc => libxaac_sys::AOT_AAC_LC as i32,
-            Self::HeAacV1 => libxaac_sys::AOT_SBR as i32,
-            Self::AacLd => libxaac_sys::AOT_AAC_LD as i32,
-            Self::HeAacV2 => libxaac_sys::AOT_PS as i32,
-            Self::AacEld => libxaac_sys::AOT_AAC_ELD as i32,
-            Self::Usac => libxaac_sys::AOT_USAC as i32,
+            Self::AacLc => vuio_xaac_sys::AOT_AAC_LC as i32,
+            Self::HeAacV1 => vuio_xaac_sys::AOT_SBR as i32,
+            Self::AacLd => vuio_xaac_sys::AOT_AAC_LD as i32,
+            Self::HeAacV2 => vuio_xaac_sys::AOT_PS as i32,
+            Self::AacEld => vuio_xaac_sys::AOT_AAC_ELD as i32,
+            Self::Usac => vuio_xaac_sys::AOT_USAC as i32,
         }
     }
 
@@ -264,7 +264,7 @@ pub struct EncodedFrame {
 #[derive(Debug)]
 pub struct Encoder {
     config: EncoderConfig,
-    ffi: Box<libxaac_sys::ixheaace_user_config_struct>,
+    ffi: Box<vuio_xaac_sys::ixheaace_user_config_struct>,
     input_size: usize,
     audio_specific_config: Vec<u8>,
     version: VersionInfo,
@@ -274,7 +274,8 @@ pub struct Encoder {
 impl Encoder {
     pub fn new(config: EncoderConfig) -> Result<Self> {
         let frame_length = config.validate()?;
-        let mut ffi: Box<libxaac_sys::ixheaace_user_config_struct> = Box::new(unsafe { zeroed() });
+        let mut ffi: Box<vuio_xaac_sys::ixheaace_user_config_struct> =
+            Box::new(unsafe { zeroed() });
         let version = encoder_version()?;
         let drc_payload = config
             .drc
@@ -365,7 +366,7 @@ impl Encoder {
             i32::from(config.output_format == OutputFormat::Adts);
 
         let create_status = unsafe {
-            libxaac_sys::ixheaace_create(
+            vuio_xaac_sys::ixheaace_create(
                 (&mut ffi.input_config as *mut _) as *mut c_void,
                 (&mut ffi.output_config as *mut _) as *mut c_void,
             )
@@ -374,7 +375,7 @@ impl Encoder {
 
         let input_size = ffi.output_config.input_size as usize;
         let asc_len = ffi.output_config.i_out_bytes.max(0) as usize;
-        let out_ptr = ffi.output_config.mem_info_table[libxaac_sys::IA_MEMTYPE_OUTPUT as usize]
+        let out_ptr = ffi.output_config.mem_info_table[vuio_xaac_sys::IA_MEMTYPE_OUTPUT as usize]
             .mem_ptr as *const u8;
         let audio_specific_config = if asc_len == 0 || out_ptr.is_null() {
             Vec::new()
@@ -504,9 +505,10 @@ impl Encoder {
     }
 
     fn encode_pcm_bytes_inner(&mut self, pcm: &[u8]) -> Result<EncodedPacket> {
-        let in_ptr = self.ffi.output_config.mem_info_table[libxaac_sys::IA_MEMTYPE_INPUT as usize]
+        let in_ptr = self.ffi.output_config.mem_info_table[vuio_xaac_sys::IA_MEMTYPE_INPUT as usize]
             .mem_ptr as *mut u8;
-        let out_ptr = self.ffi.output_config.mem_info_table[libxaac_sys::IA_MEMTYPE_OUTPUT as usize]
+        let out_ptr = self.ffi.output_config.mem_info_table
+            [vuio_xaac_sys::IA_MEMTYPE_OUTPUT as usize]
             .mem_ptr as *const u8;
         if in_ptr.is_null() || out_ptr.is_null() {
             return Err(Error::InvalidConfig("encoder buffers were not allocated"));
@@ -517,7 +519,7 @@ impl Encoder {
         }
 
         let status = unsafe {
-            libxaac_sys::ixheaace_process(
+            vuio_xaac_sys::ixheaace_process(
                 self.ffi.output_config.pv_ia_process_api_obj,
                 (&mut self.ffi.input_config as *mut _) as *mut c_void,
                 (&mut self.ffi.output_config as *mut _) as *mut c_void,
@@ -537,7 +539,7 @@ impl Encoder {
 impl Drop for Encoder {
     fn drop(&mut self) {
         let _ = unsafe {
-            libxaac_sys::ixheaace_delete((&mut self.ffi.output_config as *mut _) as *mut c_void)
+            vuio_xaac_sys::ixheaace_delete((&mut self.ffi.output_config as *mut _) as *mut c_void)
         };
     }
 }

@@ -3,7 +3,7 @@ use std::ffi::{CStr, c_void};
 use std::mem::{align_of, size_of, zeroed};
 use std::ptr;
 
-use libxaac_sys::{
+use vuio_xaac_sys::{
     AOT_AAC_LC, DEFAULT_MEM_ALIGN_8, IA_API_CMD_GET_API_SIZE, IA_MEMTYPE_INPUT, IA_MEMTYPE_OUTPUT,
     ia_lib_info_struct, ixheaacd_dec_api, ixheaacd_get_lib_id_strings, ixheaace_delete,
     ixheaace_get_lib_id_strings, ixheaace_process, ixheaace_user_config_struct, ixheaace_version,
@@ -16,7 +16,7 @@ fn main() {
     let (mut config, pcm_input_size) = build_encoder_config();
 
     let create_status = unsafe {
-        libxaac_sys::ixheaace_create(
+        vuio_xaac_sys::ixheaace_create(
             (&mut config.input_config as *mut _) as *mut c_void,
             (&mut config.output_config as *mut _) as *mut c_void,
         )

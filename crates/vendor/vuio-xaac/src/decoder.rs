@@ -138,12 +138,12 @@ pub enum ProfileHint {
 impl ProfileHint {
     fn aot(self) -> i32 {
         match self {
-            Self::AacLc => libxaac_sys::AOT_AAC_LC as i32,
-            Self::HeAacV1 => libxaac_sys::AOT_SBR as i32,
-            Self::AacLd => libxaac_sys::AOT_AAC_LD as i32,
-            Self::HeAacV2 => libxaac_sys::AOT_PS as i32,
-            Self::AacEld => libxaac_sys::AOT_AAC_ELD as i32,
-            Self::Usac => libxaac_sys::AOT_USAC as i32,
+            Self::AacLc => vuio_xaac_sys::AOT_AAC_LC as i32,
+            Self::HeAacV1 => vuio_xaac_sys::AOT_SBR as i32,
+            Self::AacLd => vuio_xaac_sys::AOT_AAC_LD as i32,
+            Self::HeAacV2 => vuio_xaac_sys::AOT_PS as i32,
+            Self::AacEld => vuio_xaac_sys::AOT_AAC_ELD as i32,
+            Self::Usac => vuio_xaac_sys::AOT_USAC as i32,
         }
     }
 }
@@ -339,9 +339,9 @@ impl DrcDecoder {
     fn new(stream_info: &StreamInfo) -> Result<Self> {
         let mut api_size = 0u32;
         check_decoder(unsafe {
-            libxaac_sys::ia_drc_dec_api(
+            vuio_xaac_sys::ia_drc_dec_api(
                 ptr::null_mut(),
-                libxaac_sys::IA_API_CMD_GET_API_SIZE as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_API_SIZE as i32,
                 0,
                 (&mut api_size as *mut _) as *mut c_void,
             )
@@ -349,10 +349,10 @@ impl DrcDecoder {
 
         let api = AlignedBuffer::new(api_size as usize, 8)?;
         check_decoder(unsafe {
-            libxaac_sys::ia_drc_dec_api(
+            vuio_xaac_sys::ia_drc_dec_api(
                 api.as_ptr().cast::<c_void>(),
-                libxaac_sys::IA_API_CMD_INIT as i32,
-                libxaac_sys::IA_CMD_TYPE_INIT_API_PRE_CONFIG_PARAMS as i32,
+                vuio_xaac_sys::IA_API_CMD_INIT as i32,
+                vuio_xaac_sys::IA_CMD_TYPE_INIT_API_PRE_CONFIG_PARAMS as i32,
                 ptr::null_mut(),
             )
         })?;
@@ -387,25 +387,25 @@ impl DrcDecoder {
     fn allocate_memory(&mut self) -> Result<()> {
         let mut memtabs_size = 0u32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_MEMTABS_SIZE as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_MEMTABS_SIZE as i32,
             0,
             (&mut memtabs_size as *mut _) as *mut c_void,
         ))?;
         self.memtabs = AlignedBuffer::new(memtabs_size as usize, 8)?;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_MEMTABS_PTR as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_MEMTABS_PTR as i32,
             0,
             self.memtabs.as_ptr().cast::<c_void>(),
         ))?;
         check_decoder(self.call(
-            libxaac_sys::IA_API_CMD_INIT as i32,
-            libxaac_sys::IA_CMD_TYPE_INIT_API_POST_CONFIG_PARAMS as i32,
+            vuio_xaac_sys::IA_API_CMD_INIT as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_INIT_API_POST_CONFIG_PARAMS as i32,
             ptr::null_mut(),
         ))?;
 
         let mut mem_count = 0i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_N_MEMTABS as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_N_MEMTABS as i32,
             0,
             (&mut mem_count as *mut _) as *mut c_void,
         ))?;
@@ -414,18 +414,18 @@ impl DrcDecoder {
             let mut size = 0u32;
             let mut alignment = 0u32;
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_GET_MEM_INFO_SIZE as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_MEM_INFO_SIZE as i32,
                 index,
                 (&mut size as *mut _) as *mut c_void,
             ))?;
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_GET_MEM_INFO_ALIGNMENT as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_MEM_INFO_ALIGNMENT as i32,
                 index,
                 (&mut alignment as *mut _) as *mut c_void,
             ))?;
             let block = AlignedBuffer::new(size as usize, alignment.max(1) as usize)?;
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_SET_MEM_PTR as i32,
+                vuio_xaac_sys::IA_API_CMD_SET_MEM_PTR as i32,
                 index,
                 block.as_ptr().cast::<c_void>(),
             ))?;
@@ -492,7 +492,7 @@ impl DrcDecoder {
             (&mut size as *mut _) as *mut c_void,
         ))?;
         check_decoder(self.call(
-            libxaac_sys::IA_API_CMD_INIT as i32,
+            vuio_xaac_sys::IA_API_CMD_INIT as i32,
             init_cmd,
             ptr::null_mut(),
         ))
@@ -552,7 +552,7 @@ impl DrcDecoder {
             self.set_config(IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT, 1)?;
             let gain_stream_flag = 1i32;
             self.call_with_value(
-                libxaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
+                vuio_xaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
                 0,
                 (&mut (pcm.len() as i32) as *mut _) as *mut c_void,
             );
@@ -565,7 +565,7 @@ impl DrcDecoder {
             ))?;
             self.set_config(IA_DRC_DEC_CONFIG_GAIN_STREAM_FLAG, gain_stream_flag)?;
             check_decoder(self.call(
-                libxaac_sys::IA_API_CMD_INIT as i32,
+                vuio_xaac_sys::IA_API_CMD_INIT as i32,
                 IA_CMD_TYPE_INIT_CPY_BSF_BUFF,
                 ptr::null_mut(),
             ))?;
@@ -574,13 +574,13 @@ impl DrcDecoder {
 
         let mut pcm_len = pcm.len() as i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
             0,
             (&mut pcm_len as *mut _) as *mut c_void,
         ))?;
         check_decoder(self.call(
-            libxaac_sys::IA_API_CMD_EXECUTE as i32,
-            libxaac_sys::IA_CMD_TYPE_DO_EXECUTE as i32,
+            vuio_xaac_sys::IA_API_CMD_EXECUTE as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_DO_EXECUTE as i32,
             ptr::null_mut(),
         ))?;
         let out = self
@@ -595,7 +595,7 @@ impl DrcDecoder {
     fn query_mem_size(&self, index: i32) -> Result<u32> {
         let mut size = 0u32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_MEM_INFO_SIZE as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_MEM_INFO_SIZE as i32,
             index,
             (&mut size as *mut _) as *mut c_void,
         ))?;
@@ -605,14 +605,16 @@ impl DrcDecoder {
     fn set_config(&mut self, index: i32, value: i32) -> Result<()> {
         let mut value = value;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
             index,
             (&mut value as *mut _) as *mut c_void,
         ))
     }
 
     fn call(&self, cmd: i32, idx: i32, value: *mut c_void) -> i32 {
-        unsafe { libxaac_sys::ia_drc_dec_api(self.api.as_ptr().cast::<c_void>(), cmd, idx, value) }
+        unsafe {
+            vuio_xaac_sys::ia_drc_dec_api(self.api.as_ptr().cast::<c_void>(), cmd, idx, value)
+        }
     }
 
     fn call_with_value(&self, cmd: i32, idx: i32, value: *mut c_void) -> i32 {
@@ -645,9 +647,9 @@ impl Decoder {
         let version = decoder_version();
         let mut api_size = 0u32;
         check_decoder(unsafe {
-            libxaac_sys::ixheaacd_dec_api(
+            vuio_xaac_sys::ixheaacd_dec_api(
                 ptr::null_mut(),
-                libxaac_sys::IA_API_CMD_GET_API_SIZE as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_API_SIZE as i32,
                 0,
                 (&mut api_size as *mut _) as *mut c_void,
             )
@@ -655,10 +657,10 @@ impl Decoder {
 
         let api = AlignedBuffer::new(api_size as usize, 4)?;
         check_decoder(unsafe {
-            libxaac_sys::ixheaacd_dec_api(
+            vuio_xaac_sys::ixheaacd_dec_api(
                 api.as_ptr().cast::<c_void>(),
-                libxaac_sys::IA_API_CMD_INIT as i32,
-                libxaac_sys::IA_CMD_TYPE_INIT_API_PRE_CONFIG_PARAMS as i32,
+                vuio_xaac_sys::IA_API_CMD_INIT as i32,
+                vuio_xaac_sys::IA_CMD_TYPE_INIT_API_PRE_CONFIG_PARAMS as i32,
                 ptr::null_mut(),
             )
         })?;
@@ -713,7 +715,7 @@ impl Decoder {
                 }
                 InitState::Continue => {}
                 InitState::EndOfStream => {
-                    return Err(Error::DecoderError(libxaac_sys::IA_FATAL_ERROR as i32));
+                    return Err(Error::DecoderError(vuio_xaac_sys::IA_FATAL_ERROR as i32));
                 }
             }
         }
@@ -794,13 +796,13 @@ impl Decoder {
 
         let mut bytes_i32 = bytes as i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
             0,
             (&mut bytes_i32 as *mut _) as *mut c_void,
         ))?;
         let status = self.call(
-            libxaac_sys::IA_API_CMD_INIT as i32,
-            libxaac_sys::IA_CMD_TYPE_INIT_PROCESS as i32,
+            vuio_xaac_sys::IA_API_CMD_INIT as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_INIT_PROCESS as i32,
             ptr::null_mut(),
         );
         if is_fatal(status) {
@@ -812,8 +814,8 @@ impl Decoder {
 
         let mut init_done = 0i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_INIT as i32,
-            libxaac_sys::IA_CMD_TYPE_INIT_DONE_QUERY as i32,
+            vuio_xaac_sys::IA_API_CMD_INIT as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_INIT_DONE_QUERY as i32,
             (&mut init_done as *mut _) as *mut c_void,
         ))?;
 
@@ -853,13 +855,13 @@ impl Decoder {
         let bytes = self.load_input_window();
         let mut bytes_i32 = bytes as i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_INPUT_BYTES as i32,
             0,
             (&mut bytes_i32 as *mut _) as *mut c_void,
         ))?;
         let status = self.call(
-            libxaac_sys::IA_API_CMD_EXECUTE as i32,
-            libxaac_sys::IA_CMD_TYPE_DO_EXECUTE as i32,
+            vuio_xaac_sys::IA_API_CMD_EXECUTE as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_DO_EXECUTE as i32,
             ptr::null_mut(),
         );
         if is_fatal(status) {
@@ -871,14 +873,14 @@ impl Decoder {
 
         let mut done = 0i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_EXECUTE as i32,
-            libxaac_sys::IA_CMD_TYPE_DONE_QUERY as i32,
+            vuio_xaac_sys::IA_API_CMD_EXECUTE as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_DONE_QUERY as i32,
             (&mut done as *mut _) as *mut c_void,
         ))?;
 
         let mut out_bytes = 0i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_OUTPUT_BYTES as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_OUTPUT_BYTES as i32,
             0,
             (&mut out_bytes as *mut _) as *mut c_void,
         ))?;
@@ -888,8 +890,8 @@ impl Decoder {
         if !pcm.is_empty() {
             let gain_payload = if info.drc_active {
                 self.read_optional_buffer(
-                    libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_BUF as i32,
-                    libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN as i32,
+                    vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_BUF as i32,
+                    vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN as i32,
                 )?
             } else {
                 None
@@ -922,39 +924,39 @@ impl Decoder {
 
     fn apply_config(&mut self) -> Result<()> {
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_PCM_WDSZ as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_PCM_WDSZ as i32,
             self.config.pcm_word_size as i32,
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DOWNMIX as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DOWNMIX as i32,
             i32::from(self.config.downmix_to_mono),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_TOSTEREO as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_TOSTEREO as i32,
             i32::from(self.config.to_stereo),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DSAMPLE as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DSAMPLE as i32,
             i32::from(self.config.downsample_sbr),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_ISMP4 as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_ISMP4 as i32,
             i32::from(matches!(self.config.transport, DecoderTransport::Mp4Raw)),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_MAX_CHANNEL as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_MAX_CHANNEL as i32,
             i32::from(self.config.max_channels),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_COUP_CHANNEL as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_COUP_CHANNEL as i32,
             i32::from(self.config.coupling_channels),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DOWNMIX_STEREO as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DOWNMIX_STEREO as i32,
             i32::from(self.config.downmix_to_stereo),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_DISABLE_SYNC as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_DISABLE_SYNC as i32,
             i32::from(
                 self.config.disable_sync
                     || matches!(
@@ -964,32 +966,32 @@ impl Decoder {
             ),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_AUTO_SBR_UPSAMPLE as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_AUTO_SBR_UPSAMPLE as i32,
             i32::from(self.config.auto_sbr_upsample),
         )?;
         self.set_config_f32(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_CUT as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_CUT as i32,
             self.config.drc.cut,
         )?;
         self.set_config_f32(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_BOOST as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_BOOST as i32,
             self.config.drc.boost,
         )?;
         self.set_config(
-            libxaac_sys::IA_XHEAAC_DEC_CONFIG_PARAM_DRC_TARGET_LEVEL as i32,
+            vuio_xaac_sys::IA_XHEAAC_DEC_CONFIG_PARAM_DRC_TARGET_LEVEL as i32,
             i32::from(self.config.drc.target_level),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_HEAVY_COMP as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_HEAVY_COMP as i32,
             i32::from(self.config.drc.heavy_compression),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_EFFECT_TYPE as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_EFFECT_TYPE as i32,
             self.config.drc.effect_type.raw(),
         )?;
         if let Some(target_loudness) = self.config.drc.target_loudness {
             self.set_config(
-                libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_TARGET_LOUDNESS as i32,
+                vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_TARGET_LOUDNESS as i32,
                 target_loudness,
             )?;
         }
@@ -1000,41 +1002,41 @@ impl Decoder {
             );
         }
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_FRAMESIZE as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_FRAMESIZE as i32,
             i32::from(self.config.ld_frame_480),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_HQ_ESBR as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_HQ_ESBR as i32,
             i32::from(self.config.hq_esbr),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_PS_ENABLE as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_PS_ENABLE as i32,
             i32::from(self.config.ps_enable),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_PEAK_LIMITER as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_PEAK_LIMITER as i32,
             i32::from(!self.config.peak_limiter),
         )?;
         self.set_config(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_FRAMELENGTH_FLAG as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_FRAMELENGTH_FLAG as i32,
             i32::from(self.config.frame_length_960),
         )?;
         self.set_config(
-            libxaac_sys::IA_XHEAAC_DEC_CONFIG_ERROR_CONCEALMENT as i32,
+            vuio_xaac_sys::IA_XHEAAC_DEC_CONFIG_ERROR_CONCEALMENT as i32,
             i32::from(self.config.error_concealment),
         )?;
         self.set_config(
-            libxaac_sys::IA_XHEAAC_DEC_CONFIG_PARAM_ESBR as i32,
+            vuio_xaac_sys::IA_XHEAAC_DEC_CONFIG_PARAM_ESBR as i32,
             i32::from(self.config.enable_esbr),
         )?;
 
         if let Some(raw) = self.config.raw {
             self.set_config(
-                libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_SAMP_FREQ as i32,
+                vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_SAMP_FREQ as i32,
                 raw.sample_rate as i32,
             )?;
             self.set_config(
-                libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_AOT as i32,
+                vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_AOT as i32,
                 raw.audio_object_type.aot(),
             )?;
         }
@@ -1044,26 +1046,26 @@ impl Decoder {
     fn allocate_memory(&mut self) -> Result<()> {
         let mut memtabs_size = 0u32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_MEMTABS_SIZE as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_MEMTABS_SIZE as i32,
             0,
             (&mut memtabs_size as *mut _) as *mut c_void,
         ))?;
         self.memtabs = AlignedBuffer::new(memtabs_size as usize, 4)?;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_MEMTABS_PTR as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_MEMTABS_PTR as i32,
             0,
             self.memtabs.as_ptr().cast::<c_void>(),
         ))?;
 
         check_decoder(self.call(
-            libxaac_sys::IA_API_CMD_INIT as i32,
-            libxaac_sys::IA_CMD_TYPE_INIT_API_POST_CONFIG_PARAMS as i32,
+            vuio_xaac_sys::IA_API_CMD_INIT as i32,
+            vuio_xaac_sys::IA_CMD_TYPE_INIT_API_POST_CONFIG_PARAMS as i32,
             ptr::null_mut(),
         ))?;
 
         let mut mem_count = 0i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_N_MEMTABS as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_N_MEMTABS as i32,
             0,
             (&mut mem_count as *mut _) as *mut c_void,
         ))?;
@@ -1074,17 +1076,17 @@ impl Decoder {
             let mut mem_type = 0u32;
 
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_GET_MEM_INFO_SIZE as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_MEM_INFO_SIZE as i32,
                 index,
                 (&mut size as *mut _) as *mut c_void,
             ))?;
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_GET_MEM_INFO_ALIGNMENT as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_MEM_INFO_ALIGNMENT as i32,
                 index,
                 (&mut alignment as *mut _) as *mut c_void,
             ))?;
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_GET_MEM_INFO_TYPE as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_MEM_INFO_TYPE as i32,
                 index,
                 (&mut mem_type as *mut _) as *mut c_void,
             ))?;
@@ -1092,15 +1094,15 @@ impl Decoder {
             let block = AlignedBuffer::new(size as usize, alignment.max(1) as usize)?;
             let ptr = block.as_ptr().cast::<c_void>();
             check_decoder(self.call_with_value(
-                libxaac_sys::IA_API_CMD_SET_MEM_PTR as i32,
+                vuio_xaac_sys::IA_API_CMD_SET_MEM_PTR as i32,
                 index,
                 ptr,
             ))?;
 
-            if mem_type == libxaac_sys::IA_MEMTYPE_INPUT {
+            if mem_type == vuio_xaac_sys::IA_MEMTYPE_INPUT {
                 self.input_index = self.memblocks.len();
                 self.input_capacity = size as usize;
-            } else if mem_type == libxaac_sys::IA_MEMTYPE_OUTPUT {
+            } else if mem_type == vuio_xaac_sys::IA_MEMTYPE_OUTPUT {
                 self.output_index = self.memblocks.len();
             }
 
@@ -1136,13 +1138,13 @@ impl Decoder {
             let interface_present = 1i32;
             drc.set_config(IA_DRC_DEC_CONFIG_PARAM_INT_PRESENT, interface_present)?;
             check_decoder(drc.call(
-                libxaac_sys::IA_API_CMD_INIT as i32,
+                vuio_xaac_sys::IA_API_CMD_INIT as i32,
                 IA_CMD_TYPE_INIT_CPY_IN_BSF_BUFF,
                 ptr::null_mut(),
             ))?;
             check_decoder(drc.call(
-                libxaac_sys::IA_API_CMD_INIT as i32,
-                libxaac_sys::IA_CMD_TYPE_INIT_PROCESS as i32,
+                vuio_xaac_sys::IA_API_CMD_INIT as i32,
+                vuio_xaac_sys::IA_CMD_TYPE_INIT_PROCESS as i32,
                 ptr::null_mut(),
             ))?;
         }
@@ -1154,16 +1156,18 @@ impl Decoder {
     }
 
     fn refresh_stream_info(&mut self) -> Result<StreamInfo> {
-        let sample_rate =
-            self.get_config_required(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_SAMP_FREQ as i32)?;
-        let channels = self
-            .get_config_required(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_NUM_CHANNELS as i32)?;
-        let channel_mask = self
-            .get_config_required(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_CHANNEL_MASK as i32)?;
-        let sbr_mode =
-            self.get_config_required(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_SBR_MODE as i32)?;
+        let sample_rate = self
+            .get_config_required(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_SAMP_FREQ as i32)?;
+        let channels = self.get_config_required(
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_NUM_CHANNELS as i32,
+        )?;
+        let channel_mask = self.get_config_required(
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_CHANNEL_MASK as i32,
+        )?;
+        let sbr_mode = self
+            .get_config_required(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_SBR_MODE as i32)?;
         let aot =
-            self.get_config_required(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_AOT as i32)?;
+            self.get_config_required(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_AOT as i32)?;
 
         let info = StreamInfo {
             sample_rate: sample_rate.max(0) as u32,
@@ -1171,7 +1175,7 @@ impl Decoder {
             channel_mask: channel_mask.max(0) as u32,
             channel_mode: self
                 .get_config_optional(
-                    libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_CHANNEL_MODE as i32,
+                    vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_CHANNEL_MODE as i32,
                 )?
                 .map(ChannelMode::from),
             pcm_word_size: self.config.pcm_word_size,
@@ -1179,37 +1183,39 @@ impl Decoder {
             audio_object_type: aot,
             drc_effect_type: self
                 .get_config_optional(
-                    libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_EFFECT_TYPE as i32,
+                    vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_EFFECT_TYPE as i32,
                 )?
                 .map(DrcEffectType::from_raw),
             drc_target_loudness: self.get_config_optional(
-                libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_TARGET_LOUDNESS as i32,
+                vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_TARGET_LOUDNESS as i32,
             )?,
             drc_loudness_norm: self.get_config_optional(
-                libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_LOUD_NORM as i32,
+                vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_PARAM_DRC_LOUD_NORM as i32,
             )?,
             loudness_leveling: self
                 .get_config_optional(IA_XHEAAC_DEC_CONFIG_PARAM_DRC_LOUDNESS_LEVELING)?
                 .map(|value| value != 0),
             preroll_frames: self
                 .get_config_optional(
-                    libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GET_NUM_PRE_ROLL_FRAMES as i32,
+                    vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GET_NUM_PRE_ROLL_FRAMES as i32,
                 )?
                 .map(|value| value.max(0) as u32),
             drc_config_changed: self
-                .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_DRC_IS_CONFIG_CHANGED as i32)?
+                .get_config_optional(vuio_xaac_sys::IA_ENHAACPLUS_DEC_DRC_IS_CONFIG_CHANGED as i32)?
                 .map(|value| value != 0),
             drc_apply_crossfade: self
-                .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_DRC_APPLY_CROSSFADE as i32)?
+                .get_config_optional(vuio_xaac_sys::IA_ENHAACPLUS_DEC_DRC_APPLY_CROSSFADE as i32)?
                 .map(|value| value != 0),
             extension_elements: self
-                .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_ELE as i32)?
+                .get_config_optional(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_ELE as i32)?
                 .map(|value| value.max(0) as u32),
             config_extensions: self
-                .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_CONFIG_EXT as i32)?
+                .get_config_optional(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_CONFIG_EXT as i32)?
                 .map(|value| value.max(0) as u32),
             gain_payload_len: self
-                .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN as i32)?
+                .get_config_optional(
+                    vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN as i32,
+                )?
                 .map(|value| value.max(0) as u32),
             drc_active: self.drc_decoder.is_some(),
         };
@@ -1219,11 +1225,11 @@ impl Decoder {
 
     fn read_extension_payloads(&self) -> Result<Option<ExtensionPayloads>> {
         let num_elements = self
-            .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_ELE as i32)?
+            .get_config_optional(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_ELE as i32)?
             .unwrap_or_default()
             .max(0) as usize;
         let num_config_ext = self
-            .get_config_optional(libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_CONFIG_EXT as i32)?
+            .get_config_optional(vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_NUM_CONFIG_EXT as i32)?
             .unwrap_or_default()
             .max(0) as usize;
         if num_elements == 0 && num_config_ext == 0 {
@@ -1232,12 +1238,12 @@ impl Decoder {
 
         let mut sizes = [[0i32; 16]; 2];
         check_decoder(self.get_config_raw(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_EXT_ELE_BUF_SIZES as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_EXT_ELE_BUF_SIZES as i32,
             sizes.as_mut_ptr().cast::<c_void>(),
         ))?;
         let mut ptrs = [[ptr::null_mut::<u8>(); 16]; 2];
         check_decoder(self.get_config_raw(
-            libxaac_sys::IA_ENHAACPLUS_DEC_CONFIG_EXT_ELE_PTR as i32,
+            vuio_xaac_sys::IA_ENHAACPLUS_DEC_CONFIG_EXT_ELE_PTR as i32,
             ptrs.as_mut_ptr().cast::<c_void>(),
         ))?;
 
@@ -1309,7 +1315,7 @@ impl Decoder {
 
     fn consume_pending(&mut self, consumed: usize) -> Result<()> {
         if consumed > self.pending_input.len() {
-            return Err(Error::DecoderError(libxaac_sys::IA_FATAL_ERROR as i32));
+            return Err(Error::DecoderError(vuio_xaac_sys::IA_FATAL_ERROR as i32));
         }
         self.pending_input.drain(..consumed);
         Ok(())
@@ -1320,7 +1326,7 @@ impl Decoder {
             return Ok(());
         }
         check_decoder(self.call(
-            libxaac_sys::IA_API_CMD_INPUT_OVER as i32,
+            vuio_xaac_sys::IA_API_CMD_INPUT_OVER as i32,
             0,
             ptr::null_mut(),
         ))?;
@@ -1331,7 +1337,7 @@ impl Decoder {
     fn query_consumed(&self) -> Result<i32> {
         let mut consumed = 0i32;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_GET_CURIDX_INPUT_BUF as i32,
+            vuio_xaac_sys::IA_API_CMD_GET_CURIDX_INPUT_BUF as i32,
             0,
             (&mut consumed as *mut _) as *mut c_void,
         ))?;
@@ -1341,7 +1347,7 @@ impl Decoder {
     fn set_config(&mut self, index: i32, value: i32) -> Result<()> {
         let mut value = value;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
             index,
             (&mut value as *mut _) as *mut c_void,
         ))
@@ -1350,11 +1356,11 @@ impl Decoder {
     fn set_config_optional(&mut self, index: i32, value: i32) -> Result<()> {
         let mut value = value;
         let status = self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
             index,
             (&mut value as *mut _) as *mut c_void,
         );
-        if status == libxaac_sys::IA_NO_ERROR as i32 || !is_fatal(status) {
+        if status == vuio_xaac_sys::IA_NO_ERROR as i32 || !is_fatal(status) {
             Ok(())
         } else {
             Err(Error::DecoderError(status))
@@ -1364,7 +1370,7 @@ impl Decoder {
     fn set_config_f32(&mut self, index: i32, value: f32) -> Result<()> {
         let mut value = value;
         check_decoder(self.call_with_value(
-            libxaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
+            vuio_xaac_sys::IA_API_CMD_SET_CONFIG_PARAM as i32,
             index,
             (&mut value as *mut _) as *mut c_void,
         ))
@@ -1372,13 +1378,13 @@ impl Decoder {
 
     fn get_config_required(&self, index: i32) -> Result<i32> {
         self.get_config_optional(index)?
-            .ok_or(Error::DecoderError(libxaac_sys::IA_FATAL_ERROR as i32))
+            .ok_or(Error::DecoderError(vuio_xaac_sys::IA_FATAL_ERROR as i32))
     }
 
     fn get_config_optional(&self, index: i32) -> Result<Option<i32>> {
         let mut value = 0i32;
         let status = self.get_config(index, &mut value);
-        if status == libxaac_sys::IA_NO_ERROR as i32 {
+        if status == vuio_xaac_sys::IA_NO_ERROR as i32 {
             Ok(Some(value))
         } else if is_fatal(status) {
             Err(Error::DecoderError(status))
@@ -1389,9 +1395,9 @@ impl Decoder {
 
     fn get_config_raw(&self, index: i32, value: *mut c_void) -> i32 {
         unsafe {
-            libxaac_sys::ixheaacd_dec_api(
+            vuio_xaac_sys::ixheaacd_dec_api(
                 self.api.as_ptr().cast::<c_void>(),
-                libxaac_sys::IA_API_CMD_GET_CONFIG_PARAM as i32,
+                vuio_xaac_sys::IA_API_CMD_GET_CONFIG_PARAM as i32,
                 index,
                 value,
             )
@@ -1404,7 +1410,7 @@ impl Decoder {
 
     fn call(&self, cmd: i32, idx: i32, value: *mut c_void) -> i32 {
         unsafe {
-            libxaac_sys::ixheaacd_dec_api(self.api.as_ptr().cast::<c_void>(), cmd, idx, value)
+            vuio_xaac_sys::ixheaacd_dec_api(self.api.as_ptr().cast::<c_void>(), cmd, idx, value)
         }
     }
 
@@ -1461,5 +1467,5 @@ impl DrcEffectType {
 }
 
 fn is_fatal(status: i32) -> bool {
-    (status as u32 & libxaac_sys::IA_FATAL_ERROR) != 0
+    (status as u32 & vuio_xaac_sys::IA_FATAL_ERROR) != 0
 }

@@ -130,7 +130,7 @@ transcode-dts = ["transcode", "dep:oxideav-dts"]
 # The AAC-LC encoder, for `[transcode] audio_format = "aac"`. LPCM is the
 # default output and needs no encoder, so this is separable — but it is also
 # what the HLS audio path will re-encode into, so it ships on.
-transcode-aac = ["transcode", "dep:xaac-rs"]
+transcode-aac = ["transcode", "dep:vuio-xaac"]
 unstable-internals = []
 
 [dependencies]
@@ -193,7 +193,7 @@ hex = { version = "0.4", optional = true }
 oxideav-core = { package = "vuio-codec-core", version = "0.0.1", path = "../vuio-codec-core", optional = true }
 vuio-codec-ac3 = { version = "0.0.1", path = "../vuio-codec-ac3", optional = true }
 oxideav-dts = { package = "vuio-codec-dts", version = "0.0.1", path = "../vuio-codec-dts", optional = true }
-xaac-rs = { version = "0.2", path = "../vendor/xaac-rs", optional = true }
+vuio-xaac = { version = "0.3", path = "../vendor/vuio-xaac", optional = true }
 # `functions` registers the `nfc()` scalar the normalization migration uses.
 rusqlite = { version = "0.40.2", features = ["bundled", "collation", "functions"] }
 # Only the `mediainfo` feature uses this, and only to talk to public metadata APIs

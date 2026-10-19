@@ -2,7 +2,7 @@
 //! - AC-3 Decoder (vuio-codec-ac3)
 //! - E-AC-3 Decoder (vuio-codec-ac3)
 //! - DTS Decoder (oxideav-dts)
-//! - AAC Encoder (xaac-rs vs Apple Native vs oxideav-aac)
+//! - AAC Encoder (vuio-xaac vs Apple Native vs oxideav-aac)
 
 use std::time::{Duration, Instant};
 use vuio_core::media::transcode::{PcmDecoder, TranscodeCodec};
@@ -390,7 +390,7 @@ fn bench_xaac(
     channels: u16,
 ) -> Result<(Duration, usize), String> {
     let start = Instant::now();
-    use xaac_rs::{Encoder, EncoderConfig, OutputFormat, Profile};
+    use vuio_xaac::{Encoder, EncoderConfig, OutputFormat, Profile};
 
     let config = EncoderConfig {
         profile: Profile::AacLc,
@@ -497,7 +497,7 @@ fn main() {
     }
 
     {
-        print!("Benchmarking xaac-rs (libxaac)... ");
+        print!("Benchmarking vuio-xaac (libxaac)... ");
         match bench_xaac(&pcm_bytes, sample_rate, channels) {
             Ok((dur, out_bytes)) => {
                 let speed = duration_secs / dur.as_secs_f64();

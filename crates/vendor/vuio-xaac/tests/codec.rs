@@ -1,4 +1,4 @@
-use xaac_rs::{DecodeStatus, Decoder, DecoderConfig, Encoder, EncoderConfig, OutputFormat};
+use vuio_xaac::{DecodeStatus, Decoder, DecoderConfig, Encoder, EncoderConfig, OutputFormat};
 
 #[test]
 fn decoder_initializes_with_default_config() {

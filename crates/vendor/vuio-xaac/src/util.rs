@@ -66,7 +66,7 @@ impl Drop for AlignedBuffer {
 
 unsafe extern "C" fn xaac_alloc(size: u32, alignment: u32) -> *mut std::ffi::c_void {
     let requested_align = alignment
-        .max(libxaac_sys::DEFAULT_MEM_ALIGN_8)
+        .max(vuio_xaac_sys::DEFAULT_MEM_ALIGN_8)
         .next_power_of_two() as usize;
     let header_words = 2 * std::mem::size_of::<usize>();
     let total_size = size as usize + requested_align + header_words;

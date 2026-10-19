@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 
 /// One AAC-LC encoder bound to a stream's shape.
 pub struct AacEncoder {
-    inner: xaac_rs::Encoder,
+    inner: vuio_xaac::Encoder,
     frame_bytes: usize,
     buffer: Vec<u8>,
     channels: u16,
@@ -49,16 +49,16 @@ impl AacEncoder {
 
         let bitrate = Self::bitrate_for(channels);
 
-        let config = xaac_rs::EncoderConfig {
-            profile: xaac_rs::Profile::AacLc,
+        let config = vuio_xaac::EncoderConfig {
+            profile: vuio_xaac::Profile::AacLc,
             sample_rate,
             channels,
             bitrate,
-            output_format: xaac_rs::OutputFormat::Adts,
+            output_format: vuio_xaac::OutputFormat::Adts,
             ..Default::default()
         };
 
-        let inner = xaac_rs::Encoder::new(config)
+        let inner = vuio_xaac::Encoder::new(config)
             .map_err(|e| anyhow::anyhow!("AAC encoder: {e:?}"))
             .context("configuring the AAC encoder")?;
         let frame_bytes = inner.input_frame_bytes();

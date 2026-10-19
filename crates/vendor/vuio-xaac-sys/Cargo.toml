@@ -1,0 +1,72 @@
+# VuIO fork of upstream libxaac-sys (Yehor Smoliakov), kept in `vendor/` so the
+# AAC transcode path owns its build fixes (MSVC, cross-compilation, cmake arch
+# normalization). Apache-2.0 like upstream and like libxaac itself.
+
+[package]
+edition = "2024"
+rust-version = "1.85"
+name = "vuio-xaac-sys"
+version = "0.2.0"
+authors = ["vyrti", "Yehor Smoliakov <egorsmkv@gmail.com>"]
+build = "build.rs"
+links = "xaac"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE-APACHE",
+    "build.rs",
+    "wrapper.h",
+    "examples/**",
+    "src/**",
+    # The cmake build consumes cmake/, common/, decoder/ and encoder/ only;
+    # test/, fuzzer/ and docs/ are gated behind BUILD_TESTS=OFF and left out.
+    "libxaac/CMakeLists.txt",
+    "libxaac/cmake/**",
+    "libxaac/common/**",
+    "libxaac/decoder/**",
+    "libxaac/encoder/**",
+    "libxaac/LICENSE",
+    "libxaac/NOTICE",
+]
+autolib = false
+autobins = false
+autoexamples = false
+autotests = false
+autobenches = false
+description = "Rust FFI bindings to the bundled libxaac xHE-AAC encoder and decoder. Fork of the upstream xaac-sys with MSVC support and cross-compile fixes in the bundled cmake build."
+repository = "https://github.com/vuiodev/vuio"
+readme = "README.md"
+keywords = [
+    "aac",
+    "xhe-aac",
+    "ffi",
+    "bindings",
+    "audio",
+]
+categories = [
+    "external-ffi-bindings",
+    "multimedia::audio",
+]
+license = "Apache-2.0"
+
+[features]
+bundled = []
+default = [
+    "bundled",
+    "static",
+]
+dynamic = []
+static = []
+
+[lib]
+name = "vuio_xaac_sys"
+path = "src/lib.rs"
+
+[[example]]
+name = "sample"
+path = "examples/sample.rs"
+
+[dependencies]
+
+[build-dependencies]
+cc = "1.4"

@@ -1465,13 +1465,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "libxaac-sys"
-version = "0.1.0"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "linux-raw-sys"
 version = "0.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3299,7 +3292,7 @@ dependencies = [
  "vuio-codec-core",
  "vuio-codec-dts",
  "vuio-core",
- "xaac-rs",
+ "vuio-xaac",
 ]
 
 [[package]]
@@ -3427,8 +3420,8 @@ dependencies = [
  "vuio-codec-dts",
  "vuio-core",
  "vuio-web",
+ "vuio-xaac",
  "windows",
- "xaac-rs",
 ]
 
 [[package]]
@@ -3436,6 +3429,21 @@ name = "vuio-web"
 version = "0.0.50"
 dependencies = [
  "axum",
+]
+
+[[package]]
+name = "vuio-xaac"
+version = "0.3.0"
+dependencies = [
+ "pyo3",
+ "vuio-xaac-sys",
+]
+
+[[package]]
+name = "vuio-xaac-sys"
+version = "0.2.0"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -3859,14 +3867,6 @@ dependencies = [
  "rand_core",
  "serde",
  "zeroize",
-]
-
-[[package]]
-name = "xaac-rs"
-version = "0.2.0"
-dependencies = [
- "libxaac-sys",
- "pyo3",
 ]
 
 [[package]]

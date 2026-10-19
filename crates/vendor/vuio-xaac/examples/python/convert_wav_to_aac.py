@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import xaac_rs
+import vuio_xaac
 
 from _wav import WavFile
 
@@ -26,17 +26,17 @@ def main(argv: list[str]) -> int:
 
     wav = WavFile.parse(input_path.read_bytes())
 
-    config = xaac_rs.EncoderConfig()
-    config.profile = xaac_rs.Profile.AacLc
+    config = vuio_xaac.EncoderConfig()
+    config.profile = vuio_xaac.Profile.AacLc
     config.sample_rate = wav.sample_rate
     config.native_sample_rate = wav.sample_rate
     config.channels = wav.channels
     config.channel_mask = wav.channel_mask or 0
     config.bitrate = bitrate
     config.pcm_word_size = wav.bits_per_sample
-    config.output_format = xaac_rs.OutputFormat.Adts
+    config.output_format = vuio_xaac.OutputFormat.Adts
 
-    encoder = xaac_rs.Encoder(config)
+    encoder = vuio_xaac.Encoder(config)
     frame_bytes = encoder.input_frame_bytes()
 
     with output_path.open("wb") as output_file:

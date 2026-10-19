@@ -23,9 +23,9 @@ use crate::encoder::{
 use crate::error::Error;
 use crate::util::VersionInfo as RustVersionInfo;
 
-create_exception!(xaac_rs, XaacError, PyException);
+create_exception!(vuio_xaac, XaacError, PyException);
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Profile {
     AacLc,
@@ -36,14 +36,14 @@ pub enum Profile {
     Usac,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Raw,
     Adts,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InverseQuantizationMode {
     Off,
@@ -51,7 +51,7 @@ pub enum InverseQuantizationMode {
     High,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsacCodecMode {
     Switched,
@@ -59,7 +59,7 @@ pub enum UsacCodecMode {
     TimeDomain,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsacFrameLengthIndex {
     NoSbr768,
@@ -69,7 +69,7 @@ pub enum UsacFrameLengthIndex {
     Esbr4_1_1024,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DecoderTransport {
     Auto,
@@ -77,7 +77,7 @@ pub enum DecoderTransport {
     Mp4Raw,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrcEffectType {
     None,
@@ -94,7 +94,7 @@ pub enum DrcEffectType {
     StereoDownmix,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SbrMode {
     Unknown,
@@ -104,7 +104,7 @@ pub enum SbrMode {
     Esbr,
 }
 
-#[pyclass(module = "xaac_rs", eq, eq_int)]
+#[pyclass(module = "vuio_xaac", eq, eq_int)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProfileHint {
     AacLc,
@@ -115,7 +115,7 @@ pub enum ProfileHint {
     Usac,
 }
 
-#[pyclass(module = "xaac_rs")]
+#[pyclass(module = "vuio_xaac")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelMode {
     #[pyo3(get)]
@@ -134,7 +134,7 @@ impl ChannelMode {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionInfo {
     pub name: String,
@@ -152,7 +152,7 @@ impl VersionInfo {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncoderDrcConfig {
     pub use_drc_element: bool,
@@ -172,7 +172,7 @@ impl EncoderDrcConfig {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone)]
 pub struct EncoderConfig {
     pub profile: Profile,
@@ -223,7 +223,7 @@ impl EncoderConfig {
     }
 }
 
-#[pyclass(module = "xaac_rs")]
+#[pyclass(module = "vuio_xaac")]
 #[derive(Debug, Clone)]
 pub struct EncodedPacket {
     data: Vec<u8>,
@@ -247,7 +247,7 @@ impl EncodedPacket {
     }
 }
 
-#[pyclass(module = "xaac_rs")]
+#[pyclass(module = "vuio_xaac")]
 #[derive(Debug, Clone)]
 pub struct EncodedFrame {
     #[pyo3(get)]
@@ -267,7 +267,7 @@ impl EncodedFrame {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct DecoderDrcConfig {
     pub enabled: bool,
@@ -288,7 +288,7 @@ impl DecoderDrcConfig {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawStreamConfig {
     pub sample_rate: u32,
@@ -306,7 +306,7 @@ impl RawStreamConfig {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone)]
 pub struct DecoderConfig {
     pub transport: DecoderTransport,
@@ -338,7 +338,7 @@ impl DecoderConfig {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamInfo {
     pub sample_rate: u32,
@@ -388,7 +388,7 @@ impl StreamInfo {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodeProgress {
     pub initialized: bool,
@@ -406,7 +406,7 @@ impl DecodeProgress {
     }
 }
 
-#[pyclass(module = "xaac_rs")]
+#[pyclass(module = "vuio_xaac")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedFrame {
     pcm: Vec<u8>,
@@ -451,7 +451,7 @@ impl DecodedFrame {
     }
 }
 
-#[pyclass(module = "xaac_rs", get_all, set_all)]
+#[pyclass(module = "vuio_xaac", get_all, set_all)]
 #[derive(Debug, Clone)]
 pub struct DecodeStatus {
     pub kind: String,
@@ -486,7 +486,7 @@ impl DecodeStatus {
     }
 }
 
-#[pyclass(module = "xaac_rs", unsendable)]
+#[pyclass(module = "vuio_xaac", unsendable)]
 pub struct Encoder {
     inner: RefCell<RustEncoder>,
 }
@@ -577,7 +577,7 @@ impl Encoder {
     }
 }
 
-#[pyclass(module = "xaac_rs", unsendable)]
+#[pyclass(module = "vuio_xaac", unsendable)]
 pub struct Decoder {
     inner: RefCell<RustDecoder>,
 }
@@ -1226,7 +1226,7 @@ impl From<RustVersionInfo> for VersionInfo {
 }
 
 #[pymodule]
-fn xaac_rs(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn vuio_xaac(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("XaacError", _py.get_type::<XaacError>())?;
 
     m.add_class::<Profile>()?;

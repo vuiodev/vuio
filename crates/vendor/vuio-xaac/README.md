@@ -1,14 +1,19 @@
-# xaac-rs
+# vuio-xaac
 
-[![Crates.io Version](https://img.shields.io/crates/v/xaac-rs)](https://crates.io/crates/xaac-rs)
+[![Crates.io Version](https://img.shields.io/crates/v/vuio-xaac)](https://crates.io/crates/vuio-xaac)
+
+A fork of upstream [`xaac-rs`](https://crates.io/crates/xaac-rs) by Yehor
+Smoliakov, maintained inside the VuIO tree (`vendor/`) so VuIO's AAC transcode
+path owns its fixes: a bit-reservoir default fix in the encoder, and a portable
+FFI pointer type. Apache-2.0 like upstream.
 
 High-level Rust bindings for AAC and xHE-AAC encoding and decoding built on top
-of `libxaac-sys`.
+of `vuio-xaac-sys`.
 
 An optional `python` feature also exposes the full high-level API as a PyO3
-extension module importable as `xaac_rs`.
+extension module importable as `vuio_xaac`.
 
-This crate wraps the low-level FFI API exposed by the `libxaac-sys`
+This crate wraps the low-level FFI API exposed by the `vuio-xaac-sys`
 crate and provides a safer, more idiomatic Rust interface for:
 
 - AAC-LC encoding
@@ -24,7 +29,7 @@ crate and provides a safer, more idiomatic Rust interface for:
 Basic AAC-LC ADTS encoding:
 
 ```rust
-use xaac_rs::{Encoder, EncoderConfig, OutputFormat};
+use vuio_xaac::{Encoder, EncoderConfig, OutputFormat};
 
 let mut encoder = Encoder::new(EncoderConfig {
     output_format: OutputFormat::Adts,
@@ -35,13 +40,13 @@ let pcm = vec![0i16; encoder.input_frame_bytes() / 2];
 let packet = encoder.encode_i16_interleaved(&pcm)?;
 
 assert!(!packet.data.is_empty());
-# Ok::<(), xaac_rs::Error>(())
+# Ok::<(), vuio_xaac::Error>(())
 ```
 
 Chunked AAC decoding:
 
 ```rust
-use xaac_rs::{DecodeStatus, Decoder, DecoderConfig};
+use vuio_xaac::{DecodeStatus, Decoder, DecoderConfig};
 
 let mut decoder = Decoder::new(DecoderConfig::default())?;
 let data: &[u8] = &[];
@@ -54,7 +59,7 @@ match decoder.decode_stream_chunk(data)? {
     }
     DecodeStatus::EndOfStream => {}
 }
-# Ok::<(), xaac_rs::Error>(())
+# Ok::<(), vuio_xaac::Error>(())
 ```
 
 ## WAV Conversion Example
@@ -116,22 +121,22 @@ Build and install the Python module locally with maturin:
 python3 -m venv .venv
 .venv/bin/pip install maturin
 VIRTUAL_ENV="$PWD/.venv" .venv/bin/maturin build --features python -i .venv/bin/python
-.venv/bin/pip install target/wheels/xaac_rs-*.whl
+.venv/bin/pip install target/wheels/vuio_xaac-*.whl
 ```
 
 Example:
 
 ```python
-import xaac_rs
+import vuio_xaac
 
-config = xaac_rs.EncoderConfig()
-config.output_format = xaac_rs.OutputFormat.Adts
-encoder = xaac_rs.Encoder(config)
+config = vuio_xaac.EncoderConfig()
+config.output_format = vuio_xaac.OutputFormat.Adts
+encoder = vuio_xaac.Encoder(config)
 
 pcm = [0] * (encoder.input_frame_bytes() // 2)
 packet = encoder.encode_i16_interleaved(pcm)
 
-decoder = xaac_rs.Decoder()
+decoder = vuio_xaac.Decoder()
 status = decoder.decode_stream_chunk(packet.data)
 ```
 

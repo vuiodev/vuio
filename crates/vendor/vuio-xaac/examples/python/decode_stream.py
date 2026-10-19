@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import xaac_rs
+import vuio_xaac
 
 
 def usage() -> str:
@@ -16,7 +16,7 @@ def main(argv: list[str]) -> int:
         raise ValueError(usage())
 
     data = Path(argv[1]).read_bytes()
-    decoder = xaac_rs.Decoder()
+    decoder = vuio_xaac.Decoder()
     frame_count = 0
     pcm_bytes = 0
     offset = 0

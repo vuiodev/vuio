@@ -4,7 +4,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import xaac_rs
+import vuio_xaac
 
 
 def usage() -> str:
@@ -16,7 +16,7 @@ def optional_value(value: object | None) -> str:
 
 
 def estimate_adts_bitrate(
-    data: bytes, sample_rate: int, sbr_mode: xaac_rs.SbrMode
+    data: bytes, sample_rate: int, sbr_mode: vuio_xaac.SbrMode
 ) -> int | None:
     if sample_rate == 0:
         return None
@@ -44,9 +44,9 @@ def estimate_adts_bitrate(
     if frames == 0 or offset != len(data):
         return None
 
-    if sbr_mode == xaac_rs.SbrMode.Enabled:
+    if sbr_mode == vuio_xaac.SbrMode.Enabled:
         samples_per_frame = 2048
-    elif sbr_mode == xaac_rs.SbrMode.Esbr:
+    elif sbr_mode == vuio_xaac.SbrMode.Esbr:
         samples_per_frame = 4096
     else:
         samples_per_frame = 1024
@@ -62,7 +62,7 @@ def main(argv: list[str]) -> int:
     input_path = Path(argv[1])
     data = input_path.read_bytes()
 
-    decoder = xaac_rs.Decoder()
+    decoder = vuio_xaac.Decoder()
     version = decoder.version()
 
     print(f"file: {input_path}")

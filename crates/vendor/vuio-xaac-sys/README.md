@@ -1,4 +1,9 @@
-# libxaac-sys
+# vuio-xaac-sys
+
+A fork of upstream [`libxaac-sys`](https://crates.io/crates/libxaac-sys) by
+Yehor Smoliakov, maintained inside the VuIO tree (`vendor/`). The bundled
+`libxaac` cmake build gained Windows/MSVC handling, cc-based cross-compiler
+selection, and arch normalization. Apache-2.0 like upstream and libxaac itself.
 
 Rust FFI bindings for the vendored `libxaac` C library.
 
@@ -25,28 +30,28 @@ Default:
 
 ```toml
 [dependencies]
-libxaac-sys = "0.1"
+vuio-xaac-sys = "0.1"
 ```
 
 Bundled static build:
 
 ```toml
 [dependencies]
-libxaac-sys = { version = "0.1", features = ["bundled", "static"] }
+vuio-xaac-sys = { version = "0.1", features = ["bundled", "static"] }
 ```
 
 System dynamic linking:
 
 ```toml
 [dependencies]
-libxaac-sys = { version = "0.1", default-features = false, features = ["dynamic"] }
+vuio-xaac-sys = { version = "0.1", default-features = false, features = ["dynamic"] }
 ```
 
 System static linking:
 
 ```toml
 [dependencies]
-libxaac-sys = { version = "0.1", default-features = false, features = ["static"] }
+vuio-xaac-sys = { version = "0.1", default-features = false, features = ["static"] }
 ```
 
 ## License

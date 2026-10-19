@@ -63,9 +63,19 @@ echo "Starting VuIO Crates.io publication sequence..."
 publish_crate "vuio-codec-core" ${DRY_RUN:+--allow-dirty}
 publish_crate "vuio-cast" ${DRY_RUN:+--allow-dirty}
 publish_crate "vuio-web" ${DRY_RUN:+--allow-dirty}
+publish_crate "vuio-xaac-sys" ${DRY_RUN:+--allow-dirty}
 
 if [ -z "$DRY_RUN" ]; then
-    wait_step "vuio-codec-core, vuio-cast, and vuio-web available on crates.io"
+    wait_step "vuio-codec-core, vuio-cast, vuio-web, and vuio-xaac-sys available on crates.io"
+fi
+
+# -------------------------------------------------------------
+# Layer 1b: AAC stack (vuio-xaac needs vuio-xaac-sys on the registry)
+# -------------------------------------------------------------
+publish_crate "vuio-xaac" ${DRY_RUN:+--allow-dirty}
+
+if [ -z "$DRY_RUN" ]; then
+    wait_step "vuio-xaac available on crates.io"
 fi
 
 # -------------------------------------------------------------

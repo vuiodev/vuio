@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use xaac_rs::{DecodeStatus, Decoder, DecoderConfig};
+use vuio_xaac::{DecodeStatus, Decoder, DecoderConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let input = env::args().nth(1).ok_or_else(usage)?;

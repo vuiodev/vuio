@@ -14,8 +14,8 @@ members = [
     # Pure-Rust DTS decoder and shared codec runtime
     "crates/vuio-codec-core",
     "crates/vuio-codec-dts",
-    "crates/vendor/libxaac-sys",
-    "crates/vendor/xaac-rs",
+    "crates/vendor/vuio-xaac-sys",
+    "crates/vendor/vuio-xaac",
 ]
 
 # `vuio-bench` is deliberately not a default member. Cargo unifies features across
@@ -41,9 +41,9 @@ opt-level = 3
 opt-level = 3
 [profile.dev.package.vuio-codec-dts]
 opt-level = 3
-[profile.dev.package.xaac-rs]
+[profile.dev.package.vuio-xaac]
 opt-level = 3
-[profile.dev.package.libxaac-sys]
+[profile.dev.package.vuio-xaac-sys]
 opt-level = 3
 [profile.dev.package.symphonia]
 opt-level = 3

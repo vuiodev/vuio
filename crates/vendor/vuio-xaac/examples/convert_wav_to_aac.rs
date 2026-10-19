@@ -3,7 +3,7 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
 
-use xaac_rs::{Encoder, EncoderConfig, OutputFormat, Profile};
+use vuio_xaac::{Encoder, EncoderConfig, OutputFormat, Profile};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = env::args().skip(1);
