@@ -337,17 +337,30 @@ fn convert_watcher_events(
                     | notify::event::ModifyKind::Metadata(_)
                     | notify::event::ModifyKind::Any
                     | notify::event::ModifyKind::Other => {
-                        // Only process modify events for media files
-                        let media_paths: Vec<_> = event
-                            .event
-                            .paths
-                            .iter()
-                            .filter(|path| path_is_relevant(path, policies))
-                            .collect();
-
-                        for path in media_paths {
-                            debug!("Media file modified: {}", path.display());
-                            fs_events.push(FileSystemEvent::Modified(path.clone()));
+                        for path in &event.event.paths {
+                            // macOS reports a deletion as a metadata change on the
+                            // removed path, and the debouncer can drop the matching
+                            // Remove event when it coalesces a create+remove pair.
+                            // A path that no longer exists is a deletion however the
+                            // backend labelled it — otherwise a deleted folder is
+                            // never retired from the index and the TV keeps listing
+                            // it until a rescan. An I/O error does not establish a
+                            // deletion, so only `Ok(false)` counts.
+                            if matches!(path.try_exists(), Ok(false))
+                                && ScanPolicy::for_path(policies, path).is_some()
+                            {
+                                debug!(
+                                    "Path reported modified but missing; treating as deleted: {}",
+                                    path.display()
+                                );
+                                fs_events.push(FileSystemEvent::Deleted {
+                                    path: path.clone(),
+                                    is_directory: None,
+                                });
+                            } else if path_is_relevant(path, policies) {
+                                debug!("Media file modified: {}", path.display());
+                                fs_events.push(FileSystemEvent::Modified(path.clone()));
+                            }
                         }
                     }
                 }
