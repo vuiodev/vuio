@@ -224,13 +224,15 @@ fn test_convert_watcher_events_ignores_access() {
 fn test_convert_watcher_events_handles_modify() {
     use notify::event::{ModifyKind, DataChange};
 
-    let policy = ScanPolicy::platform_default(Path::new("/media"), true);
-    let policies = vec![policy];
+    let root = TempDir::new().unwrap();
+    let song = root.path().join("song.flac");
+    fs::write(&song, b"audio").unwrap();
+    let policies = vec![ScanPolicy::platform_default(root.path(), true)];
 
     let modify_event = DebouncedEvent {
         event: notify::Event {
             kind: notify::EventKind::Modify(ModifyKind::Data(DataChange::Content)),
-            paths: vec![PathBuf::from("/media/song.flac")],
+            paths: vec![song.clone()],
             attrs: notify::event::EventAttributes::default(),
         },
         time: std::time::Instant::now(),
@@ -239,7 +241,7 @@ fn test_convert_watcher_events_handles_modify() {
     let converted = convert_watcher_events(vec![modify_event], &policies);
     assert_eq!(converted.len(), 1);
     match &converted[0] {
-        FileSystemEvent::Modified(p) => assert_eq!(p, Path::new("/media/song.flac")),
+        FileSystemEvent::Modified(p) => assert_eq!(p, &song),
         _ => panic!("Expected FileSystemEvent::Modified"),
     }
 }
@@ -277,4 +279,43 @@ fn generic_events_report_missing_files_and_directories_as_deletions() {
         }
         assert!(matches!(&converted[2], FileSystemEvent::Modified(path) if path == &present));
     }
+}
+
+/// macOS reports a removal as `Modify(Metadata)` on the removed path when the
+/// debouncer drops the matching `Remove` event. Missing paths must still reach
+/// index cleanup, and directories have no media extension to let the regular
+/// relevance check catch them.
+#[test]
+fn metadata_events_for_missing_paths_are_deletions() {
+    use notify::event::MetadataKind;
+
+    let root = TempDir::new().unwrap();
+    let policies = vec![ScanPolicy::platform_default(root.path(), true)];
+    let missing_folder = root.path().join("deleted-folder");
+    let missing_file = root.path().join("gone.mp4");
+    let present = root.path().join("here.mp4");
+    fs::write(&present, b"video").unwrap();
+
+    let event = DebouncedEvent {
+        event: notify::Event::new(notify::EventKind::Modify(
+            notify::event::ModifyKind::Metadata(MetadataKind::Extended),
+        ))
+        .add_path(missing_folder.clone())
+        .add_path(missing_file.clone())
+        .add_path(present.clone()),
+        time: std::time::Instant::now(),
+    };
+
+    let converted = convert_watcher_events(vec![event], &policies);
+    assert_eq!(converted.len(), 3);
+    for (event, expected) in converted[..2]
+        .iter()
+        .zip([&missing_folder, &missing_file])
+    {
+        assert!(
+            matches!(event, FileSystemEvent::Deleted { path, is_directory: None } if path == expected),
+            "a metadata event for a missing path must delete indexed content: {event:?}"
+        );
+    }
+    assert!(matches!(&converted[2], FileSystemEvent::Modified(path) if path == &present));
 }
